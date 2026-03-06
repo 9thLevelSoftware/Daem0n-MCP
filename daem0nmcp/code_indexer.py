@@ -789,6 +789,8 @@ class CodeIndexManager:
             await session.execute(
                 delete(CodeEntity).where(CodeEntity.project_path == project_path)
             )
+            # Flush the delete so merge() sees the cleared state
+            await session.flush()
 
             # Upsert entities (merge handles stale rows that survive deletion)
             for entity_dict in entities:
@@ -1198,6 +1200,8 @@ class CodeIndexManager:
                     )
                 )
             )
+            # Flush the delete so merge() sees the cleared state
+            await session.flush()
 
             # Upsert entities (merge handles stale rows that survive deletion)
             for entity_dict in entities:
