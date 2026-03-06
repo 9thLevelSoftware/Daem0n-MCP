@@ -442,6 +442,51 @@ class TestCodeIndexManager:
 
         assert count1 == count2
 
+    @pytest.mark.asyncio
+    async def test_reindex_does_not_raise_integrity_error(self, temp_project, db_manager):
+        """Regression: re-indexing must not raise IntegrityError on existing keys.
+
+        Before the fix, bulk DELETE via session.execute() wasn't flushed before
+        session.merge(), causing merge to emit INSERT (instead of UPDATE) for
+        rows that still existed in the DB, triggering UNIQUE constraint failures.
+        """
+        from daem0nmcp.code_indexer import CodeIndexManager
+
+        indexer = CodeIndexManager(db=db_manager, qdrant=None)
+
+        # Index, then re-index three times — should never raise IntegrityError
+        await indexer.index_project(str(temp_project))
+        await indexer.index_project(str(temp_project))
+        await indexer.index_project(str(temp_project))
+
+    @pytest.mark.asyncio
+    async def test_reindex_updates_entities_after_file_change(self, temp_project, db_manager):
+        """Test that re-indexing picks up file changes (entity content updated)."""
+        from daem0nmcp.code_indexer import CodeIndexManager
+        from daem0nmcp.models import CodeEntity
+        from sqlalchemy import select
+
+        indexer = CodeIndexManager(db=db_manager, qdrant=None)
+
+        # First index
+        await indexer.index_project(str(temp_project))
+
+        # Modify the Python file — rename a function
+        py_file = temp_project / "sample.py"
+        content = py_file.read_text()
+        py_file.write_text(content.replace('helper_function', 'renamed_helper'))
+
+        # Re-index
+        await indexer.index_project(str(temp_project))
+
+        # Verify the renamed entity is present and the old one is gone
+        async with db_manager.get_session() as session:
+            result = await session.execute(select(CodeEntity.name))
+            names = [row[0] for row in result.all()]
+
+        assert 'renamed_helper' in names
+        assert 'helper_function' not in names
+
 
 # Tests that don't require tree-sitter
 class TestLanguageQueries:
