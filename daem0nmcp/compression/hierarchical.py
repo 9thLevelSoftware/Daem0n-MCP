@@ -6,11 +6,12 @@ Implements CONTEXT-04: Hierarchical compression leverages Phase 1 community stru
 For simple queries, community summaries ARE the compressed context (no LLMLingua needed).
 For complex queries, retrieves raw memories and applies adaptive compression.
 """
-import logging
-from typing import Dict, Any, Optional, List
 
+import logging
+from typing import Any
+
+from ..recall_planner import QueryComplexity, RecallPlan, RecallPlanner
 from .adaptive import AdaptiveCompressor
-from ..recall_planner import RecallPlanner, RecallPlan, QueryComplexity
 
 logger = logging.getLogger(__name__)
 
@@ -57,8 +58,8 @@ class HierarchicalContextManager:
 
     def __init__(
         self,
-        compressor: Optional[AdaptiveCompressor] = None,
-        recall_planner: Optional[RecallPlanner] = None,
+        compressor: AdaptiveCompressor | None = None,
+        recall_planner: RecallPlanner | None = None,
     ):
         """
         Initialize with compressor and planner.
@@ -73,11 +74,11 @@ class HierarchicalContextManager:
     def get_context(
         self,
         query: str,
-        memories: List[Dict[str, Any]],
-        community_summaries: Optional[List[str]] = None,
-        plan: Optional[RecallPlan] = None,
+        memories: list[dict[str, Any]],
+        community_summaries: list[str] | None = None,
+        plan: RecallPlan | None = None,
         skip_compression: bool = False,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """
         Get optimized context for the query.
 
@@ -112,12 +113,14 @@ class HierarchicalContextManager:
             return self._simple_strategy(community_summaries, raw_context)
 
         elif plan.complexity == QueryComplexity.MEDIUM:
-            return self._medium_strategy(community_summaries, raw_context, plan, skip_compression)
+            return self._medium_strategy(
+                community_summaries, raw_context, plan, skip_compression
+            )
 
         else:  # COMPLEX
             return self._complex_strategy(raw_context, plan, skip_compression)
 
-    def _format_memories(self, memories: List[Dict[str, Any]]) -> str:
+    def _format_memories(self, memories: list[dict[str, Any]]) -> str:
         """Format memory list into context string."""
         if not memories:
             return ""
@@ -130,7 +133,7 @@ class HierarchicalContextManager:
 
         return "\n\n".join(lines)
 
-    def _format_summaries(self, summaries: Optional[List[str]]) -> str:
+    def _format_summaries(self, summaries: list[str] | None) -> str:
         """Format community summaries into context string."""
         if not summaries:
             return ""
@@ -138,9 +141,9 @@ class HierarchicalContextManager:
 
     def _simple_strategy(
         self,
-        community_summaries: Optional[List[str]],
+        community_summaries: list[str] | None,
         raw_context: str,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """
         Simple query strategy: Use community summaries (pre-compressed).
 
@@ -165,11 +168,11 @@ class HierarchicalContextManager:
 
     def _medium_strategy(
         self,
-        community_summaries: Optional[List[str]],
+        community_summaries: list[str] | None,
         raw_context: str,
         plan: RecallPlan,
         skip_compression: bool = False,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """
         Medium query strategy: Hybrid summaries + compressed raw.
 
@@ -183,12 +186,24 @@ class HierarchicalContextManager:
             skip_compression: If True, skip internal compression (JIT handles it).
         """
         # Combine summaries with raw
-        summary_context = self._format_summaries(community_summaries) if community_summaries else ""
-        combined = f"{summary_context}\n\n---\n\n{raw_context}" if summary_context else raw_context
+        summary_context = (
+            self._format_summaries(community_summaries) if community_summaries else ""
+        )
+        combined = (
+            f"{summary_context}\n\n---\n\n{raw_context}"
+            if summary_context
+            else raw_context
+        )
 
         # Check if compression needed (skip when JIT is the compression point)
-        if not skip_compression and plan.compress and self.compressor.compressor.should_compress(combined):
-            result = self.compressor.compress(combined, rate_override=plan.compression_rate)
+        if (
+            not skip_compression
+            and plan.compress
+            and self.compressor.compressor.should_compress(combined)
+        ):
+            result = self.compressor.compress(
+                combined, rate_override=plan.compression_rate
+            )
             return {
                 "context": result["compressed_prompt"],
                 "strategy": "hybrid_compressed",
@@ -210,7 +225,7 @@ class HierarchicalContextManager:
         raw_context: str,
         plan: RecallPlan,
         skip_compression: bool = False,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """
         Complex query strategy: Full raw with adaptive compression.
 
@@ -221,7 +236,11 @@ class HierarchicalContextManager:
             plan: RecallPlan with compression settings.
             skip_compression: If True, skip internal compression (JIT handles it).
         """
-        if not skip_compression and plan.compress and self.compressor.compressor.should_compress(raw_context):
+        if (
+            not skip_compression
+            and plan.compress
+            and self.compressor.compressor.should_compress(raw_context)
+        ):
             # Let AdaptiveCompressor detect content type
             result = self.compressor.compress(raw_context)
             return {

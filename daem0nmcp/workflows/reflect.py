@@ -7,15 +7,17 @@ Actions:
 - execute: Execute Python code in an isolated sandbox
 """
 
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from .errors import InvalidActionError, MissingParamError
 
-VALID_ACTIONS = frozenset({
-    "outcome",
-    "verify",
-    "execute",
-})
+VALID_ACTIONS = frozenset(
+    {
+        "outcome",
+        "verify",
+        "execute",
+    }
+)
 
 
 async def dispatch(
@@ -23,18 +25,18 @@ async def dispatch(
     project_path: str,
     *,
     # outcome params
-    memory_id: Optional[int] = None,
-    outcome_text: Optional[str] = None,
-    worked: Optional[bool] = None,
+    memory_id: int | None = None,
+    outcome_text: str | None = None,
+    worked: bool | None = None,
     # verify params
-    text: Optional[str] = None,
-    categories: Optional[List[str]] = None,
-    as_of_time: Optional[str] = None,
+    text: str | None = None,
+    categories: list[str] | None = None,
+    as_of_time: str | None = None,
     # execute params
-    code: Optional[str] = None,
-    timeout_seconds: Optional[int] = None,
+    code: str | None = None,
+    timeout_seconds: int | None = None,
     **kwargs,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Dispatch action to appropriate handler."""
     if action not in VALID_ACTIONS:
         raise InvalidActionError(action, sorted(VALID_ACTIONS))
@@ -51,9 +53,7 @@ async def dispatch(
     elif action == "verify":
         if not text:
             raise MissingParamError("text", action)
-        return await _do_verify(
-            project_path, text, categories, as_of_time
-        )
+        return await _do_verify(project_path, text, categories, as_of_time)
 
     elif action == "execute":
         if not code:
@@ -68,7 +68,7 @@ async def _do_outcome(
     memory_id: int,
     outcome_text: str,
     worked: bool,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Record whether a decision worked."""
     from ..server import record_outcome
 
@@ -83,9 +83,9 @@ async def _do_outcome(
 async def _do_verify(
     project_path: str,
     text: str,
-    categories: Optional[List[str]],
-    as_of_time: Optional[str],
-) -> Dict[str, Any]:
+    categories: list[str] | None,
+    as_of_time: str | None,
+) -> dict[str, Any]:
     """Verify factual claims against stored knowledge."""
     from ..server import verify_facts
 
@@ -100,8 +100,8 @@ async def _do_verify(
 async def _do_execute(
     project_path: str,
     code: str,
-    timeout_seconds: Optional[int],
-) -> Dict[str, Any]:
+    timeout_seconds: int | None,
+) -> dict[str, Any]:
     """Execute Python code in an isolated sandbox."""
     from ..server import execute_python
 

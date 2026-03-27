@@ -1,31 +1,35 @@
 """Fact verification tools: verify_facts + _build_verification_message helper."""
 
 import logging
-from typing import Dict, List, Optional, Any
+from typing import Any
 
 try:
-    from ..mcp_instance import mcp
     from .. import __version__
     from ..context_manager import (
-        get_project_context, _default_project_path,
-        _missing_project_path_error, hold_context,
+        _default_project_path,
+        _missing_project_path_error,
+        get_project_context,
+        hold_context,
     )
     from ..logging_config import with_request_id
+    from ..mcp_instance import mcp
 except ImportError:
-    from daem0nmcp.mcp_instance import mcp
     from daem0nmcp import __version__
     from daem0nmcp.context_manager import (
-        get_project_context, _default_project_path,
-        _missing_project_path_error, hold_context,
+        _default_project_path,
+        _missing_project_path_error,
+        get_project_context,
+        hold_context,
     )
     from daem0nmcp.logging_config import with_request_id
+    from daem0nmcp.mcp_instance import mcp
 
 from ._deprecation import add_deprecation
 
 logger = logging.getLogger(__name__)
 
 
-def _build_verification_message(summary: Dict[str, Any]) -> str:
+def _build_verification_message(summary: dict[str, Any]) -> str:
     """Build human-readable verification message."""
     parts = []
 
@@ -36,14 +40,18 @@ def _build_verification_message(summary: Dict[str, Any]) -> str:
         parts.append(f"{summary['unverified_count']} claim(s) unverified [unverified]")
 
     if summary["conflict_count"] > 0:
-        parts.append(f"{summary['conflict_count']} claim(s) CONFLICT with stored knowledge")
+        parts.append(
+            f"{summary['conflict_count']} claim(s) CONFLICT with stored knowledge"
+        )
 
     if not parts:
         return "No claims to verify"
 
     confidence_desc = (
-        "high" if summary["overall_confidence"] >= 0.8
-        else "medium" if summary["overall_confidence"] >= 0.5
+        "high"
+        if summary["overall_confidence"] >= 0.8
+        else "medium"
+        if summary["overall_confidence"] >= 0.5
         else "low"
     )
 
@@ -57,10 +65,10 @@ def _build_verification_message(summary: Dict[str, Any]) -> str:
 @with_request_id
 async def verify_facts(
     text: str,
-    categories: Optional[List[str]] = None,
-    as_of_time: Optional[str] = None,
-    project_path: Optional[str] = None
-) -> Dict[str, Any]:
+    categories: list[str] | None = None,
+    as_of_time: str | None = None,
+    project_path: str | None = None,
+) -> dict[str, Any]:
     """
     [DEPRECATED] Use reflect(action='verify') instead.
 
@@ -99,10 +107,13 @@ async def verify_facts(
         # Import reflexion modules
         try:
             from ..reflexion.claims import extract_claims
-            from ..reflexion.verification import verify_claims, summarize_verification
+            from ..reflexion.verification import summarize_verification, verify_claims
         except ImportError:
             from daem0nmcp.reflexion.claims import extract_claims
-            from daem0nmcp.reflexion.verification import verify_claims, summarize_verification
+            from daem0nmcp.reflexion.verification import (
+                summarize_verification,
+                verify_claims,
+            )
 
         # Extract claims from text
         claims = extract_claims(text)

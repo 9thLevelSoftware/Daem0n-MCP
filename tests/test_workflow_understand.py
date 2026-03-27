@@ -10,13 +10,15 @@ class TestUnderstandImport:
 
     def test_module_imports(self):
         from daem0nmcp.workflows import understand
+
         assert hasattr(understand, "dispatch")
         assert hasattr(understand, "VALID_ACTIONS")
 
     def test_valid_actions_contents(self):
         from daem0nmcp.workflows.understand import VALID_ACTIONS
+
         expected = {"index", "find", "impact", "todos", "refactor"}
-        assert VALID_ACTIONS == expected
+        assert expected == VALID_ACTIONS
 
 
 class TestUnderstandValidation:
@@ -25,12 +27,14 @@ class TestUnderstandValidation:
     @pytest.mark.asyncio
     async def test_invalid_action_raises(self):
         from daem0nmcp.workflows.understand import dispatch
+
         with pytest.raises(InvalidActionError):
             await dispatch(action="nonexistent", project_path="/tmp")
 
     @pytest.mark.asyncio
     async def test_find_requires_query(self):
         from daem0nmcp.workflows.understand import dispatch
+
         with pytest.raises(MissingParamError) as exc_info:
             await dispatch(action="find", project_path="/tmp")
         assert exc_info.value.param == "query"
@@ -38,6 +42,7 @@ class TestUnderstandValidation:
     @pytest.mark.asyncio
     async def test_impact_requires_entity_name(self):
         from daem0nmcp.workflows.understand import dispatch
+
         with pytest.raises(MissingParamError) as exc_info:
             await dispatch(action="impact", project_path="/tmp")
         assert exc_info.value.param == "entity_name"
@@ -45,6 +50,7 @@ class TestUnderstandValidation:
     @pytest.mark.asyncio
     async def test_refactor_requires_file_path(self):
         from daem0nmcp.workflows.understand import dispatch
+
         with pytest.raises(MissingParamError) as exc_info:
             await dispatch(action="refactor", project_path="/tmp")
         assert exc_info.value.param == "file_path"

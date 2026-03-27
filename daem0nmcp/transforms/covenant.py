@@ -19,16 +19,17 @@ The Sacred Covenant flow ensures:
 
 import json
 import logging
+from collections.abc import Callable
 from contextvars import ContextVar
 from datetime import datetime, timezone
-from typing import Any, Callable, Dict, Optional, Set
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
 # ContextVar for client metadata extracted from tool args by CovenantMiddleware.
 # This allows transport-level metadata (_client_meta) to be stripped before
 # FastMCP's Pydantic validation and accessed by tool dispatch functions.
-client_meta_var: ContextVar[Optional[Dict[str, Any]]] = ContextVar(
+client_meta_var: ContextVar[dict[str, Any] | None] = ContextVar(
     "client_meta_var", default=None
 )
 
@@ -41,33 +42,33 @@ COUNSEL_TTL_SECONDS = 300
 # ============================================================================
 
 # Tools exempt from all covenant enforcement (entry points and diagnostics)
-COVENANT_EXEMPT_TOOLS: Set[str] = {
-    "get_briefing",      # Entry point - starts communion
-    "health",            # Diagnostic - always available
-    "context_check",     # Part of the covenant flow
-    "recall",            # Read-only query
-    "recall_for_file",   # Read-only query
-    "search_memories",   # Read-only query
-    "find_related",      # Read-only query
-    "check_rules",       # Read-only query
-    "list_rules",        # Read-only query
-    "find_code",         # Read-only query
-    "analyze_impact",    # Read-only analysis
-    "export_data",       # Read-only export
-    "scan_todos",        # Read-only scan (unless auto_remember=True)
+COVENANT_EXEMPT_TOOLS: set[str] = {
+    "get_briefing",  # Entry point - starts communion
+    "health",  # Diagnostic - always available
+    "context_check",  # Part of the covenant flow
+    "recall",  # Read-only query
+    "recall_for_file",  # Read-only query
+    "search_memories",  # Read-only query
+    "find_related",  # Read-only query
+    "check_rules",  # Read-only query
+    "list_rules",  # Read-only query
+    "find_code",  # Read-only query
+    "analyze_impact",  # Read-only analysis
+    "export_data",  # Read-only export
+    "scan_todos",  # Read-only scan (unless auto_remember=True)
     "propose_refactor",  # Read-only analysis
-    "get_graph",         # Read-only query
-    "trace_chain",       # Read-only query
+    "get_graph",  # Read-only query
+    "trace_chain",  # Read-only query
     "recall_hierarchical",  # Read-only query
-    "list_communities",     # Read-only query
+    "list_communities",  # Read-only query
     "get_community_details",  # Read-only query
-    "recall_by_entity",     # Read-only query
-    "list_entities",        # Read-only query
+    "recall_by_entity",  # Read-only query
+    "list_entities",  # Read-only query
     "get_memory_versions",  # Read-only query
-    "get_memory_at_time",   # Read-only query
+    "get_memory_at_time",  # Read-only query
     "list_context_triggers",  # Read-only query
     "check_context_triggers",  # Read-only query
-    "get_active_context",   # Read-only query
+    "get_active_context",  # Read-only query
     "list_linked_projects",  # Read-only query
     # Cognitive tools (Phase 17) -- analytical, read-only instruments
     "simulate_decision",
@@ -77,7 +78,7 @@ COVENANT_EXEMPT_TOOLS: Set[str] = {
 
 # Tools that REQUIRE communion (must call get_briefing first)
 # These are all mutating tools - they change state
-COMMUNION_REQUIRED_TOOLS: Set[str] = {
+COMMUNION_REQUIRED_TOOLS: set[str] = {
     "remember",
     "remember_batch",
     "add_rule",
@@ -108,7 +109,7 @@ COMMUNION_REQUIRED_TOOLS: Set[str] = {
 
 # Tools that REQUIRE counsel (must call context_check before mutating)
 # These are the most important mutations that could cause conflicts
-COUNSEL_REQUIRED_TOOLS: Set[str] = {
+COUNSEL_REQUIRED_TOOLS: set[str] = {
     "remember",
     "remember_batch",
     "add_rule",
@@ -125,6 +126,7 @@ COUNSEL_REQUIRED_TOOLS: Set[str] = {
 # COVENANT VIOLATION RESPONSES
 # ============================================================================
 
+
 class CovenantViolation:
     """
     Standard violation response structures for covenant breaches.
@@ -135,7 +137,7 @@ class CovenantViolation:
     """
 
     @staticmethod
-    def communion_required(project_path: str) -> Dict[str, Any]:
+    def communion_required(project_path: str) -> dict[str, Any]:
         """
         Response when tool is called without prior get_briefing().
 
@@ -166,7 +168,7 @@ class CovenantViolation:
         }
 
     @staticmethod
-    def counsel_required(tool_name: str, project_path: str) -> Dict[str, Any]:
+    def counsel_required(tool_name: str, project_path: str) -> dict[str, Any]:
         """
         Response when mutating tool is called without prior context_check().
 
@@ -202,7 +204,9 @@ class CovenantViolation:
         }
 
     @staticmethod
-    def counsel_expired(tool_name: str, project_path: str, age_seconds: int) -> Dict[str, Any]:
+    def counsel_expired(
+        tool_name: str, project_path: str, age_seconds: int
+    ) -> dict[str, Any]:
         """
         Response when context_check was done but has expired.
 
@@ -241,6 +245,7 @@ class CovenantViolation:
 # COVENANT TRANSFORM
 # ============================================================================
 
+
 class CovenantTransform:
     """
     FastMCP 3.0 Transform for Sacred Covenant enforcement.
@@ -273,9 +278,9 @@ class CovenantTransform:
     def __init__(
         self,
         counsel_ttl_seconds: int = COUNSEL_TTL_SECONDS,
-        exempt_tools: Optional[Set[str]] = None,
-        communion_required_tools: Optional[Set[str]] = None,
-        counsel_required_tools: Optional[Set[str]] = None,
+        exempt_tools: set[str] | None = None,
+        communion_required_tools: set[str] | None = None,
+        counsel_required_tools: set[str] | None = None,
     ):
         """
         Initialize the CovenantTransform.
@@ -288,15 +293,17 @@ class CovenantTransform:
         """
         self.counsel_ttl_seconds = counsel_ttl_seconds
         self.exempt_tools = exempt_tools or COVENANT_EXEMPT_TOOLS
-        self.communion_required_tools = communion_required_tools or COMMUNION_REQUIRED_TOOLS
+        self.communion_required_tools = (
+            communion_required_tools or COMMUNION_REQUIRED_TOOLS
+        )
         self.counsel_required_tools = counsel_required_tools or COUNSEL_REQUIRED_TOOLS
 
     def check_tool_access(
         self,
         tool_name: str,
-        project_path: Optional[str],
-        get_state: Callable[[Optional[str]], Optional[Dict[str, Any]]],
-    ) -> Optional[Dict[str, Any]]:
+        project_path: str | None,
+        get_state: Callable[[str | None], dict[str, Any] | None],
+    ) -> dict[str, Any] | None:
         """
         Check if a tool call is allowed under the Sacred Covenant.
 
@@ -326,7 +333,9 @@ class CovenantTransform:
         # Step 3: Check communion requirement
         if tool_name in self.communion_required_tools:
             if state is None or not state.get("briefed", False):
-                logger.info(f"Communion required for tool '{tool_name}' on project '{project_path}'")
+                logger.info(
+                    f"Communion required for tool '{tool_name}' on project '{project_path}'"
+                )
                 return CovenantViolation.communion_required(project_path or "unknown")
 
         # Step 4: Check counsel requirement
@@ -341,7 +350,9 @@ class CovenantTransform:
 
             if not context_checks:
                 logger.info(f"Counsel required for tool '{tool_name}'")
-                return CovenantViolation.counsel_required(tool_name, project_path or "unknown")
+                return CovenantViolation.counsel_required(
+                    tool_name, project_path or "unknown"
+                )
 
             # Find the most recent context check with a valid timestamp
             most_recent_age = self._get_freshest_counsel_age(context_checks)
@@ -349,14 +360,16 @@ class CovenantTransform:
             if most_recent_age is None:
                 # No valid timestamped checks
                 logger.info(f"No valid timestamped counsel found for '{tool_name}'")
-                return CovenantViolation.counsel_required(tool_name, project_path or "unknown")
+                return CovenantViolation.counsel_required(
+                    tool_name, project_path or "unknown"
+                )
 
             if most_recent_age > self.counsel_ttl_seconds:
-                logger.info(f"Counsel expired ({most_recent_age:.0f}s old) for '{tool_name}'")
+                logger.info(
+                    f"Counsel expired ({most_recent_age:.0f}s old) for '{tool_name}'"
+                )
                 return CovenantViolation.counsel_expired(
-                    tool_name,
-                    project_path or "unknown",
-                    int(most_recent_age)
+                    tool_name, project_path or "unknown", int(most_recent_age)
                 )
 
         # All checks passed
@@ -366,7 +379,7 @@ class CovenantTransform:
     def _get_freshest_counsel_age(
         self,
         context_checks: list,
-    ) -> Optional[float]:
+    ) -> float | None:
         """
         Find the age of the most recent valid context check.
 
@@ -377,7 +390,7 @@ class CovenantTransform:
             Age in seconds of the freshest check, or None if no valid checks
         """
         now = datetime.now(timezone.utc)
-        most_recent_age: Optional[float] = None
+        most_recent_age: float | None = None
 
         for check in context_checks:
             if isinstance(check, dict) and "timestamp" in check:
@@ -414,9 +427,10 @@ class CovenantTransform:
 # ============================================================================
 
 try:
-    from fastmcp.server.middleware import Middleware, MiddlewareContext, CallNext
+    from fastmcp.server.middleware import CallNext, Middleware, MiddlewareContext
     from fastmcp.tools import ToolResult
     from mcp import types as mt
+
     _FASTMCP_MIDDLEWARE_AVAILABLE = True
 except ImportError:
     _FASTMCP_MIDDLEWARE_AVAILABLE = False
@@ -460,12 +474,12 @@ class CovenantMiddleware(Middleware if _FASTMCP_MIDDLEWARE_AVAILABLE else object
 
     def __init__(
         self,
-        get_state: Callable[[Optional[str]], Optional[Dict[str, Any]]],
+        get_state: Callable[[str | None], dict[str, Any] | None],
         counsel_ttl_seconds: int = COUNSEL_TTL_SECONDS,
-        exempt_tools: Optional[Set[str]] = None,
-        communion_required_tools: Optional[Set[str]] = None,
-        counsel_required_tools: Optional[Set[str]] = None,
-        dream_scheduler: Optional[Any] = None,  # IdleDreamScheduler, typed as Any to avoid circular import
+        exempt_tools: set[str] | None = None,
+        communion_required_tools: set[str] | None = None,
+        counsel_required_tools: set[str] | None = None,
+        dream_scheduler: Any | None = None,  # IdleDreamScheduler, typed as Any to avoid circular import
     ):
         """
         Initialize the CovenantMiddleware.
@@ -487,8 +501,8 @@ class CovenantMiddleware(Middleware if _FASTMCP_MIDDLEWARE_AVAILABLE else object
 
         self._get_state = get_state
         self._dream_scheduler = dream_scheduler
-        self._client_name: Optional[str] = None
-        self._client_version: Optional[str] = None
+        self._client_name: str | None = None
+        self._client_version: str | None = None
         self._transform = CovenantTransform(
             counsel_ttl_seconds=counsel_ttl_seconds,
             exempt_tools=exempt_tools,
@@ -508,7 +522,7 @@ class CovenantMiddleware(Middleware if _FASTMCP_MIDDLEWARE_AVAILABLE else object
         self._dream_scheduler = scheduler
 
     @property
-    def client_name(self) -> Optional[str]:
+    def client_name(self) -> str | None:
         """MCP client name from the initialize handshake (e.g., 'opencode', 'claude-code')."""
         return self._client_name
 
@@ -572,7 +586,9 @@ class CovenantMiddleware(Middleware if _FASTMCP_MIDDLEWARE_AVAILABLE else object
         else:
             client_meta_var.set(None)
 
-        logger.debug(f"CovenantMiddleware: Checking tool '{tool_name}' for project '{project_path}'")
+        logger.debug(
+            f"CovenantMiddleware: Checking tool '{tool_name}' for project '{project_path}'"
+        )
 
         # Check covenant via the transform
         violation = self._transform.check_tool_access(

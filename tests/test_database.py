@@ -1,7 +1,8 @@
 """Tests for database configuration."""
 
-import pytest
 import tempfile
+
+import pytest
 
 
 class TestSQLitePragmas:
@@ -18,6 +19,7 @@ class TestSQLitePragmas:
 
             async with db.get_session() as session:
                 from sqlalchemy import text
+
                 result = await session.execute(text("PRAGMA journal_mode"))
                 mode = result.scalar()
                 assert mode.lower() == "wal"
@@ -35,6 +37,7 @@ class TestSQLitePragmas:
 
             async with db.get_session() as session:
                 from sqlalchemy import text
+
                 result = await session.execute(text("PRAGMA foreign_keys"))
                 enabled = result.scalar()
                 assert enabled == 1

@@ -6,7 +6,6 @@ when files with associated memories are modified.
 """
 
 import logging
-from typing import Optional
 
 from daem0nmcp.watcher import WatcherNotification
 
@@ -41,7 +40,7 @@ class SystemNotifyChannel:
         self,
         app_name: str = "Daem0n-MCP",
         timeout: int = 10,
-        ticker: Optional[str] = None
+        ticker: str | None = None,
     ):
         """
         Initialize the system notification channel.
@@ -60,6 +59,7 @@ class SystemNotifyChannel:
         # Try to import plyer
         try:
             from plyer import notification
+
             self._notification = notification
             self._plyer_available = True
             logger.debug("plyer notification module loaded")
@@ -115,7 +115,7 @@ class SystemNotifyChannel:
                 message=message,
                 app_name=self._app_name,
                 timeout=self._timeout,
-                ticker=self._ticker
+                ticker=self._ticker,
             )
 
             logger.debug(f"System notification sent for: {notification.file_path.name}")

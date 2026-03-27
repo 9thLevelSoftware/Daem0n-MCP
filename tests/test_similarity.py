@@ -1,13 +1,13 @@
 """Tests for the TF-IDF similarity engine."""
 
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timedelta, timezone
 
 from daem0nmcp.similarity import (
-    tokenize,
-    extract_code_symbols,
     TFIDFIndex,
     calculate_memory_decay,
-    detect_conflict
+    detect_conflict,
+    extract_code_symbols,
+    tokenize,
 )
 
 
@@ -218,13 +218,11 @@ class TestConflictDetection:
                 "category": "decision",
                 "worked": False,
                 "outcome": "Had security issues",
-                "tags": ["auth"]
+                "tags": ["auth"],
             }
         ]
         conflicts = detect_conflict(
-            "Use session-based authentication",
-            existing,
-            similarity_threshold=0.3
+            "Use session-based authentication", existing, similarity_threshold=0.3
         )
         assert len(conflicts) >= 1
         assert conflicts[0]["conflict_type"] == "similar_failed"
@@ -237,17 +235,19 @@ class TestConflictDetection:
                 "category": "warning",
                 "worked": None,
                 "outcome": None,
-                "tags": []
+                "tags": [],
             }
         ]
         conflicts = detect_conflict(
-            "Use synchronous database operations",
-            existing,
-            similarity_threshold=0.3
+            "Use synchronous database operations", existing, similarity_threshold=0.3
         )
         # Should detect the warning
-        warning_conflicts = [c for c in conflicts if c.get("conflict_type") == "existing_warning"]
-        assert len(warning_conflicts) >= 0  # May or may not match depending on similarity
+        warning_conflicts = [
+            c for c in conflicts if c.get("conflict_type") == "existing_warning"
+        ]
+        assert (
+            len(warning_conflicts) >= 0
+        )  # May or may not match depending on similarity
 
     def test_detects_duplicate(self):
         existing = [
@@ -257,17 +257,17 @@ class TestConflictDetection:
                 "category": "decision",
                 "worked": True,
                 "outcome": "Works great",
-                "tags": ["auth", "jwt"]
+                "tags": ["auth", "jwt"],
             }
         ]
         conflicts = detect_conflict(
-            "Use JWT tokens for API authentication",
-            existing,
-            similarity_threshold=0.3
+            "Use JWT tokens for API authentication", existing, similarity_threshold=0.3
         )
         # Highly similar content should be flagged as potential duplicate
         if conflicts:
-            assert any(c.get("conflict_type") == "potential_duplicate" for c in conflicts)
+            assert any(
+                c.get("conflict_type") == "potential_duplicate" for c in conflicts
+            )
 
 
 class TestTFIDFVectorCaching:
@@ -285,7 +285,7 @@ class TestTFIDFVectorCaching:
         results1 = index.search("hello", top_k=1)
 
         # Check cache exists
-        assert hasattr(index, '_query_cache')
+        assert hasattr(index, "_query_cache")
         assert "hello" in index._query_cache
 
         # Second search uses cache

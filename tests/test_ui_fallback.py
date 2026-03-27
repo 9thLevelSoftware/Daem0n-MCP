@@ -1,11 +1,12 @@
 """Tests for UI text fallback formatting."""
+
 from datetime import datetime, timezone
 
 from daem0nmcp.ui.fallback import (
-    format_with_ui_hint,
-    format_search_results,
     format_briefing,
     format_covenant_status,
+    format_search_results,
+    format_with_ui_hint,
 )
 
 
@@ -15,9 +16,7 @@ class TestFormatWithUIHint:
     def test_adds_ui_resource_and_text(self):
         data = {"count": 5, "results": []}
         result = format_with_ui_hint(
-            data=data,
-            ui_resource="ui://daem0n/search",
-            text="5 results found"
+            data=data, ui_resource="ui://daem0n/search", text="5 results found"
         )
 
         assert result["ui_resource"] == "ui://daem0n/search"

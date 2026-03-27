@@ -1,8 +1,9 @@
 """Community summarization for GraphRAG hierarchical queries."""
 
 import logging
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import Any, Awaitable, Callable, Dict, List, Optional
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -35,8 +36,8 @@ class CommunitySummarizer:
 
     def __init__(
         self,
-        config: Optional[SummaryConfig] = None,
-        llm_func: Optional[Callable[[str], Awaitable[str]]] = None,
+        config: SummaryConfig | None = None,
+        llm_func: Callable[[str], Awaitable[str]] | None = None,
     ):
         """
         Initialize summarizer.
@@ -52,8 +53,8 @@ class CommunitySummarizer:
     async def summarize_community(
         self,
         community_name: str,
-        members: List[Dict[str, Any]],
-        entity_names: Optional[List[str]] = None,
+        members: list[dict[str, Any]],
+        entity_names: list[str] | None = None,
     ) -> str:
         """
         Generate summary for a community.
@@ -77,8 +78,8 @@ class CommunitySummarizer:
     def _extractive_summarize(
         self,
         community_name: str,
-        members: List[Dict[str, Any]],
-        entity_names: Optional[List[str]] = None,
+        members: list[dict[str, Any]],
+        entity_names: list[str] | None = None,
     ) -> str:
         """
         Generate summary by extracting key information from members.
@@ -95,7 +96,7 @@ class CommunitySummarizer:
 
         if self.config.include_categories:
             # Group by category
-            by_category: Dict[str, List[str]] = {}
+            by_category: dict[str, list[str]] = {}
             for mem in members:
                 cat = mem.get("category", "other")
                 if cat not in by_category:
@@ -125,8 +126,8 @@ class CommunitySummarizer:
     async def _llm_summarize(
         self,
         community_name: str,
-        members: List[Dict[str, Any]],
-        entity_names: Optional[List[str]] = None,
+        members: list[dict[str, Any]],
+        entity_names: list[str] | None = None,
     ) -> str:
         """
         Generate summary using LLM.
@@ -179,16 +180,14 @@ Summary:"""
             summary = await self.llm_func(prompt)
             return summary.strip()
         except Exception as e:
-            logger.warning(
-                f"LLM summarization failed: {e}, falling back to extractive"
-            )
+            logger.warning(f"LLM summarization failed: {e}, falling back to extractive")
             return self._extractive_summarize(community_name, members, entity_names)
 
     async def summarize_hierarchy(
         self,
-        communities: List[Dict[str, Any]],
-        fetch_members_func: Callable[[List[int]], Awaitable[List[Dict[str, Any]]]],
-    ) -> List[Dict[str, Any]]:
+        communities: list[dict[str, Any]],
+        fetch_members_func: Callable[[list[int]], Awaitable[list[dict[str, Any]]]],
+    ) -> list[dict[str, Any]]:
         """
         Generate summaries for a hierarchy of communities (bottom-up).
 
@@ -204,7 +203,7 @@ Summary:"""
             Communities with summaries populated
         """
         # Group by level
-        by_level: Dict[int, List[Dict[str, Any]]] = {}
+        by_level: dict[int, list[dict[str, Any]]] = {}
         for c in communities:
             level = c.get("level", 0)
             if level not in by_level:
@@ -212,7 +211,7 @@ Summary:"""
             by_level[level].append(c)
 
         # Track generated summaries by community ID
-        summaries: Dict[int, str] = {}
+        summaries: dict[int, str] = {}
 
         # Process bottom-up (level 0 first)
         for level in sorted(by_level.keys()):
@@ -222,15 +221,11 @@ Summary:"""
                 if level == 0:
                     # Leaf: summarize from member memories
                     member_ids = community.get("member_ids", [])
-                    members = (
-                        await fetch_members_func(member_ids) if member_ids else []
-                    )
+                    members = await fetch_members_func(member_ids) if member_ids else []
                 else:
                     # Higher level: summarize from child summaries
                     # Find children
-                    children = [
-                        c for c in communities if c.get("parent_id") == comm_id
-                    ]
+                    children = [c for c in communities if c.get("parent_id") == comm_id]
                     # Create pseudo-members from child summaries
                     members = [
                         {

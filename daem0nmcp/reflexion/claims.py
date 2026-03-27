@@ -14,7 +14,6 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import List, Optional, Set
 
 
 class ClaimType(str, Enum):
@@ -28,21 +27,23 @@ class ClaimType(str, Enum):
 class VerificationLevel(str, Enum):
     """How strictly the claim should be verified."""
 
-    MANDATORY = "mandatory"      # Must verify against memory store
+    MANDATORY = "mandatory"  # Must verify against memory store
     BEST_EFFORT = "best_effort"  # Check if indexed; don't fail if not found
-    SKIP = "skip"                # No verification needed
+    SKIP = "skip"  # No verification needed
 
 
 @dataclass
 class Claim:
     """A verifiable claim extracted from text."""
 
-    text: str                           # The claim text as found
-    claim_type: ClaimType               # Category of claim
+    text: str  # The claim text as found
+    claim_type: ClaimType  # Category of claim
     verification_level: VerificationLevel
-    subject: Optional[str] = None       # The subject being claimed about
-    predicate: Optional[str] = None     # What's being claimed about the subject
-    source_span: tuple[int, int] = field(default_factory=lambda: (0, 0))  # Character positions
+    subject: str | None = None  # The subject being claimed about
+    predicate: str | None = None  # What's being claimed about the subject
+    source_span: tuple[int, int] = field(
+        default_factory=lambda: (0, 0)
+    )  # Character positions
 
     def __hash__(self) -> int:
         """Hash by normalized subject for deduplication."""
@@ -80,15 +81,15 @@ MEMORY_PATTERNS = [
     (r"\bwe\s+decided\s+(?:to\s+)?(.+?)(?:\.|,|$)", "decision"),
     (r"\bwe\s+agreed\s+(?:to\s+|on\s+)?(.+?)(?:\.|,|$)", "agreement"),
     (r"\bwe\s+chose\s+(?:to\s+)?(.+?)(?:\.|,|$)", "choice"),
-
     # "I remember..." patterns
     (r"\bi\s+remember\s+(?:that\s+)?(.+?)(?:\.|,|$)", "memory"),
     (r"\bas\s+i\s+recall\b[,]?\s*(.+?)(?:\.|,|$)", "memory"),
-
     # "You/We mentioned..." patterns
     (r"\byou\s+(?:mentioned|said)\s+(?:that\s+)?(.+?)(?:\.|,|$)", "user_statement"),
-    (r"\bwe\s+(?:mentioned|discussed|talked\s+about)\s+(?:that\s+)?(.+?)(?:\.|,|$)", "discussion"),
-
+    (
+        r"\bwe\s+(?:mentioned|discussed|talked\s+about)\s+(?:that\s+)?(.+?)(?:\.|,|$)",
+        "discussion",
+    ),
     # "Previously..." patterns
     (r"\bpreviously[,]?\s+(?:we\s+)?(.+?)(?:\.|,|$)", "previous"),
     (r"\bearlier[,]?\s+(?:we\s+)?(.+?)(?:\.|,|$)", "earlier"),
@@ -98,7 +99,10 @@ MEMORY_PATTERNS = [
 
 # Outcome reference patterns - mandatory verification
 OUTCOME_PATTERNS = [
-    (r"\bthat\s+(?:approach|method|solution)\s+(worked|failed|succeeded|broke)", "outcome"),
+    (
+        r"\bthat\s+(?:approach|method|solution)\s+(worked|failed|succeeded|broke)",
+        "outcome",
+    ),
     (r"\bit\s+(worked|failed|succeeded|broke)(?:\s+(?:well|badly|great))?", "outcome"),
     (r"\bthis\s+(worked|failed|succeeded|broke)", "outcome"),
     (r"\bwe\s+(?:tried|tested)\s+(?:that\s+)?and\s+it\s+(worked|failed)", "outcome"),
@@ -111,19 +115,14 @@ OUTCOME_PATTERNS = [
 FACTUAL_PATTERNS = [
     # "X is Y" patterns
     (r"(\w+(?:\s+\w+)?)\s+is\s+(?:a\s+)?(\w+(?:\s+\w+){0,3})(?:\.|,|$)", "identity"),
-
     # "X uses Y" patterns
     (r"(\w+(?:\s+\w+)?)\s+uses?\s+(\w+(?:\s+\w+){0,3})(?:\.|,|$)", "usage"),
-
     # "X supports Y" patterns
     (r"(\w+(?:\s+\w+)?)\s+supports?\s+(\w+(?:\s+\w+){0,3})(?:\.|,|$)", "support"),
-
     # "X returns Y" patterns
     (r"(\w+(?:\s+\w+)?)\s+returns?\s+(\w+(?:\s+\w+){0,3})(?:\.|,|$)", "return_value"),
-
     # "X has Y" patterns
     (r"(\w+(?:\s+\w+)?)\s+has\s+(?:a\s+)?(\w+(?:\s+\w+){0,3})(?:\.|,|$)", "property"),
-
     # "X requires Y" patterns
     (r"(\w+(?:\s+\w+)?)\s+requires?\s+(\w+(?:\s+\w+){0,3})(?:\.|,|$)", "requirement"),
 ]
@@ -144,7 +143,7 @@ CODE_VERIFIABLE_PATTERNS = [
 ]
 
 
-def is_code_verifiable(claim: "Claim") -> bool:
+def is_code_verifiable(claim: Claim) -> bool:
     """Check if a claim can be verified by executing Python code.
 
     Code-verifiable claims include:
@@ -195,7 +194,9 @@ def is_opinion(text: str) -> bool:
     return False
 
 
-def _extract_subject_predicate(match: re.Match, pattern_type: str) -> tuple[Optional[str], Optional[str]]:
+def _extract_subject_predicate(
+    match: re.Match, pattern_type: str
+) -> tuple[str | None, str | None]:
     """Extract subject and predicate from a regex match.
 
     Args:
@@ -207,13 +208,30 @@ def _extract_subject_predicate(match: re.Match, pattern_type: str) -> tuple[Opti
     """
     groups = match.groups()
 
-    if pattern_type in ("identity", "usage", "support", "return_value", "property", "requirement"):
+    if pattern_type in (
+        "identity",
+        "usage",
+        "support",
+        "return_value",
+        "property",
+        "requirement",
+    ):
         # Two-group patterns: subject verb predicate
         if len(groups) >= 2:
             return groups[0].strip(), groups[1].strip()
 
-    if pattern_type in ("decision", "agreement", "choice", "memory", "discussion",
-                        "previous", "earlier", "last_time", "before", "user_statement"):
+    if pattern_type in (
+        "decision",
+        "agreement",
+        "choice",
+        "memory",
+        "discussion",
+        "previous",
+        "earlier",
+        "last_time",
+        "before",
+        "user_statement",
+    ):
         # Single-group patterns: full claim is the subject
         if groups:
             return groups[0].strip(), None
@@ -231,7 +249,7 @@ def _extract_subject_predicate(match: re.Match, pattern_type: str) -> tuple[Opti
     return None, None
 
 
-def extract_claims(text: str) -> List[Claim]:
+def extract_claims(text: str) -> list[Claim]:
     """Extract verifiable claims from text.
 
     Detects:
@@ -255,8 +273,8 @@ def extract_claims(text: str) -> List[Claim]:
     if is_opinion(text):
         return []
 
-    claims: List[Claim] = []
-    seen_subjects: Set[str] = set()
+    claims: list[Claim] = []
+    seen_subjects: set[str] = set()
 
     # Check for memory references (mandatory verification)
     for pattern, pattern_type in MEMORY_PATTERNS:
@@ -275,14 +293,16 @@ def extract_claims(text: str) -> List[Claim]:
                 continue
             seen_subjects.add(subject_key)
 
-            claims.append(Claim(
-                text=claim_text,
-                claim_type=ClaimType.MEMORY_REFERENCE,
-                verification_level=VerificationLevel.MANDATORY,
-                subject=subject,
-                predicate=predicate,
-                source_span=(match.start(), match.end()),
-            ))
+            claims.append(
+                Claim(
+                    text=claim_text,
+                    claim_type=ClaimType.MEMORY_REFERENCE,
+                    verification_level=VerificationLevel.MANDATORY,
+                    subject=subject,
+                    predicate=predicate,
+                    source_span=(match.start(), match.end()),
+                )
+            )
 
     # Check for outcome references (mandatory verification)
     for pattern, pattern_type in OUTCOME_PATTERNS:
@@ -299,14 +319,16 @@ def extract_claims(text: str) -> List[Claim]:
                 continue
             seen_subjects.add(subject_key)
 
-            claims.append(Claim(
-                text=claim_text,
-                claim_type=ClaimType.OUTCOME_REFERENCE,
-                verification_level=VerificationLevel.MANDATORY,
-                subject=subject,
-                predicate=predicate,
-                source_span=(match.start(), match.end()),
-            ))
+            claims.append(
+                Claim(
+                    text=claim_text,
+                    claim_type=ClaimType.OUTCOME_REFERENCE,
+                    verification_level=VerificationLevel.MANDATORY,
+                    subject=subject,
+                    predicate=predicate,
+                    source_span=(match.start(), match.end()),
+                )
+            )
 
     # Check for factual assertions (best effort verification)
     for pattern, pattern_type in FACTUAL_PATTERNS:
@@ -327,14 +349,16 @@ def extract_claims(text: str) -> List[Claim]:
                 continue
             seen_subjects.add(subject_key)
 
-            claims.append(Claim(
-                text=claim_text,
-                claim_type=ClaimType.FACTUAL_ASSERTION,
-                verification_level=VerificationLevel.BEST_EFFORT,
-                subject=subject,
-                predicate=predicate,
-                source_span=(match.start(), match.end()),
-            ))
+            claims.append(
+                Claim(
+                    text=claim_text,
+                    claim_type=ClaimType.FACTUAL_ASSERTION,
+                    verification_level=VerificationLevel.BEST_EFFORT,
+                    subject=subject,
+                    predicate=predicate,
+                    source_span=(match.start(), match.end()),
+                )
+            )
 
     return claims
 

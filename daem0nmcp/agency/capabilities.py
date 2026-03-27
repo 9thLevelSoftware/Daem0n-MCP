@@ -12,7 +12,6 @@ Scopes:
 
 import logging
 from enum import Enum, auto
-from typing import Dict, Optional, Set
 
 logger = logging.getLogger(__name__)
 
@@ -26,7 +25,7 @@ class CapabilityScope(Enum):
 
 
 # Default capabilities granted to all projects
-DEFAULT_CAPABILITIES: Set[CapabilityScope] = {
+DEFAULT_CAPABILITIES: set[CapabilityScope] = {
     CapabilityScope.EXECUTE_CODE,  # Code execution allowed by default
 }
 
@@ -40,9 +39,9 @@ class CapabilityManager:
     """
 
     def __init__(self) -> None:
-        self._project_capabilities: Dict[str, Set[CapabilityScope]] = {}
+        self._project_capabilities: dict[str, set[CapabilityScope]] = {}
 
-    def get_capabilities(self, project_path: str) -> Set[CapabilityScope]:
+    def get_capabilities(self, project_path: str) -> set[CapabilityScope]:
         """Get capabilities for a project (defaults if not set)."""
         return self._project_capabilities.get(project_path, DEFAULT_CAPABILITIES.copy())
 
@@ -51,18 +50,14 @@ class CapabilityManager:
         caps = self.get_capabilities(project_path)
         return capability in caps
 
-    def grant_capability(
-        self, project_path: str, capability: CapabilityScope
-    ) -> None:
+    def grant_capability(self, project_path: str, capability: CapabilityScope) -> None:
         """Grant a capability to a project."""
         if project_path not in self._project_capabilities:
             self._project_capabilities[project_path] = DEFAULT_CAPABILITIES.copy()
         self._project_capabilities[project_path].add(capability)
         logger.info(f"Granted {capability.name} to {project_path}")
 
-    def revoke_capability(
-        self, project_path: str, capability: CapabilityScope
-    ) -> None:
+    def revoke_capability(self, project_path: str, capability: CapabilityScope) -> None:
         """Revoke a capability from a project."""
         if project_path not in self._project_capabilities:
             self._project_capabilities[project_path] = DEFAULT_CAPABILITIES.copy()
@@ -77,8 +72,8 @@ class CapabilityManager:
 def check_capability(
     project_path: str,
     capability: CapabilityScope,
-    manager: Optional[CapabilityManager] = None,
-) -> Optional[Dict]:
+    manager: CapabilityManager | None = None,
+) -> dict | None:
     """
     Check if project has required capability.
 

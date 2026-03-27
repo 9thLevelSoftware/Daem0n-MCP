@@ -6,14 +6,14 @@ Provides session state tracking and pre-commit enforcement logic.
 
 import hashlib
 import logging
-from datetime import datetime, timezone, timedelta
-from typing import Optional, Dict, Any, List
+from datetime import datetime, timedelta, timezone
+from typing import Any
 
 from sqlalchemy import select
 
-from .database import DatabaseManager
-from .models import SessionState, Memory
 from .config import settings
+from .database import DatabaseManager
+from .models import Memory, SessionState
 
 logger = logging.getLogger(__name__)
 
@@ -42,7 +42,7 @@ class SessionManager:
     def __init__(self, db_manager: DatabaseManager):
         self.db = db_manager
 
-    async def get_session_state(self, project_path: str) -> Optional[Dict[str, Any]]:
+    async def get_session_state(self, project_path: str) -> dict[str, Any] | None:
         """Get current session state as a dictionary."""
         session_id = get_session_id(project_path)
 
@@ -59,9 +59,12 @@ class SessionManager:
                 "session_id": state.session_id,
                 "project_path": state.project_path,
                 "briefed": state.briefed,
-                "context_checks": state.context_checks or [],  # JSON column returns list
+                "context_checks": state.context_checks
+                or [],  # JSON column returns list
                 "pending_decisions": state.pending_decisions or [],
-                "last_activity": state.last_activity.isoformat() if state.last_activity else None,
+                "last_activity": state.last_activity.isoformat()
+                if state.last_activity
+                else None,
             }
 
     async def mark_briefed(self, project_path: str) -> None:
@@ -91,7 +94,7 @@ class SessionManager:
         self,
         project_path: str,
         topic_or_file: str,
-        timestamp: Optional[datetime] = None,
+        timestamp: datetime | None = None,
     ) -> None:
         """
         Record that a context check was performed.
@@ -126,7 +129,11 @@ class SessionManager:
             else:
                 checks = list(state.context_checks or [])
                 # Remove old entry for same topic if exists
-                checks = [c for c in checks if not (isinstance(c, dict) and c.get("topic") == topic_or_file)]
+                checks = [
+                    c
+                    for c in checks
+                    if not (isinstance(c, dict) and c.get("topic") == topic_or_file)
+                ]
                 checks.append(check_entry)
                 # Keep only last 20 checks to prevent unbounded growth
                 state.context_checks = checks[-20:]
@@ -241,7 +248,7 @@ class PreCommitChecker:
         self.db = db_manager
         self.memory = memory_manager
 
-    async def check(self, staged_files: List[str], project_path: str) -> Dict[str, Any]:
+    async def check(self, staged_files: list[str], project_path: str) -> dict[str, Any]:
         """
         Check staged files for issues before commit.
 
@@ -264,7 +271,7 @@ class PreCommitChecker:
                 select(Memory).where(
                     Memory.category == "decision",
                     Memory.outcome.is_(None),
-                    Memory.worked.is_(None)
+                    Memory.worked.is_(None),
                 )
             )
             pending_decisions = result.scalars().all()
@@ -278,25 +285,28 @@ class PreCommitChecker:
             age = now - decision_time
             if age > self.pending_threshold:
                 age_hours = int(age.total_seconds() / 3600)
-                blocks.append({
-                    "type": "PENDING_DECISION_OLD",
-                    "memory_id": decision.id,
-                    "content": decision.content,
-                    "message": f"Decision #{decision.id} from {age_hours}h ago needs outcome: {decision.content[:80]}"
-                })
+                blocks.append(
+                    {
+                        "type": "PENDING_DECISION_OLD",
+                        "memory_id": decision.id,
+                        "content": decision.content,
+                        "message": f"Decision #{decision.id} from {age_hours}h ago needs outcome: {decision.content[:80]}",
+                    }
+                )
             else:
-                warnings.append({
-                    "type": "PENDING_DECISION_RECENT",
-                    "memory_id": decision.id,
-                    "message": f"Decision #{decision.id} needs outcome: {decision.content[:80]}"
-                })
+                warnings.append(
+                    {
+                        "type": "PENDING_DECISION_RECENT",
+                        "memory_id": decision.id,
+                        "message": f"Decision #{decision.id} needs outcome: {decision.content[:80]}",
+                    }
+                )
 
         # Check each staged file for failed approaches and warnings
         for file_path in staged_files:
             try:
                 file_memories = await self.memory.recall_for_file(
-                    file_path=file_path,
-                    project_path=project_path
+                    file_path=file_path, project_path=project_path
                 )
             except Exception as e:
                 logger.warning(f"Could not check memories for {file_path}: {e}")
@@ -306,24 +316,26 @@ class PreCommitChecker:
             for category in ["decisions", "learnings", "warnings", "patterns"]:
                 for mem in file_memories.get(category, []):
                     if mem.get("worked") is False:
-                        blocks.append({
-                            "type": "FAILED_APPROACH",
-                            "memory_id": mem.get("id"),
-                            "content": mem.get("content", ""),
-                            "message": f"File {file_path} has failed approach: {mem.get('content', '')[:80]}"
-                        })
+                        blocks.append(
+                            {
+                                "type": "FAILED_APPROACH",
+                                "memory_id": mem.get("id"),
+                                "content": mem.get("content", ""),
+                                "message": f"File {file_path} has failed approach: {mem.get('content', '')[:80]}",
+                            }
+                        )
 
             # Check for warning memories (not already failed)
             for mem in file_memories.get("warnings", []):
-                if mem.get("worked") is not False:  # Don't duplicate failed approach warnings
-                    warnings.append({
-                        "type": "FILE_WARNING",
-                        "memory_id": mem.get("id"),
-                        "message": f"Warning for {file_path}: {mem.get('content', '')[:80]}"
-                    })
+                if (
+                    mem.get("worked") is not False
+                ):  # Don't duplicate failed approach warnings
+                    warnings.append(
+                        {
+                            "type": "FILE_WARNING",
+                            "memory_id": mem.get("id"),
+                            "message": f"Warning for {file_path}: {mem.get('content', '')[:80]}",
+                        }
+                    )
 
-        return {
-            "can_commit": len(blocks) == 0,
-            "blocks": blocks,
-            "warnings": warnings
-        }
+        return {"can_commit": len(blocks) == 0, "blocks": blocks, "warnings": warnings}

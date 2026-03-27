@@ -15,7 +15,7 @@ defaults to 0.0 with a note in suggestions).
 
 import logging
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Any, Dict, List, Optional
+from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import select
 
@@ -23,11 +23,11 @@ if TYPE_CHECKING:
     from ..context_manager import ProjectContext
 
 try:
-    from ..models import Rule
     from ..config import settings
+    from ..models import Rule
 except ImportError:
-    from daem0nmcp.models import Rule
     from daem0nmcp.config import settings
+    from daem0nmcp.models import Rule
 
 try:
     from . import StalenessReport
@@ -41,9 +41,9 @@ _MIN_TERM_LENGTH = 3
 
 
 async def run_evolution(
-    rule_id: Optional[int],
+    rule_id: int | None,
     ctx: "ProjectContext",
-) -> List[StalenessReport]:
+) -> list[StalenessReport]:
     """Examine one or all rules for signs of entropy and decay.
 
     If *rule_id* is provided, analyse that single rule.  If ``None``,
@@ -68,9 +68,7 @@ async def run_evolution(
     # ------------------------------------------------------------------
     async with ctx.db_manager.get_session() as session:
         if rule_id is not None:
-            result = await session.execute(
-                select(Rule).where(Rule.id == rule_id)
-            )
+            result = await session.execute(select(Rule).where(Rule.id == rule_id))
             rule = result.scalar_one_or_none()
             if not rule:
                 raise ValueError(
@@ -84,7 +82,7 @@ async def run_evolution(
     # ------------------------------------------------------------------
     # 2. Analyse each rule
     # ------------------------------------------------------------------
-    reports: List[StalenessReport] = []
+    reports: list[StalenessReport] = []
     for rule_obj in rules:
         report = await _analyze_rule(rule_obj, ctx)
         reports.append(report)
@@ -105,21 +103,18 @@ async def run_evolution(
 # Internal helpers
 # ------------------------------------------------------------------
 
-def _extract_terms(trigger: str) -> List[str]:
+
+def _extract_terms(trigger: str) -> list[str]:
     """Extract meaningful terms from a rule trigger string.
 
     Splits on whitespace, filters out tokens shorter than
     ``_MIN_TERM_LENGTH``, and lowercases for consistent matching.
     """
-    return [
-        token.lower()
-        for token in trigger.split()
-        if len(token) > _MIN_TERM_LENGTH
-    ]
+    return [token.lower() for token in trigger.split() if len(token) > _MIN_TERM_LENGTH]
 
 
 async def _code_drift_analysis(
-    terms: List[str],
+    terms: list[str],
     ctx: "ProjectContext",
 ) -> tuple:
     """Compute code drift score by cross-referencing terms against the
@@ -129,9 +124,9 @@ async def _code_drift_analysis(
         A 4-tuple of (code_drift_score, referenced_entities,
         missing_entities, suggestion_notes).
     """
-    referenced_entities: List[Dict[str, Any]] = []
-    missing_entities: List[str] = []
-    suggestion_notes: List[str] = []
+    referenced_entities: list[dict[str, Any]] = []
+    missing_entities: list[str] = []
+    suggestion_notes: list[str] = []
 
     if not terms:
         return 0.0, referenced_entities, missing_entities, suggestion_notes
@@ -144,9 +139,7 @@ async def _code_drift_analysis(
             from daem0nmcp.code_indexer import CodeIndexManager, is_available
 
         if not is_available():
-            suggestion_notes.append(
-                "Code index unavailable -- drift analysis skipped"
-            )
+            suggestion_notes.append("Code index unavailable -- drift analysis skipped")
             return 0.0, referenced_entities, missing_entities, suggestion_notes
 
         indexer = CodeIndexManager(db=ctx.db_manager, qdrant=None)
@@ -194,7 +187,7 @@ async def _outcome_correlation_analysis(
         )
 
         # Flatten recall categories to a single list of memories
-        memories: List[Dict[str, Any]] = []
+        memories: list[dict[str, Any]] = []
         for cat_key in ("decisions", "patterns", "warnings", "learnings"):
             cat_list = recall_result.get(cat_key)
             if isinstance(cat_list, list):
@@ -319,46 +312,52 @@ async def _analyze_rule_inner(
     staleness_score = max(0.0, min(1.0, staleness_score))
 
     # ----- (e) Evolution suggestions -----
-    suggestions: List[Dict[str, Any]] = []
+    suggestions: list[dict[str, Any]] = []
 
     # Notes from drift analysis (e.g. code index unavailable)
     for note in drift_notes:
-        suggestions.append({
-            "type": "info",
-            "reason": note,
-            "current": "N/A",
-            "proposed": "N/A",
-        })
+        suggestions.append(
+            {
+                "type": "info",
+                "reason": note,
+                "current": "N/A",
+                "proposed": "N/A",
+            }
+        )
 
     if staleness_score >= 0.2:
         # Missing entities -> suggest trigger update
         for entity in missing_entities:
-            suggestions.append({
-                "type": "update_trigger",
-                "reason": f"Entity '{entity}' no longer found in codebase",
-                "current": rule.trigger,
-                "proposed": "Update trigger to reference current entity names",
-            })
+            suggestions.append(
+                {
+                    "type": "update_trigger",
+                    "reason": f"Entity '{entity}' no longer found in codebase",
+                    "current": rule.trigger,
+                    "proposed": "Update trigger to reference current entity names",
+                }
+            )
 
         # High failure rate -> suggest warning
         if outcome_correlation_score > 0.7:
-            suggestions.append({
-                "type": "add_warning",
-                "reason": (
-                    f"Rule has {failed} failures vs {worked} successes"
-                ),
-                "current": "No staleness warning",
-                "proposed": "Add warning: this rule has low success correlation",
-            })
+            suggestions.append(
+                {
+                    "type": "add_warning",
+                    "reason": (f"Rule has {failed} failures vs {worked} successes"),
+                    "current": "No staleness warning",
+                    "proposed": "Add warning: this rule has low success correlation",
+                }
+            )
 
         # Age-based review
         if age_factor > 0.5:
-            suggestions.append({
-                "type": "review_needed",
-                "reason": f"Rule is {days_old} days old without review",
-                "current": "No review date",
-                "proposed": "Schedule rule review",
-            })
+            suggestions.append(
+                {
+                    "type": "review_needed",
+                    "reason": f"Rule is {days_old} days old without review",
+                    "current": "No review date",
+                    "proposed": "Schedule rule review",
+                }
+            )
 
     # ----- (f) Return report -----
     return StalenessReport(

@@ -8,17 +8,18 @@ blocks the command (exit 2). Warnings are output as context (exit 0).
 import sys
 
 from ._client import (
-    get_project_path,
+    block,
     get_command_from_input,
     get_managers,
+    get_project_path,
     run_async,
-    block,
     succeed,
 )
 
 
 class PreBashResult:
     """Value object returned by ``async_main``."""
+
     __slots__ = ("blocked", "message")
 
     def __init__(self, blocked: bool, message: str):
@@ -77,6 +78,7 @@ def main() -> None:
 
 if __name__ == "__main__":
     import warnings
+
     warnings.filterwarnings("ignore")
 
     from daem0nmcp.claude_hooks._client import run_hook_safely

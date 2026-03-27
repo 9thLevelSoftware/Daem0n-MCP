@@ -14,15 +14,15 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union
+from typing import TYPE_CHECKING, Any
 
-from ..vectors import cosine_similarity, decode, encode_query, encode_document
 from ..graph.contradiction import has_negation_mismatch
+from ..vectors import cosine_similarity, decode, encode_document, encode_query
 from .claims import VerificationLevel
 
 if TYPE_CHECKING:
-    from ..memory import MemoryManager
     from ..graph import KnowledgeGraph
+    from ..memory import MemoryManager
     from .claims import Claim
 
 logger = logging.getLogger(__name__)
@@ -35,8 +35,8 @@ class VerificationEvidence:
     source: str  # "memory", "entity", "temporal"
     content: str  # The actual evidence text
     similarity: float  # How similar to the claim
-    memory_id: Optional[int] = None
-    entity_id: Optional[int] = None
+    memory_id: int | None = None
+    entity_id: int | None = None
 
 
 @dataclass
@@ -47,8 +47,8 @@ class VerificationResult:
     claim_type: str
     status: str  # "verified", "unverified", "conflict"
     confidence: float  # 0.0-1.0 confidence in the verdict
-    evidence: List[VerificationEvidence] = field(default_factory=list)
-    conflict_reason: Optional[str] = None  # If status is "conflict"
+    evidence: list[VerificationEvidence] = field(default_factory=list)
+    conflict_reason: str | None = None  # If status is "conflict"
 
 
 # Thresholds
@@ -57,11 +57,11 @@ SIMILARITY_THRESHOLD_CONFLICT = 0.75  # Higher bar for conflict detection
 
 
 async def verify_claim(
-    claim: "Claim",
-    memory_manager: "MemoryManager",
-    knowledge_graph: Optional["KnowledgeGraph"] = None,
-    as_of_time: Optional[Union[str, datetime]] = None,
-    categories: Optional[List[str]] = None,
+    claim: Claim,
+    memory_manager: MemoryManager,
+    knowledge_graph: KnowledgeGraph | None = None,
+    as_of_time: str | datetime | None = None,
+    categories: list[str] | None = None,
 ) -> VerificationResult:
     """
     Verify a single claim against stored knowledge.
@@ -82,7 +82,11 @@ async def verify_claim(
         VerificationResult with status, confidence, and evidence
     """
     # Get claim type value for result
-    claim_type_str = claim.claim_type.value if hasattr(claim.claim_type, 'value') else str(claim.claim_type)
+    claim_type_str = (
+        claim.claim_type.value
+        if hasattr(claim.claim_type, "value")
+        else str(claim.claim_type)
+    )
 
     # Skip verification for skip-level claims (opinions, hypotheticals)
     if claim.verification_level == VerificationLevel.SKIP:
@@ -94,18 +98,18 @@ async def verify_claim(
             evidence=[],
         )
 
-    evidence_list: List[VerificationEvidence] = []
+    evidence_list: list[VerificationEvidence] = []
     has_support = False
     has_conflict = False
     conflict_reason = None
 
     # Parse as_of_time string to datetime if provided
-    query_time: Optional[datetime] = None
+    query_time: datetime | None = None
     if as_of_time is not None:
         if isinstance(as_of_time, str):
             try:
                 # Parse ISO 8601 format
-                query_time = datetime.fromisoformat(as_of_time.replace('Z', '+00:00'))
+                query_time = datetime.fromisoformat(as_of_time.replace("Z", "+00:00"))
             except ValueError:
                 logger.warning(f"Invalid as_of_time format: {as_of_time}, ignoring")
         elif isinstance(as_of_time, datetime):
@@ -142,7 +146,9 @@ async def verify_claim(
                 if memory_embedding_bytes:
                     memory_embedding = decode(memory_embedding_bytes)
                     if memory_embedding is not None:
-                        similarity = cosine_similarity(claim_embedding, memory_embedding)
+                        similarity = cosine_similarity(
+                            claim_embedding, memory_embedding
+                        )
 
             if similarity >= SIMILARITY_THRESHOLD_SUPPORT:
                 # Check for negation mismatch (conflict)
@@ -150,20 +156,24 @@ async def verify_claim(
                 if negation:
                     has_conflict = True
                     conflict_reason = f"Memory contradicts claim: negation pattern {negation[0]} vs {negation[1]}"
-                    evidence_list.append(VerificationEvidence(
-                        source="memory",
-                        content=content[:200],  # Truncate for brevity
-                        similarity=similarity,
-                        memory_id=memory.get("id"),
-                    ))
+                    evidence_list.append(
+                        VerificationEvidence(
+                            source="memory",
+                            content=content[:200],  # Truncate for brevity
+                            similarity=similarity,
+                            memory_id=memory.get("id"),
+                        )
+                    )
                 else:
                     has_support = True
-                    evidence_list.append(VerificationEvidence(
-                        source="memory",
-                        content=content[:200],
-                        similarity=similarity,
-                        memory_id=memory.get("id"),
-                    ))
+                    evidence_list.append(
+                        VerificationEvidence(
+                            source="memory",
+                            content=content[:200],
+                            similarity=similarity,
+                            memory_id=memory.get("id"),
+                        )
+                    )
 
     except Exception as e:
         logger.warning(f"Memory recall verification failed: {e}")
@@ -178,9 +188,11 @@ async def verify_claim(
 
             # Search for entities matching the claim subject
             entity_nodes = [
-                node for node in knowledge_graph._graph.nodes()
-                if node.startswith("entity:") and
-                search_subject.lower() in knowledge_graph._graph.nodes[node].get("name", "").lower()
+                node
+                for node in knowledge_graph._graph.nodes()
+                if node.startswith("entity:")
+                and search_subject.lower()
+                in knowledge_graph._graph.nodes[node].get("name", "").lower()
             ]
 
             for entity_node in entity_nodes[:3]:  # Limit to 3 entities
@@ -196,16 +208,22 @@ async def verify_claim(
                     # Extract entity ID safely
                     entity_id = None
                     try:
-                        entity_id = int(entity_node.split(":")[1]) if ":" in entity_node else None
+                        entity_id = (
+                            int(entity_node.split(":")[1])
+                            if ":" in entity_node
+                            else None
+                        )
                     except (ValueError, IndexError):
                         pass  # entity_id stays None if parsing fails - expected for malformed nodes
 
-                    evidence_list.append(VerificationEvidence(
-                        source="entity",
-                        content=f"Entity '{entity_name}' found with {len(memory_neighbors)} related memories",
-                        similarity=0.8,  # High confidence if entity exists
-                        entity_id=entity_id,
-                    ))
+                    evidence_list.append(
+                        VerificationEvidence(
+                            source="entity",
+                            content=f"Entity '{entity_name}' found with {len(memory_neighbors)} related memories",
+                            similarity=0.8,  # High confidence if entity exists
+                            entity_id=entity_id,
+                        )
+                    )
 
         except Exception as e:
             logger.warning(f"GraphRAG verification failed: {e}")
@@ -234,12 +252,12 @@ async def verify_claim(
 
 
 async def verify_claims(
-    claims: List["Claim"],
-    memory_manager: "MemoryManager",
-    knowledge_graph: Optional["KnowledgeGraph"] = None,
-    as_of_time: Optional[str] = None,
-    categories: Optional[List[str]] = None,
-) -> List[VerificationResult]:
+    claims: list[Claim],
+    memory_manager: MemoryManager,
+    knowledge_graph: KnowledgeGraph | None = None,
+    as_of_time: str | None = None,
+    categories: list[str] | None = None,
+) -> list[VerificationResult]:
     """
     Verify multiple claims against stored knowledge.
 
@@ -268,7 +286,7 @@ async def verify_claims(
     return results
 
 
-def summarize_verification(results: List[VerificationResult]) -> Dict[str, Any]:
+def summarize_verification(results: list[VerificationResult]) -> dict[str, Any]:
     """
     Summarize verification results for quality scoring.
 
@@ -283,7 +301,9 @@ def summarize_verification(results: List[VerificationResult]) -> Dict[str, Any]:
     unverified = [r for r in results if r.status == "unverified"]
     conflicts = [r for r in results if r.status == "conflict"]
 
-    avg_confidence = sum(r.confidence for r in results) / len(results) if results else 0.5
+    avg_confidence = (
+        sum(r.confidence for r in results) / len(results) if results else 0.5
+    )
 
     return {
         "verified_count": len(verified),
@@ -291,8 +311,7 @@ def summarize_verification(results: List[VerificationResult]) -> Dict[str, Any]:
         "conflict_count": len(conflicts),
         "overall_confidence": round(avg_confidence, 3),
         "conflicts": [
-            {"claim": c.claim_text, "reason": c.conflict_reason}
-            for c in conflicts
+            {"claim": c.claim_text, "reason": c.conflict_reason} for c in conflicts
         ],
     }
 

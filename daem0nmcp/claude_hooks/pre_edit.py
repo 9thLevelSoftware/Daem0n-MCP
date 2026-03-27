@@ -10,11 +10,11 @@ import sys
 from pathlib import Path
 
 from ._client import (
-    get_project_path,
+    block,
     get_file_path_from_input,
     get_managers,
+    get_project_path,
     run_async,
-    block,
     succeed,
 )
 
@@ -80,6 +80,7 @@ def _format_file_context(file_memories: dict, rule_result: dict) -> str:
 
 class PreEditResult:
     """Value object returned by ``async_main``."""
+
     __slots__ = ("allowed", "message")
 
     def __init__(self, allowed: bool, message: str):
@@ -93,6 +94,7 @@ async def async_main(project_path: str, file_path: str) -> PreEditResult:
     await db.init_db()
 
     from ..enforcement import SessionManager
+
     session_mgr = SessionManager(db)
     has_token = await session_mgr.has_recent_context_check(project_path)
 
@@ -107,6 +109,7 @@ async def async_main(project_path: str, file_path: str) -> PreEditResult:
         )
 
     from ..cli import check_file
+
     file_result = await check_file(file_path, db, memory, rules)
 
     filename = Path(file_path).name
@@ -114,7 +117,9 @@ async def async_main(project_path: str, file_path: str) -> PreEditResult:
 
     context = _format_file_context(file_result, rule_result)
     if context:
-        return PreEditResult(allowed=True, message=f"[Daem0n recalls for {filename}]\n{context}")
+        return PreEditResult(
+            allowed=True, message=f"[Daem0n recalls for {filename}]\n{context}"
+        )
     return PreEditResult(allowed=True, message="")
 
 
@@ -140,6 +145,7 @@ def main() -> None:
 
 if __name__ == "__main__":
     import warnings
+
     warnings.filterwarnings("ignore")
 
     from daem0nmcp.claude_hooks._client import run_hook_safely

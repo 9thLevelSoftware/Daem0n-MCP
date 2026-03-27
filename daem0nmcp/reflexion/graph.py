@@ -12,16 +12,17 @@ Graph structure:
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, Any, Callable, Dict, Optional
+from collections.abc import Callable
+from typing import TYPE_CHECKING, Any
 
-from langgraph.graph import StateGraph, START, END
+from langgraph.graph import END, START, StateGraph
 
-from .state import ReflexionState
 from .nodes import create_actor_node, create_evaluator_node, create_reflector_node
+from .state import ReflexionState
 
 if TYPE_CHECKING:
-    from ..memory import MemoryManager
     from ..graph import KnowledgeGraph
+    from ..memory import MemoryManager
 
 logger = logging.getLogger(__name__)
 
@@ -40,10 +41,10 @@ def should_continue(state: ReflexionState) -> str:
 
 
 def build_reflexion_graph(
-    memory_manager: "MemoryManager",
-    knowledge_graph: Optional["KnowledgeGraph"] = None,
-    llm_func: Optional[Callable[[str], str]] = None,
-    sandbox_executor: Optional[Any] = None,
+    memory_manager: MemoryManager,
+    knowledge_graph: KnowledgeGraph | None = None,
+    llm_func: Callable[[str], str] | None = None,
+    sandbox_executor: Any | None = None,
 ) -> StateGraph:
     """
     Build the Reflexion StateGraph.
@@ -89,11 +90,11 @@ def build_reflexion_graph(
 
 
 async def create_reflexion_app(
-    memory_manager: "MemoryManager",
-    knowledge_graph: Optional["KnowledgeGraph"] = None,
-    llm_func: Optional[Callable[[str], str]] = None,
-    checkpoint_path: Optional[str] = None,
-    sandbox_executor: Optional[Any] = None,
+    memory_manager: MemoryManager,
+    knowledge_graph: KnowledgeGraph | None = None,
+    llm_func: Callable[[str], str] | None = None,
+    checkpoint_path: str | None = None,
+    sandbox_executor: Any | None = None,
 ):
     """
     Create a compiled Reflexion app with optional checkpointing.
@@ -129,12 +130,12 @@ async def create_reflexion_app(
 
 async def run_reflexion(
     query: str,
-    memory_manager: "MemoryManager",
-    knowledge_graph: Optional["KnowledgeGraph"] = None,
-    llm_func: Optional[Callable[[str], str]] = None,
-    thread_id: Optional[str] = None,
-    sandbox_executor: Optional[Any] = None,
-) -> Dict[str, Any]:
+    memory_manager: MemoryManager,
+    knowledge_graph: KnowledgeGraph | None = None,
+    llm_func: Callable[[str], str] | None = None,
+    thread_id: str | None = None,
+    sandbox_executor: Any | None = None,
+) -> dict[str, Any]:
     """
     Run the Reflexion loop on a query.
 
@@ -173,7 +174,7 @@ async def run_reflexion(
         "verification_code": None,
     }
 
-    config: Dict[str, Any] = {}
+    config: dict[str, Any] = {}
     if thread_id:
         config["configurable"] = {"thread_id": thread_id}
 

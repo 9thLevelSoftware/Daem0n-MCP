@@ -9,13 +9,12 @@ Enable by setting:
     OTEL_SERVICE_NAME=daem0nmcp
 """
 
-import os
 import logging
-from typing import Optional
+import os
 
 logger = logging.getLogger(__name__)
 
-_TRACING_ENABLED: Optional[bool] = None
+_TRACING_ENABLED: bool | None = None
 
 
 def is_tracing_enabled() -> bool:

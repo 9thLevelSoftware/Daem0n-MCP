@@ -4,11 +4,14 @@ Text Fallback Formatting for Non-MCP-Apps Hosts
 Provides human-readable text formatting for tool results when the
 host doesn't support MCP Apps visual rendering.
 """
-from typing import Any, Dict, List, Optional
+
 from datetime import datetime
+from typing import Any
 
 
-def format_with_ui_hint(data: Dict[str, Any], ui_resource: str, text: str) -> Dict[str, Any]:
+def format_with_ui_hint(
+    data: dict[str, Any], ui_resource: str, text: str
+) -> dict[str, Any]:
     """
     Wrap tool result with UI hint and text fallback.
 
@@ -33,9 +36,7 @@ def format_with_ui_hint(data: Dict[str, Any], ui_resource: str, text: str) -> Di
 
 
 def format_search_results(
-    query: str,
-    results: List[Dict[str, Any]],
-    total_count: Optional[int] = None
+    query: str, results: list[dict[str, Any]], total_count: int | None = None
 ) -> str:
     """
     Format search/recall results as readable text.
@@ -74,10 +75,10 @@ def format_search_results(
 
 def format_briefing(
     project: str,
-    stats: Dict[str, Any],
-    warnings: List[Dict[str, Any]],
-    recent_decisions: List[Dict[str, Any]],
-    focus_areas: List[str],
+    stats: dict[str, Any],
+    warnings: list[dict[str, Any]],
+    recent_decisions: list[dict[str, Any]],
+    focus_areas: list[str],
 ) -> str:
     """
     Format briefing as readable text.
@@ -104,20 +105,24 @@ def format_briefing(
         lines.append(f"  {key}: {value}")
 
     if warnings:
-        lines.extend([
-            "",
-            "ACTIVE WARNINGS",
-            "-" * 20,
-        ])
+        lines.extend(
+            [
+                "",
+                "ACTIVE WARNINGS",
+                "-" * 20,
+            ]
+        )
         for w in warnings:
             lines.append(f"  ! {w.get('content', 'Unknown warning')}")
 
     if recent_decisions:
-        lines.extend([
-            "",
-            "RECENT DECISIONS",
-            "-" * 20,
-        ])
+        lines.extend(
+            [
+                "",
+                "RECENT DECISIONS",
+                "-" * 20,
+            ]
+        )
         for d in recent_decisions[:5]:
             outcome = d.get("outcome", "pending")
             outcome_marker = {"success": "+", "failure": "-", "pending": "?"}
@@ -125,11 +130,13 @@ def format_briefing(
             lines.append(f"  [{marker}] {d.get('content', '')[:60]}")
 
     if focus_areas:
-        lines.extend([
-            "",
-            "FOCUS AREAS",
-            "-" * 20,
-        ])
+        lines.extend(
+            [
+                "",
+                "FOCUS AREAS",
+                "-" * 20,
+            ]
+        )
         for area in focus_areas:
             lines.append(f"  * {area}")
 
@@ -144,7 +151,7 @@ def format_covenant_status(
     is_briefed: bool,
     context_checks: int,
     preflight_valid: bool,
-    preflight_expires: Optional[datetime] = None,
+    preflight_expires: datetime | None = None,
 ) -> str:
     """
     Format covenant status as readable text.
@@ -174,7 +181,7 @@ def format_covenant_status(
     return "\n".join(lines)
 
 
-def format_covenant_status_text(data: Dict[str, Any]) -> str:
+def format_covenant_status_text(data: dict[str, Any]) -> str:
     """
     Format covenant status as readable text for non-MCP-Apps hosts.
 
@@ -226,9 +233,9 @@ def format_covenant_status_text(data: Dict[str, Any]) -> str:
 
 def format_community_cluster(
     community_id: int,
-    members: List[str],
+    members: list[str],
     summary: str,
-    sub_communities: Optional[List[Dict[str, Any]]] = None,
+    sub_communities: list[dict[str, Any]] | None = None,
 ) -> str:
     """
     Format community cluster as readable text.
@@ -252,10 +259,12 @@ def format_community_cluster(
     ]
 
     if sub_communities:
-        lines.extend([
-            "",
-            "Sub-communities:",
-        ])
+        lines.extend(
+            [
+                "",
+                "Sub-communities:",
+            ]
+        )
         for sub in sub_communities:
             sub_id = sub.get("id", "?")
             sub_size = len(sub.get("members", []))
@@ -267,7 +276,7 @@ def format_community_cluster(
 def format_graph_path(
     start: str,
     end: str,
-    path: List[Dict[str, Any]],
+    path: list[dict[str, Any]],
     hops: int,
 ) -> str:
     """
@@ -306,7 +315,7 @@ def format_graph_path(
     return "\n".join(lines)
 
 
-def format_communities_text(data: Dict[str, Any]) -> str:
+def format_communities_text(data: dict[str, Any]) -> str:
     """
     Format community list as readable text for non-MCP-Apps hosts.
 
@@ -340,7 +349,7 @@ def format_communities_text(data: Dict[str, Any]) -> str:
         return "\n".join(lines)
 
     # Group by level for readable output
-    by_level: Dict[int, List[Dict[str, Any]]] = {}
+    by_level: dict[int, list[dict[str, Any]]] = {}
     for c in communities:
         level = c.get("level", 0)
         by_level.setdefault(level, []).append(c)
@@ -364,7 +373,7 @@ def format_communities_text(data: Dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def format_graph_text(data: Dict[str, Any]) -> str:
+def format_graph_text(data: dict[str, Any]) -> str:
     """
     Format graph data as readable text for non-MCP-Apps hosts.
 
@@ -397,7 +406,7 @@ def format_graph_text(data: Dict[str, Any]) -> str:
         return "\n".join(lines)
 
     # Group nodes by category
-    by_category: Dict[str, List[Dict[str, Any]]] = {}
+    by_category: dict[str, list[dict[str, Any]]] = {}
     for node in nodes:
         cat = node.get("category", "unknown")
         by_category.setdefault(cat, []).append(node)
@@ -419,7 +428,7 @@ def format_graph_text(data: Dict[str, Any]) -> str:
     if edges:
         lines.append("## Relationships")
         lines.append("-" * 40)
-        rel_counts: Dict[str, int] = {}
+        rel_counts: dict[str, int] = {}
         for edge in edges:
             rel = edge.get("relationship", "relates_to")
             rel_counts[rel] = rel_counts.get(rel, 0) + 1
@@ -431,7 +440,7 @@ def format_graph_text(data: Dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def format_briefing_text(data: Dict[str, Any]) -> str:
+def format_briefing_text(data: dict[str, Any]) -> str:
     """
     Format briefing data as readable text for non-MCP-Apps hosts.
 
@@ -475,7 +484,13 @@ def format_briefing_text(data: Dict[str, Any]) -> str:
         lines.append(f"## Recent Decisions ({len(decisions)})")
         for d in decisions[:5]:  # Limit for text output
             worked = d.get("worked")
-            status_str = "[SUCCESS]" if worked is True else "[FAILED]" if worked is False else "[PENDING]"
+            status_str = (
+                "[SUCCESS]"
+                if worked is True
+                else "[FAILED]"
+                if worked is False
+                else "[PENDING]"
+            )
             content = d.get("content", "")[:100]  # Truncate
             lines.append(f"  {status_str} {content}")
         if len(decisions) > 5:

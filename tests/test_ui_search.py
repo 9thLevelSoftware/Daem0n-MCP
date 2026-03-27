@@ -11,11 +11,26 @@ class TestBuildSearchUI:
         data = {
             "topic": "python",
             "decisions": [
-                {"content": "Use Python 3.11", "relevance": 0.95, "created_at": "2026-01-28T00:00:00Z", "tags": ["python"]},
-                {"content": "Use type hints", "relevance": 0.88, "created_at": "2026-01-27T00:00:00Z", "tags": []},
+                {
+                    "content": "Use Python 3.11",
+                    "relevance": 0.95,
+                    "created_at": "2026-01-28T00:00:00Z",
+                    "tags": ["python"],
+                },
+                {
+                    "content": "Use type hints",
+                    "relevance": 0.88,
+                    "created_at": "2026-01-27T00:00:00Z",
+                    "tags": [],
+                },
             ],
             "warnings": [
-                {"content": "Avoid Python 2", "relevance": 0.75, "created_at": "2026-01-26T00:00:00Z", "tags": ["legacy"]},
+                {
+                    "content": "Avoid Python 2",
+                    "relevance": 0.75,
+                    "created_at": "2026-01-26T00:00:00Z",
+                    "tags": ["legacy"],
+                },
             ],
             "patterns": [],
             "learnings": [],
@@ -85,8 +100,8 @@ class TestBuildSearchUI:
         assert "daemon-score-bar__track" in html
         assert "daemon-score-bar__fill" in html
         # Check that width percentages are calculated
-        assert 'width: 95%' in html
-        assert 'width: 30%' in html
+        assert "width: 95%" in html
+        assert "width: 30%" in html
 
     def test_all_categories_rendered(self):
         """Test that all four categories are properly rendered."""
@@ -197,7 +212,11 @@ class TestSearchUIIntegration:
         data = {
             "topic": "xyz",
             "decisions": [
-                {"content": "Unique content here", "relevance": 0.85, "tags": ["sample"]}
+                {
+                    "content": "Unique content here",
+                    "relevance": 0.85,
+                    "tags": ["sample"],
+                }
             ],
             "patterns": [],
             "warnings": [],
@@ -364,7 +383,7 @@ class TestRecordOutcomeButton:
         # Button element should NOT be present (outcome already recorded)
         # Check for the actual button with data-memory-id attribute
         assert 'data-memory-id="456"' not in html
-        assert 'data-memory-id=' not in html  # No button with memory id at all
+        assert "data-memory-id=" not in html  # No button with memory id at all
         # But the card should still exist
         assert "Use JWT for authentication" in html
 
@@ -389,7 +408,7 @@ class TestRecordOutcomeButton:
 
         # Button should NOT be present - check for actual button element
         assert 'data-memory-id="789"' not in html
-        assert 'data-memory-id=' not in html  # No button with memory id
+        assert "data-memory-id=" not in html  # No button with memory id
 
     def test_record_outcome_button_only_on_decisions(self):
         """Test that Record Outcome button only appears on decision cards."""
@@ -414,7 +433,7 @@ class TestRecordOutcomeButton:
         assert 'data-memory-id="100"' not in html
         assert 'data-memory-id="101"' not in html
         assert 'data-memory-id="102"' not in html
-        assert 'data-memory-id=' not in html  # No buttons at all
+        assert "data-memory-id=" not in html  # No buttons at all
         # But the cards should still render
         assert "A pattern" in html
         assert "A warning" in html
@@ -440,7 +459,7 @@ class TestRecordOutcomeButton:
         html = _build_search_ui(data)
 
         # Button should NOT appear (no memory_id)
-        assert 'data-memory-id=' not in html
+        assert "data-memory-id=" not in html
         # But the card should still render
         assert "Decision without ID" in html
 
@@ -501,16 +520,16 @@ class TestPagination:
         prev_button_start = html.find('data-action="prev"')
         assert prev_button_start > 0
         # Look backward for the button start and forward for the >
-        button_start = html.rfind('<button', 0, prev_button_start)
-        button_end = html.find('>', prev_button_start)
-        prev_button = html[button_start:button_end + 1]
+        button_start = html.rfind("<button", 0, prev_button_start)
+        button_end = html.find(">", prev_button_start)
+        prev_button = html[button_start : button_end + 1]
         assert "disabled" in prev_button
 
         # Next button should NOT be disabled
         next_button_start = html.find('data-action="next"')
-        button_start = html.rfind('<button', 0, next_button_start)
-        button_end = html.find('>', next_button_start)
-        next_button = html[button_start:button_end + 1]
+        button_start = html.rfind("<button", 0, next_button_start)
+        button_end = html.find(">", next_button_start)
+        next_button = html[button_start : button_end + 1]
         # Check that disabled is not in the Next button specifically
         # (Need to be careful since "disabled" might appear elsewhere)
         assert next_button.count("disabled") == 0
@@ -539,16 +558,16 @@ class TestPagination:
 
         # Previous button should NOT be disabled
         prev_button_start = html.find('data-action="prev"')
-        button_start = html.rfind('<button', 0, prev_button_start)
-        button_end = html.find('>', prev_button_start)
-        prev_button = html[button_start:button_end + 1]
+        button_start = html.rfind("<button", 0, prev_button_start)
+        button_end = html.find(">", prev_button_start)
+        prev_button = html[button_start : button_end + 1]
         assert prev_button.count("disabled") == 0
 
         # Next button should be disabled
         next_button_start = html.find('data-action="next"')
-        button_start = html.rfind('<button', 0, next_button_start)
-        button_end = html.find('>', next_button_start)
-        next_button = html[button_start:button_end + 1]
+        button_start = html.rfind("<button", 0, next_button_start)
+        button_end = html.find(">", next_button_start)
+        next_button = html[button_start : button_end + 1]
         assert "disabled" in next_button
 
     def test_pagination_hidden_single_page(self):
@@ -593,9 +612,7 @@ class TestRecallVisualFormat:
         }
 
         result = format_with_ui_hint(
-            data=data,
-            ui_resource="ui://daem0n/search",
-            text="Test text"
+            data=data, ui_resource="ui://daem0n/search", text="Test text"
         )
 
         # Should have original data plus ui_resource and text
@@ -613,13 +630,16 @@ class TestRecallVisualFormat:
 
         results = [
             {"id": 1, "category": "decision", "content": "Use async", "score": 0.85},
-            {"id": 2, "category": "warning", "content": "Watch for deadlocks", "score": 0.72},
+            {
+                "id": 2,
+                "category": "warning",
+                "content": "Watch for deadlocks",
+                "score": 0.72,
+            },
         ]
 
         text = format_search_results(
-            query="concurrency",
-            results=results,
-            total_count=2
+            query="concurrency", results=results, total_count=2
         )
 
         assert "Search Results for: concurrency" in text
@@ -635,11 +655,7 @@ class TestRecallVisualFormat:
         """Test that format_search_results handles empty results."""
         from daem0nmcp.ui.fallback import format_search_results
 
-        text = format_search_results(
-            query="nonexistent",
-            results=[],
-            total_count=0
-        )
+        text = format_search_results(query="nonexistent", results=[], total_count=0)
 
         assert "No results found for: nonexistent" in text
 

@@ -1,9 +1,10 @@
 """Tests for contextual recall triggers."""
 
-import pytest
-import tempfile
 import shutil
+import tempfile
 from datetime import datetime, timezone
+
+import pytest
 
 from daem0nmcp.models import ContextTrigger
 
@@ -18,7 +19,7 @@ class TestContextTriggerModel:
             trigger_type="file_pattern",
             pattern="src/auth/**/*.py",
             recall_topic="authentication",
-            is_active=True
+            is_active=True,
         )
 
         assert trigger.project_path == "/test/project"
@@ -39,7 +40,7 @@ class TestContextTriggerModel:
             is_active=True,
             priority=0,
             recall_categories=[],
-            trigger_count=0
+            trigger_count=0,
         )
 
         # Verify values are set correctly
@@ -61,7 +62,7 @@ class TestContextTriggerModel:
             is_active=False,
             priority=10,
             trigger_count=5,
-            last_triggered=now
+            last_triggered=now,
         )
 
         assert trigger.project_path == "/test/project"
@@ -81,7 +82,7 @@ class TestContextTriggerModel:
             project_path="/test",
             trigger_type="file_pattern",
             pattern="src/api/**/*.py",
-            recall_topic="API design"
+            recall_topic="API design",
         )
         assert file_trigger.trigger_type == "file_pattern"
 
@@ -90,7 +91,7 @@ class TestContextTriggerModel:
             project_path="/test",
             trigger_type="tag_match",
             pattern="database|sql",
-            recall_topic="database decisions"
+            recall_topic="database decisions",
         )
         assert tag_trigger.trigger_type == "tag_match"
 
@@ -99,7 +100,7 @@ class TestContextTriggerModel:
             project_path="/test",
             trigger_type="entity_match",
             pattern=".*Repository$",
-            recall_topic="repository pattern"
+            recall_topic="repository pattern",
         )
         assert entity_trigger.trigger_type == "entity_match"
 
@@ -120,8 +121,8 @@ def temp_storage():
 @pytest.fixture
 async def trigger_manager(temp_storage):
     """Create a trigger manager with temporary storage."""
-    from daem0nmcp.database import DatabaseManager
     from daem0nmcp.context_triggers import ContextTriggerManager
+    from daem0nmcp.database import DatabaseManager
 
     db = DatabaseManager(temp_storage)
     await db.init_db()
@@ -137,7 +138,7 @@ async def test_add_file_trigger(trigger_manager, temp_storage):
         project_path=temp_storage,
         trigger_type="file_pattern",
         pattern="src/auth/**/*.py",
-        recall_topic="authentication"
+        recall_topic="authentication",
     )
 
     assert result["status"] == "created"
@@ -151,12 +152,11 @@ async def test_check_triggers_matches_file(trigger_manager, temp_storage):
         project_path=temp_storage,
         trigger_type="file_pattern",
         pattern="src/auth/*.py",
-        recall_topic="authentication"
+        recall_topic="authentication",
     )
 
     matches = await trigger_manager.check_triggers(
-        project_path=temp_storage,
-        file_path="src/auth/service.py"
+        project_path=temp_storage, file_path="src/auth/service.py"
     )
 
     assert len(matches) == 1
@@ -170,7 +170,7 @@ async def test_add_tag_trigger(trigger_manager, temp_storage):
         project_path=temp_storage,
         trigger_type="tag_match",
         pattern="auth|security",
-        recall_topic="security decisions"
+        recall_topic="security decisions",
     )
 
     assert result["status"] == "created"
@@ -184,12 +184,11 @@ async def test_check_triggers_matches_tag(trigger_manager, temp_storage):
         project_path=temp_storage,
         trigger_type="tag_match",
         pattern="database|sql",
-        recall_topic="database decisions"
+        recall_topic="database decisions",
     )
 
     matches = await trigger_manager.check_triggers(
-        project_path=temp_storage,
-        tags=["database", "migration"]
+        project_path=temp_storage, tags=["database", "migration"]
     )
 
     assert len(matches) == 1
@@ -203,7 +202,7 @@ async def test_add_entity_trigger(trigger_manager, temp_storage):
         project_path=temp_storage,
         trigger_type="entity_match",
         pattern=".*Service$",
-        recall_topic="service patterns"
+        recall_topic="service patterns",
     )
 
     assert result["status"] == "created"
@@ -217,12 +216,11 @@ async def test_check_triggers_matches_entity(trigger_manager, temp_storage):
         project_path=temp_storage,
         trigger_type="entity_match",
         pattern=".*Repository$",
-        recall_topic="repository pattern"
+        recall_topic="repository pattern",
     )
 
     matches = await trigger_manager.check_triggers(
-        project_path=temp_storage,
-        entities=["UserRepository", "OrderRepository"]
+        project_path=temp_storage, entities=["UserRepository", "OrderRepository"]
     )
 
     assert len(matches) == 1
@@ -236,13 +234,12 @@ async def test_remove_trigger(trigger_manager, temp_storage):
         project_path=temp_storage,
         trigger_type="file_pattern",
         pattern="src/**/*.py",
-        recall_topic="python code"
+        recall_topic="python code",
     )
     trigger_id = result["trigger_id"]
 
     remove_result = await trigger_manager.remove_trigger(
-        trigger_id=trigger_id,
-        project_path=temp_storage
+        trigger_id=trigger_id, project_path=temp_storage
     )
 
     assert remove_result["status"] == "removed"
@@ -255,13 +252,13 @@ async def test_list_triggers(trigger_manager, temp_storage):
         project_path=temp_storage,
         trigger_type="file_pattern",
         pattern="src/auth/*.py",
-        recall_topic="authentication"
+        recall_topic="authentication",
     )
     await trigger_manager.add_trigger(
         project_path=temp_storage,
         trigger_type="tag_match",
         pattern="database",
-        recall_topic="database"
+        recall_topic="database",
     )
 
     triggers = await trigger_manager.list_triggers(project_path=temp_storage)
@@ -276,12 +273,11 @@ async def test_check_triggers_no_match(trigger_manager, temp_storage):
         project_path=temp_storage,
         trigger_type="file_pattern",
         pattern="src/auth/*.py",
-        recall_topic="authentication"
+        recall_topic="authentication",
     )
 
     matches = await trigger_manager.check_triggers(
-        project_path=temp_storage,
-        file_path="src/api/routes.py"
+        project_path=temp_storage, file_path="src/api/routes.py"
     )
 
     assert len(matches) == 0
@@ -295,14 +291,13 @@ async def test_check_triggers_inactive_not_matched(trigger_manager, temp_storage
         project_path=temp_storage,
         trigger_type="file_pattern",
         pattern="src/auth/*.py",
-        recall_topic="authentication"
+        recall_topic="authentication",
     )
     _ = result["trigger_id"]  # Verify trigger_id exists
 
     # We'd need to disable the trigger - for now test that active ones match
     matches = await trigger_manager.check_triggers(
-        project_path=temp_storage,
-        file_path="src/auth/service.py"
+        project_path=temp_storage, file_path="src/auth/service.py"
     )
 
     assert len(matches) == 1  # Active trigger should match
@@ -315,19 +310,19 @@ async def test_multiple_trigger_types_matched(trigger_manager, temp_storage):
         project_path=temp_storage,
         trigger_type="file_pattern",
         pattern="src/auth/*.py",
-        recall_topic="auth files"
+        recall_topic="auth files",
     )
     await trigger_manager.add_trigger(
         project_path=temp_storage,
         trigger_type="tag_match",
         pattern="security",
-        recall_topic="security context"
+        recall_topic="security context",
     )
 
     matches = await trigger_manager.check_triggers(
         project_path=temp_storage,
         file_path="src/auth/service.py",
-        tags=["security", "validation"]
+        tags=["security", "validation"],
     )
 
     assert len(matches) == 2
@@ -344,7 +339,7 @@ async def test_trigger_with_recall_categories(trigger_manager, temp_storage):
         trigger_type="file_pattern",
         pattern="src/auth/*.py",
         recall_topic="authentication",
-        recall_categories=["warning", "pattern"]
+        recall_categories=["warning", "pattern"],
     )
 
     assert result["status"] == "created"
@@ -361,19 +356,18 @@ async def test_trigger_with_priority(trigger_manager, temp_storage):
         trigger_type="file_pattern",
         pattern="src/*.py",
         recall_topic="low priority",
-        priority=1
+        priority=1,
     )
     await trigger_manager.add_trigger(
         project_path=temp_storage,
         trigger_type="file_pattern",
         pattern="src/*.py",
         recall_topic="high priority",
-        priority=10
+        priority=10,
     )
 
     matches = await trigger_manager.check_triggers(
-        project_path=temp_storage,
-        file_path="src/main.py"
+        project_path=temp_storage, file_path="src/main.py"
     )
 
     assert len(matches) == 2
@@ -390,24 +384,23 @@ async def test_get_triggered_context(trigger_manager, temp_storage):
         project_path=temp_storage,
         trigger_type="file_pattern",
         pattern="src/auth/*.py",
-        recall_topic="authentication"
+        recall_topic="authentication",
     )
 
     # Create some memories that would match
     from daem0nmcp.memory import MemoryManager
+
     memory_mgr = MemoryManager(trigger_manager.db)
     await memory_mgr.remember(
         category="pattern",
         content="Always use JWT tokens for authentication",
         tags=["authentication", "jwt"],
-        project_path=temp_storage
+        project_path=temp_storage,
     )
 
     # Get triggered context
     result = await trigger_manager.get_triggered_context(
-        project_path=temp_storage,
-        file_path="src/auth/service.py",
-        limit=5
+        project_path=temp_storage, file_path="src/auth/service.py", limit=5
     )
 
     assert "triggers" in result
@@ -423,20 +416,18 @@ async def test_check_triggers_glob_patterns(trigger_manager, temp_storage):
         project_path=temp_storage,
         trigger_type="file_pattern",
         pattern="src/**/test_*.py",
-        recall_topic="test files"
+        recall_topic="test files",
     )
 
     # Should match nested test files
     matches = await trigger_manager.check_triggers(
-        project_path=temp_storage,
-        file_path="src/auth/tests/test_service.py"
+        project_path=temp_storage, file_path="src/auth/tests/test_service.py"
     )
     assert len(matches) == 1
 
     # Should not match non-test files
     matches = await trigger_manager.check_triggers(
-        project_path=temp_storage,
-        file_path="src/auth/service.py"
+        project_path=temp_storage, file_path="src/auth/service.py"
     )
     assert len(matches) == 0
 
@@ -445,10 +436,12 @@ async def test_check_triggers_glob_patterns(trigger_manager, temp_storage):
 # MCP Tool Tests - Server Integration
 # ============================================================================
 
+
 @pytest.fixture
 async def covenant_compliant_project_for_triggers(tmp_path):
     """Create project that passes communion checks."""
     from daem0nmcp import server
+
     project_path = str(tmp_path)
     server._project_contexts.clear()
     await server.get_briefing(project_path=project_path)
@@ -465,7 +458,7 @@ async def test_mcp_add_context_trigger(covenant_compliant_project_for_triggers):
         trigger_type="file_pattern",
         pattern="src/auth/**/*.py",
         recall_topic="authentication",
-        project_path=covenant_compliant_project_for_triggers
+        project_path=covenant_compliant_project_for_triggers,
     )
 
     assert result["status"] == "created"
@@ -482,7 +475,7 @@ async def test_mcp_list_context_triggers(covenant_compliant_project_for_triggers
         trigger_type="file_pattern",
         pattern="src/auth/**/*.py",
         recall_topic="authentication",
-        project_path=covenant_compliant_project_for_triggers
+        project_path=covenant_compliant_project_for_triggers,
     )
 
     result = await server.list_context_triggers(
@@ -504,14 +497,13 @@ async def test_mcp_remove_context_trigger(covenant_compliant_project_for_trigger
         trigger_type="file_pattern",
         pattern="src/auth/**/*.py",
         recall_topic="authentication",
-        project_path=covenant_compliant_project_for_triggers
+        project_path=covenant_compliant_project_for_triggers,
     )
     trigger_id = add_result["trigger_id"]
 
     # Remove it
     result = await server.remove_context_trigger(
-        trigger_id=trigger_id,
-        project_path=covenant_compliant_project_for_triggers
+        trigger_id=trigger_id, project_path=covenant_compliant_project_for_triggers
     )
 
     assert result["status"] == "removed"
@@ -533,13 +525,13 @@ async def test_mcp_check_context_triggers(covenant_compliant_project_for_trigger
         trigger_type="file_pattern",
         pattern="src/auth/*.py",
         recall_topic="authentication",
-        project_path=covenant_compliant_project_for_triggers
+        project_path=covenant_compliant_project_for_triggers,
     )
 
     # Check with matching file
     result = await server.check_context_triggers(
         file_path="src/auth/service.py",
-        project_path=covenant_compliant_project_for_triggers
+        project_path=covenant_compliant_project_for_triggers,
     )
 
     assert "triggers" in result
@@ -548,7 +540,9 @@ async def test_mcp_check_context_triggers(covenant_compliant_project_for_trigger
 
 
 @pytest.mark.asyncio
-async def test_mcp_check_context_triggers_no_match(covenant_compliant_project_for_triggers):
+async def test_mcp_check_context_triggers_no_match(
+    covenant_compliant_project_for_triggers,
+):
     """Test MCP tool returns empty when no triggers match."""
     from daem0nmcp import server
 
@@ -557,13 +551,13 @@ async def test_mcp_check_context_triggers_no_match(covenant_compliant_project_fo
         trigger_type="file_pattern",
         pattern="src/auth/*.py",
         recall_topic="authentication",
-        project_path=covenant_compliant_project_for_triggers
+        project_path=covenant_compliant_project_for_triggers,
     )
 
     # Check with non-matching file
     result = await server.check_context_triggers(
         file_path="src/api/routes.py",
-        project_path=covenant_compliant_project_for_triggers
+        project_path=covenant_compliant_project_for_triggers,
     )
 
     assert "triggers" in result
@@ -573,15 +567,16 @@ async def test_mcp_check_context_triggers_no_match(covenant_compliant_project_fo
 @pytest.mark.asyncio
 async def test_mcp_resource_triggered_context(covenant_compliant_project_for_triggers):
     """Test MCP resource for triggered context."""
-    from daem0nmcp import server
     import json
+
+    from daem0nmcp import server
 
     # Add a trigger
     await server.add_context_trigger(
         trigger_type="file_pattern",
         pattern="*.py",
         recall_topic="python",
-        project_path=covenant_compliant_project_for_triggers
+        project_path=covenant_compliant_project_for_triggers,
     )
 
     # Create a memory that matches the topic
@@ -589,13 +584,12 @@ async def test_mcp_resource_triggered_context(covenant_compliant_project_for_tri
         category="pattern",
         content="Use type hints in Python",
         tags=["python"],
-        project_path=covenant_compliant_project_for_triggers
+        project_path=covenant_compliant_project_for_triggers,
     )
 
     # Access the resource directly (simulates MCP resource access)
     result_json = await server.get_triggered_context_resource(
-        file_path="test.py",
-        project_path=covenant_compliant_project_for_triggers
+        file_path="test.py", project_path=covenant_compliant_project_for_triggers
     )
 
     result = json.loads(result_json)

@@ -1,16 +1,17 @@
 """Tests for Sacred Covenant enforcement."""
 
-import pytest
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 
+import pytest
+
 from daem0nmcp.covenant import (
+    COMMUNION_REQUIRED_TOOLS,
+    COUNSEL_REQUIRED_TOOLS,
+    COVENANT_EXEMPT_TOOLS,
     CovenantEnforcer,
     CovenantViolation,
     PreflightToken,
-    COVENANT_EXEMPT_TOOLS,
-    COMMUNION_REQUIRED_TOOLS,
-    COUNSEL_REQUIRED_TOOLS,
 )
 
 
@@ -87,6 +88,7 @@ class TestPreflightToken:
 
         # Tamper with the token
         import json
+
         data = json.loads(serialized)
         data["action"] = "malicious action"
         tampered = json.dumps(data)
@@ -128,7 +130,9 @@ class TestCovenantEnforcer:
         """Tool should be blocked if not briefed."""
         enforcer = CovenantEnforcer()
 
-        with patch.object(enforcer, '_get_session_state', return_value=mock_session_state):
+        with patch.object(
+            enforcer, "_get_session_state", return_value=mock_session_state
+        ):
             result = await enforcer.check_communion("/test/project")
 
         assert result is not None
@@ -139,7 +143,9 @@ class TestCovenantEnforcer:
         """Tool should be allowed if briefed."""
         enforcer = CovenantEnforcer()
 
-        with patch.object(enforcer, '_get_session_state', return_value=briefed_session_state):
+        with patch.object(
+            enforcer, "_get_session_state", return_value=briefed_session_state
+        ):
             result = await enforcer.check_communion("/test/project")
 
         assert result is None  # No violation
@@ -149,7 +155,9 @@ class TestCovenantEnforcer:
         """Tool should be blocked if no recent context_check."""
         enforcer = CovenantEnforcer()
 
-        with patch.object(enforcer, '_get_session_state', return_value=briefed_session_state):
+        with patch.object(
+            enforcer, "_get_session_state", return_value=briefed_session_state
+        ):
             result = await enforcer.check_counsel("remember", "/test/project")
 
         assert result is not None
@@ -160,7 +168,9 @@ class TestCovenantEnforcer:
         """Tool should be allowed with recent context_check."""
         enforcer = CovenantEnforcer()
 
-        with patch.object(enforcer, '_get_session_state', return_value=counseled_session_state):
+        with patch.object(
+            enforcer, "_get_session_state", return_value=counseled_session_state
+        ):
             result = await enforcer.check_counsel("remember", "/test/project")
 
         assert result is None  # No violation
@@ -193,6 +203,7 @@ class TestPreflightTokenIntegration:
     @pytest.fixture
     def db_manager(self, tmp_path):
         from daem0nmcp.database import DatabaseManager
+
         return DatabaseManager(str(tmp_path / "storage"))
 
     @pytest.mark.asyncio
@@ -201,6 +212,7 @@ class TestPreflightTokenIntegration:
         await db_manager.init_db()
 
         from daem0nmcp import server
+
         server._project_contexts.clear()
 
         project_path = str(db_manager.storage_path.parent.parent)
@@ -210,8 +222,10 @@ class TestPreflightTokenIntegration:
 
         # Mock recall and check_rules to avoid vector dimension issues
         ctx = await server.get_project_context(project_path)
-        with patch.object(ctx.memory_manager, 'recall', return_value={}), \
-             patch.object(ctx.rules_engine, 'check_rules', return_value={}):
+        with (
+            patch.object(ctx.memory_manager, "recall", return_value={}),
+            patch.object(ctx.rules_engine, "check_rules", return_value={}),
+        ):
             # context_check should return token
             result = await server.context_check(
                 description="About to edit auth.py",
@@ -222,6 +236,7 @@ class TestPreflightTokenIntegration:
 
         # Verify token is valid
         from daem0nmcp.covenant import PreflightToken
+
         token = PreflightToken.verify(result["preflight_token"], project_path)
         assert token is not None
         assert token.action == "About to edit auth.py"

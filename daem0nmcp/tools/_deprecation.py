@@ -2,7 +2,7 @@
 
 import contextvars
 import logging
-from typing import Any, Dict
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -25,10 +25,10 @@ class workflow_call:
 
 
 def add_deprecation(
-    result: Dict[str, Any],
+    result: dict[str, Any],
     tool_name: str,
     replacement: str,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """
     Add structured deprecation warning to tool output.
 
@@ -45,5 +45,7 @@ def add_deprecation(
         "replacement": replacement,
         "message": f"'{tool_name}' is deprecated. Use '{replacement}' instead.",
     }
-    logger.warning(f"Deprecated tool '{tool_name}' invoked. Use '{replacement}' instead.")
+    logger.warning(
+        f"Deprecated tool '{tool_name}' invoked. Use '{replacement}' instead."
+    )
     return result

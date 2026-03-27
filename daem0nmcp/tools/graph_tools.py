@@ -1,24 +1,26 @@
 """Graph and community tools: link_memories, trace_chain, get_graph, communities, etc."""
 
 import logging
-from typing import Dict, List, Optional, Any
+from typing import Any
 
 try:
-    from ..mcp_instance import mcp
     from .. import __version__
     from ..context_manager import (
-        get_project_context, _default_project_path,
+        _default_project_path,
         _missing_project_path_error,
+        get_project_context,
     )
     from ..logging_config import with_request_id
+    from ..mcp_instance import mcp
 except ImportError:
-    from daem0nmcp.mcp_instance import mcp
     from daem0nmcp import __version__
     from daem0nmcp.context_manager import (
-        get_project_context, _default_project_path,
+        _default_project_path,
         _missing_project_path_error,
+        get_project_context,
     )
     from daem0nmcp.logging_config import with_request_id
+    from daem0nmcp.mcp_instance import mcp
 
 logger = logging.getLogger(__name__)
 
@@ -29,9 +31,9 @@ async def link_memories(
     source_id: int,
     target_id: int,
     relationship: str,
-    description: Optional[str] = None,
-    project_path: Optional[str] = None
-) -> Dict[str, Any]:
+    description: str | None = None,
+    project_path: str | None = None,
+) -> dict[str, Any]:
     """
     Create relationship between memories. Types: led_to, supersedes, depends_on, conflicts_with, related_to.
 
@@ -50,7 +52,7 @@ async def link_memories(
         source_id=source_id,
         target_id=target_id,
         relationship=relationship,
-        description=description
+        description=description,
     )
 
 
@@ -59,9 +61,9 @@ async def link_memories(
 async def unlink_memories(
     source_id: int,
     target_id: int,
-    relationship: Optional[str] = None,
-    project_path: Optional[str] = None
-) -> Dict[str, Any]:
+    relationship: str | None = None,
+    project_path: str | None = None,
+) -> dict[str, Any]:
     """
     Remove relationship between memories.
 
@@ -76,9 +78,7 @@ async def unlink_memories(
 
     ctx = await get_project_context(project_path)
     return await ctx.memory_manager.unlink_memories(
-        source_id=source_id,
-        target_id=target_id,
-        relationship=relationship
+        source_id=source_id, target_id=target_id, relationship=relationship
     )
 
 
@@ -87,10 +87,10 @@ async def unlink_memories(
 async def trace_chain(
     memory_id: int,
     direction: str = "both",
-    relationship_types: Optional[List[str]] = None,
+    relationship_types: list[str] | None = None,
     max_depth: int = 10,
-    project_path: Optional[str] = None
-) -> Dict[str, Any]:
+    project_path: str | None = None,
+) -> dict[str, Any]:
     """
     Traverse memory graph to understand causal chains and dependencies.
 
@@ -109,18 +109,18 @@ async def trace_chain(
         memory_id=memory_id,
         direction=direction,
         relationship_types=relationship_types,
-        max_depth=max_depth
+        max_depth=max_depth,
     )
 
 
 @mcp.tool(version=__version__)
 @with_request_id
 async def get_graph(
-    memory_ids: Optional[List[int]] = None,
-    topic: Optional[str] = None,
+    memory_ids: list[int] | None = None,
+    topic: str | None = None,
     format: str = "json",
-    project_path: Optional[str] = None
-) -> Dict[str, Any]:
+    project_path: str | None = None,
+) -> dict[str, Any]:
     """
     Get subgraph of memories and relationships as JSON or Mermaid diagram.
 
@@ -135,20 +135,18 @@ async def get_graph(
 
     ctx = await get_project_context(project_path)
     return await ctx.memory_manager.get_graph(
-        memory_ids=memory_ids,
-        topic=topic,
-        format=format
+        memory_ids=memory_ids, topic=topic, format=format
     )
 
 
 @mcp.tool(version=__version__)
 @with_request_id
 async def get_graph_visual(
-    memory_ids: Optional[List[int]] = None,
-    topic: Optional[str] = None,
+    memory_ids: list[int] | None = None,
+    topic: str | None = None,
     include_orphans: bool = False,
-    project_path: Optional[str] = None
-) -> Dict[str, Any]:
+    project_path: str | None = None,
+) -> dict[str, Any]:
     """
     Get visual memory graph with UI resource hint for MCP Apps rendering.
 
@@ -165,9 +163,10 @@ async def get_graph_visual(
     Returns:
         Graph data with ui_resource hint for visual rendering and text fallback.
     """
-    from daem0nmcp.ui.fallback import format_graph_text, format_with_ui_hint
     import json
     import urllib.parse
+
+    from daem0nmcp.ui.fallback import format_graph_text, format_with_ui_hint
 
     if not project_path and not _default_project_path:
         return _missing_project_path_error()
@@ -176,9 +175,7 @@ async def get_graph_visual(
 
     # Get graph data using existing function
     result = await ctx.memory_manager.get_graph(
-        memory_ids=memory_ids,
-        topic=topic,
-        format="json"
+        memory_ids=memory_ids, topic=topic, format="json"
     )
 
     # Check for errors
@@ -202,9 +199,7 @@ async def get_graph_visual(
 
 @mcp.tool(version=__version__)
 @with_request_id
-async def get_graph_stats(
-    project_path: Optional[str] = None
-) -> Dict[str, Any]:
+async def get_graph_stats(project_path: str | None = None) -> dict[str, Any]:
     """
     Get metrics about the knowledge graph structure: node/edge counts, density, components.
 
@@ -228,8 +223,8 @@ async def get_graph_stats(
 async def rebuild_communities(
     min_community_size: int = 2,
     resolution: float = 1.0,
-    project_path: Optional[str] = None
-) -> Dict[str, Any]:
+    project_path: str | None = None,
+) -> dict[str, Any]:
     """
     Detect memory communities using Leiden algorithm on the knowledge graph.
 
@@ -254,13 +249,12 @@ async def rebuild_communities(
         project_path=project_path or _default_project_path,
         knowledge_graph=knowledge_graph,
         resolution=resolution,
-        min_community_size=min_community_size
+        min_community_size=min_community_size,
     )
 
     # Save to database
     result = await cm.save_communities(
-        project_path or _default_project_path,
-        communities
+        project_path or _default_project_path, communities
     )
 
     return {
@@ -273,9 +267,8 @@ async def rebuild_communities(
 @mcp.tool(version=__version__)
 @with_request_id
 async def list_communities(
-    level: Optional[int] = None,
-    project_path: Optional[str] = None
-) -> Dict[str, Any]:
+    level: int | None = None, project_path: str | None = None
+) -> dict[str, Any]:
     """
     List all memory communities with summaries.
 
@@ -291,24 +284,18 @@ async def list_communities(
     ctx = await get_project_context(project_path)
     cm = CommunityManager(ctx.db_manager)
 
-    communities = await cm.get_communities(
-        project_path or _default_project_path,
-        level
-    )
+    communities = await cm.get_communities(project_path or _default_project_path, level)
 
-    return {
-        "count": len(communities),
-        "communities": communities
-    }
+    return {"count": len(communities), "communities": communities}
 
 
 @mcp.tool(version=__version__)
 @with_request_id
 async def list_communities_visual(
-    level: Optional[int] = None,
-    parent_community_id: Optional[int] = None,
-    project_path: Optional[str] = None
-) -> Dict[str, Any]:
+    level: int | None = None,
+    parent_community_id: int | None = None,
+    project_path: str | None = None,
+) -> dict[str, Any]:
     """
     List communities with visual UI support.
 
@@ -323,7 +310,7 @@ async def list_communities_visual(
     Returns:
         Dict with community data + ui_resource hint + text fallback
     """
-    from daem0nmcp.ui.fallback import format_with_ui_hint, format_communities_text
+    from daem0nmcp.ui.fallback import format_communities_text, format_with_ui_hint
 
     # Get communities using existing function
     result = await list_communities(level=level, project_path=project_path)
@@ -335,18 +322,22 @@ async def list_communities_visual(
     # If parent_community_id specified, filter to children only
     if parent_community_id is not None:
         communities = result.get("communities", [])
-        filtered = [c for c in communities if c.get("parent_community_id") == parent_community_id]
+        filtered = [
+            c
+            for c in communities
+            if c.get("parent_community_id") == parent_community_id
+        ]
 
-        parent = next((c for c in communities if c.get("id") == parent_community_id), None)
+        parent = next(
+            (c for c in communities if c.get("id") == parent_community_id), None
+        )
         path = []
         if parent:
-            path.append({"id": parent.get("id"), "name": parent.get("name", "Community")})
+            path.append(
+                {"id": parent.get("id"), "name": parent.get("name", "Community")}
+            )
 
-        result = {
-            "count": len(filtered),
-            "communities": filtered,
-            "path": path
-        }
+        result = {"count": len(filtered), "communities": filtered, "path": path}
 
     # Generate text fallback
     text = format_communities_text(result)
@@ -354,23 +345,19 @@ async def list_communities_visual(
     # Create UI resource URI with encoded data
     import json
     import urllib.parse
+
     data_json = json.dumps(result)
     encoded_data = urllib.parse.quote(data_json)
     ui_resource = f"ui://daem0n/community/{encoded_data}"
 
-    return format_with_ui_hint(
-        data=result,
-        ui_resource=ui_resource,
-        text=text
-    )
+    return format_with_ui_hint(data=result, ui_resource=ui_resource, text=text)
 
 
 @mcp.tool(version=__version__)
 @with_request_id
 async def get_community_details(
-    community_id: int,
-    project_path: Optional[str] = None
-) -> Dict[str, Any]:
+    community_id: int, project_path: str | None = None
+) -> dict[str, Any]:
     """
     Get full community details including all member memories.
 

@@ -1,9 +1,10 @@
 """Tests for active working context management."""
 
-import pytest
-import tempfile
 import shutil
-from datetime import datetime, timezone, timedelta
+import tempfile
+from datetime import datetime, timedelta, timezone
+
+import pytest
 
 from daem0nmcp.models import ActiveContextItem
 
@@ -18,7 +19,7 @@ class TestActiveContextModel:
             memory_id=42,
             priority=1,
             added_at=datetime.now(timezone.utc),
-            reason="Critical auth decision"
+            reason="Critical auth decision",
         )
 
         assert item.project_path == "/test/project"
@@ -39,8 +40,8 @@ def temp_storage():
 @pytest.fixture
 async def active_context_manager(temp_storage):
     """Create an active context manager with temporary storage."""
-    from daem0nmcp.database import DatabaseManager
     from daem0nmcp.active_context import ActiveContextManager
+    from daem0nmcp.database import DatabaseManager
 
     db = DatabaseManager(temp_storage)
     await db.init_db()
@@ -59,14 +60,13 @@ class TestActiveContextManager:
 
         mem_manager = MemoryManager(active_context_manager.db)
         mem = await mem_manager.remember(
-            category="decision",
-            content="Critical auth decision"
+            category="decision", content="Critical auth decision"
         )
 
         result = await active_context_manager.add_to_context(
             project_path="/test/project",
             memory_id=mem["id"],
-            reason="Must inform all auth work"
+            reason="Must inform all auth work",
         )
 
         assert result["status"] == "added"
@@ -76,35 +76,30 @@ class TestActiveContextManager:
     async def test_add_nonexistent_memory_fails(self, active_context_manager):
         """Test that adding a nonexistent memory returns an error."""
         result = await active_context_manager.add_to_context(
-            project_path="/test/project",
-            memory_id=99999,
-            reason="This should fail"
+            project_path="/test/project", memory_id=99999, reason="This should fail"
         )
 
         assert "error" in result
         assert "not found" in result["error"]
 
     @pytest.mark.asyncio
-    async def test_add_duplicate_memory_returns_already_exists(self, active_context_manager):
+    async def test_add_duplicate_memory_returns_already_exists(
+        self, active_context_manager
+    ):
         """Test that adding the same memory twice returns already_exists."""
         from daem0nmcp.memory import MemoryManager
 
         mem_manager = MemoryManager(active_context_manager.db)
-        mem = await mem_manager.remember(
-            category="warning",
-            content="Critical warning"
-        )
+        mem = await mem_manager.remember(category="warning", content="Critical warning")
 
         # Add first time
         await active_context_manager.add_to_context(
-            project_path="/test/project",
-            memory_id=mem["id"]
+            project_path="/test/project", memory_id=mem["id"]
         )
 
         # Add second time
         result = await active_context_manager.add_to_context(
-            project_path="/test/project",
-            memory_id=mem["id"]
+            project_path="/test/project", memory_id=mem["id"]
         )
 
         assert result["status"] == "already_exists"
@@ -116,18 +111,15 @@ class TestActiveContextManager:
 
         mem_manager = MemoryManager(active_context_manager.db)
         mem = await mem_manager.remember(
-            category="pattern",
-            content="Important pattern"
+            category="pattern", content="Important pattern"
         )
 
         await active_context_manager.add_to_context(
-            project_path="/test/project",
-            memory_id=mem["id"]
+            project_path="/test/project", memory_id=mem["id"]
         )
 
         result = await active_context_manager.remove_from_context(
-            project_path="/test/project",
-            memory_id=mem["id"]
+            project_path="/test/project", memory_id=mem["id"]
         )
 
         assert result["status"] == "removed"
@@ -136,8 +128,7 @@ class TestActiveContextManager:
     async def test_remove_nonexistent_returns_not_found(self, active_context_manager):
         """Test removing a nonexistent item returns not_found."""
         result = await active_context_manager.remove_from_context(
-            project_path="/test/project",
-            memory_id=99999
+            project_path="/test/project", memory_id=99999
         )
 
         assert result["status"] == "not_found"
@@ -154,14 +145,10 @@ class TestActiveContextManager:
         mem2 = await mem_manager.remember(category="warning", content="Warning 1")
 
         await active_context_manager.add_to_context(
-            project_path="/test/project",
-            memory_id=mem1["id"],
-            priority=1
+            project_path="/test/project", memory_id=mem1["id"], priority=1
         )
         await active_context_manager.add_to_context(
-            project_path="/test/project",
-            memory_id=mem2["id"],
-            priority=2
+            project_path="/test/project", memory_id=mem2["id"], priority=2
         )
 
         result = await active_context_manager.get_active_context("/test/project")
@@ -180,8 +167,7 @@ class TestActiveContextManager:
         mem = await mem_manager.remember(category="decision", content="Test")
 
         await active_context_manager.add_to_context(
-            project_path="/test/project",
-            memory_id=mem["id"]
+            project_path="/test/project", memory_id=mem["id"]
         )
 
         result = await active_context_manager.clear_context("/test/project")
@@ -203,23 +189,17 @@ class TestActiveContextManager:
         # Add 10 memories (at limit)
         for i in range(10):
             mem = await mem_manager.remember(
-                category="decision",
-                content=f"Decision {i}"
+                category="decision", content=f"Decision {i}"
             )
             result = await active_context_manager.add_to_context(
-                project_path="/test/project",
-                memory_id=mem["id"]
+                project_path="/test/project", memory_id=mem["id"]
             )
             assert result["status"] == "added"
 
         # 11th should fail
-        mem11 = await mem_manager.remember(
-            category="decision",
-            content="Decision 11"
-        )
+        mem11 = await mem_manager.remember(category="decision", content="Decision 11")
         result = await active_context_manager.add_to_context(
-            project_path="/test/project",
-            memory_id=mem11["id"]
+            project_path="/test/project", memory_id=mem11["id"]
         )
 
         assert result["error"] == "CONTEXT_FULL"
@@ -235,9 +215,7 @@ class TestActiveContextManager:
         # Add with past expiry
         past = datetime.now(timezone.utc) - timedelta(hours=1)
         await active_context_manager.add_to_context(
-            project_path="/test/project",
-            memory_id=mem["id"],
-            expires_at=past
+            project_path="/test/project", memory_id=mem["id"], expires_at=past
         )
 
         result = await active_context_manager.cleanup_expired("/test/project")
@@ -258,14 +236,14 @@ class TestActiveContextMCPTools:
         mem = await server.remember(
             category="warning",
             content="Never use eval() for user input",
-            project_path=covenant_compliant_project
+            project_path=covenant_compliant_project,
         )
 
         # Add to active context
         result = await server.set_active_context(
             memory_id=mem["id"],
             reason="Critical security warning",
-            project_path=covenant_compliant_project
+            project_path=covenant_compliant_project,
         )
 
         assert result["status"] == "added"
@@ -287,18 +265,16 @@ class TestActiveContextMCPTools:
         mem = await server.remember(
             category="decision",
             content="Use PostgreSQL for main database",
-            project_path=covenant_compliant_project
+            project_path=covenant_compliant_project,
         )
 
         await server.set_active_context(
-            memory_id=mem["id"],
-            project_path=covenant_compliant_project
+            memory_id=mem["id"], project_path=covenant_compliant_project
         )
 
         # Remove from context
         result = await server.remove_from_active_context(
-            memory_id=mem["id"],
-            project_path=covenant_compliant_project
+            memory_id=mem["id"], project_path=covenant_compliant_project
         )
 
         assert result["status"] == "removed"
@@ -318,21 +294,19 @@ class TestActiveContextMCPTools:
         mem1 = await server.remember(
             category="pattern",
             content="Pattern 1",
-            project_path=covenant_compliant_project
+            project_path=covenant_compliant_project,
         )
         mem2 = await server.remember(
             category="pattern",
             content="Pattern 2",
-            project_path=covenant_compliant_project
+            project_path=covenant_compliant_project,
         )
 
         await server.set_active_context(
-            memory_id=mem1["id"],
-            project_path=covenant_compliant_project
+            memory_id=mem1["id"], project_path=covenant_compliant_project
         )
         await server.set_active_context(
-            memory_id=mem2["id"],
-            project_path=covenant_compliant_project
+            memory_id=mem2["id"], project_path=covenant_compliant_project
         )
 
         # Clear all
@@ -351,14 +325,14 @@ class TestActiveContextMCPTools:
         mem = await server.remember(
             category="learning",
             content="Temporary focus area",
-            project_path=covenant_compliant_project
+            project_path=covenant_compliant_project,
         )
 
         result = await server.set_active_context(
             memory_id=mem["id"],
             reason="Temporary focus",
             expires_in_hours=24,
-            project_path=covenant_compliant_project
+            project_path=covenant_compliant_project,
         )
 
         assert result["status"] == "added"
@@ -368,10 +342,7 @@ class TestActiveContextMCPTools:
         """Test that set_active_context requires project_path."""
         from daem0nmcp import server
 
-        result = await server.set_active_context(
-            memory_id=1,
-            project_path=None
-        )
+        result = await server.set_active_context(memory_id=1, project_path=None)
 
         assert "error" in result
         assert result["error"] == "MISSING_PROJECT_PATH"
@@ -389,12 +360,12 @@ class TestBriefingIncludesActiveContext:
         mem = await server.remember(
             category="warning",
             content="Database migration in progress",
-            project_path=covenant_compliant_project
+            project_path=covenant_compliant_project,
         )
         await server.set_active_context(
             memory_id=mem["id"],
             reason="Ongoing migration",
-            project_path=covenant_compliant_project
+            project_path=covenant_compliant_project,
         )
 
         # Get briefing
@@ -411,9 +382,9 @@ class TestAutoActivationOnFailure:
     @pytest.mark.asyncio
     async def test_failed_decision_auto_activates(self, temp_storage):
         """Failed decisions should auto-activate in context."""
+        from daem0nmcp.active_context import ActiveContextManager
         from daem0nmcp.database import DatabaseManager
         from daem0nmcp.memory import MemoryManager
-        from daem0nmcp.active_context import ActiveContextManager
 
         db = DatabaseManager(temp_storage)
         await db.init_db()
@@ -425,7 +396,7 @@ class TestAutoActivationOnFailure:
             mem = await mem_manager.remember(
                 category="decision",
                 content="Use synchronous DB calls",
-                project_path=temp_storage
+                project_path=temp_storage,
             )
 
             # Record it as failed
@@ -433,7 +404,7 @@ class TestAutoActivationOnFailure:
                 memory_id=mem["id"],
                 outcome="Caused timeout issues",
                 worked=False,
-                project_path=temp_storage
+                project_path=temp_storage,
             )
 
             # Check active context

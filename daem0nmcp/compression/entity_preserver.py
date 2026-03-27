@@ -5,8 +5,8 @@ Extracts important code tokens (function names, class names, keywords)
 to use as force_tokens during compression, ensuring code structure
 is preserved even with aggressive compression.
 """
+
 import re
-from typing import List, Set
 
 
 class CodeEntityPreserver:
@@ -26,45 +26,95 @@ class CodeEntityPreserver:
     MAX_ENTITY_NAMES: int = 50
 
     # Language-agnostic structural tokens
-    STRUCTURAL_TOKENS: List[str] = [
+    STRUCTURAL_TOKENS: list[str] = [
         # Python keywords
-        "def ", "class ", "return ", "import ", "from ",
-        "async ", "await ", "if ", "else:", "elif ",
-        "for ", "while ", "try:", "except ", "finally:",
-        "with ", "as ", "yield ", "raise ", "pass",
-        "break", "continue", "lambda ", "assert ",
-        "global ", "nonlocal ", "None", "True", "False",
+        "def ",
+        "class ",
+        "return ",
+        "import ",
+        "from ",
+        "async ",
+        "await ",
+        "if ",
+        "else:",
+        "elif ",
+        "for ",
+        "while ",
+        "try:",
+        "except ",
+        "finally:",
+        "with ",
+        "as ",
+        "yield ",
+        "raise ",
+        "pass",
+        "break",
+        "continue",
+        "lambda ",
+        "assert ",
+        "global ",
+        "nonlocal ",
+        "None",
+        "True",
+        "False",
         # JavaScript/TypeScript keywords
-        "function ", "const ", "let ", "var ", "export ",
-        "import ", "default", "async ", "await ", "new ",
-        "this.", "super", "extends ", "implements ",
-        "interface ", "type ", "enum ", "readonly ",
-        "private ", "public ", "protected ",
+        "function ",
+        "const ",
+        "let ",
+        "var ",
+        "export ",
+        "import ",
+        "default",
+        "async ",
+        "await ",
+        "new ",
+        "this.",
+        "super",
+        "extends ",
+        "implements ",
+        "interface ",
+        "type ",
+        "enum ",
+        "readonly ",
+        "private ",
+        "public ",
+        "protected ",
         # Control flow (multi-language)
-        "switch ", "case ", "default:", "throw ", "catch ",
+        "switch ",
+        "case ",
+        "default:",
+        "throw ",
+        "catch ",
         # Common operators/delimiters
-        "=>", "->", "::", "==", "!=", "===", "!==",
-        "self.", "this.",
+        "=>",
+        "->",
+        "::",
+        "==",
+        "!=",
+        "===",
+        "!==",
+        "self.",
+        "this.",
     ]
 
     # Patterns to extract identifiers
     IDENTIFIER_PATTERNS = [
-        r'\bdef\s+(\w+)\s*\(',              # Python function
-        r'\bclass\s+(\w+)',                  # Python/JS class
-        r'\bfunction\s+(\w+)\s*\(',          # JS function
-        r'\bconst\s+(\w+)\s*=',              # JS const
-        r'\blet\s+(\w+)\s*=',                # JS let
-        r'\bvar\s+(\w+)\s*=',                # JS var
-        r'\b(\w+)\s*:\s*function',           # Object method
-        r'\basync\s+def\s+(\w+)',            # Python async function
-        r'\basync\s+function\s+(\w+)',       # JS async function
-        r'\b(\w+)\s*=\s*async',              # Arrow async
-        r'\binterface\s+(\w+)',              # TS interface
-        r'\btype\s+(\w+)\s*=',               # TS type alias
-        r'\benum\s+(\w+)',                   # TS/Java enum
+        r"\bdef\s+(\w+)\s*\(",  # Python function
+        r"\bclass\s+(\w+)",  # Python/JS class
+        r"\bfunction\s+(\w+)\s*\(",  # JS function
+        r"\bconst\s+(\w+)\s*=",  # JS const
+        r"\blet\s+(\w+)\s*=",  # JS let
+        r"\bvar\s+(\w+)\s*=",  # JS var
+        r"\b(\w+)\s*:\s*function",  # Object method
+        r"\basync\s+def\s+(\w+)",  # Python async function
+        r"\basync\s+function\s+(\w+)",  # JS async function
+        r"\b(\w+)\s*=\s*async",  # Arrow async
+        r"\binterface\s+(\w+)",  # TS interface
+        r"\btype\s+(\w+)\s*=",  # TS type alias
+        r"\benum\s+(\w+)",  # TS/Java enum
     ]
 
-    def __init__(self, additional_structural: List[str] = None):
+    def __init__(self, additional_structural: list[str] = None):
         """
         Initialize preserver with optional additional structural tokens.
 
@@ -75,11 +125,11 @@ class CodeEntityPreserver:
         if additional_structural:
             self._structural.extend(additional_structural)
 
-    def get_structural_tokens(self) -> List[str]:
+    def get_structural_tokens(self) -> list[str]:
         """Get the list of structural tokens to preserve."""
         return list(self._structural)
 
-    def extract_identifiers(self, code: str) -> Set[str]:
+    def extract_identifiers(self, code: str) -> set[str]:
         """
         Extract function/class/variable names from code.
 
@@ -89,7 +139,7 @@ class CodeEntityPreserver:
         Returns:
             Set of identifier names
         """
-        identifiers: Set[str] = set()
+        identifiers: set[str] = set()
 
         for pattern in self.IDENTIFIER_PATTERNS:
             matches = re.findall(pattern, code)
@@ -97,7 +147,7 @@ class CodeEntityPreserver:
 
         return identifiers
 
-    def extract_entity_names(self, code: str) -> List[str]:
+    def extract_entity_names(self, code: str) -> list[str]:
         """
         Extract function and class names from code, limited to MAX_ENTITY_NAMES.
 
@@ -111,9 +161,9 @@ class CodeEntityPreserver:
         # Sort by length (shorter names are usually more important)
         # and limit to MAX_ENTITY_NAMES
         sorted_names = sorted(identifiers, key=len)
-        return sorted_names[:self.MAX_ENTITY_NAMES]
+        return sorted_names[: self.MAX_ENTITY_NAMES]
 
-    def get_force_tokens(self, code: str) -> List[str]:
+    def get_force_tokens(self, code: str) -> list[str]:
         """
         Get all tokens to force-preserve during compression.
 
@@ -146,10 +196,26 @@ class CodeEntityPreserver:
             return False
 
         code_indicators = [
-            "def ", "class ", "function ", "import ", "from ",
-            "=>", "->", "::", "();", "{}", "[]",
-            "self.", "this.", "return ", "async ", "await ",
-            "const ", "let ", "var ", "export ",
+            "def ",
+            "class ",
+            "function ",
+            "import ",
+            "from ",
+            "=>",
+            "->",
+            "::",
+            "();",
+            "{}",
+            "[]",
+            "self.",
+            "this.",
+            "return ",
+            "async ",
+            "await ",
+            "const ",
+            "let ",
+            "var ",
+            "export ",
         ]
 
         code_score = sum(text.count(ind) for ind in code_indicators)

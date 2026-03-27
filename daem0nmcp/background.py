@@ -2,13 +2,15 @@
 
 import asyncio
 import uuid
+from collections.abc import Awaitable
 from datetime import datetime, timezone
-from typing import Any, Awaitable, Dict, Optional
 from enum import Enum
+from typing import Any
 
 
 class TaskState(str, Enum):
     """States a background task can be in."""
+
     PENDING = "pending"
     RUNNING = "running"
     COMPLETED = "completed"
@@ -39,14 +41,11 @@ class BackgroundTaskManager:
     """
 
     def __init__(self):
-        self._tasks: Dict[str, Dict[str, Any]] = {}
-        self._results: Dict[str, Any] = {}
+        self._tasks: dict[str, dict[str, Any]] = {}
+        self._results: dict[str, Any] = {}
 
     async def create_task(
-        self,
-        coro: Awaitable[Any],
-        name: str,
-        project_path: Optional[str] = None
+        self, coro: Awaitable[Any], name: str, project_path: str | None = None
     ) -> str:
         """Create and start a background task.
 
@@ -87,12 +86,14 @@ class BackgroundTaskManager:
                 self._tasks[task_id]["error"] = str(e)
                 raise
             finally:
-                self._tasks[task_id]["completed_at"] = datetime.now(timezone.utc).isoformat()
+                self._tasks[task_id]["completed_at"] = datetime.now(
+                    timezone.utc
+                ).isoformat()
 
         self._tasks[task_id]["_task"] = asyncio.create_task(wrapper())
         return task_id
 
-    def get_status(self, task_id: str) -> Optional[Dict[str, Any]]:
+    def get_status(self, task_id: str) -> dict[str, Any] | None:
         """Get task status without internal fields.
 
         Args:
@@ -151,7 +152,7 @@ class BackgroundTaskManager:
             pass
         return True
 
-    def list_tasks(self, project_path: Optional[str] = None) -> list:
+    def list_tasks(self, project_path: str | None = None) -> list:
         """List all tasks, optionally filtered by project.
 
         Args:

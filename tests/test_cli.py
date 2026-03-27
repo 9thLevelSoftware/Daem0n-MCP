@@ -6,10 +6,10 @@ These tests verify the command-line interface functionality using subprocess cal
 
 import json
 import os
-import sys
 import shutil
-import tempfile
 import subprocess
+import sys
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -27,7 +27,7 @@ def temp_project():
 def cli_env(temp_project):
     """Environment for CLI commands pointing to temp project."""
     env = os.environ.copy()
-    env['DAEM0NMCP_PROJECT_ROOT'] = temp_project
+    env["DAEM0NMCP_PROJECT_ROOT"] = temp_project
     return env
 
 
@@ -48,7 +48,7 @@ def run_cli(*args, env=None, project_path=None):
         stderr=subprocess.PIPE,
         stdin=subprocess.DEVNULL,
         text=True,
-        env=env
+        env=env,
     )
     stdout, stderr = process.communicate()
 
@@ -108,7 +108,9 @@ class TestStatusCommand:
         """Test status command with text output."""
         result = run_cli("status", project_path=temp_project)
         assert result.returncode == 0
-        assert "Pending decisions" in result.stdout or "pending" in result.stdout.lower()
+        assert (
+            "Pending decisions" in result.stdout or "pending" in result.stdout.lower()
+        )
 
 
 class TestMigrateCommand:
@@ -142,7 +144,9 @@ class TestScanTodosCommand:
 
     def test_scan_todos_empty_directory(self, temp_project):
         """Test scanning empty directory."""
-        result = run_cli("--json", "scan-todos", "--path", temp_project, project_path=temp_project)
+        result = run_cli(
+            "--json", "scan-todos", "--path", temp_project, project_path=temp_project
+        )
         assert result.returncode == 0
 
         data = json.loads(result.stdout)
@@ -155,7 +159,9 @@ class TestScanTodosCommand:
         test_file = Path(temp_project) / "test.py"
         test_file.write_text("# TODO: Fix this bug\nprint('hello')\n")
 
-        result = run_cli("--json", "scan-todos", "--path", temp_project, project_path=temp_project)
+        result = run_cli(
+            "--json", "scan-todos", "--path", temp_project, project_path=temp_project
+        )
         assert result.returncode == 0
 
         data = json.loads(result.stdout)
@@ -167,7 +173,9 @@ class TestScanTodosCommand:
         test_file = Path(temp_project) / "test.py"
         test_file.write_text("# FIXME: Critical issue here\nprint('hello')\n")
 
-        result = run_cli("--json", "scan-todos", "--path", temp_project, project_path=temp_project)
+        result = run_cli(
+            "--json", "scan-todos", "--path", temp_project, project_path=temp_project
+        )
         assert result.returncode == 0
 
         data = json.loads(result.stdout)
@@ -207,8 +215,11 @@ class TestRecordOutcomeCommand:
     def test_record_outcome_with_worked_flag(self, temp_project):
         """Test recording outcome with --worked flag."""
         result = run_cli(
-            "record-outcome", "99999", "This is the outcome", "--worked",
-            project_path=temp_project
+            "record-outcome",
+            "99999",
+            "This is the outcome",
+            "--worked",
+            project_path=temp_project,
         )
         # Command should complete (note: doesn't validate memory existence)
         assert result.returncode == 0
@@ -217,8 +228,11 @@ class TestRecordOutcomeCommand:
     def test_record_outcome_with_failed_flag(self, temp_project):
         """Test recording outcome with --failed flag."""
         result = run_cli(
-            "record-outcome", "99999", "This did not work", "--failed",
-            project_path=temp_project
+            "record-outcome",
+            "99999",
+            "This did not work",
+            "--failed",
+            project_path=temp_project,
         )
         # Command should complete
         assert result.returncode == 0
@@ -226,11 +240,14 @@ class TestRecordOutcomeCommand:
     def test_record_outcome_requires_worked_or_failed(self, temp_project):
         """Test that record-outcome requires --worked or --failed."""
         result = run_cli(
-            "record-outcome", "1", "Outcome text",
-            project_path=temp_project
+            "record-outcome", "1", "Outcome text", project_path=temp_project
         )
         # Should fail without --worked or --failed
-        assert result.returncode != 0 or "worked" in result.stdout.lower() or "failed" in result.stdout.lower()
+        assert (
+            result.returncode != 0
+            or "worked" in result.stdout.lower()
+            or "failed" in result.stdout.lower()
+        )
 
 
 class TestHooksCommands:
@@ -240,7 +257,11 @@ class TestHooksCommands:
         """Test install-hooks fails gracefully without git repo."""
         result = run_cli("install-hooks", project_path=temp_project)
         # Should fail because no .git directory
-        assert result.returncode != 0 or "git" in result.stdout.lower() or "git" in result.stderr.lower()
+        assert (
+            result.returncode != 0
+            or "git" in result.stdout.lower()
+            or "git" in result.stderr.lower()
+        )
 
     def test_install_hooks_in_git_repo(self, temp_project):
         """Test install-hooks in a git repository."""
@@ -250,19 +271,27 @@ class TestHooksCommands:
             cwd=temp_project,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            stdin=subprocess.DEVNULL
+            stdin=subprocess.DEVNULL,
         )
         proc.communicate()
 
         result = run_cli("install-hooks", project_path=temp_project)
         # Should succeed or indicate hooks were installed
-        assert result.returncode == 0 or "installed" in result.stdout.lower() or "created" in result.stdout.lower()
+        assert (
+            result.returncode == 0
+            or "installed" in result.stdout.lower()
+            or "created" in result.stdout.lower()
+        )
 
     def test_uninstall_hooks_no_git_repo(self, temp_project):
         """Test uninstall-hooks fails gracefully without git repo."""
         result = run_cli("uninstall-hooks", project_path=temp_project)
         # Should fail or indicate no hooks to remove
-        assert result.returncode != 0 or "no" in result.stdout.lower() or "git" in result.stderr.lower()
+        assert (
+            result.returncode != 0
+            or "no" in result.stdout.lower()
+            or "git" in result.stderr.lower()
+        )
 
 
 class TestProjectPathOption:
@@ -318,7 +347,9 @@ class TestJSONOutputOption:
 
             try:
                 data = json.loads(result.stdout)
-                assert isinstance(data, dict), f"Expected dict for {cmd}, got {type(data)}"
+                assert isinstance(data, dict), (
+                    f"Expected dict for {cmd}, got {type(data)}"
+                )
             except json.JSONDecodeError as e:
                 pytest.fail(f"Invalid JSON from {cmd}: {e}\nOutput: {result.stdout}")
 

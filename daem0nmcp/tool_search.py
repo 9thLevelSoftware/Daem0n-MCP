@@ -8,7 +8,6 @@ instead of loading all tool definitions upfront.
 """
 
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Set
 
 from .bm25_index import BM25Index
 
@@ -16,12 +15,13 @@ from .bm25_index import BM25Index
 @dataclass
 class ToolMetadata:
     """Metadata for an MCP tool."""
+
     name: str
     description: str
-    category: Optional[str] = None
-    tags: List[str] = field(default_factory=list)
-    parameters: Optional[Dict] = None
-    examples: List[str] = field(default_factory=list)
+    category: str | None = None
+    tags: list[str] = field(default_factory=list)
+    parameters: dict | None = None
+    examples: list[str] = field(default_factory=list)
 
 
 class ToolSearchIndex:
@@ -37,9 +37,9 @@ class ToolSearchIndex:
     """
 
     def __init__(self):
-        self._tools: Dict[str, ToolMetadata] = {}
+        self._tools: dict[str, ToolMetadata] = {}
         self._bm25 = BM25Index()
-        self._categories: Set[str] = set()
+        self._categories: set[str] = set()
 
     def add_tool(self, tool: ToolMetadata) -> None:
         """Add a tool to the search index."""
@@ -67,11 +67,8 @@ class ToolSearchIndex:
             del self._tools[name]
 
     def search(
-        self,
-        query: str,
-        top_k: int = 10,
-        category: Optional[str] = None
-    ) -> List[ToolMetadata]:
+        self, query: str, top_k: int = 10, category: str | None = None
+    ) -> list[ToolMetadata]:
         """
         Search for tools matching the query.
 
@@ -99,20 +96,17 @@ class ToolSearchIndex:
 
         return matched_tools[:top_k]
 
-    def get_tool(self, name: str) -> Optional[ToolMetadata]:
+    def get_tool(self, name: str) -> ToolMetadata | None:
         """Get a specific tool by name."""
         return self._tools.get(name)
 
-    def get_categories(self) -> List[str]:
+    def get_categories(self) -> list[str]:
         """Get all tool categories."""
         return sorted(self._categories)
 
-    def get_tools_by_category(self, category: str) -> List[ToolMetadata]:
+    def get_tools_by_category(self, category: str) -> list[ToolMetadata]:
         """Get all tools in a category."""
-        return [
-            tool for tool in self._tools.values()
-            if tool.category == category
-        ]
+        return [tool for tool in self._tools.values() if tool.category == category]
 
     def __len__(self) -> int:
         return len(self._tools)

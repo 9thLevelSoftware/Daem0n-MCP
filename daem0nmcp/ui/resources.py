@@ -17,12 +17,13 @@ Resource registrations:
 - ui://daem0n/community - Community cluster map (Phase 10)
 - ui://daem0n/graph - Memory graph viewer (Phase 11)
 """
-from html import escape as _html_escape
+
 import json
 import re
 from datetime import datetime
+from html import escape as _html_escape
 from pathlib import Path
-from typing import Any, Dict, Optional, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from fastmcp import FastMCP
@@ -112,7 +113,7 @@ def _format_date(date_str: str) -> str:
         return str(date_str) if date_str else ""
 
 
-def _outcome_indicator(worked: Optional[bool]) -> str:
+def _outcome_indicator(worked: bool | None) -> str:
     """Return badge HTML for decision outcome status."""
     if worked is True:
         return '<span class="daemon-badge daemon-badge--success">Success</span>'
@@ -122,7 +123,7 @@ def _outcome_indicator(worked: Optional[bool]) -> str:
         return '<span class="daemon-badge">Pending</span>'
 
 
-def _build_search_ui(data: Dict[str, Any]) -> str:
+def _build_search_ui(data: dict[str, Any]) -> str:
     """
     Build the search results UI HTML from recall data.
 
@@ -157,12 +158,16 @@ def _build_search_ui(data: Dict[str, Any]) -> str:
     cards_html = []
 
     # Helper to render a single card
-    def render_card(result: Dict[str, Any], category: str) -> str:
+    def render_card(result: dict[str, Any], category: str) -> str:
         content = result.get("content", "")
         highlighted_content = _highlight_keywords(content, topic)
         relevance = result.get("relevance", result.get("score", 0))
-        semantic_match = result.get("semantic_match", relevance)  # Fallback to relevance if not provided
-        recency_weight = result.get("recency_weight", 1.0)  # Default to 1.0 if not provided
+        semantic_match = result.get(
+            "semantic_match", relevance
+        )  # Fallback to relevance if not provided
+        recency_weight = result.get(
+            "recency_weight", 1.0
+        )  # Default to 1.0 if not provided
         score_width = int(relevance * 100) if relevance <= 1 else int(relevance)
         created_at = _format_date(result.get("created_at", ""))
         tags = result.get("tags", [])
@@ -171,12 +176,19 @@ def _build_search_ui(data: Dict[str, Any]) -> str:
 
         tags_html = ""
         if tags:
-            tag_spans = [f'<span class="result-card__tag">{_html_escape(str(tag))}</span>' for tag in tags]
+            tag_spans = [
+                f'<span class="result-card__tag">{_html_escape(str(tag))}</span>'
+                for tag in tags
+            ]
             tags_html = f'<div class="result-card__tags">{" ".join(tag_spans)}</div>'
 
         # Format percentages for display
-        semantic_pct = f"{semantic_match:.0%}" if semantic_match <= 1 else f"{semantic_match}%"
-        recency_pct = f"{recency_weight:.0%}" if recency_weight <= 1 else f"{recency_weight}%"
+        semantic_pct = (
+            f"{semantic_match:.0%}" if semantic_match <= 1 else f"{semantic_match}%"
+        )
+        recency_pct = (
+            f"{recency_weight:.0%}" if recency_weight <= 1 else f"{recency_weight}%"
+        )
         relevance_pct = f"{relevance:.0%}" if relevance <= 1 else f"{relevance}%"
 
         # Record Outcome button for decisions without outcome yet
@@ -241,14 +253,14 @@ def _build_search_ui(data: Dict[str, Any]) -> str:
 
     # Handle empty state
     if not cards_html:
-        cards_html.append('''
+        cards_html.append("""
 <div class="daemon-empty" style="grid-column: 1 / -1;">
     <div class="daemon-empty__icon">&#x1F50D;</div>
     <p class="daemon-empty__title">No results found</p>
     <p class="daemon-empty__description">
         No memories matched your search query. Try different keywords or broaden your search.
     </p>
-</div>''')
+</div>""")
 
     # Pagination data
     offset = data.get("offset", 0)
@@ -257,7 +269,9 @@ def _build_search_ui(data: Dict[str, Any]) -> str:
 
     # Build result count text
     if total_count == total_results:
-        result_count_text = f"Showing {total_results} result{'s' if total_results != 1 else ''}"
+        result_count_text = (
+            f"Showing {total_results} result{'s' if total_results != 1 else ''}"
+        )
     else:
         result_count_text = f"Showing {total_results} of {total_count} results"
 
@@ -285,7 +299,9 @@ def _build_search_ui(data: Dict[str, Any]) -> str:
             </div>'''
 
     # Inject into template
-    html = template.replace("{{TITLE}}", f"Search: {topic}" if topic else "Search Results")
+    html = template.replace(
+        "{{TITLE}}", f"Search: {topic}" if topic else "Search Results"
+    )
     html = html.replace("{{TOPIC}}", topic if topic else "All")
     html = html.replace("{{RESULT_COUNT}}", result_count_text)
     html = html.replace("{{CONTENT}}", "\n".join(cards_html))
@@ -295,7 +311,7 @@ def _build_search_ui(data: Dict[str, Any]) -> str:
     return html
 
 
-def _build_briefing_ui(data: Dict[str, Any]) -> str:
+def _build_briefing_ui(data: dict[str, Any]) -> str:
     """
     Build the briefing dashboard UI HTML from get_briefing data.
 
@@ -331,7 +347,7 @@ def _build_briefing_ui(data: Dict[str, Any]) -> str:
     patterns_count = statistics.get("by_category", {}).get("pattern", 0)
     success_rate = statistics.get("outcome_rates", {}).get("success_rate", 0)
 
-    stats_html = f'''
+    stats_html = f"""
 <div class="daemon-stats">
     <div class="daemon-stat">
         <div class="daemon-stat__value">{total_memories}</div>
@@ -353,7 +369,7 @@ def _build_briefing_ui(data: Dict[str, Any]) -> str:
         <div class="daemon-stat__value">{success_rate:.0%}</div>
         <div class="daemon-stat__label">Success Rate</div>
     </div>
-</div>'''
+</div>"""
 
     # Build message block (if present)
     message_html = ""
@@ -370,16 +386,16 @@ def _build_briefing_ui(data: Dict[str, Any]) -> str:
             outcome = _outcome_indicator(d.get("worked"))
             content = _html_escape(d.get("content", "")[:200])  # Truncate for display
             date = _format_date(d.get("created_at", ""))
-            decisions_html.append(f'''
+            decisions_html.append(f"""
 <div class="decision-item">
     <div class="decision-item__header">
         {outcome}
         <span class="decision-item__meta">{date}</span>
     </div>
     <div class="decision-item__content">{content}</div>
-</div>''')
+</div>""")
 
-        sections.append(f'''
+        sections.append(f"""
 <details class="daemon-accordion__item" open>
     <summary class="daemon-accordion__header">
         <span class="daemon-accordion__title">
@@ -391,7 +407,7 @@ def _build_briefing_ui(data: Dict[str, Any]) -> str:
     <div class="daemon-accordion__content">
         {"".join(decisions_html)}
     </div>
-</details>''')
+</details>""")
 
     # Active Warnings section
     if active_warnings:
@@ -399,12 +415,12 @@ def _build_briefing_ui(data: Dict[str, Any]) -> str:
         for w in active_warnings:
             severity = w.get("severity", "medium").lower()
             content = _html_escape(w.get("content", ""))
-            warnings_html.append(f'''
+            warnings_html.append(f"""
 <div class="warning-item warning-item--{severity}">
     <div class="warning-item__content">{content}</div>
-</div>''')
+</div>""")
 
-        sections.append(f'''
+        sections.append(f"""
 <details class="daemon-accordion__item" open>
     <summary class="daemon-accordion__header">
         <span class="daemon-accordion__title">
@@ -416,19 +432,19 @@ def _build_briefing_ui(data: Dict[str, Any]) -> str:
     <div class="daemon-accordion__content">
         {"".join(warnings_html)}
     </div>
-</details>''')
+</details>""")
 
     # Failed Approaches section
     if failed_approaches:
         failed_html = []
         for f in failed_approaches:
             content = _html_escape(f.get("content", ""))
-            failed_html.append(f'''
+            failed_html.append(f"""
 <div class="warning-item warning-item--high">
     <div class="warning-item__content">{content}</div>
-</div>''')
+</div>""")
 
-        sections.append(f'''
+        sections.append(f"""
 <details class="daemon-accordion__item">
     <summary class="daemon-accordion__header">
         <span class="daemon-accordion__title">
@@ -440,7 +456,7 @@ def _build_briefing_ui(data: Dict[str, Any]) -> str:
     <div class="daemon-accordion__content">
         {"".join(failed_html)}
     </div>
-</details>''')
+</details>""")
 
     # Git Changes section
     git_files = git_changes.get("files", [])
@@ -452,12 +468,14 @@ def _build_briefing_ui(data: Dict[str, Any]) -> str:
             css_class = {
                 "A": "git-change--added",
                 "M": "git-change--modified",
-                "D": "git-change--deleted"
+                "D": "git-change--deleted",
             }.get(status_char, "")
-            changes_html.append(f'<div class="git-change {css_class}">{status_char} {path}</div>')
+            changes_html.append(
+                f'<div class="git-change {css_class}">{status_char} {path}</div>'
+            )
 
         total_changes = git_changes.get("total", len(git_files))
-        sections.append(f'''
+        sections.append(f"""
 <details class="daemon-accordion__item">
     <summary class="daemon-accordion__header">
         <span class="daemon-accordion__title">
@@ -469,7 +487,7 @@ def _build_briefing_ui(data: Dict[str, Any]) -> str:
     <div class="daemon-accordion__content">
         {"".join(changes_html)}
     </div>
-</details>''')
+</details>""")
 
     # Focus Areas section (quick-access buttons)
     if focus_areas:
@@ -483,7 +501,7 @@ def _build_briefing_ui(data: Dict[str, Any]) -> str:
     {topic}
 </button>''')
 
-        sections.append(f'''
+        sections.append(f"""
 <details class="daemon-accordion__item" open>
     <summary class="daemon-accordion__header">
         <span class="daemon-accordion__title">
@@ -495,20 +513,25 @@ def _build_briefing_ui(data: Dict[str, Any]) -> str:
     <div class="daemon-accordion__content">
         {"".join(buttons_html)}
     </div>
-</details>''')
+</details>""")
 
     # Inject into template
     html = template.replace("{{TITLE}}", "Session Briefing")
     html = html.replace("{{STATUS}}", status.upper())
     html = html.replace("{{STATS}}", stats_html)
     html = html.replace("{{MESSAGE}}", message_html)
-    html = html.replace("{{CONTENT}}", "\n".join(sections) if sections else '<p class="daemon-muted">No active context.</p>')
+    html = html.replace(
+        "{{CONTENT}}",
+        "\n".join(sections)
+        if sections
+        else '<p class="daemon-muted">No active context.</p>',
+    )
     html = _inject_assets(html, include_d3=False)
 
     return html
 
 
-def _build_community_ui(data: Dict[str, Any]) -> str:
+def _build_community_ui(data: dict[str, Any]) -> str:
     """
     Build the community cluster map UI HTML from list_communities data.
 
@@ -529,10 +552,10 @@ def _build_community_ui(data: Dict[str, Any]) -> str:
 
     # Transform flat communities list into hierarchical structure for D3
     # Root node contains all top-level communities as children
-    def build_hierarchy(community_list: list) -> Dict[str, Any]:
+    def build_hierarchy(community_list: list) -> dict[str, Any]:
         """Build hierarchy from flat list, grouping by parent_community_id."""
         # Index by id for quick lookup
-        by_id: Dict[int, Dict[str, Any]] = {}
+        by_id: dict[int, dict[str, Any]] = {}
         for c in community_list:
             by_id[c.get("id")] = {
                 "id": c.get("id"),
@@ -580,7 +603,9 @@ def _build_community_ui(data: Dict[str, Any]) -> str:
             '<span class="treemap-breadcrumb__item" data-id="root">All Communities</span>'
         )
         for i, item in enumerate(path):
-            breadcrumb_items.append('<span class="treemap-breadcrumb__separator">/</span>')
+            breadcrumb_items.append(
+                '<span class="treemap-breadcrumb__separator">/</span>'
+            )
             if i == len(path) - 1:
                 # Current (last) item
                 breadcrumb_items.append(
@@ -609,7 +634,7 @@ def _build_community_ui(data: Dict[str, Any]) -> str:
     return html
 
 
-def _build_graph_ui(data: Dict[str, Any]) -> str:
+def _build_graph_ui(data: dict[str, Any]) -> str:
     """
     Build the memory graph viewer UI HTML from get_graph data.
 
@@ -637,13 +662,15 @@ def _build_graph_ui(data: Dict[str, Any]) -> str:
     # Transform edge format for D3 (source/target instead of source_id/target_id)
     d3_edges = []
     for edge in edges:
-        d3_edges.append({
-            "source": edge.get("source_id") or edge.get("source"),
-            "target": edge.get("target_id") or edge.get("target"),
-            "relationship": edge.get("relationship", "relates_to"),
-            "confidence": edge.get("confidence", 1.0),
-            "description": edge.get("description", ""),
-        })
+        d3_edges.append(
+            {
+                "source": edge.get("source_id") or edge.get("source"),
+                "target": edge.get("target_id") or edge.get("target"),
+                "relationship": edge.get("relationship", "relates_to"),
+                "confidence": edge.get("confidence", 1.0),
+                "description": edge.get("description", ""),
+            }
+        )
 
     # Add full_content to nodes for details panel
     for node in nodes:
@@ -680,7 +707,7 @@ def _build_graph_ui(data: Dict[str, Any]) -> str:
     return html
 
 
-def _build_covenant_ui(data: Dict[str, Any]) -> str:
+def _build_covenant_ui(data: dict[str, Any]) -> str:
     """
     Build the covenant status dashboard UI HTML from get_covenant_status data.
 
@@ -728,13 +755,13 @@ def _build_covenant_ui(data: Dict[str, Any]) -> str:
     token_expires_at = preflight.get("expires_at") or ""
 
     # Phase info panel
-    phase_info_html = f'''
+    phase_info_html = f"""
     <div class="covenant-phase-info">
         <div class="covenant-phase-info__label">{phase_label}</div>
         <div class="covenant-phase-info__description">{phase_description}</div>
         <p style="margin-top: var(--daemon-space-sm); color: var(--daemon-text-muted);">{message}</p>
     </div>
-    '''
+    """
 
     # Inject into template
     html = template.replace("{{TITLE}}", "Covenant Status")
@@ -757,7 +784,7 @@ def _build_test_ui() -> str:
     base = _load_template("base.html")
 
     # Simple test content using daemon theme classes
-    content = '''
+    content = """
 <div class="daemon-card" style="padding: 20px; text-align: center;">
     <h1 style="color: var(--daemon-accent);">Daem0n UI Infrastructure</h1>
     <p style="color: var(--daemon-text-muted);">
@@ -767,7 +794,7 @@ def _build_test_ui() -> str:
         INFRA-03 Validated
     </div>
 </div>
-'''
+"""
 
     html = base.replace("{{TITLE}}", "Daem0n Test UI")
     html = html.replace("{{CONTENT}}", content)
@@ -791,7 +818,7 @@ def register_ui_resources(mcp: "FastMCP") -> None:
         uri="ui://daem0n/test",
         name="Test UI",
         description="Test UI to validate MCP Apps infrastructure",
-        mime_type=MCP_APPS_MIME
+        mime_type=MCP_APPS_MIME,
     )
     def get_test_ui() -> str:
         """Serve the test UI template."""
@@ -801,7 +828,7 @@ def register_ui_resources(mcp: "FastMCP") -> None:
         uri="ui://daem0n/search/{data}",
         name="Search Results",
         description="Visual search results with filtering and score insights",
-        mime_type=MCP_APPS_MIME
+        mime_type=MCP_APPS_MIME,
     )
     def get_search_ui(data: str) -> str:
         """
@@ -821,7 +848,7 @@ def register_ui_resources(mcp: "FastMCP") -> None:
         uri="ui://daem0n/briefing/{data}",
         name="Session Briefing",
         description="Briefing dashboard with accordion sections for session context",
-        mime_type=MCP_APPS_MIME
+        mime_type=MCP_APPS_MIME,
     )
     def get_briefing_ui(data: str) -> str:
         """
@@ -840,7 +867,7 @@ def register_ui_resources(mcp: "FastMCP") -> None:
         uri="ui://daem0n/covenant/{data}",
         name="Covenant Status",
         description="Sacred Covenant state machine dashboard with token countdown",
-        mime_type=MCP_APPS_MIME
+        mime_type=MCP_APPS_MIME,
     )
     def get_covenant_ui(data: str) -> str:
         """
@@ -859,7 +886,7 @@ def register_ui_resources(mcp: "FastMCP") -> None:
         uri="ui://daem0n/community/{data}",
         name="Community Cluster Map",
         description="Interactive treemap visualization of Leiden communities",
-        mime_type=MCP_APPS_MIME
+        mime_type=MCP_APPS_MIME,
     )
     def get_community_ui(data: str) -> str:
         """
@@ -879,7 +906,7 @@ def register_ui_resources(mcp: "FastMCP") -> None:
         uri="ui://daem0n/graph/{data}",
         name="Memory Graph",
         description="Interactive force-directed graph visualization of memory relationships",
-        mime_type=MCP_APPS_MIME
+        mime_type=MCP_APPS_MIME,
     )
     def get_graph_ui(data: str) -> str:
         """

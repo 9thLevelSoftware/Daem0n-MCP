@@ -1,8 +1,9 @@
 """Tests for the rules engine with TF-IDF matching."""
 
-import pytest
-import tempfile
 import shutil
+import tempfile
+
+import pytest
 
 from daem0nmcp.database import DatabaseManager
 from daem0nmcp.rules import RulesEngine
@@ -36,7 +37,7 @@ class TestRulesEngine:
             trigger="adding new API endpoint",
             must_do=["Add rate limiting", "Write tests"],
             must_not=["Use synchronous calls"],
-            ask_first=["Is this a breaking change?"]
+            ask_first=["Is this a breaking change?"],
         )
 
         assert "id" in result
@@ -50,7 +51,7 @@ class TestRulesEngine:
         result = await rules_engine.add_rule(
             trigger="modifying database schema",
             must_do=["Create migration"],
-            warnings=["Last schema change caused downtime"]
+            warnings=["Last schema change caused downtime"],
         )
 
         assert "Last schema change caused downtime" in result["warnings"]
@@ -62,7 +63,7 @@ class TestRulesEngine:
         await rules_engine.add_rule(
             trigger="adding API endpoint",
             must_do=["Add rate limiting"],
-            must_not=["Skip validation"]
+            must_not=["Skip validation"],
         )
 
         # Check an action that matches via shared terms (API, endpoint)
@@ -77,8 +78,7 @@ class TestRulesEngine:
     async def test_check_rules_no_match(self, rules_engine):
         """Test checking an action that doesn't match any rules."""
         await rules_engine.add_rule(
-            trigger="database migration",
-            must_do=["Backup first"]
+            trigger="database migration", must_do=["Backup first"]
         )
 
         result = await rules_engine.check_rules("updating documentation files")
@@ -90,13 +90,12 @@ class TestRulesEngine:
     async def test_check_rules_multiple_matches(self, rules_engine):
         """Test combining guidance from multiple matching rules."""
         await rules_engine.add_rule(
-            trigger="API changes",
-            must_do=["Update OpenAPI spec"]
+            trigger="API changes", must_do=["Update OpenAPI spec"]
         )
         await rules_engine.add_rule(
             trigger="endpoint modifications",
             must_do=["Write integration tests"],
-            warnings=["Check backwards compatibility"]
+            warnings=["Check backwards compatibility"],
         )
 
         result = await rules_engine.check_rules("making API endpoint changes")
@@ -112,7 +111,7 @@ class TestRulesEngine:
         await rules_engine.add_rule(
             trigger="production deployment",
             must_not=["Deploy on Friday"],
-            warnings=["Always have rollback plan"]
+            warnings=["Always have rollback plan"],
         )
 
         result = await rules_engine.check_rules("deploying to production server")
@@ -137,14 +136,11 @@ class TestRulesEngine:
     async def test_update_rule(self, rules_engine):
         """Test updating a rule."""
         rule = await rules_engine.add_rule(
-            trigger="test rule",
-            must_do=["Original task"]
+            trigger="test rule", must_do=["Original task"]
         )
 
         result = await rules_engine.update_rule(
-            rule_id=rule["id"],
-            must_do=["Updated task"],
-            priority=10
+            rule_id=rule["id"], must_do=["Updated task"], priority=10
         )
 
         assert result["updated"]
@@ -159,8 +155,7 @@ class TestRulesEngine:
     async def test_delete_rule(self, rules_engine):
         """Test deleting a rule."""
         rule = await rules_engine.add_rule(
-            trigger="to be deleted",
-            must_do=["Something"]
+            trigger="to be deleted", must_do=["Something"]
         )
 
         result = await rules_engine.delete_rule(rule["id"])
@@ -174,13 +169,11 @@ class TestRulesEngine:
     async def test_add_warning_to_rule(self, rules_engine):
         """Test adding a warning to an existing rule."""
         rule = await rules_engine.add_rule(
-            trigger="database changes",
-            must_do=["Backup first"]
+            trigger="database changes", must_do=["Backup first"]
         )
 
         result = await rules_engine.add_warning_to_rule(
-            rule["id"],
-            "Previous migration took 2 hours"
+            rule["id"], "Previous migration took 2 hours"
         )
 
         assert "Previous migration took 2 hours" in result["warnings"]
@@ -202,8 +195,7 @@ class TestRulesEngine:
     async def test_disabled_rules_not_matched(self, rules_engine):
         """Test that disabled rules are not matched."""
         rule = await rules_engine.add_rule(
-            trigger="disabled rule test",
-            must_do=["Should not appear"]
+            trigger="disabled rule test", must_do=["Should not appear"]
         )
 
         # Disable the rule
@@ -220,8 +212,7 @@ class TestRulesEngine:
     async def test_find_similar_rules(self, rules_engine):
         """Test finding similar rules to avoid duplicates."""
         await rules_engine.add_rule(
-            trigger="adding new API endpoint",
-            must_do=["Add rate limiting"]
+            trigger="adding new API endpoint", must_do=["Add rate limiting"]
         )
 
         # Find rules similar to a proposed trigger
@@ -235,8 +226,7 @@ class TestRulesEngine:
     async def test_check_rules_returns_match_scores(self, rules_engine):
         """Test that check_rules returns match scores."""
         await rules_engine.add_rule(
-            trigger="API endpoint creation",
-            must_do=["Add tests"]
+            trigger="API endpoint creation", must_do=["Add tests"]
         )
 
         result = await rules_engine.check_rules("creating new API endpoint")
@@ -251,8 +241,7 @@ class TestRulesEngine:
         """Test that TF-IDF matches related concepts."""
         # Add rules with different terminology
         await rules_engine.add_rule(
-            trigger="authentication security",
-            must_do=["Use secure tokens"]
+            trigger="authentication security", must_do=["Use secure tokens"]
         )
 
         # Query with related but different words
@@ -280,7 +269,7 @@ class TestRulesCaching:
         await rules_engine.add_rule(
             trigger="cache test rule check",
             must_do=["verify caching works"],
-            priority=1
+            priority=1,
         )
 
         # First check_rules - should populate cache
@@ -308,8 +297,7 @@ class TestRulesCaching:
 
         # Create initial rule
         await rules_engine.add_rule(
-            trigger="initial rule for add test",
-            must_do=["do something"]
+            trigger="initial rule for add test", must_do=["do something"]
         )
 
         # Clear cache
@@ -322,8 +310,7 @@ class TestRulesCaching:
 
         # Add new rule - should clear cache
         await rules_engine.add_rule(
-            trigger="new rule for add test",
-            must_do=["do something else"]
+            trigger="new rule for add test", must_do=["do something else"]
         )
 
         # Cache should be empty now
@@ -336,8 +323,7 @@ class TestRulesCaching:
 
         # Create rule
         result = await rules_engine.add_rule(
-            trigger="rule for delete test",
-            must_do=["do something"]
+            trigger="rule for delete test", must_do=["do something"]
         )
         rule_id = result["id"]
 
@@ -360,8 +346,7 @@ class TestRulesCaching:
 
         # Create rule
         result = await rules_engine.add_rule(
-            trigger="rule for enable test",
-            must_do=["do something"]
+            trigger="rule for enable test", must_do=["do something"]
         )
         rule_id = result["id"]
 

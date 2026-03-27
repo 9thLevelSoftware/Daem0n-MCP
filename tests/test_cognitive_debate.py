@@ -13,10 +13,10 @@ import pytest
 from daem0nmcp.cognitive import DebateResult
 from daem0nmcp.cognitive.debate import run_debate, score_evidence
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def _make_recall_result(memories=None):
     """Build a recall() return dict with categorised memories."""
@@ -30,7 +30,9 @@ def _make_recall_result(memories=None):
         "limit": 10,
         "has_more": False,
         "summary": None,
-        "decisions": [m for m in memories if m.get("category", "decision") == "decision"],
+        "decisions": [
+            m for m in memories if m.get("category", "decision") == "decision"
+        ],
         "patterns": [m for m in memories if m.get("category") == "pattern"],
         "learnings": [m for m in memories if m.get("category") == "learning"],
         "warnings": [m for m in memories if m.get("category") == "warning"],
@@ -96,9 +98,16 @@ class TestDebateInsufficientEvidence:
     async def test_debate_insufficient_evidence(self):
         """When both sides have <min_evidence memories, returns early."""
         # Return only 1 memory per recall (below default min_evidence=2)
-        recall = _make_recall_result([
-            {"id": 1, "content": "lonely evidence", "worked": True, "category": "decision"},
-        ])
+        recall = _make_recall_result(
+            [
+                {
+                    "id": 1,
+                    "content": "lonely evidence",
+                    "worked": True,
+                    "category": "decision",
+                },
+            ]
+        )
         ctx = _make_ctx(recall_result=recall)
 
         result = await run_debate(
@@ -119,11 +128,28 @@ class TestDebateBasicRuns:
     @pytest.mark.asyncio
     async def test_debate_basic_runs(self):
         """With enough evidence, debate runs at least 2 rounds and produces synthesis."""
-        recall = _make_recall_result([
-            {"id": 10, "content": "evidence A1", "worked": True, "category": "decision"},
-            {"id": 11, "content": "evidence A2", "worked": True, "category": "learning"},
-            {"id": 12, "content": "evidence A3", "worked": None, "category": "pattern"},
-        ])
+        recall = _make_recall_result(
+            [
+                {
+                    "id": 10,
+                    "content": "evidence A1",
+                    "worked": True,
+                    "category": "decision",
+                },
+                {
+                    "id": 11,
+                    "content": "evidence A2",
+                    "worked": True,
+                    "category": "learning",
+                },
+                {
+                    "id": 12,
+                    "content": "evidence A3",
+                    "worked": None,
+                    "category": "pattern",
+                },
+            ]
+        )
         ctx = _make_ctx(recall_result=recall)
 
         result = await run_debate(
@@ -147,11 +173,31 @@ class TestDebateConvergence:
     async def test_debate_convergence(self):
         """When recall returns consistent results, debate converges."""
         # Same evidence every call -> scores stabilize -> convergence
-        recall = _make_recall_result([
-            {"id": 10, "content": "consistent evidence 1", "worked": True, "category": "decision", "relevance": 0.8},
-            {"id": 11, "content": "consistent evidence 2", "worked": True, "category": "learning", "relevance": 0.7},
-            {"id": 12, "content": "consistent evidence 3", "worked": None, "category": "pattern", "relevance": 0.6},
-        ])
+        recall = _make_recall_result(
+            [
+                {
+                    "id": 10,
+                    "content": "consistent evidence 1",
+                    "worked": True,
+                    "category": "decision",
+                    "relevance": 0.8,
+                },
+                {
+                    "id": 11,
+                    "content": "consistent evidence 2",
+                    "worked": True,
+                    "category": "learning",
+                    "relevance": 0.7,
+                },
+                {
+                    "id": 12,
+                    "content": "consistent evidence 3",
+                    "worked": None,
+                    "category": "pattern",
+                    "relevance": 0.6,
+                },
+            ]
+        )
         ctx = _make_ctx(recall_result=recall)
 
         result = await run_debate(
@@ -175,17 +221,39 @@ class TestDebateMaxRoundsCap:
         async def varying_recall(**kwargs):
             """Return different evidence each time to prevent convergence."""
             call_idx["n"] += 1
-            return _make_recall_result([
-                {"id": call_idx["n"] * 100 + 1, "content": f"evidence {call_idx['n']}", "worked": True, "category": "decision", "relevance": 0.3 + (call_idx["n"] % 5) * 0.1},
-                {"id": call_idx["n"] * 100 + 2, "content": f"more {call_idx['n']}", "worked": False, "category": "learning", "relevance": 0.5 + (call_idx["n"] % 3) * 0.15},
-                {"id": call_idx["n"] * 100 + 3, "content": f"extra {call_idx['n']}", "worked": None, "category": "pattern", "relevance": 0.2 + (call_idx["n"] % 4) * 0.2},
-            ])
+            return _make_recall_result(
+                [
+                    {
+                        "id": call_idx["n"] * 100 + 1,
+                        "content": f"evidence {call_idx['n']}",
+                        "worked": True,
+                        "category": "decision",
+                        "relevance": 0.3 + (call_idx["n"] % 5) * 0.1,
+                    },
+                    {
+                        "id": call_idx["n"] * 100 + 2,
+                        "content": f"more {call_idx['n']}",
+                        "worked": False,
+                        "category": "learning",
+                        "relevance": 0.5 + (call_idx["n"] % 3) * 0.15,
+                    },
+                    {
+                        "id": call_idx["n"] * 100 + 3,
+                        "content": f"extra {call_idx['n']}",
+                        "worked": None,
+                        "category": "pattern",
+                        "relevance": 0.2 + (call_idx["n"] % 4) * 0.2,
+                    },
+                ]
+            )
 
         ctx = _make_ctx(recall_side_effect=varying_recall)
 
         with patch("daem0nmcp.cognitive.debate.settings") as mock_settings:
             mock_settings.cognitive_debate_max_rounds = 3
-            mock_settings.cognitive_debate_convergence_threshold = 0.001  # Very tight threshold to prevent convergence
+            mock_settings.cognitive_debate_convergence_threshold = (
+                0.001  # Very tight threshold to prevent convergence
+            )
             mock_settings.cognitive_debate_min_evidence = 2
             result = await run_debate(
                 topic="varied topic",
@@ -201,11 +269,31 @@ class TestDebateConsensusStored:
     @pytest.mark.asyncio
     async def test_debate_consensus_stored(self):
         """Consensus memory is persisted with debate and consensus tags."""
-        recall = _make_recall_result([
-            {"id": 10, "content": "evidence 1", "worked": True, "category": "decision", "relevance": 0.8},
-            {"id": 11, "content": "evidence 2", "worked": True, "category": "learning", "relevance": 0.7},
-            {"id": 12, "content": "evidence 3", "worked": None, "category": "pattern", "relevance": 0.6},
-        ])
+        recall = _make_recall_result(
+            [
+                {
+                    "id": 10,
+                    "content": "evidence 1",
+                    "worked": True,
+                    "category": "decision",
+                    "relevance": 0.8,
+                },
+                {
+                    "id": 11,
+                    "content": "evidence 2",
+                    "worked": True,
+                    "category": "learning",
+                    "relevance": 0.7,
+                },
+                {
+                    "id": 12,
+                    "content": "evidence 3",
+                    "worked": None,
+                    "category": "pattern",
+                    "relevance": 0.6,
+                },
+            ]
+        )
         ctx = _make_ctx(recall_result=recall)
 
         await run_debate(
@@ -220,7 +308,11 @@ class TestDebateConsensusStored:
 
         call_kwargs = ctx.memory_manager.remember.call_args
         # Check tags contain debate and consensus
-        tags = call_kwargs.kwargs.get("tags", []) if call_kwargs.kwargs else call_kwargs[1].get("tags", [])
+        tags = (
+            call_kwargs.kwargs.get("tags", [])
+            if call_kwargs.kwargs
+            else call_kwargs[1].get("tags", [])
+        )
         assert "debate" in tags
         assert "consensus" in tags
 
@@ -244,7 +336,11 @@ class TestDebateNoLLMCalls:
                 # Skip lines that are comments or docstrings
                 for line in source.split("\n"):
                     stripped = line.strip()
-                    if stripped.startswith("#") or stripped.startswith('"') or stripped.startswith("'"):
+                    if (
+                        stripped.startswith("#")
+                        or stripped.startswith('"')
+                        or stripped.startswith("'")
+                    ):
                         continue
                     assert pattern not in stripped, (
                         f"debate.py imports LLM library '{lib}' -- "

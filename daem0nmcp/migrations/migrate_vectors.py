@@ -15,8 +15,8 @@ import argparse
 import asyncio
 import logging
 import sys
+from collections.abc import Callable
 from pathlib import Path
-from typing import Callable, Optional
 
 from sqlalchemy import select
 
@@ -33,7 +33,7 @@ async def migrate_vectors_to_qdrant(
     db: DatabaseManager,
     qdrant: QdrantVectorStore,
     batch_size: int = 100,
-    progress_callback: Optional[Callable[[int, int], None]] = None
+    progress_callback: Callable[[int, int], None] | None = None,
 ) -> dict:
     """
     One-time migration of existing vectors from SQLite to Qdrant.
@@ -52,13 +52,7 @@ async def migrate_vectors_to_qdrant(
         - total: Total memories processed
         - errors: List of error messages for failed migrations
     """
-    result = {
-        "migrated": 0,
-        "skipped": 0,
-        "failed": 0,
-        "total": 0,
-        "errors": []
-    }
+    result = {"migrated": 0, "skipped": 0, "failed": 0, "total": 0, "errors": []}
 
     # Ensure database is initialized
     await db.init_db()
@@ -81,7 +75,9 @@ async def migrate_vectors_to_qdrant(
         try:
             qdrant_count = qdrant.get_count()
             if qdrant_count > 0:
-                logger.info(f"Qdrant already has {qdrant_count} vectors. Will skip existing.")
+                logger.info(
+                    f"Qdrant already has {qdrant_count} vectors. Will skip existing."
+                )
         except Exception as e:
             logger.debug(f"Could not check Qdrant count: {e}")
 
@@ -109,14 +105,12 @@ async def migrate_vectors_to_qdrant(
                     "tags": mem.tags or [],
                     "file_path": mem.file_path,
                     "worked": mem.worked,
-                    "is_permanent": mem.is_permanent
+                    "is_permanent": mem.is_permanent,
                 }
 
                 # Upsert to Qdrant (idempotent - safe to run multiple times)
                 qdrant.upsert_memory(
-                    memory_id=mem.id,
-                    embedding=embedding,
-                    metadata=metadata
+                    memory_id=mem.id, embedding=embedding, metadata=metadata
                 )
                 result["migrated"] += 1
 
@@ -137,7 +131,7 @@ async def migrate_vectors_to_qdrant(
     return result
 
 
-async def run_migration(project_path: Optional[str] = None) -> dict:
+async def run_migration(project_path: str | None = None) -> dict:
     """
     Run the vector migration with proper initialization.
 
@@ -173,9 +167,7 @@ async def run_migration(project_path: Optional[str] = None) -> dict:
 
     try:
         result = await migrate_vectors_to_qdrant(
-            db=db,
-            qdrant=qdrant,
-            progress_callback=progress_reporter
+            db=db, qdrant=qdrant, progress_callback=progress_reporter
         )
         return result
     finally:
@@ -198,17 +190,16 @@ Examples:
 
     # Run with verbose logging
     python -m daem0nmcp.migrations.migrate_vectors --verbose
-        """
+        """,
     )
     parser.add_argument(
-        "--project-path", "-p",
+        "--project-path",
+        "-p",
         help="Path to project root (defaults to current directory)",
-        default=None
+        default=None,
     )
     parser.add_argument(
-        "--verbose", "-v",
-        action="store_true",
-        help="Enable verbose logging"
+        "--verbose", "-v", action="store_true", help="Enable verbose logging"
     )
 
     args = parser.parse_args()
@@ -216,8 +207,7 @@ Examples:
     # Configure logging
     log_level = logging.DEBUG if args.verbose else logging.INFO
     logging.basicConfig(
-        level=log_level,
-        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+        level=log_level, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
     )
 
     print("\n" + "=" * 60)
@@ -246,7 +236,9 @@ Examples:
             print("\nMigration completed successfully!")
             return 0
         elif result["total"] == 0:
-            print("\nNo vectors to migrate (database may be empty or have no embeddings).")
+            print(
+                "\nNo vectors to migrate (database may be empty or have no embeddings)."
+            )
             return 0
         elif result["failed"] > 0:
             print("\nMigration completed with errors. Review the errors above.")

@@ -7,10 +7,24 @@ Tables:
 - memory_relationships: Graph edges between memories for causal reasoning
 """
 
-from sqlalchemy import Column, Integer, String, Text, JSON, DateTime, Boolean, LargeBinary, Float, ForeignKey, Index, UniqueConstraint
+from datetime import datetime, timezone
+
+from sqlalchemy import (
+    JSON,
+    Boolean,
+    Column,
+    DateTime,
+    Float,
+    ForeignKey,
+    Index,
+    Integer,
+    LargeBinary,
+    String,
+    Text,
+    UniqueConstraint,
+)
 from sqlalchemy.orm import DeclarativeBase
 from sqlalchemy.orm import relationship as orm_relationship
-from datetime import datetime, timezone
 
 
 class Base(DeclarativeBase):
@@ -30,12 +44,15 @@ class Memory(Base):
     Semantic memories (patterns, warnings) don't decay - they're project facts.
     Episodic memories (decisions, learnings) decay over time.
     """
+
     __tablename__ = "memories"
 
     id = Column(Integer, primary_key=True, index=True)
 
     # What type of memory
-    category = Column(String, nullable=False, index=True)  # decision, pattern, warning, learning
+    category = Column(
+        String, nullable=False, index=True
+    )  # decision, pattern, warning, learning
 
     # The actual content
     content = Column(Text, nullable=False)
@@ -89,13 +106,18 @@ class Memory(Base):
     importance_score = Column(Float, nullable=True)
 
     # Provenance tracking (Phase 22: LLM Compatibility)
-    source_client = Column(String, nullable=True)   # e.g., "opencode", "claude-code"
-    source_model = Column(String, nullable=True)     # e.g., "anthropic/claude-sonnet-4", "openai/gpt-5"
+    source_client = Column(String, nullable=True)  # e.g., "opencode", "claude-code"
+    source_model = Column(
+        String, nullable=True
+    )  # e.g., "anthropic/claude-sonnet-4", "openai/gpt-5"
 
     # Timestamps
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
-    updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc),
-                       onupdate=lambda: datetime.now(timezone.utc))
+    updated_at = Column(
+        DateTime,
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+    )
 
 
 class Fact(Base):
@@ -109,6 +131,7 @@ class Fact(Base):
 
     Uses content hash for O(1) lookup instead of semantic search.
     """
+
     __tablename__ = "facts"
 
     id = Column(Integer, primary_key=True, index=True)
@@ -123,7 +146,9 @@ class Fact(Base):
     category = Column(String, nullable=True, index=True)
 
     # Original memory this fact was derived from
-    source_memory_id = Column(Integer, ForeignKey("memories.id", ondelete="SET NULL"), nullable=True)
+    source_memory_id = Column(
+        Integer, ForeignKey("memories.id", ondelete="SET NULL"), nullable=True
+    )
 
     # How many times this fact has been verified/confirmed
     verification_count = Column(Integer, default=0)
@@ -153,6 +178,7 @@ class Rule(Base):
         must_not: ["Use synchronous database calls"]
         ask_first: ["Is this a breaking change?"]
     """
+
     __tablename__ = "rules"
 
     id = Column(Integer, primary_key=True, index=True)
@@ -212,12 +238,18 @@ class MemoryVersion(Base):
     - "When did this relationship change?"
     - "What facts were invalidated by new information?"
     """
+
     __tablename__ = "memory_versions"
 
     id = Column(Integer, primary_key=True, index=True)
 
     # Reference to the memory being versioned
-    memory_id = Column(Integer, ForeignKey("memories.id", ondelete="CASCADE"), nullable=False, index=True)
+    memory_id = Column(
+        Integer,
+        ForeignKey("memories.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
 
     # Version sequence number (1, 2, 3...)
     version_number = Column(Integer, nullable=False)
@@ -233,7 +265,9 @@ class MemoryVersion(Base):
     worked = Column(Boolean, nullable=True)
 
     # What triggered this version
-    change_type = Column(String, nullable=False)  # created, content_updated, outcome_recorded, relationship_changed
+    change_type = Column(
+        String, nullable=False
+    )  # created, content_updated, outcome_recorded, relationship_changed
     change_description = Column(Text, nullable=True)
 
     # Transaction time: when this version was recorded in the system
@@ -248,11 +282,13 @@ class MemoryVersion(Base):
 
     # Reference to the version that invalidated this one (for contradiction tracking)
     # Enables tracking causal chains of fact updates
-    invalidated_by_version_id = Column(Integer, ForeignKey("memory_versions.id"), nullable=True)
+    invalidated_by_version_id = Column(
+        Integer, ForeignKey("memory_versions.id"), nullable=True
+    )
 
     # Composite index for efficient version lookups
     __table_args__ = (
-        Index('ix_memory_versions_memory_version', 'memory_id', 'version_number'),
+        Index("ix_memory_versions_memory_version", "memory_id", "version_number"),
     )
 
     # ORM relationship
@@ -280,15 +316,26 @@ class MemoryRelationship(Base):
     2. Expand via graph edges to get connected context
     3. Assembly full context for LLM including structural relationships
     """
+
     __tablename__ = "memory_relationships"
 
     id = Column(Integer, primary_key=True, index=True)
 
     # Source memory (the "from" node)
-    source_id = Column(Integer, ForeignKey("memories.id", ondelete="CASCADE"), nullable=False, index=True)
+    source_id = Column(
+        Integer,
+        ForeignKey("memories.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
 
     # Target memory (the "to" node)
-    target_id = Column(Integer, ForeignKey("memories.id", ondelete="CASCADE"), nullable=False, index=True)
+    target_id = Column(
+        Integer,
+        ForeignKey("memories.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
 
     # Relationship type
     relationship = Column(String, nullable=False, index=True)
@@ -303,8 +350,12 @@ class MemoryRelationship(Base):
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 
     # ORM relationships for easy navigation
-    source = orm_relationship("Memory", foreign_keys=[source_id], backref="outgoing_relationships")
-    target = orm_relationship("Memory", foreign_keys=[target_id], backref="incoming_relationships")
+    source = orm_relationship(
+        "Memory", foreign_keys=[source_id], backref="outgoing_relationships"
+    )
+    target = orm_relationship(
+        "Memory", foreign_keys=[target_id], backref="incoming_relationships"
+    )
 
 
 class SessionState(Base):
@@ -314,6 +365,7 @@ class SessionState(Base):
     Sessions are identified by project + time bucket.
     Tracks what context checks were made and what decisions are pending outcomes.
     """
+
     __tablename__ = "session_state"
 
     id = Column(Integer, primary_key=True, index=True)
@@ -332,6 +384,7 @@ class EnforcementBypassLog(Base):
 
     Provides accountability even when developers skip enforcement.
     """
+
     __tablename__ = "enforcement_bypass_log"
 
     id = Column(Integer, primary_key=True, index=True)
@@ -352,6 +405,7 @@ class CodeEntity(Base):
     - Impact analysis for changes
     - Semantic code search
     """
+
     __tablename__ = "code_entities"
 
     id = Column(String, primary_key=True)  # hash of project+path+name+type
@@ -390,10 +444,13 @@ class MemoryCodeRef(Base):
     - introduces: Memory introduces this entity
     - deprecates: Memory marks this entity as deprecated
     """
+
     __tablename__ = "memory_code_refs"
 
     id = Column(Integer, primary_key=True)
-    memory_id = Column(Integer, ForeignKey("memories.id", ondelete="CASCADE"), index=True)
+    memory_id = Column(
+        Integer, ForeignKey("memories.id", ondelete="CASCADE"), index=True
+    )
     code_entity_id = Column(String, index=True)
 
     # Snapshot (survives reindex - entity might be renamed/moved)
@@ -402,7 +459,9 @@ class MemoryCodeRef(Base):
     file_path = Column(String, nullable=True)
     line_number = Column(Integer, nullable=True)
 
-    relationship = Column(String, nullable=True)  # "about", "modifies", "introduces", "deprecates"
+    relationship = Column(
+        String, nullable=True
+    )  # "about", "modifies", "introduces", "deprecates"
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 
     # ORM relationship
@@ -422,6 +481,7 @@ class ProjectLink(Base):
     - downstream: Dependent (this app depends on your library)
     - related: Loose association
     """
+
     __tablename__ = "project_links"
 
     id = Column(Integer, primary_key=True, index=True)
@@ -433,7 +493,9 @@ class ProjectLink(Base):
     linked_path = Column(String, nullable=False)
 
     # Type of relationship
-    relationship = Column(String, default="related")  # same-project, upstream, downstream, related
+    relationship = Column(
+        String, default="related"
+    )  # same-project, upstream, downstream, related
 
     # Optional label/description
     label = Column(String, nullable=True)
@@ -456,6 +518,7 @@ class ActiveContextItem(Base):
 
     Max items per project: 10 (prevents context bloat)
     """
+
     __tablename__ = "active_context"
 
     id = Column(Integer, primary_key=True, index=True)
@@ -464,7 +527,9 @@ class ActiveContextItem(Base):
     project_path = Column(String, nullable=False, index=True)
 
     # The memory to keep in active context
-    memory_id = Column(Integer, ForeignKey("memories.id", ondelete="CASCADE"), nullable=False)
+    memory_id = Column(
+        Integer, ForeignKey("memories.id", ondelete="CASCADE"), nullable=False
+    )
 
     # Priority for ordering (higher = more important, shown first)
     priority = Column(Integer, default=0)
@@ -498,6 +563,7 @@ class MemoryCommunity(Base):
     - "Give me an overview of auth decisions" -> community summary
     - "Drill into JWT specifics" -> community members
     """
+
     __tablename__ = "memory_communities"
 
     id = Column(Integer, primary_key=True, index=True)
@@ -522,15 +588,20 @@ class MemoryCommunity(Base):
     level = Column(Integer, default=0)
 
     # Parent community (for hierarchy)
-    parent_id = Column(Integer, ForeignKey("memory_communities.id", ondelete="SET NULL"), nullable=True)
+    parent_id = Column(
+        Integer, ForeignKey("memory_communities.id", ondelete="SET NULL"), nullable=True
+    )
 
     # Vector embedding for community summary (for semantic search)
     vector_embedding = Column(LargeBinary, nullable=True)
 
     # Timestamps
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
-    updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc),
-                       onupdate=lambda: datetime.now(timezone.utc))
+    updated_at = Column(
+        DateTime,
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+    )
 
     # ORM relationship for hierarchy
     parent = orm_relationship("MemoryCommunity", remote_side=[id], backref="children")
@@ -551,6 +622,7 @@ class ExtractedEntity(Base):
     Auto-extracted from memory content using pattern matching.
     Links to code_entities table when possible for richer context.
     """
+
     __tablename__ = "extracted_entities"
 
     id = Column(Integer, primary_key=True, index=True)
@@ -561,8 +633,11 @@ class ExtractedEntity(Base):
     mention_count = Column(Integer, default=1)
     code_entity_id = Column(String, nullable=True, index=True)
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
-    updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc),
-                       onupdate=lambda: datetime.now(timezone.utc))
+    updated_at = Column(
+        DateTime,
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+    )
 
 
 class MemoryEntityRef(Base):
@@ -576,11 +651,22 @@ class MemoryEntityRef(Base):
     - introduces: Memory introduces this entity
     - deprecates: Memory deprecates this entity
     """
+
     __tablename__ = "memory_entity_refs"
 
     id = Column(Integer, primary_key=True, index=True)
-    memory_id = Column(Integer, ForeignKey("memories.id", ondelete="CASCADE"), nullable=False, index=True)
-    entity_id = Column(Integer, ForeignKey("extracted_entities.id", ondelete="CASCADE"), nullable=False, index=True)
+    memory_id = Column(
+        Integer,
+        ForeignKey("memories.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    entity_id = Column(
+        Integer,
+        ForeignKey("extracted_entities.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
     relationship = Column(String, default="mentions")
     context_snippet = Column(Text, nullable=True)
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
@@ -609,6 +695,7 @@ class ContextTrigger(Base):
     - Show database warnings when touching migration files
     - Recall API patterns when adding new endpoints
     """
+
     __tablename__ = "context_triggers"
 
     id = Column(Integer, primary_key=True, index=True)
@@ -644,6 +731,7 @@ class ContextTrigger(Base):
 
 class FileHash(Base):
     """Tracks content hashes for indexed files."""
+
     __tablename__ = "file_hashes"
 
     id = Column(Integer, primary_key=True, index=True)
@@ -653,5 +741,5 @@ class FileHash(Base):
     indexed_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 
     __table_args__ = (
-        UniqueConstraint('project_path', 'file_path', name='uix_file_project'),
+        UniqueConstraint("project_path", "file_path", name="uix_file_project"),
     )

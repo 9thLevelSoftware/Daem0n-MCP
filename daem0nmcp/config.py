@@ -7,7 +7,7 @@ Example: DAEM0NMCP_LOG_LEVEL=DEBUG
 
 import shutil
 from pathlib import Path
-from typing import Optional, List
+
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -23,7 +23,7 @@ class Settings(BaseSettings):
 
     # Core paths
     project_root: str = "."
-    storage_path: Optional[str] = None  # Auto-detect if not set
+    storage_path: str | None = None  # Auto-detect if not set
 
     # Server
     log_level: str = "INFO"
@@ -41,10 +41,10 @@ class Settings(BaseSettings):
     max_content_size: int = 1_000_000  # 1MB max content
     max_chunks: int = 50  # Maximum chunks per ingestion
     ingest_timeout: int = 30  # Request timeout in seconds
-    allowed_url_schemes: List[str] = ["http", "https"]
+    allowed_url_schemes: list[str] = ["http", "https"]
 
     # TODO scanner config
-    todo_skip_dirs: List[str] = [
+    todo_skip_dirs: list[str] = [
         "node_modules",
         ".git",
         ".venv",
@@ -62,17 +62,17 @@ class Settings(BaseSettings):
         ".svn",
         ".hg",
     ]
-    todo_skip_extensions: List[str] = [".pyc", ".pyo", ".so", ".dylib"]
+    todo_skip_extensions: list[str] = [".pyc", ".pyo", ".so", ".dylib"]
     todo_max_files: int = 500
 
     # Qdrant vector storage
-    qdrant_path: Optional[str] = (
+    qdrant_path: str | None = (
         None  # Path for local Qdrant storage, auto-detect if not set
     )
-    qdrant_url: Optional[str] = (
+    qdrant_url: str | None = (
         None  # Optional remote Qdrant URL (overrides local path)
     )
-    qdrant_api_key: Optional[str] = None  # API key for remote Qdrant (if using cloud)
+    qdrant_api_key: str | None = None  # API key for remote Qdrant (if using cloud)
 
     # File Watcher (Phase 1: Proactive Layer)
     watcher_enabled: bool = False  # Enable file watcher daemon
@@ -80,10 +80,10 @@ class Settings(BaseSettings):
     watcher_system_notifications: bool = True  # Enable desktop notifications
     watcher_log_file: bool = True  # Enable log file channel
     watcher_editor_poll: bool = True  # Enable editor poll channel
-    watcher_skip_patterns: List[
+    watcher_skip_patterns: list[
         str
     ] = []  # Additional patterns to skip (added to defaults)
-    watcher_watch_extensions: List[str] = []  # File extensions to watch (empty = all)
+    watcher_watch_extensions: list[str] = []  # File extensions to watch (empty = all)
 
     # Search tuning
     hybrid_vector_weight: float = Field(
@@ -176,7 +176,7 @@ class Settings(BaseSettings):
 
     # Code Indexing
     parse_tree_cache_maxsize: int = 200
-    index_languages: List[str] = []  # Empty = all supported
+    index_languages: list[str] = []  # Empty = all supported
 
     def _migrate_legacy_storage(self, project_path: Path, new_storage: Path) -> bool:
         """
@@ -265,7 +265,7 @@ class Settings(BaseSettings):
 
         return str(storage)
 
-    def get_qdrant_path(self) -> Optional[str]:
+    def get_qdrant_path(self) -> str | None:
         """
         Determine Qdrant storage path for local mode.
 

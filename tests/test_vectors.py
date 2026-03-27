@@ -113,6 +113,7 @@ class TestEncodeQueryDocument:
     @patch("daem0nmcp.vectors._get_model")
     def test_encode_document_prepends_document_prefix(self, mock_get_model):
         import numpy as np
+
         from daem0nmcp import vectors
 
         fake_model = MagicMock()
@@ -130,6 +131,7 @@ class TestEncodeQueryDocument:
     @patch("daem0nmcp.vectors._get_model")
     def test_encode_query_prepends_query_prefix(self, mock_get_model):
         import numpy as np
+
         from daem0nmcp import vectors
 
         fake_model = MagicMock()
@@ -145,6 +147,7 @@ class TestEncodeQueryDocument:
     @patch("daem0nmcp.vectors._get_model")
     def test_encode_returns_correct_byte_length(self, mock_get_model):
         import numpy as np
+
         from daem0nmcp import vectors
 
         fake_model = MagicMock()
@@ -160,4 +163,5 @@ class TestEncodeQueryDocument:
 class TestGetDimension:
     def test_returns_configured_dimension(self):
         from daem0nmcp.vectors import get_dimension
+
         assert get_dimension() == settings.embedding_dimension

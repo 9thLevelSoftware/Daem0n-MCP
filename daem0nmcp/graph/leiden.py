@@ -2,7 +2,7 @@
 
 import logging
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 import networkx as nx
 
@@ -21,8 +21,8 @@ class LeidenConfig:
 
 def run_leiden_on_networkx(
     nx_graph: nx.Graph,
-    config: Optional[LeidenConfig] = None,
-) -> Dict[str, int]:
+    config: LeidenConfig | None = None,
+) -> dict[str, int]:
     """
     Run Leiden community detection on a NetworkX graph.
 
@@ -56,7 +56,7 @@ def run_leiden_on_networkx(
     # Select partition type
     if config.partition_type == "cpm":
         partition_class = la.CPMVertexPartition
-        kwargs: Dict[str, Any] = {"resolution_parameter": config.resolution}
+        kwargs: dict[str, Any] = {"resolution_parameter": config.resolution}
     else:
         partition_class = la.ModularityVertexPartition
         kwargs = {}
@@ -86,7 +86,7 @@ def run_leiden_on_networkx(
     return community_map
 
 
-def get_community_stats(community_map: Dict[str, int]) -> Dict[str, Any]:
+def get_community_stats(community_map: dict[str, int]) -> dict[str, Any]:
     """Get statistics about detected communities."""
     from collections import Counter
 
@@ -105,8 +105,8 @@ def get_community_stats(community_map: Dict[str, int]) -> Dict[str, Any]:
 
 
 def get_nodes_in_community(
-    community_map: Dict[str, int],
+    community_map: dict[str, int],
     community_id: int,
-) -> List[str]:
+) -> list[str]:
     """Get all node IDs belonging to a specific community."""
     return [node for node, comm in community_map.items() if comm == community_id]

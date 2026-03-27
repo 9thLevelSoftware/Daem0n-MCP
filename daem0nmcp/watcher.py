@@ -20,16 +20,16 @@ Usage:
 """
 
 import asyncio
-import logging
 import fnmatch
+import logging
 from abc import abstractmethod
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, List, Optional, Protocol, Any, runtime_checkable
+from typing import Any, Protocol, runtime_checkable
 
+from watchdog.events import DirModifiedEvent, FileSystemEventHandler
 from watchdog.observers import Observer
-from watchdog.events import FileSystemEventHandler, DirModifiedEvent
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +37,7 @@ logger = logging.getLogger(__name__)
 # =============================================================================
 # Data Classes
 # =============================================================================
+
 
 @dataclass
 class WatcherNotification:
@@ -50,8 +51,9 @@ class WatcherNotification:
         project_path: The project root path
         summary: A brief summary of relevant memories
     """
+
     file_path: Path
-    memories: List[Dict[str, Any]]
+    memories: list[dict[str, Any]]
     timestamp: datetime
     project_path: Path
     summary: str = ""
@@ -60,7 +62,7 @@ class WatcherNotification:
         """Generate summary if not provided."""
         if not self.summary and self.memories:
             # Count by category
-            by_category: Dict[str, int] = {}
+            by_category: dict[str, int] = {}
             has_warnings = False
             has_failures = False
 
@@ -77,8 +79,10 @@ class WatcherNotification:
                 parts.append("ATTENTION NEEDED")
             parts.append(f"{len(self.memories)} memories")
 
-            cat_parts = [f"{count} {cat}{'s' if count > 1 else ''}"
-                        for cat, count in sorted(by_category.items())]
+            cat_parts = [
+                f"{count} {cat}{'s' if count > 1 else ''}"
+                for cat, count in sorted(by_category.items())
+            ]
             if cat_parts:
                 parts.append(f"({', '.join(cat_parts)})")
 
@@ -97,9 +101,10 @@ class WatcherConfig:
         recursive: Whether to watch subdirectories
         max_queue_size: Maximum pending changes before dropping oldest
     """
+
     debounce_seconds: float = 1.0
-    skip_patterns: List[str] = field(default_factory=list)
-    watch_extensions: List[str] = field(default_factory=list)
+    skip_patterns: list[str] = field(default_factory=list)
+    watch_extensions: list[str] = field(default_factory=list)
     recursive: bool = True
     max_queue_size: int = 100
 
@@ -113,7 +118,7 @@ class WatcherConfig:
 # Default Skip Patterns
 # =============================================================================
 
-DEFAULT_SKIP_PATTERNS: List[str] = [
+DEFAULT_SKIP_PATTERNS: list[str] = [
     # Version control
     ".git",
     ".git/**",
@@ -121,11 +126,9 @@ DEFAULT_SKIP_PATTERNS: List[str] = [
     ".svn/**",
     ".hg",
     ".hg/**",
-
     # Package managers / dependencies
     "node_modules",
     "node_modules/**",
-
     # Python cache
     "__pycache__",
     "__pycache__/**",
@@ -134,7 +137,6 @@ DEFAULT_SKIP_PATTERNS: List[str] = [
     "*.pyc",
     "*.pyo",
     "*.pyd",
-
     # Virtual environments
     ".venv",
     ".venv/**",
@@ -143,7 +145,6 @@ DEFAULT_SKIP_PATTERNS: List[str] = [
     "env",
     "env/**",
     ".env",  # Environment files (also often secrets)
-
     # Build outputs
     "dist",
     "dist/**",
@@ -152,7 +153,6 @@ DEFAULT_SKIP_PATTERNS: List[str] = [
     "*.so",
     "*.dll",
     "*.dylib",
-
     # IDE / Editor
     ".idea",
     ".idea/**",
@@ -161,11 +161,9 @@ DEFAULT_SKIP_PATTERNS: List[str] = [
     "*.swp",
     "*.swo",
     "*~",
-
     # Daem0n-MCP own storage
     ".daem0nmcp",
     ".daem0nmcp/**",
-
     # Other common ignores
     ".mypy_cache",
     ".mypy_cache/**",
@@ -184,6 +182,7 @@ DEFAULT_SKIP_PATTERNS: List[str] = [
 # =============================================================================
 # Notification Channel Protocol
 # =============================================================================
+
 
 @runtime_checkable
 class NotificationChannel(Protocol):
@@ -210,6 +209,7 @@ class NotificationChannel(Protocol):
 # File Event Handler (Watchdog Integration)
 # =============================================================================
 
+
 class _FileChangeHandler(FileSystemEventHandler):
     """
     Internal handler for watchdog file system events.
@@ -222,7 +222,7 @@ class _FileChangeHandler(FileSystemEventHandler):
         queue: asyncio.Queue,
         loop: asyncio.AbstractEventLoop,
         project_path: Path,
-        config: WatcherConfig
+        config: WatcherConfig,
     ):
         super().__init__()
         self._queue = queue
@@ -277,10 +277,7 @@ class _FileChangeHandler(FileSystemEventHandler):
 
         # Queue the event for async processing
         try:
-            self._loop.call_soon_threadsafe(
-                self._queue.put_nowait,
-                path
-            )
+            self._loop.call_soon_threadsafe(self._queue.put_nowait, path)
         except asyncio.QueueFull:
             logger.warning(f"Event queue full, dropping change: {path}")
 
@@ -288,6 +285,7 @@ class _FileChangeHandler(FileSystemEventHandler):
 # =============================================================================
 # Main FileWatcher Class
 # =============================================================================
+
 
 class FileWatcher:
     """
@@ -321,8 +319,8 @@ class FileWatcher:
         self,
         project_path: Path,
         memory_manager: Any,  # MemoryManager from daem0nmcp.memory
-        channels: List[NotificationChannel],
-        config: Optional[WatcherConfig] = None
+        channels: list[NotificationChannel],
+        config: WatcherConfig | None = None,
     ):
         """
         Initialize the FileWatcher.
@@ -339,13 +337,13 @@ class FileWatcher:
         self._config = config or WatcherConfig()
 
         # Internal state
-        self._observer: Optional[Observer] = None
-        self._event_queue: Optional[asyncio.Queue] = None
-        self._process_task: Optional[asyncio.Task] = None
+        self._observer: Observer | None = None
+        self._event_queue: asyncio.Queue | None = None
+        self._process_task: asyncio.Task | None = None
         self._running = False
 
         # Debounce tracking: file_path -> last_notification_time
-        self._last_notified: Dict[Path, datetime] = {}
+        self._last_notified: dict[Path, datetime] = {}
 
         # Statistics
         self._stats = {
@@ -362,7 +360,7 @@ class FileWatcher:
         return self._running
 
     @property
-    def statistics(self) -> Dict[str, int]:
+    def statistics(self) -> dict[str, int]:
         """Get watcher statistics."""
         return self._stats.copy()
 
@@ -399,13 +397,11 @@ class FileWatcher:
             queue=self._event_queue,
             loop=loop,
             project_path=self._project_path,
-            config=self._config
+            config=self._config,
         )
 
         self._observer.schedule(
-            handler,
-            str(self._project_path),
-            recursive=self._config.recursive
+            handler, str(self._project_path), recursive=self._config.recursive
         )
         self._observer.start()
 
@@ -468,8 +464,7 @@ class FileWatcher:
                 # Wait for next event with timeout
                 try:
                     file_path = await asyncio.wait_for(
-                        self._event_queue.get(),
-                        timeout=1.0
+                        self._event_queue.get(), timeout=1.0
                     )
                 except asyncio.TimeoutError:
                     continue
@@ -517,9 +512,7 @@ class FileWatcher:
         try:
             # Query memories for this file
             result = await self._memory_manager.recall_for_file(
-                file_path=str(file_path),
-                project_path=str(self._project_path),
-                limit=20
+                file_path=str(file_path), project_path=str(self._project_path), limit=20
             )
 
             # Check if there are relevant memories
@@ -531,7 +524,7 @@ class FileWatcher:
                 return
 
             # Build flat list of all memories for notification
-            all_memories: List[Dict[str, Any]] = []
+            all_memories: list[dict[str, Any]] = []
             for category in ["warnings", "decisions", "patterns", "learnings"]:
                 memories_in_cat = result.get(category, [])
                 for mem in memories_in_cat:
@@ -544,7 +537,7 @@ class FileWatcher:
                 file_path=file_path,
                 memories=all_memories,
                 timestamp=now,
-                project_path=self._project_path
+                project_path=self._project_path,
             )
 
             # Update debounce tracking
@@ -577,18 +570,13 @@ class FileWatcher:
             await asyncio.gather(*tasks, return_exceptions=True)
 
     async def _notify_single_channel(
-        self,
-        channel: NotificationChannel,
-        notification: WatcherNotification
+        self, channel: NotificationChannel, notification: WatcherNotification
     ) -> None:
         """Notify a single channel with error handling."""
         try:
             await channel.notify(notification)
         except Exception as e:
-            logger.error(
-                f"Channel {type(channel).__name__} failed: {e}",
-                exc_info=True
-            )
+            logger.error(f"Channel {type(channel).__name__} failed: {e}", exc_info=True)
 
     def add_channel(self, channel: NotificationChannel) -> None:
         """
@@ -620,6 +608,7 @@ class FileWatcher:
 # Simple Built-in Channel for Testing
 # =============================================================================
 
+
 class LoggingChannel:
     """
     Simple notification channel that logs to the module logger.
@@ -634,7 +623,7 @@ class LoggingChannel:
         """Log the notification."""
         logger.log(
             self._level,
-            f"[MEMORY ALERT] {notification.file_path.name}: {notification.summary}"
+            f"[MEMORY ALERT] {notification.file_path.name}: {notification.summary}",
         )
 
         # Log details at debug level
@@ -679,13 +668,14 @@ class CallbackChannel:
 # Factory Function
 # =============================================================================
 
+
 def create_watcher(
     project_path: str | Path,
     memory_manager: Any,
-    channels: Optional[List[NotificationChannel]] = None,
+    channels: list[NotificationChannel] | None = None,
     debounce_seconds: float = 1.0,
-    skip_patterns: Optional[List[str]] = None,
-    watch_extensions: Optional[List[str]] = None
+    skip_patterns: list[str] | None = None,
+    watch_extensions: list[str] | None = None,
 ) -> FileWatcher:
     """
     Factory function to create a FileWatcher with common configuration.
@@ -722,7 +712,7 @@ def create_watcher(
     config = WatcherConfig(
         debounce_seconds=debounce_seconds,
         skip_patterns=patterns,
-        watch_extensions=watch_extensions or []
+        watch_extensions=watch_extensions or [],
     )
 
     # Default to logging channel if none provided
@@ -733,5 +723,5 @@ def create_watcher(
         project_path=path,
         memory_manager=memory_manager,
         channels=channels,
-        config=config
+        config=config,
     )

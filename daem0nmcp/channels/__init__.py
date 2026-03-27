@@ -26,15 +26,15 @@ Usage:
 """
 
 from daem0nmcp.watcher import (
+    CallbackChannel,
+    LoggingChannel,
     NotificationChannel,
     WatcherNotification,
-    LoggingChannel,
-    CallbackChannel,
 )
 
-from .system_notify import SystemNotifyChannel
-from .log_notify import LogFileChannel
 from .editor_poll import EditorPollChannel
+from .log_notify import LogFileChannel
+from .system_notify import SystemNotifyChannel
 
 __all__ = [
     # Protocol and data

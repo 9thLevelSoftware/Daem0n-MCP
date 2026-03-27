@@ -1,10 +1,11 @@
 # tests/test_endless_mode.py
 """Tests for Endless Mode context compression."""
 
-import pytest
-import tempfile
 import shutil
+import tempfile
 from unittest.mock import patch
+
+import pytest
 
 from daem0nmcp.database import DatabaseManager
 from daem0nmcp.memory import MemoryManager
@@ -42,7 +43,7 @@ class TestCondensedRecall:
             category="decision",
             content="This is a very long decision content that should be truncated when condensed mode is enabled",
             rationale="This is detailed rationale explaining why we made this decision",
-            context={"key": "value", "nested": {"data": "here"}}
+            context={"key": "value", "nested": {"data": "here"}},
         )
 
         # Should not raise - condensed parameter accepted
@@ -55,7 +56,7 @@ class TestCondensedRecall:
         await memory_manager.remember(
             category="decision",
             content="Use JWT tokens",
-            rationale="Need stateless auth for horizontal scaling"
+            rationale="Need stateless auth for horizontal scaling",
         )
 
         result = await memory_manager.recall("JWT", condensed=True)
@@ -70,7 +71,7 @@ class TestCondensedRecall:
         await memory_manager.remember(
             category="decision",
             content="Use PostgreSQL",
-            context={"alternatives": ["MySQL", "MongoDB"], "reason": "ACID compliance"}
+            context={"alternatives": ["MySQL", "MongoDB"], "reason": "ACID compliance"},
         )
 
         result = await memory_manager.recall("PostgreSQL", condensed=True)
@@ -81,13 +82,14 @@ class TestCondensedRecall:
     @pytest.mark.asyncio
     async def test_condensed_truncates_long_content(self, memory_manager):
         """Condensed mode should truncate content over 150 chars."""
-        long_content = "This is a very long learning content that needs to be truncated " * 10  # >150 chars
-        await memory_manager.remember(
-            category="learning",
-            content=long_content
-        )
+        long_content = (
+            "This is a very long learning content that needs to be truncated " * 10
+        )  # >150 chars
+        await memory_manager.remember(category="learning", content=long_content)
 
-        result = await memory_manager.recall("long learning content truncated", condensed=True)
+        result = await memory_manager.recall(
+            "long learning content truncated", condensed=True
+        )
         assert len(result["learnings"]) > 0, f"No learnings found. Result: {result}"
         learning = result["learnings"][0]
         # Should be truncated to ~150 chars with ellipsis
@@ -101,7 +103,7 @@ class TestCondensedRecall:
             category="decision",
             content="Use Redis for caching",
             rationale="Fast in-memory store",
-            context={"alternatives": ["Memcached"]}
+            context={"alternatives": ["Memcached"]},
         )
 
         result = await memory_manager.recall("Redis", condensed=False)
@@ -117,7 +119,7 @@ class TestCondensedRecall:
         await memory_manager.remember(
             category="decision",
             content="Test caching behavior",
-            rationale="Important rationale"
+            rationale="Important rationale",
         )
 
         # First call: condensed
@@ -143,11 +145,11 @@ class TestCondensedBriefing:
         await memory_manager.remember(
             category="decision",
             content="Auth decision with long rationale",
-            rationale="This is very detailed rationale that would bloat the response"
+            rationale="This is very detailed rationale that would bloat the response",
         )
 
         # Import server and call _prefetch_focus_areas
-        from daem0nmcp.server import _prefetch_focus_areas, ProjectContext
+        from daem0nmcp.server import ProjectContext, _prefetch_focus_areas
 
         # Create a minimal project context
         ctx = ProjectContext(
@@ -155,7 +157,7 @@ class TestCondensedBriefing:
             rules_engine=None,
             db_manager=None,
             project_path="/test",
-            storage_path="/test/.daem0nmcp"
+            storage_path="/test/.daem0nmcp",
         )
 
         # Mock recall to capture the condensed parameter
@@ -172,7 +174,9 @@ class TestCondensedBriefing:
 
         # Should have called recall with condensed=True
         assert len(called_with_condensed) > 0, "recall should have been called"
-        assert called_with_condensed[0] is True, "Should use condensed=True for focus areas"
+        assert called_with_condensed[0] is True, (
+            "Should use condensed=True for focus areas"
+        )
 
 
 class TestEndlessModeMCP:
@@ -181,6 +185,7 @@ class TestEndlessModeMCP:
     @pytest.fixture
     def db_manager(self, tmp_path):
         from daem0nmcp.database import DatabaseManager
+
         return DatabaseManager(str(tmp_path / "storage"))
 
     @pytest.mark.asyncio
@@ -189,6 +194,7 @@ class TestEndlessModeMCP:
         await db_manager.init_db()
 
         from daem0nmcp import server
+
         server._project_contexts.clear()
 
         project_path = str(db_manager.storage_path.parent.parent)
@@ -201,25 +207,22 @@ class TestEndlessModeMCP:
         ctx.memory_manager._qdrant = None
 
         # Use context_check to satisfy counsel requirement
-        with patch.object(ctx.rules_engine, 'check_rules', return_value={}):
+        with patch.object(ctx.rules_engine, "check_rules", return_value={}):
             await server.context_check(
-                description="Testing condensed parameter",
-                project_path=project_path
+                description="Testing condensed parameter", project_path=project_path
             )
 
         await server.remember(
             category="decision",
             content="Use JWT tokens for authentication",
             rationale="Need stateless auth for horizontal scaling",
-            project_path=project_path
+            project_path=project_path,
         )
 
         # Call recall with condensed=True via MCP tool
         # Search with content keywords for reliable matching
         result = await server.recall(
-            topic="JWT authentication",
-            project_path=project_path,
-            condensed=True
+            topic="JWT authentication", project_path=project_path, condensed=True
         )
 
         # Should have results
@@ -228,7 +231,9 @@ class TestEndlessModeMCP:
 
         # Condensed output should NOT have rationale
         decision = result["decisions"][0]
-        assert decision.get("rationale") is None, f"Condensed mode should strip rationale, got: {decision}"
+        assert decision.get("rationale") is None, (
+            f"Condensed mode should strip rationale, got: {decision}"
+        )
 
     @pytest.mark.asyncio
     async def test_recall_tool_condensed_vs_full(self, db_manager):
@@ -236,6 +241,7 @@ class TestEndlessModeMCP:
         await db_manager.init_db()
 
         from daem0nmcp import server
+
         server._project_contexts.clear()
 
         project_path = str(db_manager.storage_path.parent.parent)
@@ -248,37 +254,39 @@ class TestEndlessModeMCP:
         ctx.memory_manager._qdrant = None
 
         # Use context_check to satisfy counsel requirement
-        with patch.object(ctx.rules_engine, 'check_rules', return_value={}):
+        with patch.object(ctx.rules_engine, "check_rules", return_value={}):
             await server.context_check(
-                description="Testing condensed vs full mode",
-                project_path=project_path
+                description="Testing condensed vs full mode", project_path=project_path
             )
 
         await server.remember(
             category="decision",
             content="Use PostgreSQL database for persistence",
             rationale="We chose PostgreSQL because of ACID compliance",
-            project_path=project_path
+            project_path=project_path,
         )
 
         # Call with condensed=False (default)
         full_result = await server.recall(
-            topic="PostgreSQL database",
-            project_path=project_path,
-            condensed=False
+            topic="PostgreSQL database", project_path=project_path, condensed=False
         )
 
         # Call with condensed=True
         condensed_result = await server.recall(
-            topic="PostgreSQL database",
-            project_path=project_path,
-            condensed=True
+            topic="PostgreSQL database", project_path=project_path, condensed=True
         )
 
         # Full should have rationale
-        assert len(full_result["decisions"]) > 0, f"Expected decisions in full result: {full_result}"
-        assert full_result["decisions"][0]["rationale"] == "We chose PostgreSQL because of ACID compliance"
+        assert len(full_result["decisions"]) > 0, (
+            f"Expected decisions in full result: {full_result}"
+        )
+        assert (
+            full_result["decisions"][0]["rationale"]
+            == "We chose PostgreSQL because of ACID compliance"
+        )
 
         # Condensed should NOT have rationale
-        assert len(condensed_result["decisions"]) > 0, f"Expected decisions in condensed result: {condensed_result}"
+        assert len(condensed_result["decisions"]) > 0, (
+            f"Expected decisions in condensed result: {condensed_result}"
+        )
         assert condensed_result["decisions"][0].get("rationale") is None

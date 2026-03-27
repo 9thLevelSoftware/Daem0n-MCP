@@ -5,9 +5,9 @@ import json
 import pytest
 
 from daem0nmcp.claude_hooks.install import (
+    _is_daem0n_entry,
     install_claude_hooks,
     uninstall_claude_hooks,
-    _is_daem0n_entry,
 )
 
 
@@ -30,14 +30,21 @@ class TestIsDevilEntry:
     def test_detects_new_hooks(self):
         entry = {
             "matcher": "Edit|Write",
-            "hooks": [{"type": "command", "command": '"python" -m daem0nmcp.claude_hooks.pre_edit'}],
+            "hooks": [
+                {
+                    "type": "command",
+                    "command": '"python" -m daem0nmcp.claude_hooks.pre_edit',
+                }
+            ],
         }
         assert _is_daem0n_entry(entry) is True
 
     def test_detects_legacy_hooks(self):
         entry = {
             "matcher": "Edit",
-            "hooks": [{"type": "command", "command": "python hooks/daem0n_pre_edit_hook.py"}],
+            "hooks": [
+                {"type": "command", "command": "python hooks/daem0n_pre_edit_hook.py"}
+            ],
         }
         assert _is_daem0n_entry(entry) is True
 
@@ -96,7 +103,12 @@ class TestInstall:
                 "PreToolUse": [
                     {
                         "matcher": "Edit",
-                        "hooks": [{"type": "command", "command": "python hooks/daem0n_pre_edit_hook.py"}],
+                        "hooks": [
+                            {
+                                "type": "command",
+                                "command": "python hooks/daem0n_pre_edit_hook.py",
+                            }
+                        ],
                     }
                 ]
             }
@@ -119,11 +131,18 @@ class TestInstall:
                 "SessionStart": [
                     {
                         "matcher": "",
-                        "hooks": [{"type": "command", "command": '"python" -m daem0nmcp.claude_hooks.session_start'}],
+                        "hooks": [
+                            {
+                                "type": "command",
+                                "command": '"python" -m daem0nmcp.claude_hooks.session_start',
+                            }
+                        ],
                     },
                     {
                         "matcher": "",
-                        "hooks": [{"type": "command", "command": "node gsd-check-update.js"}],
+                        "hooks": [
+                            {"type": "command", "command": "node gsd-check-update.js"}
+                        ],
                     },
                 ]
             }
@@ -139,7 +158,10 @@ class TestInstall:
         # Non-Daem0n GSD entry is preserved
         assert "gsd-check-update.js" in session_start[0]["hooks"][0]["command"]
         # New Daem0n SessionStart entry is added
-        assert "daem0nmcp.claude_hooks.session_start" in session_start[1]["hooks"][0]["command"]
+        assert (
+            "daem0nmcp.claude_hooks.session_start"
+            in session_start[1]["hooks"][0]["command"]
+        )
 
     def test_dry_run_no_write(self, fake_settings):
         ok, msg = install_claude_hooks(dry_run=True)

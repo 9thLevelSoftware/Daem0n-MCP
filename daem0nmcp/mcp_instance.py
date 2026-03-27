@@ -14,14 +14,17 @@ By isolating the FastMCP instance here, tool modules can be extracted from
 server.py without creating circular dependencies.
 """
 
-import os
 import logging
+import os
 import sys
 
 try:
     from fastmcp import FastMCP
 except ImportError:
-    print("ERROR: fastmcp not installed. Run: pip install fastmcp>=3.0.0b1", file=sys.stderr)
+    print(
+        "ERROR: fastmcp not installed. Run: pip install fastmcp>=3.0.0b1",
+        file=sys.stderr,
+    )
     sys.exit(1)
 
 try:
@@ -34,15 +37,15 @@ except ImportError:
 # Configure logging
 logging.basicConfig(
     level=getattr(logging, settings.log_level),
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
 )
 logger = logging.getLogger(__name__)
 
 # Configure structured logging (optional - only if env var set)
-if os.getenv('DAEM0NMCP_STRUCTURED_LOGS'):
+if os.getenv("DAEM0NMCP_STRUCTURED_LOGS"):
     handler = logging.StreamHandler()
     handler.setFormatter(StructuredFormatter())
-    daem0n_logger = logging.getLogger('daem0nmcp')
+    daem0n_logger = logging.getLogger("daem0nmcp")
     daem0n_logger.addHandler(handler)
     daem0n_logger.setLevel(logging.INFO)
 

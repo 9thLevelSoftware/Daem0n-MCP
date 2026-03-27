@@ -1,24 +1,24 @@
 """Consolidated workflow tools: commune, consult, inscribe, reflect, understand, govern, explore, maintain."""
 
 import logging
-from typing import Dict, List, Optional, Any
+from typing import Any
 
 try:
-    from ..mcp_instance import mcp
     from .. import __version__
     from ..context_manager import (
         _default_project_path,
         _missing_project_path_error,
     )
     from ..logging_config import with_request_id
+    from ..mcp_instance import mcp
 except ImportError:
-    from daem0nmcp.mcp_instance import mcp
     from daem0nmcp import __version__
     from daem0nmcp.context_manager import (
         _default_project_path,
         _missing_project_path_error,
     )
     from daem0nmcp.logging_config import with_request_id
+    from daem0nmcp.mcp_instance import mcp
 
 from ._deprecation import workflow_call
 
@@ -39,17 +39,17 @@ logger = logging.getLogger(__name__)
 @with_request_id
 async def commune(
     action: str,
-    project_path: Optional[str] = None,
-    focus_areas: Optional[List[str]] = None,
+    project_path: str | None = None,
+    focus_areas: list[str] | None = None,
     visual: bool = False,
-    file_path: Optional[str] = None,
-    tags: Optional[List[str]] = None,
-    entities: Optional[List[str]] = None,
+    file_path: str | None = None,
+    tags: list[str] | None = None,
+    entities: list[str] | None = None,
     limit: int = 5,
-    since: Optional[str] = None,
+    since: str | None = None,
     interval_seconds: int = 10,
-    parent_community_id: Optional[int] = None,
-) -> Dict[str, Any]:
+    parent_community_id: int | None = None,
+) -> dict[str, Any]:
     """
     Session start & status operations.
 
@@ -91,41 +91,41 @@ async def commune(
 @with_request_id
 async def consult(
     action: str,
-    project_path: Optional[str] = None,
+    project_path: str | None = None,
     # preflight params
-    description: Optional[str] = None,
+    description: str | None = None,
     # recall params
-    topic: Optional[str] = None,
-    categories: Optional[List[str]] = None,
-    tags: Optional[List[str]] = None,
-    file_path: Optional[str] = None,
+    topic: str | None = None,
+    categories: list[str] | None = None,
+    tags: list[str] | None = None,
+    file_path: str | None = None,
     offset: int = 0,
     limit: int = 10,
-    since: Optional[str] = None,
-    until: Optional[str] = None,
+    since: str | None = None,
+    until: str | None = None,
     include_linked: bool = False,
     visual: bool = False,
     condensed: bool = False,
     # recall_entity params
-    entity_name: Optional[str] = None,
-    entity_type: Optional[str] = None,
+    entity_name: str | None = None,
+    entity_type: str | None = None,
     # recall_hierarchical params
     include_members: bool = False,
     # search params
-    query: Optional[str] = None,
+    query: str | None = None,
     include_meta: bool = False,
     highlight: bool = False,
     highlight_start: str = "<b>",
     highlight_end: str = "</b>",
     # check_rules params
-    action_desc: Optional[str] = None,
-    context: Optional[Dict[str, Any]] = None,
+    action_desc: str | None = None,
+    context: dict[str, Any] | None = None,
     # compress params
-    compress_text: Optional[str] = None,
-    rate: Optional[float] = None,
-    content_type: Optional[str] = None,
+    compress_text: str | None = None,
+    rate: float | None = None,
+    content_type: str | None = None,
     preserve_code: bool = True,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """
     Pre-action intelligence gathering.
 
@@ -185,34 +185,34 @@ async def consult(
 @with_request_id
 async def inscribe(
     action: str,
-    project_path: Optional[str] = None,
+    project_path: str | None = None,
     # remember params
-    category: Optional[str] = None,
-    content: Optional[str] = None,
-    rationale: Optional[str] = None,
-    context: Optional[Dict[str, Any]] = None,
-    tags: Optional[List[str]] = None,
-    file_path: Optional[str] = None,
-    happened_at: Optional[str] = None,
+    category: str | None = None,
+    content: str | None = None,
+    rationale: str | None = None,
+    context: dict[str, Any] | None = None,
+    tags: list[str] | None = None,
+    file_path: str | None = None,
+    happened_at: str | None = None,
     # remember_batch params
-    memories: Optional[List[Dict[str, Any]]] = None,
+    memories: list[dict[str, Any]] | None = None,
     # link/unlink params
-    source_id: Optional[int] = None,
-    target_id: Optional[int] = None,
-    relationship: Optional[str] = None,
-    description: Optional[str] = None,
+    source_id: int | None = None,
+    target_id: int | None = None,
+    relationship: str | None = None,
+    description: str | None = None,
     # pin/activate/deactivate params
-    memory_id: Optional[int] = None,
+    memory_id: int | None = None,
     pinned: bool = True,
     # activate params
-    reason: Optional[str] = None,
+    reason: str | None = None,
     priority: int = 0,
-    expires_in_hours: Optional[int] = None,
+    expires_in_hours: int | None = None,
     # ingest params
-    url: Optional[str] = None,
-    topic: Optional[str] = None,
+    url: str | None = None,
+    topic: str | None = None,
     chunk_size: int = 2000,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """
     Memory writing & linking operations.
 
@@ -265,19 +265,19 @@ async def inscribe(
 @with_request_id
 async def reflect(
     action: str,
-    project_path: Optional[str] = None,
+    project_path: str | None = None,
     # outcome params
-    memory_id: Optional[int] = None,
-    outcome_text: Optional[str] = None,
-    worked: Optional[bool] = None,
+    memory_id: int | None = None,
+    outcome_text: str | None = None,
+    worked: bool | None = None,
     # verify params
-    text: Optional[str] = None,
-    categories: Optional[List[str]] = None,
-    as_of_time: Optional[str] = None,
+    text: str | None = None,
+    categories: list[str] | None = None,
+    as_of_time: str | None = None,
     # execute params
-    code: Optional[str] = None,
-    timeout_seconds: Optional[int] = None,
-) -> Dict[str, Any]:
+    code: str | None = None,
+    timeout_seconds: int | None = None,
+) -> dict[str, Any]:
     """
     Outcomes & verification operations.
 
@@ -317,21 +317,21 @@ async def reflect(
 @with_request_id
 async def understand(
     action: str,
-    project_path: Optional[str] = None,
+    project_path: str | None = None,
     # index params
-    path: Optional[str] = None,
-    patterns: Optional[List[str]] = None,
+    path: str | None = None,
+    patterns: list[str] | None = None,
     # find params
-    query: Optional[str] = None,
+    query: str | None = None,
     limit: int = 20,
     # impact params
-    entity_name: Optional[str] = None,
+    entity_name: str | None = None,
     # todos params
     auto_remember: bool = False,
-    types: Optional[List[str]] = None,
+    types: list[str] | None = None,
     # refactor params
-    file_path: Optional[str] = None,
-) -> Dict[str, Any]:
+    file_path: str | None = None,
+) -> dict[str, Any]:
     """
     Code comprehension operations.
 
@@ -372,30 +372,30 @@ async def understand(
 @with_request_id
 async def govern(
     action: str,
-    project_path: Optional[str] = None,
+    project_path: str | None = None,
     # add_rule params
-    trigger: Optional[str] = None,
-    must_do: Optional[List[str]] = None,
-    must_not: Optional[List[str]] = None,
-    ask_first: Optional[List[str]] = None,
-    warnings: Optional[List[str]] = None,
+    trigger: str | None = None,
+    must_do: list[str] | None = None,
+    must_not: list[str] | None = None,
+    ask_first: list[str] | None = None,
+    warnings: list[str] | None = None,
     priority: int = 0,
     # update_rule params
-    rule_id: Optional[int] = None,
-    enabled: Optional[bool] = None,
+    rule_id: int | None = None,
+    enabled: bool | None = None,
     # list_rules params
     enabled_only: bool = True,
     limit: int = 50,
     # add_trigger params
-    trigger_type: Optional[str] = None,
-    pattern: Optional[str] = None,
-    recall_topic: Optional[str] = None,
-    recall_categories: Optional[List[str]] = None,
+    trigger_type: str | None = None,
+    pattern: str | None = None,
+    recall_topic: str | None = None,
+    recall_categories: list[str] | None = None,
     # list_triggers params
     active_only: bool = True,
     # remove_trigger params
-    trigger_id: Optional[int] = None,
-) -> Dict[str, Any]:
+    trigger_id: int | None = None,
+) -> dict[str, Any]:
     """
     Rules & triggers management.
 
@@ -446,39 +446,39 @@ async def govern(
 @with_request_id
 async def explore(
     action: str,
-    project_path: Optional[str] = None,
+    project_path: str | None = None,
     # related params
-    memory_id: Optional[int] = None,
-    relationship_types: Optional[List[str]] = None,
+    memory_id: int | None = None,
+    relationship_types: list[str] | None = None,
     direction: str = "both",
     max_depth: int = 2,
     # chain params
-    start_memory_id: Optional[int] = None,
-    end_memory_id: Optional[int] = None,
+    start_memory_id: int | None = None,
+    end_memory_id: int | None = None,
     # graph params
-    memory_ids: Optional[List[int]] = None,
-    topic: Optional[str] = None,
+    memory_ids: list[int] | None = None,
+    topic: str | None = None,
     format: str = "json",
     visual: bool = False,
     include_orphans: bool = False,
     # communities params
-    level: Optional[int] = None,
-    parent_community_id: Optional[int] = None,
+    level: int | None = None,
+    parent_community_id: int | None = None,
     # community_detail params
-    community_id: Optional[int] = None,
+    community_id: int | None = None,
     # rebuild_communities params
     min_community_size: int = 2,
     resolution: float = 1.0,
     # entities params
-    entity_type: Optional[str] = None,
+    entity_type: str | None = None,
     limit: int = 20,
     # evolution params
-    entity_name: Optional[str] = None,
+    entity_name: str | None = None,
     include_invalidated: bool = True,
-    entity_id: Optional[int] = None,
+    entity_id: int | None = None,
     # at_time params
-    timestamp: Optional[str] = None,
-) -> Dict[str, Any]:
+    timestamp: str | None = None,
+) -> dict[str, Any]:
     """
     Graph & discovery operations.
 
@@ -536,34 +536,34 @@ async def explore(
 @with_request_id
 async def maintain(
     action: str,
-    project_path: Optional[str] = None,
+    project_path: str | None = None,
     # prune params
     older_than_days: int = 90,
-    categories: Optional[List[str]] = None,
+    categories: list[str] | None = None,
     min_recall_count: int = 5,
     protect_successful: bool = True,
     dry_run: bool = True,
     # archive params
-    memory_id: Optional[int] = None,
+    memory_id: int | None = None,
     archived: bool = True,
     # cleanup params
     merge_duplicates: bool = True,
     # compact params
-    summary: Optional[str] = None,
+    summary: str | None = None,
     limit: int = 10,
-    topic: Optional[str] = None,
+    topic: str | None = None,
     # export params
     include_vectors: bool = False,
     # import_data params
-    data: Optional[Dict[str, Any]] = None,
+    data: dict[str, Any] | None = None,
     merge: bool = True,
     # link_project params
-    linked_path: Optional[str] = None,
+    linked_path: str | None = None,
     relationship: str = "related",
-    label: Optional[str] = None,
+    label: str | None = None,
     # consolidate params
     archive_sources: bool = False,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """
     Housekeeping & federation operations.
 

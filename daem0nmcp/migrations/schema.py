@@ -4,22 +4,28 @@ Database migrations for Daem0nMCP.
 Handles schema updates for existing databases.
 """
 
-import sqlite3
 import logging
+import sqlite3
 from pathlib import Path
-from typing import List, Tuple
 
 logger = logging.getLogger(__name__)
 
 # Migration definitions: (version, description, sql_statements)
-MIGRATIONS: List[Tuple[int, str, List[str]]] = [
-    (1, "Add vector_embedding column", [
-        """
+MIGRATIONS: list[tuple[int, str, list[str]]] = [
+    (
+        1,
+        "Add vector_embedding column",
+        [
+            """
         ALTER TABLE memories ADD COLUMN vector_embedding BLOB;
         """
-    ]),
-    (2, "Create FTS5 virtual table for full-text search", [
-        """
+        ],
+    ),
+    (
+        2,
+        "Create FTS5 virtual table for full-text search",
+        [
+            """
         CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(
             content,
             rationale,
@@ -28,7 +34,7 @@ MIGRATIONS: List[Tuple[int, str, List[str]]] = [
             content_rowid='id'
         );
         """,
-        """
+            """
         INSERT OR IGNORE INTO memories_fts(rowid, content, rationale, tags)
         SELECT
             id,
@@ -37,21 +43,21 @@ MIGRATIONS: List[Tuple[int, str, List[str]]] = [
             COALESCE((SELECT group_concat(value, ' ') FROM json_each(tags)), '')
         FROM memories;
         """,
-        """
+            """
         CREATE TRIGGER IF NOT EXISTS memories_ai AFTER INSERT ON memories BEGIN
             INSERT INTO memories_fts(rowid, content, rationale, tags)
             SELECT new.id, new.content, COALESCE(new.rationale, ''),
                    COALESCE((SELECT group_concat(value, ' ') FROM json_each(new.tags)), '');
         END;
         """,
-        """
+            """
         CREATE TRIGGER IF NOT EXISTS memories_ad AFTER DELETE ON memories BEGIN
             INSERT INTO memories_fts(memories_fts, rowid, content, rationale, tags)
             SELECT 'delete', old.id, old.content, COALESCE(old.rationale, ''),
                    COALESCE((SELECT group_concat(value, ' ') FROM json_each(old.tags)), '');
         END;
         """,
-        """
+            """
         CREATE TRIGGER IF NOT EXISTS memories_au AFTER UPDATE ON memories BEGIN
             INSERT INTO memories_fts(memories_fts, rowid, content, rationale, tags)
             SELECT 'delete', old.id, old.content, COALESCE(old.rationale, ''),
@@ -60,61 +66,79 @@ MIGRATIONS: List[Tuple[int, str, List[str]]] = [
             SELECT new.id, new.content, COALESCE(new.rationale, ''),
                    COALESCE((SELECT group_concat(value, ' ') FROM json_each(new.tags)), '');
         END;
-        """
-    ]),
-    (3, "Add pinned and archived columns to memories", [
-        "ALTER TABLE memories ADD COLUMN pinned BOOLEAN DEFAULT 0;",
-        "ALTER TABLE memories ADD COLUMN archived BOOLEAN DEFAULT 0;"
-    ]),
-    (4, "Add file_path_relative column to memories", [
-        "ALTER TABLE memories ADD COLUMN file_path_relative TEXT;",
-        "CREATE INDEX IF NOT EXISTS idx_memories_file_path_relative ON memories(file_path_relative);"
-    ]),
-    (5, "Track last_modified for index freshness", [
-        """
+        """,
+        ],
+    ),
+    (
+        3,
+        "Add pinned and archived columns to memories",
+        [
+            "ALTER TABLE memories ADD COLUMN pinned BOOLEAN DEFAULT 0;",
+            "ALTER TABLE memories ADD COLUMN archived BOOLEAN DEFAULT 0;",
+        ],
+    ),
+    (
+        4,
+        "Add file_path_relative column to memories",
+        [
+            "ALTER TABLE memories ADD COLUMN file_path_relative TEXT;",
+            "CREATE INDEX IF NOT EXISTS idx_memories_file_path_relative ON memories(file_path_relative);",
+        ],
+    ),
+    (
+        5,
+        "Track last_modified for index freshness",
+        [
+            """
         CREATE TABLE IF NOT EXISTS meta (
             key TEXT PRIMARY KEY,
             value TEXT
         );
         """,
-        "INSERT OR IGNORE INTO meta(key, value) VALUES('memories_last_modified', CURRENT_TIMESTAMP);",
-        "INSERT OR IGNORE INTO meta(key, value) VALUES('rules_last_modified', CURRENT_TIMESTAMP);",
-        """
+            "INSERT OR IGNORE INTO meta(key, value) VALUES('memories_last_modified', CURRENT_TIMESTAMP);",
+            "INSERT OR IGNORE INTO meta(key, value) VALUES('rules_last_modified', CURRENT_TIMESTAMP);",
+            """
         CREATE TRIGGER IF NOT EXISTS memories_touch_ins AFTER INSERT ON memories BEGIN
             UPDATE meta SET value = CURRENT_TIMESTAMP WHERE key = 'memories_last_modified';
         END;
         """,
-        """
+            """
         CREATE TRIGGER IF NOT EXISTS memories_touch_upd AFTER UPDATE ON memories BEGIN
             UPDATE meta SET value = CURRENT_TIMESTAMP WHERE key = 'memories_last_modified';
         END;
         """,
-        """
+            """
         CREATE TRIGGER IF NOT EXISTS memories_touch_del AFTER DELETE ON memories BEGIN
             UPDATE meta SET value = CURRENT_TIMESTAMP WHERE key = 'memories_last_modified';
         END;
         """,
-        """
+            """
         CREATE TRIGGER IF NOT EXISTS rules_touch_ins AFTER INSERT ON rules BEGIN
             UPDATE meta SET value = CURRENT_TIMESTAMP WHERE key = 'rules_last_modified';
         END;
         """,
-        """
+            """
         CREATE TRIGGER IF NOT EXISTS rules_touch_upd AFTER UPDATE ON rules BEGIN
             UPDATE meta SET value = CURRENT_TIMESTAMP WHERE key = 'rules_last_modified';
         END;
         """,
-        """
+            """
         CREATE TRIGGER IF NOT EXISTS rules_touch_del AFTER DELETE ON rules BEGIN
             UPDATE meta SET value = CURRENT_TIMESTAMP WHERE key = 'rules_last_modified';
         END;
-        """
-    ]),
-    (6, "Add recall_count column for saliency-based pruning", [
-        "ALTER TABLE memories ADD COLUMN recall_count INTEGER DEFAULT 0;"
-    ]),
-    (7, "Add memory_relationships table for graph edges", [
-        """
+        """,
+        ],
+    ),
+    (
+        6,
+        "Add recall_count column for saliency-based pruning",
+        ["ALTER TABLE memories ADD COLUMN recall_count INTEGER DEFAULT 0;"],
+    ),
+    (
+        7,
+        "Add memory_relationships table for graph edges",
+        [
+            """
         CREATE TABLE IF NOT EXISTS memory_relationships (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             source_id INTEGER NOT NULL,
@@ -127,12 +151,16 @@ MIGRATIONS: List[Tuple[int, str, List[str]]] = [
             FOREIGN KEY (target_id) REFERENCES memories(id) ON DELETE CASCADE
         );
         """,
-        "CREATE INDEX IF NOT EXISTS idx_relationships_source ON memory_relationships(source_id);",
-        "CREATE INDEX IF NOT EXISTS idx_relationships_target ON memory_relationships(target_id);",
-        "CREATE INDEX IF NOT EXISTS idx_relationships_type ON memory_relationships(relationship);"
-    ]),
-    (8, "Add session_state and enforcement_bypass_log tables", [
-        """
+            "CREATE INDEX IF NOT EXISTS idx_relationships_source ON memory_relationships(source_id);",
+            "CREATE INDEX IF NOT EXISTS idx_relationships_target ON memory_relationships(target_id);",
+            "CREATE INDEX IF NOT EXISTS idx_relationships_type ON memory_relationships(relationship);",
+        ],
+    ),
+    (
+        8,
+        "Add session_state and enforcement_bypass_log tables",
+        [
+            """
         CREATE TABLE IF NOT EXISTS session_state (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             session_id TEXT NOT NULL UNIQUE,
@@ -144,8 +172,8 @@ MIGRATIONS: List[Tuple[int, str, List[str]]] = [
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
         """,
-        "CREATE INDEX IF NOT EXISTS idx_session_state_session_id ON session_state(session_id);",
-        """
+            "CREATE INDEX IF NOT EXISTS idx_session_state_session_id ON session_state(session_id);",
+            """
         CREATE TABLE IF NOT EXISTS enforcement_bypass_log (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -154,9 +182,13 @@ MIGRATIONS: List[Tuple[int, str, List[str]]] = [
             reason TEXT
         );
         """,
-    ]),
-    (9, "Add code_entities and memory_code_refs tables for Phase 2", [
-        """
+        ],
+    ),
+    (
+        9,
+        "Add code_entities and memory_code_refs tables for Phase 2",
+        [
+            """
         CREATE TABLE IF NOT EXISTS code_entities (
             id TEXT PRIMARY KEY,
             project_path TEXT NOT NULL,
@@ -175,11 +207,11 @@ MIGRATIONS: List[Tuple[int, str, List[str]]] = [
             indexed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
         """,
-        "CREATE INDEX IF NOT EXISTS idx_code_entities_project ON code_entities(project_path);",
-        "CREATE INDEX IF NOT EXISTS idx_code_entities_file ON code_entities(file_path);",
-        "CREATE INDEX IF NOT EXISTS idx_code_entities_name ON code_entities(name);",
-        "CREATE INDEX IF NOT EXISTS idx_code_entities_type ON code_entities(entity_type);",
-        """
+            "CREATE INDEX IF NOT EXISTS idx_code_entities_project ON code_entities(project_path);",
+            "CREATE INDEX IF NOT EXISTS idx_code_entities_file ON code_entities(file_path);",
+            "CREATE INDEX IF NOT EXISTS idx_code_entities_name ON code_entities(name);",
+            "CREATE INDEX IF NOT EXISTS idx_code_entities_type ON code_entities(entity_type);",
+            """
         CREATE TABLE IF NOT EXISTS memory_code_refs (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             memory_id INTEGER,
@@ -193,11 +225,15 @@ MIGRATIONS: List[Tuple[int, str, List[str]]] = [
             FOREIGN KEY (memory_id) REFERENCES memories(id) ON DELETE CASCADE
         );
         """,
-        "CREATE INDEX IF NOT EXISTS idx_memory_code_refs_memory ON memory_code_refs(memory_id);",
-        "CREATE INDEX IF NOT EXISTS idx_memory_code_refs_entity ON memory_code_refs(code_entity_id);",
-    ]),
-    (10, "Add project_links table for cross-repo awareness", [
-        """
+            "CREATE INDEX IF NOT EXISTS idx_memory_code_refs_memory ON memory_code_refs(memory_id);",
+            "CREATE INDEX IF NOT EXISTS idx_memory_code_refs_entity ON memory_code_refs(code_entity_id);",
+        ],
+    ),
+    (
+        10,
+        "Add project_links table for cross-repo awareness",
+        [
+            """
         CREATE TABLE IF NOT EXISTS project_links (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             source_path TEXT NOT NULL,
@@ -207,11 +243,15 @@ MIGRATIONS: List[Tuple[int, str, List[str]]] = [
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
         """,
-        "CREATE INDEX IF NOT EXISTS idx_project_links_source ON project_links(source_path);",
-        "CREATE UNIQUE INDEX IF NOT EXISTS idx_project_links_unique ON project_links(source_path, linked_path);"
-    ]),
-    (11, "Add file_hashes table for incremental indexing", [
-        """
+            "CREATE INDEX IF NOT EXISTS idx_project_links_source ON project_links(source_path);",
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_project_links_unique ON project_links(source_path, linked_path);",
+        ],
+    ),
+    (
+        11,
+        "Add file_hashes table for incremental indexing",
+        [
+            """
         CREATE TABLE IF NOT EXISTS file_hashes (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             project_path TEXT NOT NULL,
@@ -221,14 +261,22 @@ MIGRATIONS: List[Tuple[int, str, List[str]]] = [
             UNIQUE(project_path, file_path)
         );
         """,
-        "CREATE INDEX IF NOT EXISTS idx_file_hashes_project ON file_hashes(project_path);",
-    ]),
-    (12, "Add surprise_score and importance_score columns to memories", [
-        "ALTER TABLE memories ADD COLUMN surprise_score REAL;",
-        "ALTER TABLE memories ADD COLUMN importance_score REAL;",
-    ]),
-    (13, "Add facts table for static knowledge (Engram-inspired)", [
-        """
+            "CREATE INDEX IF NOT EXISTS idx_file_hashes_project ON file_hashes(project_path);",
+        ],
+    ),
+    (
+        12,
+        "Add surprise_score and importance_score columns to memories",
+        [
+            "ALTER TABLE memories ADD COLUMN surprise_score REAL;",
+            "ALTER TABLE memories ADD COLUMN importance_score REAL;",
+        ],
+    ),
+    (
+        13,
+        "Add facts table for static knowledge (Engram-inspired)",
+        [
+            """
         CREATE TABLE IF NOT EXISTS facts (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             content_hash TEXT NOT NULL UNIQUE,
@@ -243,28 +291,37 @@ MIGRATIONS: List[Tuple[int, str, List[str]]] = [
             FOREIGN KEY (source_memory_id) REFERENCES memories(id) ON DELETE SET NULL
         );
         """,
-        "CREATE INDEX IF NOT EXISTS idx_facts_content_hash ON facts(content_hash);",
-        "CREATE INDEX IF NOT EXISTS idx_facts_category ON facts(category);",
-    ]),
-    (14, "Add bi-temporal columns to memory_versions", [
-        # Add valid_from column (when fact became true in reality)
-        "ALTER TABLE memory_versions ADD COLUMN valid_from TIMESTAMP;",
-        # Add valid_to column (when fact was superseded, NULL = still valid)
-        "ALTER TABLE memory_versions ADD COLUMN valid_to TIMESTAMP;",
-        # Add invalidated_by_version_id column (for contradiction tracking)
-        "ALTER TABLE memory_versions ADD COLUMN invalidated_by_version_id INTEGER REFERENCES memory_versions(id);",
-        # Backfill valid_from with changed_at for existing records (backwards compatible)
-        "UPDATE memory_versions SET valid_from = changed_at WHERE valid_from IS NULL;",
-        # Create temporal index for point-in-time queries (valid time dimension)
-        "CREATE INDEX IF NOT EXISTS idx_memory_versions_temporal ON memory_versions(memory_id, valid_from);",
-        # Create index for transaction time queries
-        "CREATE INDEX IF NOT EXISTS idx_memory_versions_transaction ON memory_versions(memory_id, changed_at);",
-    ]),
-    (15, "Add source_client and source_model columns to memories for LLM compatibility tracking", [
-        "ALTER TABLE memories ADD COLUMN source_client TEXT;",
-        "ALTER TABLE memories ADD COLUMN source_model TEXT;",
-        "CREATE INDEX IF NOT EXISTS idx_memories_source_client ON memories(source_client);",
-    ]),
+            "CREATE INDEX IF NOT EXISTS idx_facts_content_hash ON facts(content_hash);",
+            "CREATE INDEX IF NOT EXISTS idx_facts_category ON facts(category);",
+        ],
+    ),
+    (
+        14,
+        "Add bi-temporal columns to memory_versions",
+        [
+            # Add valid_from column (when fact became true in reality)
+            "ALTER TABLE memory_versions ADD COLUMN valid_from TIMESTAMP;",
+            # Add valid_to column (when fact was superseded, NULL = still valid)
+            "ALTER TABLE memory_versions ADD COLUMN valid_to TIMESTAMP;",
+            # Add invalidated_by_version_id column (for contradiction tracking)
+            "ALTER TABLE memory_versions ADD COLUMN invalidated_by_version_id INTEGER REFERENCES memory_versions(id);",
+            # Backfill valid_from with changed_at for existing records (backwards compatible)
+            "UPDATE memory_versions SET valid_from = changed_at WHERE valid_from IS NULL;",
+            # Create temporal index for point-in-time queries (valid time dimension)
+            "CREATE INDEX IF NOT EXISTS idx_memory_versions_temporal ON memory_versions(memory_id, valid_from);",
+            # Create index for transaction time queries
+            "CREATE INDEX IF NOT EXISTS idx_memory_versions_transaction ON memory_versions(memory_id, changed_at);",
+        ],
+    ),
+    (
+        15,
+        "Add source_client and source_model columns to memories for LLM compatibility tracking",
+        [
+            "ALTER TABLE memories ADD COLUMN source_client TEXT;",
+            "ALTER TABLE memories ADD COLUMN source_model TEXT;",
+            "CREATE INDEX IF NOT EXISTS idx_memories_source_client ON memories(source_client);",
+        ],
+    ),
 ]
 
 
@@ -302,7 +359,7 @@ def check_column_exists(conn: sqlite3.Connection, table: str, column: str) -> bo
     return column in columns
 
 
-def run_migrations(db_path: str) -> Tuple[int, List[str]]:
+def run_migrations(db_path: str) -> tuple[int, list[str]]:
     """
     Run all pending migrations on the database.
 
@@ -344,7 +401,9 @@ def run_migrations(db_path: str) -> Tuple[int, List[str]]:
                         column = parts[column_idx]
 
                         if check_column_exists(conn, table, column):
-                            logger.info(f"  Column {column} already exists in {table}, skipping")
+                            logger.info(
+                                f"  Column {column} already exists in {table}, skipping"
+                            )
                             continue
 
                     try:
@@ -358,8 +417,7 @@ def run_migrations(db_path: str) -> Tuple[int, List[str]]:
 
                 # Record migration
                 conn.execute(
-                    "INSERT INTO schema_version (version) VALUES (?)",
-                    (version,)
+                    "INSERT INTO schema_version (version) VALUES (?)", (version,)
                 )
                 conn.commit()
                 applied.append(f"v{version}: {description}")
@@ -392,7 +450,7 @@ def migrate_and_backfill_vectors(db_path: str) -> dict:
         "schema_migrations": count,
         "applied": applied,
         "vectors_backfilled": 0,
-        "vectors_available": vectors.is_available()
+        "vectors_available": vectors.is_available(),
     }
 
     if not vectors.is_available():
@@ -417,7 +475,9 @@ def migrate_and_backfill_vectors(db_path: str) -> dict:
         memories = cursor.fetchall()
 
         if not memories:
-            result["message"] = f"Schema updated ({count} migrations). All memories already have vectors."
+            result["message"] = (
+                f"Schema updated ({count} migrations). All memories already have vectors."
+            )
             return result
 
         logger.info(f"Backfilling vectors for {len(memories)} memories...")
@@ -431,7 +491,7 @@ def migrate_and_backfill_vectors(db_path: str) -> dict:
             if embedding:
                 cursor.execute(
                     "UPDATE memories SET vector_embedding = ? WHERE id = ?",
-                    (embedding, mem_id)
+                    (embedding, mem_id),
                 )
                 result["vectors_backfilled"] += 1
 
@@ -460,7 +520,7 @@ def main():
 
     print("\nMigration complete:")
     print(f"  Schema migrations: {result['schema_migrations']}")
-    for m in result.get('applied', []):
+    for m in result.get("applied", []):
         print(f"    - {m}")
     print(f"  Vectors backfilled: {result['vectors_backfilled']}")
     print(f"  Vectors available: {result['vectors_available']}")
@@ -471,4 +531,5 @@ def main():
 
 if __name__ == "__main__":
     import sys
+
     sys.exit(main())

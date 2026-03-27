@@ -1,9 +1,10 @@
 """Tests for index freshness tracking."""
 
-import pytest
-import tempfile
 import shutil
+import tempfile
 import time
+
+import pytest
 
 
 class TestIndexFreshness:
@@ -18,10 +19,11 @@ class TestIndexFreshness:
     @pytest.mark.asyncio
     async def test_memory_index_rebuilds_after_external_change(self, temp_storage):
         """Verify TF-IDF index rebuilds when DB is modified externally."""
-        from daem0nmcp.database import DatabaseManager
-        from daem0nmcp.memory import MemoryManager
         import sqlite3
         import time
+
+        from daem0nmcp.database import DatabaseManager
+        from daem0nmcp.memory import MemoryManager
 
         db = DatabaseManager(temp_storage)
         await db.init_db()
@@ -32,7 +34,7 @@ class TestIndexFreshness:
             await manager.remember(
                 category="decision",
                 content="Use PostgreSQL for database",
-                tags=["database"]
+                tags=["database"],
             )
             result1 = await manager.recall("PostgreSQL")
             assert result1["found"] >= 1
@@ -52,7 +54,9 @@ class TestIndexFreshness:
 
             # Force freshness check - should detect change and rebuild
             rebuilt = await manager._check_index_freshness()
-            assert rebuilt is True, "Index should have been rebuilt after external change"
+            assert rebuilt is True, (
+                "Index should have been rebuilt after external change"
+            )
 
             # Now search should find the new memory
             result2 = await manager.recall("Redis caching")

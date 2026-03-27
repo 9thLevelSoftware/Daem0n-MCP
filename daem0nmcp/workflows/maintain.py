@@ -18,26 +18,28 @@ Actions:
 
 import logging
 from collections import defaultdict
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from .errors import InvalidActionError, MissingParamError
 
 logger = logging.getLogger(__name__)
 
-VALID_ACTIONS = frozenset({
-    "prune",
-    "archive",
-    "cleanup",
-    "compact",
-    "rebuild_index",
-    "export",
-    "import_data",
-    "link_project",
-    "unlink_project",
-    "list_projects",
-    "consolidate",
-    "purge_dream_spam",
-})
+VALID_ACTIONS = frozenset(
+    {
+        "prune",
+        "archive",
+        "cleanup",
+        "compact",
+        "rebuild_index",
+        "export",
+        "import_data",
+        "link_project",
+        "unlink_project",
+        "list_projects",
+        "consolidate",
+        "purge_dream_spam",
+    }
+)
 
 
 async def dispatch(
@@ -46,40 +48,44 @@ async def dispatch(
     *,
     # prune params
     older_than_days: int = 90,
-    categories: Optional[List[str]] = None,
+    categories: list[str] | None = None,
     min_recall_count: int = 5,
     protect_successful: bool = True,
     dry_run: bool = True,
     # archive params
-    memory_id: Optional[int] = None,
+    memory_id: int | None = None,
     archived: bool = True,
     # cleanup params
     merge_duplicates: bool = True,
     # compact params
-    summary: Optional[str] = None,
+    summary: str | None = None,
     limit: int = 10,
-    topic: Optional[str] = None,
+    topic: str | None = None,
     # export params
     include_vectors: bool = False,
     # import_data params
-    data: Optional[Dict[str, Any]] = None,
+    data: dict[str, Any] | None = None,
     merge: bool = True,
     # link_project params
-    linked_path: Optional[str] = None,
+    linked_path: str | None = None,
     relationship: str = "related",
-    label: Optional[str] = None,
+    label: str | None = None,
     # consolidate params
     archive_sources: bool = False,
     **kwargs,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Dispatch action to appropriate handler."""
     if action not in VALID_ACTIONS:
         raise InvalidActionError(action, sorted(VALID_ACTIONS))
 
     if action == "prune":
         return await _do_prune(
-            project_path, older_than_days, categories,
-            min_recall_count, protect_successful, dry_run,
+            project_path,
+            older_than_days,
+            categories,
+            min_recall_count,
+            protect_successful,
+            dry_run,
         )
 
     elif action == "archive":
@@ -93,9 +99,7 @@ async def dispatch(
     elif action == "compact":
         if not summary:
             raise MissingParamError("summary", action)
-        return await _do_compact(
-            project_path, summary, limit, topic, dry_run
-        )
+        return await _do_compact(project_path, summary, limit, topic, dry_run)
 
     elif action == "rebuild_index":
         return await _do_rebuild_index(project_path)
@@ -111,9 +115,7 @@ async def dispatch(
     elif action == "link_project":
         if not linked_path:
             raise MissingParamError("linked_path", action)
-        return await _do_link_project(
-            project_path, linked_path, relationship, label
-        )
+        return await _do_link_project(project_path, linked_path, relationship, label)
 
     elif action == "unlink_project":
         if not linked_path:
@@ -135,11 +137,11 @@ async def dispatch(
 async def _do_prune(
     project_path: str,
     older_than_days: int,
-    categories: Optional[List[str]],
+    categories: list[str] | None,
     min_recall_count: int,
     protect_successful: bool,
     dry_run: bool,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Prune old low-value memories."""
     from ..server import prune_memories
 
@@ -155,7 +157,7 @@ async def _do_prune(
 
 async def _do_archive(
     project_path: str, memory_id: int, archived: bool
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Archive/unarchive a memory."""
     from ..server import archive_memory
 
@@ -166,7 +168,7 @@ async def _do_archive(
 
 async def _do_cleanup(
     project_path: str, dry_run: bool, merge_duplicates: bool
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Merge duplicate memories."""
     from ..server import cleanup_memories
 
@@ -181,9 +183,9 @@ async def _do_compact(
     project_path: str,
     summary: str,
     limit: int,
-    topic: Optional[str],
+    topic: str | None,
     dry_run: bool,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Consolidate recent episodic memories into a summary."""
     from ..server import compact_memories
 
@@ -196,41 +198,35 @@ async def _do_compact(
     )
 
 
-async def _do_rebuild_index(project_path: str) -> Dict[str, Any]:
+async def _do_rebuild_index(project_path: str) -> dict[str, Any]:
     """Force rebuild of TF-IDF/vector indexes."""
     from ..server import rebuild_index
 
     return await rebuild_index(project_path=project_path)
 
 
-async def _do_export(
-    project_path: str, include_vectors: bool
-) -> Dict[str, Any]:
+async def _do_export(project_path: str, include_vectors: bool) -> dict[str, Any]:
     """Export all memories and rules as JSON."""
     from ..server import export_data
 
-    return await export_data(
-        project_path=project_path, include_vectors=include_vectors
-    )
+    return await export_data(project_path=project_path, include_vectors=include_vectors)
 
 
 async def _do_import(
-    project_path: str, data: Dict[str, Any], merge: bool
-) -> Dict[str, Any]:
+    project_path: str, data: dict[str, Any], merge: bool
+) -> dict[str, Any]:
     """Import memories/rules from exported JSON."""
     from ..server import import_data
 
-    return await import_data(
-        data=data, project_path=project_path, merge=merge
-    )
+    return await import_data(data=data, project_path=project_path, merge=merge)
 
 
 async def _do_link_project(
     project_path: str,
     linked_path: str,
     relationship: str,
-    label: Optional[str],
-) -> Dict[str, Any]:
+    label: str | None,
+) -> dict[str, Any]:
     """Link to another project."""
     from ..server import link_projects
 
@@ -242,27 +238,21 @@ async def _do_link_project(
     )
 
 
-async def _do_unlink_project(
-    project_path: str, linked_path: str
-) -> Dict[str, Any]:
+async def _do_unlink_project(project_path: str, linked_path: str) -> dict[str, Any]:
     """Remove project link."""
     from ..server import unlink_projects
 
-    return await unlink_projects(
-        linked_path=linked_path, project_path=project_path
-    )
+    return await unlink_projects(linked_path=linked_path, project_path=project_path)
 
 
-async def _do_list_projects(project_path: str) -> Dict[str, Any]:
+async def _do_list_projects(project_path: str) -> dict[str, Any]:
     """List all linked projects."""
     from ..server import list_linked_projects
 
     return await list_linked_projects(project_path=project_path)
 
 
-async def _do_consolidate(
-    project_path: str, archive_sources: bool
-) -> Dict[str, Any]:
+async def _do_consolidate(project_path: str, archive_sources: bool) -> dict[str, Any]:
     """Merge memories from all linked projects."""
     from ..server import consolidate_linked_databases
 
@@ -271,9 +261,7 @@ async def _do_consolidate(
     )
 
 
-async def _do_purge_dream_spam(
-    project_path: str, dry_run: bool
-) -> Dict[str, Any]:
+async def _do_purge_dream_spam(project_path: str, dry_run: bool) -> dict[str, Any]:
     """Deduplicate dream re-evaluation and summary memories.
 
     For re-evaluations: groups by source decision ID, keeps only the
@@ -290,7 +278,7 @@ async def _do_purge_dream_spam(
     Returns:
         Dict with counts of deleted/would-delete re-evaluations and summaries.
     """
-    from sqlalchemy import select, delete
+    from sqlalchemy import delete, select
 
     try:
         from ..context_manager import get_project_context
@@ -304,8 +292,8 @@ async def _do_purge_dream_spam(
 
     ctx = await get_project_context(project_path)
 
-    reeval_to_delete: List[int] = []
-    summary_to_delete: List[int] = []
+    reeval_to_delete: list[int] = []
+    summary_to_delete: list[int] = []
 
     async with ctx.db_manager.get_session() as db_session:
         # Query all learning memories with dream-related tags
@@ -317,8 +305,8 @@ async def _do_purge_dream_spam(
         all_learning = result.scalars().all()
 
         # Separate re-evaluations and summaries
-        reeval_by_decision: Dict[int, List[Any]] = defaultdict(list)
-        summary_by_day: Dict[str, List[Any]] = defaultdict(list)
+        reeval_by_decision: dict[int, list[Any]] = defaultdict(list)
+        summary_by_day: dict[str, list[Any]] = defaultdict(list)
 
         for mem in all_learning:
             tags = mem.tags or []
@@ -337,7 +325,9 @@ async def _do_purge_dream_spam(
                         break
             elif "dream-summary" in tags:
                 # Group by calendar day
-                day_key = mem.created_at.strftime("%Y-%m-%d") if mem.created_at else "unknown"
+                day_key = (
+                    mem.created_at.strftime("%Y-%m-%d") if mem.created_at else "unknown"
+                )
                 summary_by_day[day_key].append(mem)
 
         # For each decision, keep only the most recent re-evaluation

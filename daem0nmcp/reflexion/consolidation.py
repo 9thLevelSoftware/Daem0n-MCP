@@ -13,7 +13,7 @@ Based on AriGraph and memory survey (arxiv 2512.13564) patterns.
 import logging
 from collections import Counter
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Any, Dict, List, Optional
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from ..memory import MemoryManager
@@ -24,7 +24,7 @@ logger = logging.getLogger(__name__)
 DEFAULT_CONSOLIDATION_THRESHOLD = 5
 
 
-def extract_common_elements(contents: List[str]) -> str:
+def extract_common_elements(contents: list[str]) -> str:
     """
     Extract common elements from a list of similar content strings.
 
@@ -40,7 +40,7 @@ def extract_common_elements(contents: List[str]) -> str:
         return ""
 
     # Tokenize all contents
-    all_words: List[str] = []
+    all_words: list[str] = []
     for content in contents:
         # Simple tokenization - lowercase, split on whitespace/punctuation
         words = content.lower().replace(",", " ").replace(".", " ").split()
@@ -51,10 +51,26 @@ def extract_common_elements(contents: List[str]) -> str:
 
     # Filter to words appearing in majority of contents
     threshold = len(contents) // 2
-    common_words = [word for word, count in word_freq.most_common(50) if count >= threshold]
+    common_words = [
+        word for word, count in word_freq.most_common(50) if count >= threshold
+    ]
 
     # Filter out very common stop words
-    stop_words = {"the", "a", "an", "is", "are", "was", "were", "to", "of", "in", "for", "on", "with"}
+    stop_words = {
+        "the",
+        "a",
+        "an",
+        "is",
+        "are",
+        "was",
+        "were",
+        "to",
+        "of",
+        "in",
+        "for",
+        "on",
+        "with",
+    }
     common_words = [w for w in common_words if w not in stop_words and len(w) > 2]
 
     if not common_words:
@@ -64,7 +80,7 @@ def extract_common_elements(contents: List[str]) -> str:
     return " ".join(common_words[:15])  # Limit to 15 most common terms
 
 
-def identify_pattern_type(reflections: List[Dict[str, Any]]) -> str:
+def identify_pattern_type(reflections: list[dict[str, Any]]) -> str:
     """
     Identify the pattern type from reflection error types.
 
@@ -78,7 +94,12 @@ def identify_pattern_type(reflections: List[Dict[str, Any]]) -> str:
     for reflection in reflections:
         tags = reflection.get("tags", [])
         for tag in tags:
-            if tag in ("conflict", "factual_error", "unverified_claim", "quality_improvement"):
+            if tag in (
+                "conflict",
+                "factual_error",
+                "unverified_claim",
+                "quality_improvement",
+            ):
                 error_types.append(tag)
 
     if error_types:
@@ -90,7 +111,7 @@ async def consolidate_reflections(
     error_signature: str,
     memory_manager: "MemoryManager",
     consolidation_threshold: int = DEFAULT_CONSOLIDATION_THRESHOLD,
-) -> Optional[int]:
+) -> int | None:
     """
     Consolidate similar episodic reflections into a semantic pattern.
 
@@ -134,9 +155,7 @@ async def consolidate_reflections(
     pattern_type = identify_pattern_type(reflections)
 
     # Create semantic pattern memory
-    pattern_content = (
-        f"Learned pattern from {len(reflections)} similar corrections: {common_elements}"
-    )
+    pattern_content = f"Learned pattern from {len(reflections)} similar corrections: {common_elements}"
 
     pattern_tags = [
         "pattern",
@@ -190,7 +209,9 @@ async def consolidate_reflections(
                         )
                         linked_count += 1
                     except Exception as link_error:
-                        logger.warning(f"Failed to link to reflection {source_id}: {link_error}")
+                        logger.warning(
+                            f"Failed to link to reflection {source_id}: {link_error}"
+                        )
 
             logger.info(f"Linked pattern to {linked_count} source reflections")
         else:
@@ -206,7 +227,7 @@ async def consolidate_reflections(
 async def check_and_consolidate(
     memory_manager: "MemoryManager",
     consolidation_threshold: int = DEFAULT_CONSOLIDATION_THRESHOLD,
-) -> List[int]:
+) -> list[int]:
     """
     Check all reflection signatures and consolidate where threshold is met.
 
@@ -234,7 +255,7 @@ async def check_and_consolidate(
     reflections = result.get("memories", [])
 
     # Group by error signature
-    signature_groups: Dict[str, List[Dict]] = {}
+    signature_groups: dict[str, list[dict]] = {}
     for reflection in reflections:
         tags = reflection.get("tags", [])
         sig_tag = next((t for t in tags if t.startswith("sig:")), None)

@@ -39,7 +39,12 @@ def _is_daem0n_entry(entry: dict) -> bool:
         if "daem0nmcp.claude_hooks" in cmd:
             return True
         # Legacy hook scripts
-        if "daem0n_pre_edit_hook" in cmd or "daem0n_stop_hook" in cmd or "daem0n_post_edit_hook" in cmd or "daem0n_prompt_hook" in cmd:
+        if (
+            "daem0n_pre_edit_hook" in cmd
+            or "daem0n_stop_hook" in cmd
+            or "daem0n_post_edit_hook" in cmd
+            or "daem0n_prompt_hook" in cmd
+        ):
             return True
     return False
 
@@ -55,35 +60,65 @@ def _build_hook_definitions() -> dict[str, list[dict]]:
             "PreToolUse": [
                 {
                     "matcher": "Edit|Write|NotebookEdit",
-                    "hooks": [{"type": "command", "command": f'{q} -m daem0nmcp.claude_hooks.pre_edit'}],
+                    "hooks": [
+                        {
+                            "type": "command",
+                            "command": f"{q} -m daem0nmcp.claude_hooks.pre_edit",
+                        }
+                    ],
                 },
                 {
                     "matcher": "Bash",
-                    "hooks": [{"type": "command", "command": f'{q} -m daem0nmcp.claude_hooks.pre_bash'}],
+                    "hooks": [
+                        {
+                            "type": "command",
+                            "command": f"{q} -m daem0nmcp.claude_hooks.pre_bash",
+                        }
+                    ],
                 },
             ],
             "PostToolUse": [
                 {
                     "matcher": "Edit|Write",
-                    "hooks": [{"type": "command", "command": f'{q} -m daem0nmcp.claude_hooks.post_edit'}],
+                    "hooks": [
+                        {
+                            "type": "command",
+                            "command": f"{q} -m daem0nmcp.claude_hooks.post_edit",
+                        }
+                    ],
                 },
             ],
             "Stop": [
                 {
                     "matcher": "",
-                    "hooks": [{"type": "command", "command": f'{q} -m daem0nmcp.claude_hooks.stop'}],
+                    "hooks": [
+                        {
+                            "type": "command",
+                            "command": f"{q} -m daem0nmcp.claude_hooks.stop",
+                        }
+                    ],
                 },
             ],
             "SubagentStop": [
                 {
                     "matcher": "",
-                    "hooks": [{"type": "command", "command": f'{q} -m daem0nmcp.claude_hooks.stop'}],
+                    "hooks": [
+                        {
+                            "type": "command",
+                            "command": f"{q} -m daem0nmcp.claude_hooks.stop",
+                        }
+                    ],
                 },
             ],
             "SessionStart": [
                 {
                     "matcher": "",
-                    "hooks": [{"type": "command", "command": f'{q} -m daem0nmcp.claude_hooks.session_start'}],
+                    "hooks": [
+                        {
+                            "type": "command",
+                            "command": f"{q} -m daem0nmcp.claude_hooks.session_start",
+                        }
+                    ],
                 },
             ],
         }

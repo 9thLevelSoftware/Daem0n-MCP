@@ -6,33 +6,34 @@ with the memory system.
 """
 
 import json
-import pytest
 import shutil
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
-from daem0nmcp.watcher import (
-    FileWatcher,
-    WatcherConfig,
-    WatcherNotification,
-    LoggingChannel,
-    CallbackChannel,
-    create_watcher,
-)
+import pytest
+
 from daem0nmcp.channels import (
-    SystemNotifyChannel,
-    LogFileChannel,
     EditorPollChannel,
+    LogFileChannel,
+    SystemNotifyChannel,
 )
 from daem0nmcp.database import DatabaseManager
 from daem0nmcp.memory import MemoryManager
-
+from daem0nmcp.watcher import (
+    CallbackChannel,
+    FileWatcher,
+    LoggingChannel,
+    WatcherConfig,
+    WatcherNotification,
+    create_watcher,
+)
 
 # =============================================================================
 # Fixtures
 # =============================================================================
+
 
 @pytest.fixture
 def temp_project():
@@ -84,6 +85,7 @@ async def memory_manager(temp_storage):
 # WatcherNotification Tests
 # =============================================================================
 
+
 class TestWatcherNotification:
     """Test WatcherNotification dataclass."""
 
@@ -131,6 +133,7 @@ class TestWatcherNotification:
 # WatcherConfig Tests
 # =============================================================================
 
+
 class TestWatcherConfig:
     """Test WatcherConfig dataclass."""
 
@@ -160,6 +163,7 @@ class TestWatcherConfig:
 # FileWatcher Tests
 # =============================================================================
 
+
 class TestFileWatcher:
     """Test FileWatcher class."""
 
@@ -167,13 +171,15 @@ class TestFileWatcher:
     def mock_memory_manager(self):
         """Create a mock memory manager."""
         manager = MagicMock()
-        manager.recall_for_file = AsyncMock(return_value={
-            "found": 0,
-            "warnings": [],
-            "decisions": [],
-            "patterns": [],
-            "learnings": [],
-        })
+        manager.recall_for_file = AsyncMock(
+            return_value={
+                "found": 0,
+                "warnings": [],
+                "decisions": [],
+                "patterns": [],
+                "learnings": [],
+            }
+        )
         return manager
 
     async def test_watcher_creation(self, temp_project, mock_memory_manager):
@@ -270,12 +276,14 @@ class TestFileWatcher:
 # Channel Tests
 # =============================================================================
 
+
 class TestLoggingChannel:
     """Test LoggingChannel."""
 
     async def test_notify(self, caplog):
         """Test logging channel logs notifications."""
         import logging
+
         caplog.set_level(logging.INFO)
 
         channel = LoggingChannel()
@@ -499,6 +507,7 @@ class TestSystemNotifyChannel:
 # Factory Function Tests
 # =============================================================================
 
+
 class TestCreateWatcher:
     """Test create_watcher factory function."""
 
@@ -519,7 +528,8 @@ class TestCreateWatcher:
         mock_manager = MagicMock()
 
         class CustomChannel:
-            async def notify(self, notif): pass
+            async def notify(self, notif):
+                pass
 
         watcher = create_watcher(
             project_path=temp_project,
@@ -549,6 +559,7 @@ class TestCreateWatcher:
 # =============================================================================
 # Integration Tests
 # =============================================================================
+
 
 class TestWatcherIntegration:
     """Integration tests with real memory manager."""

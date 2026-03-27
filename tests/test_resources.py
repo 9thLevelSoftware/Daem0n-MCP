@@ -1,9 +1,10 @@
 # tests/test_resources.py
 """Tests for MCP Resources providing automatic context injection."""
 
-import pytest
-import tempfile
 import shutil
+import tempfile
+
+import pytest
 
 
 class TestMCPResources:
@@ -20,6 +21,7 @@ class TestMCPResources:
     async def db_manager(self, temp_storage):
         """Create a database manager with temporary storage."""
         from daem0nmcp.database import DatabaseManager
+
         db = DatabaseManager(temp_storage)
         await db.init_db()
         yield db
@@ -29,6 +31,7 @@ class TestMCPResources:
     async def memory_mgr(self, db_manager):
         """Create a memory manager."""
         from daem0nmcp.memory import MemoryManager
+
         mgr = MemoryManager(db_manager)
         yield mgr
         # Close Qdrant if initialized to release locks
@@ -39,10 +42,13 @@ class TestMCPResources:
     async def rules_engine(self, db_manager):
         """Create a rules engine."""
         from daem0nmcp.rules import RulesEngine
+
         return RulesEngine(db_manager)
 
     @pytest.mark.asyncio
-    async def test_warnings_resource_returns_active_warnings(self, db_manager, memory_mgr, temp_storage):
+    async def test_warnings_resource_returns_active_warnings(
+        self, db_manager, memory_mgr, temp_storage
+    ):
         """daem0n://warnings resource should return active warnings."""
         # Create a warning
         await memory_mgr.remember(
@@ -60,7 +66,9 @@ class TestMCPResources:
         assert "eval()" in result or "Don't use" in result
 
     @pytest.mark.asyncio
-    async def test_warnings_resource_returns_no_warnings_message(self, db_manager, temp_storage):
+    async def test_warnings_resource_returns_no_warnings_message(
+        self, db_manager, temp_storage
+    ):
         """daem0n://warnings resource should return message when no warnings."""
         from daem0nmcp.server import _warnings_resource_impl
 
@@ -69,7 +77,9 @@ class TestMCPResources:
         assert "No active warnings" in result
 
     @pytest.mark.asyncio
-    async def test_failed_resource_returns_failed_approaches(self, db_manager, memory_mgr, temp_storage):
+    async def test_failed_resource_returns_failed_approaches(
+        self, db_manager, memory_mgr, temp_storage
+    ):
         """daem0n://failed resource should return failed approaches."""
         # Create a failed decision
         result = await memory_mgr.remember(
@@ -90,7 +100,9 @@ class TestMCPResources:
         assert "synchronous" in result.lower() or "timeout" in result.lower()
 
     @pytest.mark.asyncio
-    async def test_failed_resource_returns_no_failures_message(self, db_manager, temp_storage):
+    async def test_failed_resource_returns_no_failures_message(
+        self, db_manager, temp_storage
+    ):
         """daem0n://failed resource should return message when no failures."""
         from daem0nmcp.server import _failed_resource_impl
 
@@ -99,7 +111,9 @@ class TestMCPResources:
         assert "No failed approaches" in result
 
     @pytest.mark.asyncio
-    async def test_rules_resource_returns_top_rules(self, db_manager, rules_engine, temp_storage):
+    async def test_rules_resource_returns_top_rules(
+        self, db_manager, rules_engine, temp_storage
+    ):
         """daem0n://rules resource should return high-priority rules."""
         await rules_engine.add_rule(
             trigger="adding API endpoint",
@@ -115,7 +129,9 @@ class TestMCPResources:
         assert "rate limiting" in result.lower() or "API endpoint" in result.lower()
 
     @pytest.mark.asyncio
-    async def test_rules_resource_returns_no_rules_message(self, db_manager, temp_storage):
+    async def test_rules_resource_returns_no_rules_message(
+        self, db_manager, temp_storage
+    ):
         """daem0n://rules resource should return message when no rules."""
         from daem0nmcp.server import _rules_resource_impl
 
@@ -124,7 +140,9 @@ class TestMCPResources:
         assert "No rules defined" in result
 
     @pytest.mark.asyncio
-    async def test_context_resource_combines_all(self, db_manager, memory_mgr, rules_engine, temp_storage):
+    async def test_context_resource_combines_all(
+        self, db_manager, memory_mgr, rules_engine, temp_storage
+    ):
         """daem0n://context resource should combine warnings, failed, and rules."""
         # Create a warning
         await memory_mgr.remember(
@@ -163,7 +181,9 @@ class TestMCPResources:
         assert "Rule" in result or "rule" in result
 
     @pytest.mark.asyncio
-    async def test_resources_limit_output_size(self, db_manager, memory_mgr, temp_storage):
+    async def test_resources_limit_output_size(
+        self, db_manager, memory_mgr, temp_storage
+    ):
         """Resources should limit output to reasonable size."""
         # Create many warnings
         for i in range(20):

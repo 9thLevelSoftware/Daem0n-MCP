@@ -50,6 +50,7 @@ class TestExtendedConfig:
     def test_default_embedding_model(self):
         """Default embedding model is nomic-ai/modernbert-embed-base."""
         from daem0nmcp.config import Settings
+
         settings = Settings()
         assert settings.embedding_model == "nomic-ai/modernbert-embed-base"
         assert settings.embedding_dimension == 256
@@ -60,6 +61,7 @@ class TestExtendedConfig:
     def test_default_parse_cache_maxsize(self):
         """Default parse cache maxsize is 200."""
         from daem0nmcp.config import Settings
+
         settings = Settings()
         assert settings.parse_tree_cache_maxsize == 200
 
@@ -67,12 +69,14 @@ class TestExtendedConfig:
         """Config can be set via environment."""
         monkeypatch.setenv("DAEM0NMCP_PARSE_TREE_CACHE_MAXSIZE", "500")
         from daem0nmcp.config import Settings
+
         settings = Settings()
         assert settings.parse_tree_cache_maxsize == 500
 
     def test_default_index_languages(self):
         """Default index_languages is empty list."""
         from daem0nmcp.config import Settings
+
         settings = Settings()
         assert settings.index_languages == []
 

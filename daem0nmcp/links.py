@@ -7,8 +7,9 @@ strict write isolation (each project only writes to its own database).
 """
 
 import logging
-from typing import Any, Dict, List, Optional
-from sqlalchemy import select, delete
+from typing import Any
+
+from sqlalchemy import delete, select
 
 from .database import DatabaseManager
 from .models import ProjectLink
@@ -34,8 +35,8 @@ class LinkManager:
         source_path: str,
         linked_path: str,
         relationship: str = "related",
-        label: Optional[str] = None
-    ) -> Dict[str, Any]:
+        label: str | None = None,
+    ) -> dict[str, Any]:
         """
         Create a link between two projects.
 
@@ -53,14 +54,14 @@ class LinkManager:
             existing = await session.execute(
                 select(ProjectLink).where(
                     ProjectLink.source_path == source_path,
-                    ProjectLink.linked_path == linked_path
+                    ProjectLink.linked_path == linked_path,
                 )
             )
             if existing.scalar_one_or_none():
                 return {
                     "status": "already_linked",
                     "source_path": source_path,
-                    "linked_path": linked_path
+                    "linked_path": linked_path,
                 }
 
             # Create new link
@@ -68,7 +69,7 @@ class LinkManager:
                 source_path=source_path,
                 linked_path=linked_path,
                 relationship=relationship,
-                label=label
+                label=label,
             )
             session.add(link)
 
@@ -79,14 +80,12 @@ class LinkManager:
                 "source_path": source_path,
                 "linked_path": linked_path,
                 "relationship": relationship,
-                "label": label
+                "label": label,
             }
 
     async def unlink_projects(
-        self,
-        source_path: str,
-        linked_path: str
-    ) -> Dict[str, Any]:
+        self, source_path: str, linked_path: str
+    ) -> dict[str, Any]:
         """
         Remove a link between two projects.
 
@@ -101,7 +100,7 @@ class LinkManager:
             result = await session.execute(
                 delete(ProjectLink).where(
                     ProjectLink.source_path == source_path,
-                    ProjectLink.linked_path == linked_path
+                    ProjectLink.linked_path == linked_path,
                 )
             )
 
@@ -110,19 +109,16 @@ class LinkManager:
                 return {
                     "status": "unlinked",
                     "source_path": source_path,
-                    "linked_path": linked_path
+                    "linked_path": linked_path,
                 }
             else:
                 return {
                     "status": "not_found",
                     "source_path": source_path,
-                    "linked_path": linked_path
+                    "linked_path": linked_path,
                 }
 
-    async def list_linked_projects(
-        self,
-        source_path: str
-    ) -> List[Dict[str, Any]]:
+    async def list_linked_projects(self, source_path: str) -> list[dict[str, Any]]:
         """
         List all projects linked from the given source.
 
@@ -134,9 +130,7 @@ class LinkManager:
         """
         async with self.db.get_session() as session:
             result = await session.execute(
-                select(ProjectLink).where(
-                    ProjectLink.source_path == source_path
-                )
+                select(ProjectLink).where(ProjectLink.source_path == source_path)
             )
             links = result.scalars().all()
 
@@ -146,15 +140,14 @@ class LinkManager:
                     "linked_path": link.linked_path,
                     "relationship": link.relationship,
                     "label": link.label,
-                    "created_at": link.created_at.isoformat() if link.created_at else None
+                    "created_at": link.created_at.isoformat()
+                    if link.created_at
+                    else None,
                 }
                 for link in links
             ]
 
-    async def get_linked_db_managers(
-        self,
-        source_path: str
-    ) -> List[tuple]:
+    async def get_linked_db_managers(self, source_path: str) -> list[tuple]:
         """
         Get DatabaseManager instances for all linked projects.
 
@@ -188,10 +181,8 @@ class LinkManager:
         return managers
 
     async def consolidate_linked_databases(
-        self,
-        target_path: str,
-        archive_sources: bool = False
-    ) -> Dict[str, Any]:
+        self, target_path: str, archive_sources: bool = False
+    ) -> dict[str, Any]:
         """
         Merge memories from all linked project databases into the target.
 
@@ -208,12 +199,16 @@ class LinkManager:
             Dict with status, memories_merged count, and sources_processed list
         """
         from pathlib import Path
+
         from .memory import MemoryManager
         from .models import Memory
 
         links = await self.list_linked_projects(target_path)
         if not links:
-            return {"status": "no_links", "message": "No linked projects to consolidate"}
+            return {
+                "status": "no_links",
+                "message": "No linked projects to consolidate",
+            }
 
         target_mem = MemoryManager(self.db)
         memories_merged = 0
@@ -230,6 +225,7 @@ class LinkManager:
 
             try:
                 from .database import DatabaseManager
+
                 source_db = DatabaseManager(str(source_storage))
                 await source_db.init_db()
 
@@ -251,12 +247,14 @@ class LinkManager:
                             context=context,
                             tags=list(mem.tags) if mem.tags else [],
                             file_path=mem.file_path,
-                            project_path=target_path
+                            project_path=target_path,
                         )
                         memories_merged += 1
 
                 sources_processed.append(source_path)
-                logger.info(f"Merged {len(source_memories)} memories from {source_path}")
+                logger.info(
+                    f"Merged {len(source_memories)} memories from {source_path}"
+                )
 
                 # Archive source if requested
                 if archive_sources:
@@ -273,5 +271,5 @@ class LinkManager:
             "status": "consolidated",
             "memories_merged": memories_merged,
             "sources_processed": sources_processed,
-            "archived": archive_sources
+            "archived": archive_sources,
         }

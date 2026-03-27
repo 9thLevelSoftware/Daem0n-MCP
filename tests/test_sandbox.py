@@ -1,11 +1,11 @@
 """Tests for SandboxExecutor - E2B-based sandboxed Python execution."""
 
 import os
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
-from daem0nmcp.agency import SandboxExecutor, ExecutionResult
+from daem0nmcp.agency import ExecutionResult, SandboxExecutor
 
 
 class TestExecutionResult:
@@ -215,7 +215,9 @@ class TestSandboxExecutorExecution:
             executor = SandboxExecutor(api_key="test-key")
             executor._sandbox_available = True
 
-            result = await executor.execute("import logging; logging.debug('processing')")
+            result = await executor.execute(
+                "import logging; logging.debug('processing')"
+            )
 
         assert result.success
         assert result.logs == ["Debug: processing"]
@@ -264,7 +266,7 @@ class TestSandboxExecutorTimeout:
 # Integration tests - only run with real E2B_API_KEY
 @pytest.mark.skipif(
     not os.environ.get("E2B_API_KEY"),
-    reason="E2B_API_KEY not set - skipping integration tests"
+    reason="E2B_API_KEY not set - skipping integration tests",
 )
 class TestSandboxIntegration:
     """Integration tests requiring real E2B API key."""

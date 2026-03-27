@@ -1,9 +1,10 @@
 """Tests for temporal versioning of memories."""
 
-import pytest
-import tempfile
 import shutil
+import tempfile
 from datetime import datetime, timezone
+
+import pytest
 
 from daem0nmcp.models import MemoryVersion
 
@@ -44,7 +45,7 @@ class TestMemoryVersionModel:
             context={},
             tags=["test"],
             change_type="created",
-            changed_at=datetime.now(timezone.utc)
+            changed_at=datetime.now(timezone.utc),
         )
 
         assert version.memory_id == 1
@@ -63,8 +64,11 @@ async def test_memory_versions_table_created(temp_storage):
 
     async with db.get_session() as session:
         from sqlalchemy import text
+
         result = await session.execute(
-            text("SELECT name FROM sqlite_master WHERE type='table' AND name='memory_versions'")
+            text(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='memory_versions'"
+            )
         )
         tables = result.fetchall()
 
@@ -83,28 +87,30 @@ async def test_memory_versions_has_composite_index(temp_storage):
 
     async with db.get_session() as session:
         from sqlalchemy import text
+
         result = await session.execute(
-            text("SELECT name, sql FROM sqlite_master WHERE type='index' AND tbl_name='memory_versions'")
+            text(
+                "SELECT name, sql FROM sqlite_master WHERE type='index' AND tbl_name='memory_versions'"
+            )
         )
         indexes = {row[0]: row[1] for row in result.fetchall()}
 
     await db.close()
     # Check that the composite index exists on (memory_id, version_number)
     composite_index_found = any(
-        'memory_id' in (sql or '') and 'version_number' in (sql or '')
+        "memory_id" in (sql or "") and "version_number" in (sql or "")
         for sql in indexes.values()
     )
-    assert composite_index_found, \
+    assert composite_index_found, (
         f"Expected composite index on (memory_id, version_number), found indexes: {indexes}"
+    )
 
 
 @pytest.mark.asyncio
 async def test_remember_creates_initial_version(memory_manager):
     """When a memory is created, version 1 should be auto-created."""
     result = await memory_manager.remember(
-        category="decision",
-        content="Use PostgreSQL",
-        rationale="Better JSON support"
+        category="decision", content="Use PostgreSQL", rationale="Better JSON support"
     )
 
     memory_id = result["id"]
@@ -120,15 +126,12 @@ async def test_remember_creates_initial_version(memory_manager):
 async def test_record_outcome_creates_version(memory_manager):
     """Recording an outcome should create a new version."""
     result = await memory_manager.remember(
-        category="decision",
-        content="Use Redis for caching"
+        category="decision", content="Use Redis for caching"
     )
     memory_id = result["id"]
 
     await memory_manager.record_outcome(
-        memory_id=memory_id,
-        outcome="Redis worked great, 10x faster",
-        worked=True
+        memory_id=memory_id, outcome="Redis worked great, 10x faster", worked=True
     )
 
     versions = await memory_manager.get_memory_versions(memory_id)
@@ -145,8 +148,7 @@ async def test_get_memory_at_time(memory_manager):
     """Should return memory state as it was at a specific time."""
 
     result = await memory_manager.remember(
-        category="decision",
-        content="Original content"
+        category="decision", content="Original content"
     )
     memory_id = result["id"]
 
@@ -156,9 +158,7 @@ async def test_get_memory_at_time(memory_manager):
 
     # Record an outcome (creates version 2)
     await memory_manager.record_outcome(
-        memory_id=memory_id,
-        outcome="It worked",
-        worked=True
+        memory_id=memory_id, outcome="It worked", worked=True
     )
 
     # Query memory at creation time (before outcome)
@@ -185,14 +185,13 @@ async def test_mcp_get_memory_versions_tool(covenant_compliant_project):
     result = await server.remember(
         category="decision",
         content="Test decision",
-        project_path=covenant_compliant_project
+        project_path=covenant_compliant_project,
     )
     memory_id = result["id"]
 
     # Get versions via MCP tool
     versions = await server.get_memory_versions(
-        memory_id=memory_id,
-        project_path=covenant_compliant_project
+        memory_id=memory_id, project_path=covenant_compliant_project
     )
 
     assert "versions" in versions
@@ -208,14 +207,13 @@ async def test_mcp_get_memory_at_time_tool(covenant_compliant_project):
     result = await server.remember(
         category="decision",
         content="Original content for time travel",
-        project_path=covenant_compliant_project
+        project_path=covenant_compliant_project,
     )
     memory_id = result["id"]
 
     # Get the creation time from versions
     versions = await server.get_memory_versions(
-        memory_id=memory_id,
-        project_path=covenant_compliant_project
+        memory_id=memory_id, project_path=covenant_compliant_project
     )
     creation_time = versions["versions"][0]["changed_at"]
 
@@ -224,14 +222,14 @@ async def test_mcp_get_memory_at_time_tool(covenant_compliant_project):
         memory_id=memory_id,
         outcome="It worked great!",
         worked=True,
-        project_path=covenant_compliant_project
+        project_path=covenant_compliant_project,
     )
 
     # Query memory at creation time (before outcome)
     historical = await server.get_memory_at_time(
         memory_id=memory_id,
         timestamp=creation_time,
-        project_path=covenant_compliant_project
+        project_path=covenant_compliant_project,
     )
 
     assert "error" not in historical
@@ -248,7 +246,7 @@ async def test_mcp_get_memory_at_time_invalid_timestamp(covenant_compliant_proje
     result = await server.remember(
         category="decision",
         content="Test decision",
-        project_path=covenant_compliant_project
+        project_path=covenant_compliant_project,
     )
     memory_id = result["id"]
 
@@ -256,7 +254,7 @@ async def test_mcp_get_memory_at_time_invalid_timestamp(covenant_compliant_proje
     historical = await server.get_memory_at_time(
         memory_id=memory_id,
         timestamp="not-a-valid-timestamp",
-        project_path=covenant_compliant_project
+        project_path=covenant_compliant_project,
     )
 
     assert "error" in historical
@@ -287,7 +285,7 @@ async def test_link_memories_creates_version(memory_manager):
         source_id=mem1["id"],
         target_id=mem2["id"],
         relationship="led_to",
-        description="A led to B"
+        description="A led to B",
     )
 
     # Check versions

@@ -4,9 +4,10 @@ Tests tiered thresholds, dynamic rates, metadata output,
 double-compression prevention, and custom configuration.
 Uses mocked AdaptiveCompressor to avoid loading LLMLingua-2 in CI.
 """
+
 from unittest.mock import MagicMock, patch
 
-from daem0nmcp.compression.jit import JITCompressor, JITCompressionConfig
+from daem0nmcp.compression.jit import JITCompressionConfig, JITCompressor
 
 
 def _make_mock_adaptive(token_count_fn=None):
@@ -22,7 +23,9 @@ def _make_mock_adaptive(token_count_fn=None):
 
     # Mock the inner ContextCompressor's count_tokens
     if token_count_fn is None:
-        def token_count_fn(text): return len(text) // 4  # Rough approximation
+
+        def token_count_fn(text):
+            return len(text) // 4  # Rough approximation
 
     mock_adaptive.compressor.count_tokens.side_effect = token_count_fn
 
@@ -32,7 +35,7 @@ def _make_mock_adaptive(token_count_fn=None):
         rate = rate_override or 0.33
         compressed = max(1, int(original * rate))
         return {
-            "compressed_prompt": text[:int(len(text) * rate)],
+            "compressed_prompt": text[: int(len(text) * rate)],
             "original_tokens": original,
             "compressed_tokens": compressed,
             "ratio": original / max(compressed, 1),
@@ -100,7 +103,9 @@ class TestJITCompressorTiers:
         mock.compress.assert_called_once()
         # Check that rate_override was passed and is in soft range
         call_kwargs = mock.compress.call_args
-        rate = call_kwargs.kwargs.get("rate_override") or call_kwargs[1].get("rate_override")
+        rate = call_kwargs.kwargs.get("rate_override") or call_kwargs[1].get(
+            "rate_override"
+        )
         assert 0.3 <= rate <= 0.6  # Soft rate with dynamic adjustment
 
     def test_hard_threshold_triggers_aggressive_compression(self):
@@ -115,7 +120,9 @@ class TestJITCompressorTiers:
         assert result["threshold_triggered"] == "hard"
         mock.compress.assert_called_once()
         call_kwargs = mock.compress.call_args
-        rate = call_kwargs.kwargs.get("rate_override") or call_kwargs[1].get("rate_override")
+        rate = call_kwargs.kwargs.get("rate_override") or call_kwargs[1].get(
+            "rate_override"
+        )
         assert 0.15 <= rate <= 0.35  # Hard rate with dynamic adjustment
 
     def test_emergency_threshold_triggers_maximum_compression(self):
@@ -130,7 +137,9 @@ class TestJITCompressorTiers:
         assert result["threshold_triggered"] == "emergency"
         mock.compress.assert_called_once()
         call_kwargs = mock.compress.call_args
-        rate = call_kwargs.kwargs.get("rate_override") or call_kwargs[1].get("rate_override")
+        rate = call_kwargs.kwargs.get("rate_override") or call_kwargs[1].get(
+            "rate_override"
+        )
         assert 0.15 <= rate <= 0.2  # Emergency rate, heavily clamped
 
 
@@ -147,7 +156,9 @@ class TestJITDynamicRates:
         jit.compress_if_needed(text)
 
         call_kwargs = mock.compress.call_args
-        rate = call_kwargs.kwargs.get("rate_override") or call_kwargs[1].get("rate_override")
+        rate = call_kwargs.kwargs.get("rate_override") or call_kwargs[1].get(
+            "rate_override"
+        )
         assert rate == jit.config.min_rate  # Should be clamped to 0.15
 
     def test_dynamic_rate_clamped_to_max(self):
@@ -160,7 +171,9 @@ class TestJITDynamicRates:
         jit.compress_if_needed(text)
 
         call_kwargs = mock.compress.call_args
-        rate = call_kwargs.kwargs.get("rate_override") or call_kwargs[1].get("rate_override")
+        rate = call_kwargs.kwargs.get("rate_override") or call_kwargs[1].get(
+            "rate_override"
+        )
         # sqrt(4000/4010) ~ 0.999, base_rate * 0.999 = 0.4995
         # Not clamped to max (0.6) since 0.4995 < 0.6, but should be reasonable
         assert rate <= jit.config.max_rate
@@ -275,7 +288,9 @@ class TestJITForceTokens:
 
         mock.compress.assert_called_once()
         call_kwargs = mock.compress.call_args
-        passed_tokens = call_kwargs.kwargs.get("additional_force_tokens") or call_kwargs[1].get("additional_force_tokens")
+        passed_tokens = call_kwargs.kwargs.get(
+            "additional_force_tokens"
+        ) or call_kwargs[1].get("additional_force_tokens")
         assert passed_tokens == ["myFunction", "className"]
 
 

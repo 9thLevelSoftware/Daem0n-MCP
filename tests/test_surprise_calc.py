@@ -1,7 +1,7 @@
 # tests/test_surprise_calc.py
 """Tests for surprise score calculation."""
 
-from daem0nmcp.surprise import calculate_surprise, SurpriseCalculator
+from daem0nmcp.surprise import SurpriseCalculator, calculate_surprise
 
 
 class TestCalculateSurprise:

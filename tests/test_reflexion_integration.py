@@ -4,27 +4,28 @@ These tests exercise the full reflexion loop, verifying that all components
 work together: claim extraction -> verification -> persistence -> consolidation.
 """
 
-import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
+
 from daem0nmcp.reflexion import (
-    # State
-    extract_claims,
-    verify_claims,
-    summarize_verification,
+    MAX_ITERATIONS,
     # Nodes
     QUALITY_THRESHOLD_EXIT,
-    MAX_ITERATIONS,
+    Reflection,
     # Graph
     build_reflexion_graph,
-    run_reflexion,
+    # Consolidation
+    consolidate_reflections,
+    # State
+    extract_claims,
+    has_seen_error_before,
     # Persistence
     persist_reflection,
     retrieve_similar_reflections,
-    has_seen_error_before,
-    Reflection,
-    # Consolidation
-    consolidate_reflections,
+    run_reflexion,
+    summarize_verification,
+    verify_claims,
 )
 
 
@@ -88,8 +89,12 @@ class TestClaimExtractionToVerification:
         assert len(claims) >= 1
 
         # Verify claims
-        with patch("daem0nmcp.reflexion.verification.encode_query") as mock_encode, \
-             patch("daem0nmcp.reflexion.verification.encode_document") as mock_encode_doc:
+        with (
+            patch("daem0nmcp.reflexion.verification.encode_query") as mock_encode,
+            patch(
+                "daem0nmcp.reflexion.verification.encode_document"
+            ) as mock_encode_doc,
+        ):
             with patch("daem0nmcp.reflexion.verification.decode") as mock_decode:
                 with patch(
                     "daem0nmcp.reflexion.verification.cosine_similarity"
@@ -141,8 +146,12 @@ class TestClaimExtractionToVerification:
 
         claims = extract_claims(text)
 
-        with patch("daem0nmcp.reflexion.verification.encode_query") as mock_encode, \
-             patch("daem0nmcp.reflexion.verification.encode_document") as mock_encode_doc:
+        with (
+            patch("daem0nmcp.reflexion.verification.encode_query") as mock_encode,
+            patch(
+                "daem0nmcp.reflexion.verification.encode_document"
+            ) as mock_encode_doc,
+        ):
             with patch("daem0nmcp.reflexion.verification.decode") as mock_decode:
                 with patch(
                     "daem0nmcp.reflexion.verification.cosine_similarity"
@@ -332,6 +341,7 @@ class TestReflectionPersistenceIntegration:
     @pytest.mark.asyncio
     async def test_retrieve_similar_reflections(self, mock_memory_manager):
         """Test retrieving similar reflections by signature."""
+
         # Override recall with new side_effect that returns reflections
         async def mock_recall_reflections(**kwargs):
             return {
@@ -363,6 +373,7 @@ class TestReflectionPersistenceIntegration:
     @pytest.mark.asyncio
     async def test_has_seen_error_before(self, mock_memory_manager):
         """Test checking if error has been seen before."""
+
         # Override recall with new side_effect that returns a matching reflection
         async def mock_recall_match(**kwargs):
             return {
@@ -404,6 +415,7 @@ class TestConsolidationIntegration:
     @pytest.mark.asyncio
     async def test_consolidation_creates_pattern(self, mock_memory_manager):
         """Test that consolidation creates pattern memory."""
+
         # Override recall to return 6 reflections (above threshold)
         async def mock_recall_reflections(**kwargs):
             return {
@@ -438,6 +450,7 @@ class TestConsolidationIntegration:
         self, mock_memory_manager
     ):
         """Consolidation should not create pattern below threshold."""
+
         # Override recall to return only 3 reflections (below threshold of 5)
         async def mock_recall_few(**kwargs):
             return {
@@ -465,6 +478,7 @@ class TestConsolidationIntegration:
     @pytest.mark.asyncio
     async def test_consolidation_links_episodic_to_semantic(self, mock_memory_manager):
         """Consolidation should link episodic reflections to semantic pattern."""
+
         # Override recall to return 5 reflections (at threshold)
         async def mock_recall_reflections(**kwargs):
             return {
@@ -528,8 +542,12 @@ class TestVerifyFactsToolIntegration:
         assert len(claims) >= 1, "Should extract at least one claim"
 
         # Step 2: Verify claims
-        with patch("daem0nmcp.reflexion.verification.encode_query") as mock_encode, \
-             patch("daem0nmcp.reflexion.verification.encode_document") as mock_encode_doc:
+        with (
+            patch("daem0nmcp.reflexion.verification.encode_query") as mock_encode,
+            patch(
+                "daem0nmcp.reflexion.verification.encode_document"
+            ) as mock_encode_doc,
+        ):
             with patch("daem0nmcp.reflexion.verification.decode") as mock_decode:
                 with patch(
                     "daem0nmcp.reflexion.verification.cosine_similarity"

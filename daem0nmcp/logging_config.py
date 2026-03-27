@@ -1,17 +1,17 @@
 """Structured logging configuration for Daem0nMCP."""
 
+import inspect
 import json
 import logging
 import time
 import uuid
-from typing import Callable, Optional, Awaitable
-import inspect
+from collections.abc import Awaitable, Callable
 from contextvars import ContextVar
 from functools import wraps
 
 # Context variable for request tracking
-request_id_var: ContextVar[str] = ContextVar('request_id', default='')
-_release_callback: Optional[Callable[[], Awaitable[None]]] = None
+request_id_var: ContextVar[str] = ContextVar("request_id", default="")
+_release_callback: Callable[[], Awaitable[None]] | None = None
 
 
 class StructuredFormatter(logging.Formatter):
@@ -23,20 +23,21 @@ class StructuredFormatter(logging.Formatter):
             "level": record.levelname,
             "logger": record.name,
             "message": record.getMessage(),
-            "request_id": request_id_var.get(''),
+            "request_id": request_id_var.get(""),
         }
 
         # Add extra fields
-        if hasattr(record, 'duration_ms'):
-            log_data['duration_ms'] = record.duration_ms
-        if hasattr(record, 'tool_name'):
-            log_data['tool_name'] = record.tool_name
+        if hasattr(record, "duration_ms"):
+            log_data["duration_ms"] = record.duration_ms
+        if hasattr(record, "tool_name"):
+            log_data["tool_name"] = record.tool_name
 
         return json.dumps(log_data)
 
 
 def with_request_id(func: Callable) -> Callable:
     """Decorator to add request ID to tool calls."""
+
     @wraps(func)
     async def wrapper(*args, **kwargs):
         request_id = str(uuid.uuid4())[:8]
@@ -51,7 +52,10 @@ def with_request_id(func: Callable) -> Callable:
             logger = logging.getLogger(func.__module__)
             logger.info(
                 "Tool completed",
-                extra={'duration_ms': round(duration_ms, 2), 'tool_name': func.__name__}
+                extra={
+                    "duration_ms": round(duration_ms, 2),
+                    "tool_name": func.__name__,
+                },
             )
             if _release_callback:
                 maybe_coro = _release_callback()

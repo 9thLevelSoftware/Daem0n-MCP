@@ -1,8 +1,9 @@
 """Tests for FTS5 full-text search."""
 
-import pytest
-import tempfile
 import shutil
+import tempfile
+
+import pytest
 
 
 class TestFTS5Search:
@@ -28,12 +29,12 @@ class TestFTS5Search:
         await manager.remember(
             category="decision",
             content="Use PostgreSQL for the database layer",
-            tags=["database", "architecture"]
+            tags=["database", "architecture"],
         )
         await manager.remember(
             category="warning",
             content="MySQL has issues with JSON columns",
-            tags=["database"]
+            tags=["database"],
         )
 
         # FTS search
@@ -56,12 +57,12 @@ class TestFTS5Search:
         await manager.remember(
             category="decision",
             content="Use Redis for caching",
-            tags=["cache", "performance"]
+            tags=["cache", "performance"],
         )
         await manager.remember(
             category="decision",
             content="Use Redis for session storage",
-            tags=["auth", "sessions"]
+            tags=["auth", "sessions"],
         )
 
         # Search with tag filter

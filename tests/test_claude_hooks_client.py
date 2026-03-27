@@ -6,13 +6,13 @@ import sys
 import pytest
 
 from daem0nmcp.claude_hooks._client import (
+    block,
+    get_command_from_input,
+    get_file_path_from_input,
     get_project_path,
     get_tool_input,
-    get_file_path_from_input,
-    get_command_from_input,
-    block,
-    succeed,
     run_hook_safely,
+    succeed,
 )
 
 
@@ -122,6 +122,7 @@ class TestRunHookSafely:
 
     def test_converts_nonzero_exit_to_zero(self):
         """Non-zero SystemExit is converted to exit 0 so Claude Code doesn't report hook errors."""
+
         def exits():
             sys.exit(2)
 

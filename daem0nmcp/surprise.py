@@ -7,14 +7,14 @@ High surprise = novel, important information to prioritize.
 Low surprise = routine, can be deprioritized.
 """
 
-from typing import List
+
 import numpy as np
 
 
 def calculate_surprise(
-    new_embedding: List[float],
-    existing_embeddings: List[List[float]],
-    k_nearest: int = 5
+    new_embedding: list[float],
+    existing_embeddings: list[list[float]],
+    k_nearest: int = 5,
 ) -> float:
     """
     Calculate surprise score for a new embedding.
@@ -74,13 +74,9 @@ class SurpriseCalculator:
         self.k_nearest = k_nearest
 
     def calculate(
-        self,
-        new_embedding: List[float],
-        existing_embeddings: List[List[float]]
+        self, new_embedding: list[float], existing_embeddings: list[list[float]]
     ) -> float:
         """Calculate surprise score."""
         return calculate_surprise(
-            new_embedding,
-            existing_embeddings,
-            k_nearest=self.k_nearest
+            new_embedding, existing_embeddings, k_nearest=self.k_nearest
         )

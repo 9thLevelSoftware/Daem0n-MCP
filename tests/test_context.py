@@ -1,10 +1,11 @@
 """Tests for project context management."""
 
-import pytest
 import asyncio
-from unittest.mock import patch
-import tempfile
 import shutil
+import tempfile
+from unittest.mock import patch
+
+import pytest
 
 
 class TestProjectContextConcurrency:
@@ -21,7 +22,11 @@ class TestProjectContextConcurrency:
     @pytest.mark.asyncio
     async def test_concurrent_context_creation_uses_lock(self, temp_projects):
         """Verify that concurrent calls to get_project_context don't race."""
-        from daem0nmcp.server import get_project_context, _project_contexts, _context_locks
+        from daem0nmcp.server import (
+            _context_locks,
+            _project_contexts,
+            get_project_context,
+        )
 
         # Clear existing contexts and locks
         _project_contexts.clear()
@@ -42,9 +47,10 @@ class TestProjectContextConcurrency:
 
         # Patch init_db to count calls
         from daem0nmcp.database import DatabaseManager
+
         original_init = DatabaseManager.init_db
 
-        with patch.object(DatabaseManager, 'init_db', counting_init):
+        with patch.object(DatabaseManager, "init_db", counting_init):
             # Launch concurrent requests
             tasks = [get_project_context(project_path) for _ in range(5)]
             contexts = await asyncio.gather(*tasks)
@@ -62,6 +68,7 @@ class TestProjectContextEviction:
     def temp_projects(self):
         """Create multiple temporary project directories."""
         from daem0nmcp.server import MAX_PROJECT_CONTEXTS
+
         # Create MAX_PROJECT_CONTEXTS + 3 directories to test eviction
         dirs = [tempfile.mkdtemp() for _ in range(MAX_PROJECT_CONTEXTS + 3)]
         yield dirs
@@ -72,14 +79,16 @@ class TestProjectContextEviction:
     async def test_lru_eviction_when_max_contexts_exceeded(self, temp_projects):
         """Verify oldest contexts are evicted when max is exceeded."""
         from daem0nmcp.server import (
-            get_project_context, _project_contexts,
-            evict_stale_contexts, MAX_PROJECT_CONTEXTS
+            MAX_PROJECT_CONTEXTS,
+            _project_contexts,
+            evict_stale_contexts,
+            get_project_context,
         )
 
         _project_contexts.clear()
 
         # Create contexts up to max + 2
-        for i, project_path in enumerate(temp_projects[:MAX_PROJECT_CONTEXTS + 2]):
+        for i, project_path in enumerate(temp_projects[: MAX_PROJECT_CONTEXTS + 2]):
             ctx = await get_project_context(project_path)
             ctx.last_accessed = i  # Simulate access order
 
@@ -94,9 +103,12 @@ class TestProjectContextEviction:
     async def test_ttl_eviction_for_old_contexts(self, temp_projects):
         """Verify contexts older than TTL are evicted."""
         import time
+
         from daem0nmcp.server import (
-            get_project_context, _project_contexts,
-            evict_stale_contexts, CONTEXT_TTL_SECONDS
+            CONTEXT_TTL_SECONDS,
+            _project_contexts,
+            evict_stale_contexts,
+            get_project_context,
         )
 
         _project_contexts.clear()
@@ -136,8 +148,9 @@ class TestPathResolution:
 
     def test_normalize_path_resolves_relative(self):
         """Verify relative paths are resolved."""
-        from daem0nmcp.server import _normalize_path
         import os
+
+        from daem0nmcp.server import _normalize_path
 
         result = _normalize_path(".")
         assert os.path.isabs(result)
@@ -146,7 +159,8 @@ class TestPathResolution:
     async def test_different_projects_get_different_contexts(self):
         """Verify each project gets its own context."""
         import tempfile
-        from daem0nmcp.server import get_project_context, _project_contexts
+
+        from daem0nmcp.server import _project_contexts, get_project_context
 
         _project_contexts.clear()
 

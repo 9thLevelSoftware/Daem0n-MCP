@@ -1,9 +1,10 @@
 """Tests for contradiction detection in bi-temporal knowledge."""
 
-import pytest
 import shutil
 import tempfile
 from datetime import datetime, timezone
+
+import pytest
 
 from daem0nmcp.graph.contradiction import (
     Contradiction,

@@ -7,13 +7,13 @@ Each prompt is composed of sections that can be independently optimized.
 """
 
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional
 from datetime import datetime
 
 
 @dataclass
 class PromptSection:
     """A section of a prompt template."""
+
     name: str  # e.g., "role", "context", "task", "constraints", "format"
     content: str  # Template content with {variable} placeholders
     optional: bool = False  # Can be omitted if variables missing
@@ -23,26 +23,26 @@ class PromptSection:
 @dataclass
 class PromptTemplate:
     """A structured prompt template."""
+
     name: str  # Template identifier
-    sections: List[PromptSection]
+    sections: list[PromptSection]
     version: str = "1.0"
-    description: Optional[str] = None
+    description: str | None = None
     created_at: datetime = field(default_factory=datetime.now)
 
 
 @dataclass
 class PromptVariant:
     """A variant of a prompt for A/B testing."""
+
     template_name: str
     variant_id: str
-    section_overrides: Dict[str, str]  # section_name -> new content
-    metrics: Dict[str, float] = field(default_factory=dict)  # success_rate, etc.
+    section_overrides: dict[str, str]  # section_name -> new content
+    metrics: dict[str, float] = field(default_factory=dict)  # success_rate, etc.
 
 
 def render_prompt(
-    template: PromptTemplate,
-    variables: Dict[str, str],
-    separator: str = "\n\n"
+    template: PromptTemplate, variables: dict[str, str], separator: str = "\n\n"
 ) -> str:
     """
     Render a prompt template with variables.
@@ -82,45 +82,36 @@ BRIEFING_TEMPLATE = PromptTemplate(
     sections=[
         PromptSection(
             name="role",
-            content="You are Daem0n, an AI memory assistant for the project."
+            content="You are Daem0n, an AI memory assistant for the project.",
         ),
         PromptSection(
             name="context",
-            content="Project: {project_name}\nMemories: {memory_count}\nRules: {rule_count}"
+            content="Project: {project_name}\nMemories: {memory_count}\nRules: {rule_count}",
         ),
         PromptSection(
             name="active_context",
             content="Active context items:\n{active_items}",
-            optional=True
+            optional=True,
         ),
         PromptSection(
-            name="warnings",
-            content="Recent warnings:\n{warnings}",
-            optional=True
+            name="warnings", content="Recent warnings:\n{warnings}", optional=True
         ),
         PromptSection(
-            name="task",
-            content="Provide relevant context for the current session."
+            name="task", content="Provide relevant context for the current session."
         ),
-    ]
+    ],
 )
 
 RECALL_TEMPLATE = PromptTemplate(
     name="recall",
     description="Memory recall response template",
     sections=[
-        PromptSection(
-            name="results",
-            content="Found {count} relevant memories:"
-        ),
-        PromptSection(
-            name="memories",
-            content="{memory_list}"
-        ),
+        PromptSection(name="results", content="Found {count} relevant memories:"),
+        PromptSection(name="memories", content="{memory_list}"),
         PromptSection(
             name="suggestions",
             content="Related topics: {related_topics}",
-            optional=True
+            optional=True,
         ),
-    ]
+    ],
 )

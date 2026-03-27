@@ -8,22 +8,49 @@ calling inscribe() for significant modifications. Never blocks.
 import sys
 from pathlib import Path
 
-from ._client import get_project_path, get_tool_input, get_file_path_from_input, succeed
+from ._client import get_file_path_from_input, get_project_path, get_tool_input, succeed
 
 # Patterns indicating architecturally or operationally significant changes
 SIGNIFICANT_PATTERNS = [
-    "class ", "def __init__", "async def ", "@dataclass", "@mcp.tool",
-    "config", "settings", "environment",
-    "auth", "password", "token", "secret", "credential",
-    "migration", "schema", "model", "table", "column",
-    "endpoint", "route", "api", "request", "response",
+    "class ",
+    "def __init__",
+    "async def ",
+    "@dataclass",
+    "@mcp.tool",
+    "config",
+    "settings",
+    "environment",
+    "auth",
+    "password",
+    "token",
+    "secret",
+    "credential",
+    "migration",
+    "schema",
+    "model",
+    "table",
+    "column",
+    "endpoint",
+    "route",
+    "api",
+    "request",
+    "response",
 ]
 
 # File types that are usually significant
 SIGNIFICANT_EXTENSIONS = {
-    ".py", ".ts", ".js", ".go", ".rs", ".java",
-    ".yaml", ".yml", ".json", ".toml",
-    ".sql", ".prisma",
+    ".py",
+    ".ts",
+    ".js",
+    ".go",
+    ".rs",
+    ".java",
+    ".yaml",
+    ".yml",
+    ".json",
+    ".toml",
+    ".sql",
+    ".prisma",
 }
 
 
@@ -72,6 +99,7 @@ def main() -> None:
 
 if __name__ == "__main__":
     import warnings
+
     warnings.filterwarnings("ignore")
 
     from daem0nmcp.claude_hooks._client import run_hook_safely

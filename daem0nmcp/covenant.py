@@ -16,10 +16,11 @@ import json
 import logging
 import os
 import warnings
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timedelta, timezone
 from functools import wraps
-from typing import Any, Callable, Dict, Optional, Set
+from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -27,7 +28,9 @@ logger = logging.getLogger(__name__)
 COUNSEL_TTL_SECONDS = 300
 
 # Token secret from environment (falls back to a default for testing)
-_TOKEN_SECRET = os.environ.get("DAEM0NMCP_TOKEN_SECRET", "daem0nmcp-covenant-default-secret")
+_TOKEN_SECRET = os.environ.get(
+    "DAEM0NMCP_TOKEN_SECRET", "daem0nmcp-covenant-default-secret"
+)
 
 
 # ============================================================================
@@ -35,15 +38,15 @@ _TOKEN_SECRET = os.environ.get("DAEM0NMCP_TOKEN_SECRET", "daem0nmcp-covenant-def
 # ============================================================================
 
 # Tools exempt from all covenant enforcement (entry points and diagnostics)
-COVENANT_EXEMPT_TOOLS: Set[str] = {
-    "get_briefing",      # Entry point - starts communion
-    "health",            # Diagnostic - always available
-    "context_check",     # Part of the covenant flow
+COVENANT_EXEMPT_TOOLS: set[str] = {
+    "get_briefing",  # Entry point - starts communion
+    "health",  # Diagnostic - always available
+    "context_check",  # Part of the covenant flow
 }
 
 # Tools that REQUIRE communion (must call get_briefing first)
 # This includes all tools except the exempt entry points
-COMMUNION_REQUIRED_TOOLS: Set[str] = {
+COMMUNION_REQUIRED_TOOLS: set[str] = {
     # Write operations (also need counsel)
     "remember",
     "remember_batch",
@@ -82,7 +85,7 @@ COMMUNION_REQUIRED_TOOLS: Set[str] = {
 }
 
 # Tools that REQUIRE counsel (must call context_check before mutating)
-COUNSEL_REQUIRED_TOOLS: Set[str] = {
+COUNSEL_REQUIRED_TOOLS: set[str] = {
     "remember",
     "remember_batch",
     "add_rule",
@@ -99,6 +102,7 @@ COUNSEL_REQUIRED_TOOLS: Set[str] = {
 # COVENANT VIOLATION RESPONSES
 # ============================================================================
 
+
 class CovenantViolation:
     """
     Standard violation response structures.
@@ -108,7 +112,7 @@ class CovenantViolation:
     """
 
     @staticmethod
-    def communion_required(project_path: str) -> Dict[str, Any]:
+    def communion_required(project_path: str) -> dict[str, Any]:
         """
         Response when tool is called without prior get_briefing().
 
@@ -131,7 +135,7 @@ class CovenantViolation:
         }
 
     @staticmethod
-    def counsel_required(tool_name: str, project_path: str) -> Dict[str, Any]:
+    def counsel_required(tool_name: str, project_path: str) -> dict[str, Any]:
         """
         Response when mutating tool is called without prior context_check().
 
@@ -160,7 +164,9 @@ class CovenantViolation:
         }
 
     @staticmethod
-    def counsel_expired(tool_name: str, project_path: str, age_seconds: int) -> Dict[str, Any]:
+    def counsel_expired(
+        tool_name: str, project_path: str, age_seconds: int
+    ) -> dict[str, Any]:
         """
         Response when context_check was done but has expired.
         """
@@ -187,6 +193,7 @@ class CovenantViolation:
 # ============================================================================
 # PREFLIGHT TOKEN
 # ============================================================================
+
 
 @dataclass
 class PreflightToken:
@@ -263,14 +270,16 @@ class PreflightToken:
 
     def serialize(self) -> str:
         """Serialize the token to JSON for storage/transmission."""
-        return json.dumps({
-            "action": self.action,
-            "session_id": self.session_id,
-            "project_path": self.project_path,
-            "issued_at": self.issued_at.isoformat(),
-            "expires_at": self.expires_at.isoformat(),
-            "signature": self.signature,
-        })
+        return json.dumps(
+            {
+                "action": self.action,
+                "session_id": self.session_id,
+                "project_path": self.project_path,
+                "issued_at": self.issued_at.isoformat(),
+                "expires_at": self.expires_at.isoformat(),
+                "signature": self.signature,
+            }
+        )
 
     @classmethod
     def verify(cls, serialized: str, project_path: str) -> Optional["PreflightToken"]:
@@ -297,7 +306,9 @@ class PreflightToken:
 
             # Verify project path matches
             if token.project_path != project_path:
-                logger.warning(f"Token project mismatch: {token.project_path} != {project_path}")
+                logger.warning(
+                    f"Token project mismatch: {token.project_path} != {project_path}"
+                )
                 return None
 
             # Verify signature and expiry
@@ -315,6 +326,7 @@ class PreflightToken:
 # ============================================================================
 # COVENANT ENFORCER
 # ============================================================================
+
 
 class CovenantEnforcer:
     """
@@ -347,7 +359,7 @@ class CovenantEnforcer:
         """
         self._session_manager = session_manager
 
-    async def _get_session_state(self, project_path: str) -> Optional[Dict[str, Any]]:
+    async def _get_session_state(self, project_path: str) -> dict[str, Any] | None:
         """
         Get current session state.
 
@@ -358,7 +370,7 @@ class CovenantEnforcer:
             return None
         return await self._session_manager.get_session_state(project_path)
 
-    async def check_communion(self, project_path: str) -> Optional[Dict[str, Any]]:
+    async def check_communion(self, project_path: str) -> dict[str, Any] | None:
         """
         Check if communion (get_briefing) was performed.
 
@@ -381,7 +393,7 @@ class CovenantEnforcer:
         tool_name: str,
         project_path: str,
         ttl_seconds: int = COUNSEL_TTL_SECONDS,
-    ) -> Optional[Dict[str, Any]]:
+    ) -> dict[str, Any] | None:
         """
         Check if counsel (context_check) was sought recently.
 
@@ -405,7 +417,9 @@ class CovenantEnforcer:
         context_checks = state.get("context_checks", [])
 
         if not context_checks:
-            logger.info(f"Counsel required before {tool_name} for project: {project_path}")
+            logger.info(
+                f"Counsel required before {tool_name} for project: {project_path}"
+            )
             return CovenantViolation.counsel_required(tool_name, project_path)
 
         # Find the most recent context check
@@ -439,7 +453,9 @@ class CovenantEnforcer:
         # Check if the most recent counsel is still fresh
         if most_recent_age > ttl_seconds:
             logger.info(f"Counsel expired ({most_recent_age:.0f}s old) for {tool_name}")
-            return CovenantViolation.counsel_expired(tool_name, project_path, int(most_recent_age))
+            return CovenantViolation.counsel_expired(
+                tool_name, project_path, int(most_recent_age)
+            )
 
         return None  # Counsel is fresh
 
@@ -447,6 +463,7 @@ class CovenantEnforcer:
 # ============================================================================
 # DECORATOR FUNCTIONS
 # ============================================================================
+
 
 def _deprecated_decorator_warning(name: str):
     """Emit deprecation warning for legacy decorators."""
@@ -460,7 +477,7 @@ def _deprecated_decorator_warning(name: str):
 
 
 # Callback to get project context from server (set by server.py at import time)
-_get_project_context_callback: Optional[Callable[[str], Any]] = None
+_get_project_context_callback: Callable[[str], Any] | None = None
 
 
 def set_context_callback(callback: Callable[[str], Any]) -> None:
@@ -469,7 +486,7 @@ def set_context_callback(callback: Callable[[str], Any]) -> None:
     _get_project_context_callback = callback
 
 
-def _get_context_state(project_path: str) -> Optional[Dict[str, Any]]:
+def _get_context_state(project_path: str) -> dict[str, Any] | None:
     """
     Get session state for a project using the registered callback.
 
@@ -516,7 +533,9 @@ def requires_communion(func: Callable) -> Callable:
 
         if project_path is None:
             # Can't enforce without project_path
-            logger.warning(f"Cannot enforce communion for {func.__name__}: no project_path")
+            logger.warning(
+                f"Cannot enforce communion for {func.__name__}: no project_path"
+            )
             return await func(*args, **kwargs)
 
         # Check state via callback
@@ -555,7 +574,9 @@ def requires_counsel(func: Callable) -> Callable:
 
         if project_path is None:
             # Can't enforce without project_path
-            logger.warning(f"Cannot enforce counsel for {func.__name__}: no project_path")
+            logger.warning(
+                f"Cannot enforce counsel for {func.__name__}: no project_path"
+            )
             return await func(*args, **kwargs)
 
         # Check state via callback
@@ -594,8 +615,12 @@ def requires_counsel(func: Callable) -> Callable:
             return CovenantViolation.counsel_required(func.__name__, project_path)
 
         if most_recent_age > COUNSEL_TTL_SECONDS:
-            logger.info(f"Counsel expired ({most_recent_age:.0f}s old) for {func.__name__}")
-            return CovenantViolation.counsel_expired(func.__name__, project_path, int(most_recent_age))
+            logger.info(
+                f"Counsel expired ({most_recent_age:.0f}s old) for {func.__name__}"
+            )
+            return CovenantViolation.counsel_expired(
+                func.__name__, project_path, int(most_recent_age)
+            )
 
         return await func(*args, **kwargs)
 

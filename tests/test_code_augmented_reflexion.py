@@ -8,39 +8,40 @@ Comprehensive test coverage for all 5 REFL requirements:
 - REFL-05: Failure classification (CodeFailureType, fixable/infra/verification sets)
 """
 
-import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
+
+from daem0nmcp.agency.sandbox import StructuredExecutionResult
 from daem0nmcp.reflexion.claims import (
     Claim,
     ClaimType,
     VerificationLevel,
     is_code_verifiable,
 )
-from daem0nmcp.reflexion.code_gen import generate_verification_code
 from daem0nmcp.reflexion.code_exec import (
-    CodeFailureType,
-    CodeExecutionResult,
-    classify_failure,
-    execute_verification_code,
     FIXABLE_FAILURES,
     INFRASTRUCTURE_FAILURES,
     VERIFICATION_FAILURES,
+    CodeExecutionResult,
+    CodeFailureType,
+    classify_failure,
+    execute_verification_code,
 )
-from daem0nmcp.agency.sandbox import StructuredExecutionResult
-from daem0nmcp.reflexion.nodes import (
-    create_actor_node,
-    create_evaluator_node,
-)
+from daem0nmcp.reflexion.code_gen import generate_verification_code
 from daem0nmcp.reflexion.graph import (
     build_reflexion_graph,
     run_reflexion,
 )
-
+from daem0nmcp.reflexion.nodes import (
+    create_actor_node,
+    create_evaluator_node,
+)
 
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
+
 
 @pytest.fixture
 def mock_memory_manager():
@@ -174,6 +175,7 @@ class TestActorCodeGeneration:
 
     def test_actor_generates_code_for_verifiable_draft(self):
         """Actor generates verification_code when draft has code-verifiable claims."""
+
         def llm_func(prompt):
             # Return text that extract_claims can parse AND is_code_verifiable matches
             return "The function returns None by default."
@@ -188,7 +190,10 @@ class TestActorCodeGeneration:
     def test_actor_graceful_on_code_gen_error(self):
         """Actor still returns draft if code generation fails."""
         # Patch at the source module so the local import picks up the mock
-        with patch("daem0nmcp.reflexion.code_gen.generate_verification_code", side_effect=RuntimeError("fail")):
+        with patch(
+            "daem0nmcp.reflexion.code_gen.generate_verification_code",
+            side_effect=RuntimeError("fail"),
+        ):
             actor = create_actor_node(llm_func=None)
             state = {"query": "Test", "iteration": 0, "critique": ""}
             result = actor(state)
@@ -208,7 +213,9 @@ class TestEvaluatorCodeExecution:
     """Tests for Evaluator executing verification code."""
 
     @pytest.mark.asyncio
-    async def test_evaluator_executes_code_when_sandbox_available(self, mock_memory_manager):
+    async def test_evaluator_executes_code_when_sandbox_available(
+        self, mock_memory_manager
+    ):
         """Evaluator calls execute_verification_code when sandbox_executor provided."""
         mock_exec = AsyncMock()
         mock_exec.available = True
@@ -234,12 +241,20 @@ class TestEvaluatorCodeExecution:
 
         with patch("daem0nmcp.reflexion.nodes.verify_claims") as mock_verify:
             mock_verify.return_value = []
-            with patch("daem0nmcp.reflexion.nodes.summarize_verification") as mock_summary:
+            with patch(
+                "daem0nmcp.reflexion.nodes.summarize_verification"
+            ) as mock_summary:
                 mock_summary.return_value = {
-                    "verified_count": 0, "unverified_count": 0,
-                    "conflict_count": 0, "overall_confidence": 0.7, "conflicts": [],
+                    "verified_count": 0,
+                    "unverified_count": 0,
+                    "conflict_count": 0,
+                    "overall_confidence": 0.7,
+                    "conflicts": [],
                 }
-                with patch("daem0nmcp.reflexion.code_exec.execute_verification_code", return_value=mock_code_result) as mock_exec_fn:
+                with patch(
+                    "daem0nmcp.reflexion.code_exec.execute_verification_code",
+                    return_value=mock_code_result,
+                ) as mock_exec_fn:
                     result = await evaluator(state)
 
                     mock_exec_fn.assert_called_once()
@@ -264,10 +279,15 @@ class TestEvaluatorCodeExecution:
 
         with patch("daem0nmcp.reflexion.nodes.verify_claims") as mock_verify:
             mock_verify.return_value = []
-            with patch("daem0nmcp.reflexion.nodes.summarize_verification") as mock_summary:
+            with patch(
+                "daem0nmcp.reflexion.nodes.summarize_verification"
+            ) as mock_summary:
                 mock_summary.return_value = {
-                    "verified_count": 0, "unverified_count": 0,
-                    "conflict_count": 0, "overall_confidence": 0.7, "conflicts": [],
+                    "verified_count": 0,
+                    "unverified_count": 0,
+                    "conflict_count": 0,
+                    "overall_confidence": 0.7,
+                    "conflicts": [],
                 }
                 result = await evaluator(state)
 
@@ -276,7 +296,9 @@ class TestEvaluatorCodeExecution:
         assert result["code_verification_results"] == []
 
     @pytest.mark.asyncio
-    async def test_evaluator_skips_code_when_no_verification_code(self, mock_memory_manager, mock_sandbox_executor):
+    async def test_evaluator_skips_code_when_no_verification_code(
+        self, mock_memory_manager, mock_sandbox_executor
+    ):
         """Evaluator skips code execution when verification_code is None."""
         evaluator = create_evaluator_node(
             memory_manager=mock_memory_manager,
@@ -292,10 +314,15 @@ class TestEvaluatorCodeExecution:
 
         with patch("daem0nmcp.reflexion.nodes.verify_claims") as mock_verify:
             mock_verify.return_value = []
-            with patch("daem0nmcp.reflexion.nodes.summarize_verification") as mock_summary:
+            with patch(
+                "daem0nmcp.reflexion.nodes.summarize_verification"
+            ) as mock_summary:
                 mock_summary.return_value = {
-                    "verified_count": 0, "unverified_count": 0,
-                    "conflict_count": 0, "overall_confidence": 0.7, "conflicts": [],
+                    "verified_count": 0,
+                    "unverified_count": 0,
+                    "conflict_count": 0,
+                    "overall_confidence": 0.7,
+                    "conflicts": [],
                 }
                 result = await evaluator(state)
 
@@ -335,12 +362,20 @@ class TestCodeQualityScoring:
 
         with patch("daem0nmcp.reflexion.nodes.verify_claims") as mock_verify:
             mock_verify.return_value = []
-            with patch("daem0nmcp.reflexion.nodes.summarize_verification") as mock_summary:
+            with patch(
+                "daem0nmcp.reflexion.nodes.summarize_verification"
+            ) as mock_summary:
                 mock_summary.return_value = {
-                    "verified_count": 0, "unverified_count": 0,
-                    "conflict_count": 0, "overall_confidence": 0.7, "conflicts": [],
+                    "verified_count": 0,
+                    "unverified_count": 0,
+                    "conflict_count": 0,
+                    "overall_confidence": 0.7,
+                    "conflicts": [],
                 }
-                with patch("daem0nmcp.reflexion.code_exec.execute_verification_code", return_value=mock_code_result):
+                with patch(
+                    "daem0nmcp.reflexion.code_exec.execute_verification_code",
+                    return_value=mock_code_result,
+                ):
                     result = await evaluator(state)
 
         # 0.7 base + 0.1 bonus = 0.8
@@ -372,12 +407,20 @@ class TestCodeQualityScoring:
 
         with patch("daem0nmcp.reflexion.nodes.verify_claims") as mock_verify:
             mock_verify.return_value = []
-            with patch("daem0nmcp.reflexion.nodes.summarize_verification") as mock_summary:
+            with patch(
+                "daem0nmcp.reflexion.nodes.summarize_verification"
+            ) as mock_summary:
                 mock_summary.return_value = {
-                    "verified_count": 0, "unverified_count": 0,
-                    "conflict_count": 0, "overall_confidence": 0.7, "conflicts": [],
+                    "verified_count": 0,
+                    "unverified_count": 0,
+                    "conflict_count": 0,
+                    "overall_confidence": 0.7,
+                    "conflicts": [],
                 }
-                with patch("daem0nmcp.reflexion.code_exec.execute_verification_code", return_value=mock_code_result):
+                with patch(
+                    "daem0nmcp.reflexion.code_exec.execute_verification_code",
+                    return_value=mock_code_result,
+                ):
                     result = await evaluator(state)
 
         # 0.7 base - 0.15 penalty = 0.55
@@ -410,12 +453,20 @@ class TestCodeQualityScoring:
 
         with patch("daem0nmcp.reflexion.nodes.verify_claims") as mock_verify:
             mock_verify.return_value = []
-            with patch("daem0nmcp.reflexion.nodes.summarize_verification") as mock_summary:
+            with patch(
+                "daem0nmcp.reflexion.nodes.summarize_verification"
+            ) as mock_summary:
                 mock_summary.return_value = {
-                    "verified_count": 0, "unverified_count": 0,
-                    "conflict_count": 0, "overall_confidence": 0.7, "conflicts": [],
+                    "verified_count": 0,
+                    "unverified_count": 0,
+                    "conflict_count": 0,
+                    "overall_confidence": 0.7,
+                    "conflicts": [],
                 }
-                with patch("daem0nmcp.reflexion.code_exec.execute_verification_code", return_value=mock_code_result):
+                with patch(
+                    "daem0nmcp.reflexion.code_exec.execute_verification_code",
+                    return_value=mock_code_result,
+                ):
                     result = await evaluator(state)
 
         # 0.7 base, no adjustment for infrastructure error
@@ -447,12 +498,20 @@ class TestCodeQualityScoring:
 
         with patch("daem0nmcp.reflexion.nodes.verify_claims") as mock_verify:
             mock_verify.return_value = []
-            with patch("daem0nmcp.reflexion.nodes.summarize_verification") as mock_summary:
+            with patch(
+                "daem0nmcp.reflexion.nodes.summarize_verification"
+            ) as mock_summary:
                 mock_summary.return_value = {
-                    "verified_count": 0, "unverified_count": 0,
-                    "conflict_count": 0, "overall_confidence": 0.7, "conflicts": [],
+                    "verified_count": 0,
+                    "unverified_count": 0,
+                    "conflict_count": 0,
+                    "overall_confidence": 0.7,
+                    "conflicts": [],
                 }
-                with patch("daem0nmcp.reflexion.code_exec.execute_verification_code", return_value=mock_code_result):
+                with patch(
+                    "daem0nmcp.reflexion.code_exec.execute_verification_code",
+                    return_value=mock_code_result,
+                ):
                     result = await evaluator(state)
 
         # 0.7 base, no adjustment for syntax error
@@ -487,12 +546,19 @@ class TestCodeExecutionBudget:
 
         with patch("daem0nmcp.reflexion.nodes.verify_claims") as mock_verify:
             mock_verify.return_value = []
-            with patch("daem0nmcp.reflexion.nodes.summarize_verification") as mock_summary:
+            with patch(
+                "daem0nmcp.reflexion.nodes.summarize_verification"
+            ) as mock_summary:
                 mock_summary.return_value = {
-                    "verified_count": 0, "unverified_count": 0,
-                    "conflict_count": 0, "overall_confidence": 0.7, "conflicts": [],
+                    "verified_count": 0,
+                    "unverified_count": 0,
+                    "conflict_count": 0,
+                    "overall_confidence": 0.7,
+                    "conflicts": [],
                 }
-                with patch("daem0nmcp.reflexion.code_exec.execute_verification_code") as mock_exec_fn:
+                with patch(
+                    "daem0nmcp.reflexion.code_exec.execute_verification_code"
+                ) as mock_exec_fn:
                     result = await evaluator(state)
                     # Executor NOT called because budget exhausted
                     mock_exec_fn.assert_not_called()
@@ -527,12 +593,20 @@ class TestCodeExecutionBudget:
 
         with patch("daem0nmcp.reflexion.nodes.verify_claims") as mock_verify:
             mock_verify.return_value = []
-            with patch("daem0nmcp.reflexion.nodes.summarize_verification") as mock_summary:
+            with patch(
+                "daem0nmcp.reflexion.nodes.summarize_verification"
+            ) as mock_summary:
                 mock_summary.return_value = {
-                    "verified_count": 0, "unverified_count": 0,
-                    "conflict_count": 0, "overall_confidence": 0.7, "conflicts": [],
+                    "verified_count": 0,
+                    "unverified_count": 0,
+                    "conflict_count": 0,
+                    "overall_confidence": 0.7,
+                    "conflicts": [],
                 }
-                with patch("daem0nmcp.reflexion.code_exec.execute_verification_code", return_value=mock_code_result):
+                with patch(
+                    "daem0nmcp.reflexion.code_exec.execute_verification_code",
+                    return_value=mock_code_result,
+                ):
                     result = await evaluator(state)
 
         assert result["code_executions_used"] == 1
@@ -563,10 +637,15 @@ class TestCodeExecutionBudget:
 
         with patch("daem0nmcp.reflexion.nodes.verify_claims") as mock_verify:
             mock_verify.return_value = []
-            with patch("daem0nmcp.reflexion.nodes.summarize_verification") as mock_summary:
+            with patch(
+                "daem0nmcp.reflexion.nodes.summarize_verification"
+            ) as mock_summary:
                 mock_summary.return_value = {
-                    "verified_count": 0, "unverified_count": 0,
-                    "conflict_count": 0, "overall_confidence": 0.5, "conflicts": [],
+                    "verified_count": 0,
+                    "unverified_count": 0,
+                    "conflict_count": 0,
+                    "overall_confidence": 0.5,
+                    "conflicts": [],
                 }
                 result = await evaluator(state)
 
@@ -591,10 +670,15 @@ class TestCodeExecutionBudget:
 
         with patch("daem0nmcp.reflexion.nodes.verify_claims") as mock_verify:
             mock_verify.return_value = []
-            with patch("daem0nmcp.reflexion.nodes.summarize_verification") as mock_summary:
+            with patch(
+                "daem0nmcp.reflexion.nodes.summarize_verification"
+            ) as mock_summary:
                 mock_summary.return_value = {
-                    "verified_count": 0, "unverified_count": 0,
-                    "conflict_count": 0, "overall_confidence": 0.3, "conflicts": [],
+                    "verified_count": 0,
+                    "unverified_count": 0,
+                    "conflict_count": 0,
+                    "overall_confidence": 0.3,
+                    "conflicts": [],
                 }
                 result = await evaluator(state)
 
@@ -618,28 +702,40 @@ class TestFailureClassification:
     def test_classify_syntax_error(self):
         """SyntaxError -> SYNTAX_ERROR."""
         result = StructuredExecutionResult(
-            success=False, output="", error_name="SyntaxError", error_value="invalid syntax"
+            success=False,
+            output="",
+            error_name="SyntaxError",
+            error_value="invalid syntax",
         )
         assert classify_failure(result) == CodeFailureType.SYNTAX_ERROR
 
     def test_classify_import_error(self):
         """ImportError -> IMPORT_ERROR."""
         result = StructuredExecutionResult(
-            success=False, output="", error_name="ImportError", error_value="No module named 'foo'"
+            success=False,
+            output="",
+            error_name="ImportError",
+            error_value="No module named 'foo'",
         )
         assert classify_failure(result) == CodeFailureType.IMPORT_ERROR
 
     def test_classify_module_not_found(self):
         """ModuleNotFoundError -> IMPORT_ERROR."""
         result = StructuredExecutionResult(
-            success=False, output="", error_name="ModuleNotFoundError", error_value="No module named 'bar'"
+            success=False,
+            output="",
+            error_name="ModuleNotFoundError",
+            error_value="No module named 'bar'",
         )
         assert classify_failure(result) == CodeFailureType.IMPORT_ERROR
 
     def test_classify_assertion_error(self):
         """AssertionError -> ASSERTION_FAILURE."""
         result = StructuredExecutionResult(
-            success=False, output="", error_name="AssertionError", error_value="expected True"
+            success=False,
+            output="",
+            error_name="AssertionError",
+            error_value="expected True",
         )
         assert classify_failure(result) == CodeFailureType.ASSERTION_FAILURE
 
@@ -653,14 +749,20 @@ class TestFailureClassification:
     def test_classify_unknown_as_sandbox_error(self):
         """Unknown errors -> SANDBOX_ERROR."""
         result = StructuredExecutionResult(
-            success=False, output="", error_name="RuntimeError", error_value="something broke"
+            success=False,
+            output="",
+            error_name="RuntimeError",
+            error_value="something broke",
         )
         assert classify_failure(result) == CodeFailureType.SANDBOX_ERROR
 
     def test_classify_timeout_from_value(self):
         """Timeout mentioned in error_value -> TIMEOUT."""
         result = StructuredExecutionResult(
-            success=False, output="", error_name="Error", error_value="execution timed out"
+            success=False,
+            output="",
+            error_name="Error",
+            error_value="execution timed out",
         )
         assert classify_failure(result) == CodeFailureType.TIMEOUT
 
@@ -687,7 +789,9 @@ class TestCodeExecutionResult:
 
     def test_is_success(self):
         """is_success returns True for SUCCESS type."""
-        result = CodeExecutionResult(failure_type=CodeFailureType.SUCCESS, assertions_passed=True)
+        result = CodeExecutionResult(
+            failure_type=CodeFailureType.SUCCESS, assertions_passed=True
+        )
         assert result.is_success
 
     def test_is_not_success(self):
@@ -751,7 +855,9 @@ class TestSandboxUnavailability:
     """Tests for graceful sandbox unavailability handling."""
 
     @pytest.mark.asyncio
-    async def test_execute_verification_code_sandbox_unavailable(self, unavailable_sandbox):
+    async def test_execute_verification_code_sandbox_unavailable(
+        self, unavailable_sandbox
+    ):
         """execute_verification_code returns SANDBOX_ERROR when sandbox unavailable."""
         result = await execute_verification_code(
             code="assert True",
@@ -764,7 +870,9 @@ class TestSandboxUnavailability:
         assert "not available" in result.error_message.lower()
 
     @pytest.mark.asyncio
-    async def test_evaluator_no_crash_sandbox_unavailable(self, mock_memory_manager, unavailable_sandbox):
+    async def test_evaluator_no_crash_sandbox_unavailable(
+        self, mock_memory_manager, unavailable_sandbox
+    ):
         """Evaluator does NOT crash when sandbox is unavailable -- falls back silently."""
         evaluator = create_evaluator_node(
             memory_manager=mock_memory_manager,
@@ -780,10 +888,15 @@ class TestSandboxUnavailability:
 
         with patch("daem0nmcp.reflexion.nodes.verify_claims") as mock_verify:
             mock_verify.return_value = []
-            with patch("daem0nmcp.reflexion.nodes.summarize_verification") as mock_summary:
+            with patch(
+                "daem0nmcp.reflexion.nodes.summarize_verification"
+            ) as mock_summary:
                 mock_summary.return_value = {
-                    "verified_count": 0, "unverified_count": 0,
-                    "conflict_count": 0, "overall_confidence": 0.7, "conflicts": [],
+                    "verified_count": 0,
+                    "unverified_count": 0,
+                    "conflict_count": 0,
+                    "overall_confidence": 0.7,
+                    "conflicts": [],
                 }
                 # Should not crash
                 result = await evaluator(state)
@@ -816,18 +929,21 @@ class TestStateExtension:
     def test_run_reflexion_accepts_sandbox_executor(self):
         """run_reflexion function accepts sandbox_executor parameter."""
         import inspect
+
         sig = inspect.signature(run_reflexion)
         assert "sandbox_executor" in sig.parameters
 
     def test_build_reflexion_graph_accepts_sandbox_executor(self):
         """build_reflexion_graph accepts sandbox_executor parameter."""
         import inspect
+
         sig = inspect.signature(build_reflexion_graph)
         assert "sandbox_executor" in sig.parameters
 
     def test_create_evaluator_node_accepts_sandbox_executor(self):
         """create_evaluator_node accepts sandbox_executor parameter."""
         import inspect
+
         sig = inspect.signature(create_evaluator_node)
         assert "sandbox_executor" in sig.parameters
 
@@ -864,12 +980,20 @@ class TestCodeVerificationResultsAccumulation:
 
         with patch("daem0nmcp.reflexion.nodes.verify_claims") as mock_verify:
             mock_verify.return_value = []
-            with patch("daem0nmcp.reflexion.nodes.summarize_verification") as mock_summary:
+            with patch(
+                "daem0nmcp.reflexion.nodes.summarize_verification"
+            ) as mock_summary:
                 mock_summary.return_value = {
-                    "verified_count": 0, "unverified_count": 0,
-                    "conflict_count": 0, "overall_confidence": 0.7, "conflicts": [],
+                    "verified_count": 0,
+                    "unverified_count": 0,
+                    "conflict_count": 0,
+                    "overall_confidence": 0.7,
+                    "conflicts": [],
                 }
-                with patch("daem0nmcp.reflexion.code_exec.execute_verification_code", return_value=mock_code_result):
+                with patch(
+                    "daem0nmcp.reflexion.code_exec.execute_verification_code",
+                    return_value=mock_code_result,
+                ):
                     result = await evaluator(state)
 
         assert isinstance(result["code_verification_results"], list)
@@ -890,10 +1014,15 @@ class TestCodeVerificationResultsAccumulation:
 
         with patch("daem0nmcp.reflexion.nodes.verify_claims") as mock_verify:
             mock_verify.return_value = []
-            with patch("daem0nmcp.reflexion.nodes.summarize_verification") as mock_summary:
+            with patch(
+                "daem0nmcp.reflexion.nodes.summarize_verification"
+            ) as mock_summary:
                 mock_summary.return_value = {
-                    "verified_count": 0, "unverified_count": 0,
-                    "conflict_count": 0, "overall_confidence": 0.7, "conflicts": [],
+                    "verified_count": 0,
+                    "unverified_count": 0,
+                    "conflict_count": 0,
+                    "overall_confidence": 0.7,
+                    "conflicts": [],
                 }
                 result = await evaluator(state)
 

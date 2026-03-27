@@ -10,7 +10,7 @@ import logging
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -21,10 +21,12 @@ class DreamResult:
 
     source_decision_id: int  # Memory.id of the failed decision being re-evaluated
     original_content: str  # First 200 chars of the original decision content
-    original_outcome: Optional[str]  # The outcome text from the original decision
+    original_outcome: str | None  # The outcome text from the original decision
     insight: str  # The re-evaluation insight text
     result_type: str  # One of "revised", "confirmed_failure", "needs_more_data"
-    evidence_ids: List[int] = field(default_factory=list)  # Memory.ids of evidence found
+    evidence_ids: list[int] = field(
+        default_factory=list
+    )  # Memory.ids of evidence found
 
 
 @dataclass
@@ -34,20 +36,20 @@ class DreamSession:
     session_id: str = field(default_factory=lambda: str(uuid.uuid4())[:12])
     project_path: str = ""
     started_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
-    ended_at: Optional[datetime] = None
+    ended_at: datetime | None = None
     decisions_reviewed: int = 0
     insights_generated: int = 0
     outcomes_resolved: int = 0
-    results: List[DreamResult] = field(default_factory=list)
+    results: list[DreamResult] = field(default_factory=list)
     interrupted: bool = False  # True if user returned before completion
-    strategies_run: List[str] = field(default_factory=list)
+    strategies_run: list[str] = field(default_factory=list)
 
 
 async def persist_dream_result(
     memory_manager,
     result: DreamResult,
     session: DreamSession,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Store a dream re-evaluation result as a learning memory.
 
     Args:
@@ -67,8 +69,10 @@ async def persist_dream_result(
             f"source-decision:{result.source_decision_id}",
         ]
         _pending_types = {
-            "auto_resolved_success", "auto_resolved_failure",
-            "flagged_for_review", "insufficient_evidence",
+            "auto_resolved_success",
+            "auto_resolved_failure",
+            "flagged_for_review",
+            "insufficient_evidence",
         }
         if result.result_type in _pending_types:
             tags.append("pending-resolution")
@@ -104,7 +108,7 @@ async def persist_dream_result(
 async def persist_session_summary(
     memory_manager,
     session: DreamSession,
-) -> Optional[Dict[str, Any]]:
+) -> dict[str, Any] | None:
     """Store a dream session summary as a learning memory.
 
     Only persists if the session generated at least one insight.

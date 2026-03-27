@@ -2,16 +2,19 @@
 Database Manager - Simplified for the focused memory system.
 """
 
-from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
-from sqlalchemy.pool import NullPool
-from sqlalchemy import event
-from contextlib import asynccontextmanager
-from pathlib import Path
-from datetime import datetime
-from typing import Optional
 import logging
+from contextlib import asynccontextmanager
+from datetime import datetime
+from pathlib import Path
 
-from .models import Base, MemoryVersion  # noqa: F401 - MemoryVersion imported for table creation
+from sqlalchemy import event
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.pool import NullPool
+
+from .models import (  # noqa: F401 - MemoryVersion imported for table creation
+    Base,
+    MemoryVersion,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -67,9 +70,7 @@ class DatabaseManager:
                 cursor.close()
 
             self._session_factory = async_sessionmaker(
-                bind=self._engine,
-                expire_on_commit=False,
-                class_=AsyncSession
+                bind=self._engine, expire_on_commit=False, class_=AsyncSession
             )
         return self._engine
 
@@ -92,6 +93,7 @@ class DatabaseManager:
         if self.db_path.exists():
             try:
                 from .migrations import run_migrations
+
                 count, applied = run_migrations(str(self.db_path))
                 if count > 0:
                     logger.info(f"Applied {count} migration(s): {applied}")
@@ -138,15 +140,16 @@ class DatabaseManager:
         finally:
             await session.close()
 
-    async def get_last_update_time(self) -> Optional[datetime]:
+    async def get_last_update_time(self) -> datetime | None:
         """Get the most recent updated_at from memories and rules."""
         from datetime import timezone as tz
 
         async with self.get_session() as session:
-            from sqlalchemy import select, func, text
+            from sqlalchemy import func, select, text
+
             from .models import Memory, Rule
 
-            def _parse_meta_time(value: Optional[str]) -> Optional[datetime]:
+            def _parse_meta_time(value: str | None) -> datetime | None:
                 if not value:
                     return None
                 try:
@@ -160,32 +163,34 @@ class DatabaseManager:
             meta_times = []
             try:
                 meta_exists = await session.execute(
-                    text("SELECT 1 FROM sqlite_master WHERE type='table' AND name='meta'")
+                    text(
+                        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='meta'"
+                    )
                 )
                 if meta_exists.scalar():
                     mem_meta = await session.execute(
-                        text("SELECT value FROM meta WHERE key='memories_last_modified'")
+                        text(
+                            "SELECT value FROM meta WHERE key='memories_last_modified'"
+                        )
                     )
                     rule_meta = await session.execute(
                         text("SELECT value FROM meta WHERE key='rules_last_modified'")
                     )
-                    meta_times.extend([
-                        _parse_meta_time(mem_meta.scalar()),
-                        _parse_meta_time(rule_meta.scalar())
-                    ])
+                    meta_times.extend(
+                        [
+                            _parse_meta_time(mem_meta.scalar()),
+                            _parse_meta_time(rule_meta.scalar()),
+                        ]
+                    )
             except Exception:
                 pass
 
             # Get max updated_at from memories
-            mem_result = await session.execute(
-                select(func.max(Memory.updated_at))
-            )
+            mem_result = await session.execute(select(func.max(Memory.updated_at)))
             mem_time = mem_result.scalar()
 
             # Get max created_at from rules (rules don't have updated_at)
-            rule_result = await session.execute(
-                select(func.max(Rule.created_at))
-            )
+            rule_result = await session.execute(select(func.max(Rule.created_at)))
             rule_time = rule_result.scalar()
 
             # Return the most recent, ensuring timezone awareness
@@ -199,7 +204,7 @@ class DatabaseManager:
 
             return max(times) if times else None
 
-    async def has_changes_since(self, since: Optional[datetime]) -> bool:
+    async def has_changes_since(self, since: datetime | None) -> bool:
         """Check if database has changes since the given timestamp."""
         if since is None:
             return True

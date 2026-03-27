@@ -10,6 +10,7 @@ class TestFullCovenantFlow:
     @pytest.fixture
     def db_manager(self, tmp_path):
         from daem0nmcp.database import DatabaseManager
+
         return DatabaseManager(str(tmp_path / "storage"))
 
     @pytest.mark.asyncio
@@ -18,6 +19,7 @@ class TestFullCovenantFlow:
         await db_manager.init_db()
 
         from daem0nmcp import server
+
         server._project_contexts.clear()
 
         project_path = str(db_manager.storage_path.parent.parent)
@@ -71,6 +73,7 @@ class TestFullCovenantFlow:
         await db_manager.init_db()
 
         from daem0nmcp import server
+
         server._project_contexts.clear()
 
         project_path = str(db_manager.storage_path.parent.parent)
@@ -92,8 +95,9 @@ class TestFullCovenantFlow:
         """Test that preflight tools can be called in parallel after briefing."""
         await db_manager.init_db()
 
-        from daem0nmcp import server
         import asyncio
+
+        from daem0nmcp import server
 
         server._project_contexts.clear()
         project_path = str(db_manager.storage_path.parent.parent)
@@ -103,7 +107,9 @@ class TestFullCovenantFlow:
 
         # Parallel preflight (simulated)
         results = await asyncio.gather(
-            server.context_check(description="editing test.py", project_path=project_path),
+            server.context_check(
+                description="editing test.py", project_path=project_path
+            ),
             server.recall_for_file(file_path="test.py", project_path=project_path),
             return_exceptions=True,
         )

@@ -12,9 +12,9 @@ These tests verify sandbox execution and capability scoping work correctly.
 import inspect
 import logging
 import os
+from unittest.mock import MagicMock, patch
 
 import pytest
-from unittest.mock import MagicMock, patch
 
 from daem0nmcp.agency import (
     CapabilityManager,
@@ -23,7 +23,6 @@ from daem0nmcp.agency import (
     SandboxExecutor,
     check_capability,
 )
-
 
 # ============================================================================
 # AGENCY-03: execute_python tool provides sandboxed code execution
@@ -312,7 +311,8 @@ class TestSecurityLogging:
 
         # Should log warning about unavailability (could be API key or package)
         assert any(
-            "unavailable" in record.message.lower() or "not set" in record.message.lower()
+            "unavailable" in record.message.lower()
+            or "not set" in record.message.lower()
             for record in caplog.records
         )
 
@@ -343,9 +343,7 @@ class TestSecurityLogging:
             await executor.execute("print('test')")
 
         # Should log execution info
-        assert any(
-            "execution" in record.message.lower() for record in caplog.records
-        )
+        assert any("execution" in record.message.lower() for record in caplog.records)
 
     def test_capability_logs_grant(self, caplog):
         """CapabilityManager logs capability grants."""
@@ -354,9 +352,7 @@ class TestSecurityLogging:
         manager = CapabilityManager()
         manager.grant_capability("/test", CapabilityScope.NETWORK_ACCESS)
 
-        assert any(
-            "granted" in record.message.lower() for record in caplog.records
-        )
+        assert any("granted" in record.message.lower() for record in caplog.records)
 
     def test_capability_logs_revoke(self, caplog):
         """CapabilityManager logs capability revocations."""
@@ -365,9 +361,7 @@ class TestSecurityLogging:
         manager = CapabilityManager()
         manager.revoke_capability("/test", CapabilityScope.EXECUTE_CODE)
 
-        assert any(
-            "revoked" in record.message.lower() for record in caplog.records
-        )
+        assert any("revoked" in record.message.lower() for record in caplog.records)
 
 
 # ============================================================================

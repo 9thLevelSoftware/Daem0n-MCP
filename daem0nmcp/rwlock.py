@@ -2,8 +2,8 @@
 """Async read-write lock for concurrent context access."""
 
 import asyncio
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from typing import AsyncIterator
 
 
 class RWLock:

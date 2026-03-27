@@ -6,9 +6,10 @@ into tool responses and briefings.
 """
 
 import logging
-from typing import Dict, Any, Optional
 from datetime import datetime, timezone
-from sqlalchemy import select, delete, func
+from typing import Any
+
+from sqlalchemy import delete, func, select
 
 from .database import DatabaseManager
 from .models import ActiveContextItem, Memory
@@ -36,10 +37,10 @@ class ActiveContextManager:
         self,
         project_path: str,
         memory_id: int,
-        reason: Optional[str] = None,
+        reason: str | None = None,
         priority: int = 0,
-        expires_at: Optional[datetime] = None
-    ) -> Dict[str, Any]:
+        expires_at: datetime | None = None,
+    ) -> dict[str, Any]:
         """
         Add a memory to the active working context.
 
@@ -63,20 +64,21 @@ class ActiveContextManager:
             existing = await session.execute(
                 select(ActiveContextItem).where(
                     ActiveContextItem.project_path == project_path,
-                    ActiveContextItem.memory_id == memory_id
+                    ActiveContextItem.memory_id == memory_id,
                 )
             )
             if existing.scalar_one_or_none():
                 return {
                     "status": "already_exists",
                     "memory_id": memory_id,
-                    "message": "Memory is already in active context"
+                    "message": "Memory is already in active context",
                 }
 
             # Check count limit
             count_result = await session.execute(
-                select(func.count(ActiveContextItem.id))
-                .where(ActiveContextItem.project_path == project_path)
+                select(func.count(ActiveContextItem.id)).where(
+                    ActiveContextItem.project_path == project_path
+                )
             )
             current_count = count_result.scalar() or 0
 
@@ -84,7 +86,7 @@ class ActiveContextManager:
                 return {
                     "error": "CONTEXT_FULL",
                     "message": f"Active context is full ({MAX_ACTIVE_CONTEXT_ITEMS} items). Remove an item first.",
-                    "current_count": current_count
+                    "current_count": current_count,
                 }
 
             # Add to context
@@ -93,12 +95,14 @@ class ActiveContextManager:
                 memory_id=memory_id,
                 priority=priority,
                 reason=reason,
-                expires_at=expires_at
+                expires_at=expires_at,
             )
             session.add(item)
             await session.flush()
 
-            logger.info(f"Added memory {memory_id} to active context for {project_path}")
+            logger.info(
+                f"Added memory {memory_id} to active context for {project_path}"
+            )
 
             return {
                 "status": "added",
@@ -107,40 +111,29 @@ class ActiveContextManager:
                 "priority": priority,
                 "reason": reason,
                 "current_count": current_count + 1,
-                "max_count": MAX_ACTIVE_CONTEXT_ITEMS
+                "max_count": MAX_ACTIVE_CONTEXT_ITEMS,
             }
 
     async def remove_from_context(
-        self,
-        project_path: str,
-        memory_id: int
-    ) -> Dict[str, Any]:
+        self, project_path: str, memory_id: int
+    ) -> dict[str, Any]:
         """Remove a memory from active context."""
         async with self.db.get_session() as session:
             result = await session.execute(
                 delete(ActiveContextItem).where(
                     ActiveContextItem.project_path == project_path,
-                    ActiveContextItem.memory_id == memory_id
+                    ActiveContextItem.memory_id == memory_id,
                 )
             )
 
             if result.rowcount == 0:
-                return {
-                    "status": "not_found",
-                    "memory_id": memory_id
-                }
+                return {"status": "not_found", "memory_id": memory_id}
 
-            return {
-                "status": "removed",
-                "memory_id": memory_id
-            }
+            return {"status": "removed", "memory_id": memory_id}
 
     async def get_active_context(
-        self,
-        project_path: str,
-        include_expired: bool = False,
-        condensed: bool = False
-    ) -> Dict[str, Any]:
+        self, project_path: str, include_expired: bool = False, condensed: bool = False
+    ) -> dict[str, Any]:
         """
         Get all items in the active working context.
 
@@ -162,8 +155,8 @@ class ActiveContextManager:
             if not include_expired:
                 now = datetime.now(timezone.utc)
                 query = query.where(
-                    (ActiveContextItem.expires_at.is_(None)) |
-                    (ActiveContextItem.expires_at > now)
+                    (ActiveContextItem.expires_at.is_(None))
+                    | (ActiveContextItem.expires_at > now)
                 )
 
             result = await session.execute(query)
@@ -174,11 +167,15 @@ class ActiveContextManager:
                 # Build memory dict - truncate content in condensed mode
                 if condensed:
                     # Truncate content to ~150 chars for token efficiency
-                    content = memory.content[:150] + "..." if len(memory.content) > 150 else memory.content
+                    content = (
+                        memory.content[:150] + "..."
+                        if len(memory.content) > 150
+                        else memory.content
+                    )
                     memory_dict = {
                         "category": memory.category,
                         "content": content,
-                        "worked": memory.worked
+                        "worked": memory.worked,
                     }
                 else:
                     memory_dict = {
@@ -187,27 +184,33 @@ class ActiveContextManager:
                         "rationale": memory.rationale,
                         "tags": memory.tags,
                         "outcome": memory.outcome,
-                        "worked": memory.worked
+                        "worked": memory.worked,
                     }
 
-                items.append({
-                    "context_id": ctx_item.id,
-                    "memory_id": memory.id,
-                    "priority": ctx_item.priority,
-                    "reason": ctx_item.reason,
-                    "added_at": ctx_item.added_at.isoformat() if ctx_item.added_at else None,
-                    "expires_at": ctx_item.expires_at.isoformat() if ctx_item.expires_at else None,
-                    "memory": memory_dict
-                })
+                items.append(
+                    {
+                        "context_id": ctx_item.id,
+                        "memory_id": memory.id,
+                        "priority": ctx_item.priority,
+                        "reason": ctx_item.reason,
+                        "added_at": ctx_item.added_at.isoformat()
+                        if ctx_item.added_at
+                        else None,
+                        "expires_at": ctx_item.expires_at.isoformat()
+                        if ctx_item.expires_at
+                        else None,
+                        "memory": memory_dict,
+                    }
+                )
 
             return {
                 "project_path": project_path,
                 "count": len(items),
                 "max_count": MAX_ACTIVE_CONTEXT_ITEMS,
-                "items": items
+                "items": items,
             }
 
-    async def clear_context(self, project_path: str) -> Dict[str, Any]:
+    async def clear_context(self, project_path: str) -> dict[str, Any]:
         """Clear all items from active context."""
         async with self.db.get_session() as session:
             result = await session.execute(
@@ -216,12 +219,9 @@ class ActiveContextManager:
                 )
             )
 
-            return {
-                "status": "cleared",
-                "removed_count": result.rowcount
-            }
+            return {"status": "cleared", "removed_count": result.rowcount}
 
-    async def cleanup_expired(self, project_path: str) -> Dict[str, Any]:
+    async def cleanup_expired(self, project_path: str) -> dict[str, Any]:
         """Remove expired items from active context."""
         now = datetime.now(timezone.utc)
 
@@ -230,11 +230,8 @@ class ActiveContextManager:
                 delete(ActiveContextItem).where(
                     ActiveContextItem.project_path == project_path,
                     ActiveContextItem.expires_at.isnot(None),
-                    ActiveContextItem.expires_at <= now
+                    ActiveContextItem.expires_at <= now,
                 )
             )
 
-            return {
-                "status": "cleaned",
-                "expired_count": result.rowcount
-            }
+            return {"status": "cleaned", "expired_count": result.rowcount}

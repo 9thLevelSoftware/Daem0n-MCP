@@ -1,4 +1,5 @@
 """Graph module for GraphRAG knowledge graph operations."""
+
 from .contradiction import (
     Contradiction,
     check_and_invalidate_contradictions,
@@ -20,6 +21,8 @@ from .traversal import (
     find_related_memories,
     get_graph_metrics,
     trace_causal_chain,
+)
+from .traversal import (
     trace_knowledge_evolution as trace_knowledge_evolution_graph,
 )
 

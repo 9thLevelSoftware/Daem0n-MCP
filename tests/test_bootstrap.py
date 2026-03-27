@@ -1,11 +1,19 @@
 """Tests for enhanced bootstrap functionality."""
+
 import json
 import subprocess
-
-import pytest
 from unittest.mock import AsyncMock, MagicMock
 
-from daem0nmcp.server import _extract_project_identity, _extract_architecture, _extract_conventions, _extract_entry_points, _scan_todos_for_bootstrap, _extract_project_instructions
+import pytest
+
+from daem0nmcp.server import (
+    _extract_architecture,
+    _extract_conventions,
+    _extract_entry_points,
+    _extract_project_identity,
+    _extract_project_instructions,
+    _scan_todos_for_bootstrap,
+)
 
 
 class TestExtractProjectIdentity:
@@ -18,7 +26,7 @@ class TestExtractProjectIdentity:
             "version": "1.0.0",
             "description": "A test application",
             "scripts": {"test": "jest", "build": "webpack"},
-            "dependencies": {"react": "^18.0.0", "lodash": "^4.17.0"}
+            "dependencies": {"react": "^18.0.0", "lodash": "^4.17.0"},
         }
         (tmp_path / "package.json").write_text(json.dumps(package))
 
@@ -31,13 +39,13 @@ class TestExtractProjectIdentity:
 
     def test_extracts_pyproject_toml(self, tmp_path):
         """Should extract project info from pyproject.toml."""
-        pyproject = '''
+        pyproject = """
 [project]
 name = "my-python-app"
 version = "2.0.0"
 description = "A Python application"
 dependencies = ["fastapi", "sqlalchemy"]
-'''
+"""
         (tmp_path / "pyproject.toml").write_text(pyproject)
 
         result = _extract_project_identity(str(tmp_path))
@@ -134,7 +142,7 @@ class TestExtractConventions:
 
     def test_detects_ruff_config(self, tmp_path):
         """Should detect Ruff configuration."""
-        (tmp_path / "ruff.toml").write_text('[tool.ruff]\nline-length = 88')
+        (tmp_path / "ruff.toml").write_text("[tool.ruff]\nline-length = 88")
 
         result = _extract_conventions(str(tmp_path))
 
@@ -267,7 +275,9 @@ class TestBootstrapProjectContext:
     async def test_creates_multiple_memories(self, tmp_path):
         """Should create memories for each available source."""
         # Set up project files
-        (tmp_path / "package.json").write_text('{"name": "test-app", "description": "Test"}')
+        (tmp_path / "package.json").write_text(
+            '{"name": "test-app", "description": "Test"}'
+        )
         (tmp_path / "README.md").write_text("# Test App\n\nA test application.")
         (tmp_path / "src").mkdir()
         (tmp_path / "src" / "index.ts").write_text("// main")
@@ -282,10 +292,13 @@ class TestBootstrapProjectContext:
         mock_ctx.memory_manager = mock_memory_manager
 
         from daem0nmcp.server import _bootstrap_project_context
+
         result = await _bootstrap_project_context(mock_ctx)
 
         assert result["bootstrapped"] is True
-        assert result["memories_created"] >= 3  # At least identity, architecture, entry_points
+        assert (
+            result["memories_created"] >= 3
+        )  # At least identity, architecture, entry_points
         assert "sources" in result
         assert result["sources"].get("project_identity") == "ingested"
 
@@ -300,6 +313,7 @@ class TestBootstrapProjectContext:
         mock_ctx.memory_manager = mock_memory_manager
 
         from daem0nmcp.server import _bootstrap_project_context
+
         result = await _bootstrap_project_context(mock_ctx)
 
         assert result["bootstrapped"] is True
@@ -319,21 +333,17 @@ class TestBootstrapIntegration:
             "name": "test-web-app",
             "version": "1.0.0",
             "description": "A realistic test web application",
-            "scripts": {
-                "dev": "vite",
-                "build": "tsc && vite build",
-                "test": "jest"
-            },
+            "scripts": {"dev": "vite", "build": "tsc && vite build", "test": "jest"},
             "dependencies": {
                 "react": "^18.2.0",
                 "react-dom": "^18.2.0",
-                "axios": "^1.4.0"
+                "axios": "^1.4.0",
             },
             "devDependencies": {
                 "typescript": "^5.0.0",
                 "vite": "^4.3.0",
-                "jest": "^29.5.0"
-            }
+                "jest": "^29.5.0",
+            },
         }
         (tmp_path / "package.json").write_text(json.dumps(package_json, indent=2))
 
@@ -374,8 +384,8 @@ root.render(<App />);
             "rules": {
                 "indent": ["error", 2],
                 "quotes": ["error", "single"],
-                "semi": ["error", "always"]
-            }
+                "semi": ["error", "always"],
+            },
         }
         (tmp_path / ".eslintrc.json").write_text(json.dumps(eslint_config, indent=2))
 
@@ -410,19 +420,40 @@ export async function fetchData(url: string) {
         (tmp_path / "docs").mkdir()
 
         # Initialize git repo with at least one commit
-        subprocess.run(["git", "init"], cwd=str(tmp_path), capture_output=True, check=True, stdin=subprocess.DEVNULL)
+        subprocess.run(
+            ["git", "init"],
+            cwd=str(tmp_path),
+            capture_output=True,
+            check=True,
+            stdin=subprocess.DEVNULL,
+        )
         subprocess.run(
             ["git", "config", "user.email", "test@test.com"],
-            cwd=str(tmp_path), capture_output=True, check=True, stdin=subprocess.DEVNULL
+            cwd=str(tmp_path),
+            capture_output=True,
+            check=True,
+            stdin=subprocess.DEVNULL,
         )
         subprocess.run(
             ["git", "config", "user.name", "Test User"],
-            cwd=str(tmp_path), capture_output=True, check=True, stdin=subprocess.DEVNULL
+            cwd=str(tmp_path),
+            capture_output=True,
+            check=True,
+            stdin=subprocess.DEVNULL,
         )
-        subprocess.run(["git", "add", "."], cwd=str(tmp_path), capture_output=True, check=True, stdin=subprocess.DEVNULL)
+        subprocess.run(
+            ["git", "add", "."],
+            cwd=str(tmp_path),
+            capture_output=True,
+            check=True,
+            stdin=subprocess.DEVNULL,
+        )
         subprocess.run(
             ["git", "commit", "-m", "Initial commit"],
-            cwd=str(tmp_path), capture_output=True, check=True, stdin=subprocess.DEVNULL
+            cwd=str(tmp_path),
+            capture_output=True,
+            check=True,
+            stdin=subprocess.DEVNULL,
         )
 
         # Run all extractors directly and verify each returns expected content

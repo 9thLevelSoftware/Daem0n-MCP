@@ -1,11 +1,12 @@
 """Tests for enforcement models and session tracking."""
 
-import pytest
 import sqlite3
 from datetime import datetime, timezone
 
-from daem0nmcp.models import SessionState, EnforcementBypassLog
-from daem0nmcp.migrations import run_migrations, MIGRATIONS
+import pytest
+
+from daem0nmcp.migrations import MIGRATIONS, run_migrations
+from daem0nmcp.models import EnforcementBypassLog, SessionState
 
 
 class TestEnforcementModels:
@@ -100,11 +101,17 @@ class TestEnforcementMigration:
         conn = sqlite3.connect(str(db_path))
         cursor = conn.cursor()
 
-        cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='session_state'")
+        cursor.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='session_state'"
+        )
         assert cursor.fetchone() is not None, "session_state table should exist"
 
-        cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='enforcement_bypass_log'")
-        assert cursor.fetchone() is not None, "enforcement_bypass_log table should exist"
+        cursor.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='enforcement_bypass_log'"
+        )
+        assert cursor.fetchone() is not None, (
+            "enforcement_bypass_log table should exist"
+        )
 
         conn.close()
 
@@ -116,17 +123,20 @@ class TestSessionManager:
     def db_manager(self, tmp_path):
         """Create a test database manager."""
         from daem0nmcp.database import DatabaseManager
+
         return DatabaseManager(str(tmp_path / "storage"))
 
     @pytest.fixture
     def session_mgr(self, db_manager):
         """Create a session manager."""
         from daem0nmcp.enforcement import SessionManager
+
         return SessionManager(db_manager)
 
     def test_get_session_id_format(self):
         """Session ID should be deterministic based on project and hour."""
         from daem0nmcp.enforcement import get_session_id
+
         session_id = get_session_id("/path/to/project")
         assert "-" in session_id
         parts = session_id.split("-")
@@ -136,6 +146,7 @@ class TestSessionManager:
     def test_get_session_id_same_hour(self):
         """Same project in same hour should get same session ID."""
         from daem0nmcp.enforcement import get_session_id
+
         id1 = get_session_id("/path/to/project")
         id2 = get_session_id("/path/to/project")
         assert id1 == id2
@@ -143,6 +154,7 @@ class TestSessionManager:
     def test_get_session_id_different_projects(self):
         """Different projects should get different session IDs."""
         from daem0nmcp.enforcement import get_session_id
+
         id1 = get_session_id("/path/to/project1")
         id2 = get_session_id("/path/to/project2")
         assert id1 != id2
@@ -201,10 +213,14 @@ class TestSessionManager:
         await session_mgr.add_context_check(project_path, "authentication")
 
         # Recent check should be found
-        assert await session_mgr.has_recent_context_check(project_path, max_age_seconds=300)
+        assert await session_mgr.has_recent_context_check(
+            project_path, max_age_seconds=300
+        )
 
         # With very short TTL, should be stale
-        assert not await session_mgr.has_recent_context_check(project_path, max_age_seconds=0)
+        assert not await session_mgr.has_recent_context_check(
+            project_path, max_age_seconds=0
+        )
 
     @pytest.mark.asyncio
     async def test_add_pending_decision(self, db_manager, session_mgr):
@@ -243,18 +259,21 @@ class TestPreCommitChecker:
     def db_manager(self, tmp_path):
         """Create a test database manager."""
         from daem0nmcp.database import DatabaseManager
+
         return DatabaseManager(str(tmp_path / "storage"))
 
     @pytest.fixture
     def memory_mgr(self, db_manager):
         """Create a memory manager."""
         from daem0nmcp.memory import MemoryManager
+
         return MemoryManager(db_manager)
 
     @pytest.fixture
     def checker(self, db_manager, memory_mgr):
         """Create a pre-commit checker."""
         from daem0nmcp.enforcement import PreCommitChecker
+
         return PreCommitChecker(db_manager, memory_mgr)
 
     @pytest.mark.asyncio
@@ -271,7 +290,9 @@ class TestPreCommitChecker:
         assert len(result["warnings"]) == 0
 
     @pytest.mark.asyncio
-    async def test_check_blocks_old_pending_decisions(self, db_manager, memory_mgr, checker):
+    async def test_check_blocks_old_pending_decisions(
+        self, db_manager, memory_mgr, checker
+    ):
         """Decisions older than 24h should block commit."""
         await db_manager.init_db()
         project_path = "/test/project"
@@ -279,17 +300,19 @@ class TestPreCommitChecker:
 
         # Create a decision older than 24h without outcome
         from datetime import timedelta
+
         old_time = datetime.now(timezone.utc) - timedelta(hours=25)
 
         # Create memory directly in database
         from daem0nmcp.models import Memory
+
         async with db_manager.get_session() as session:
             decision = Memory(
                 category="decision",
                 content="Use JWT for authentication",
                 created_at=old_time,
                 outcome=None,
-                worked=None
+                worked=None,
             )
             session.add(decision)
             await session.flush()
@@ -303,7 +326,9 @@ class TestPreCommitChecker:
         assert result["blocks"][0]["memory_id"] == memory_id
 
     @pytest.mark.asyncio
-    async def test_check_blocks_failed_approach_files(self, db_manager, memory_mgr, checker):
+    async def test_check_blocks_failed_approach_files(
+        self, db_manager, memory_mgr, checker
+    ):
         """Files with worked=False should block commit."""
         await db_manager.init_db()
         project_path = "/test/project"
@@ -314,15 +339,13 @@ class TestPreCommitChecker:
             category="decision",
             content="Try synchronous auth approach",
             file_path="src/auth.py",
-            project_path=project_path
+            project_path=project_path,
         )
         memory_id = result["id"]
 
         # Mark it as failed
         await memory_mgr.record_outcome(
-            memory_id=memory_id,
-            outcome="Caused timeout issues",
-            worked=False
+            memory_id=memory_id, outcome="Caused timeout issues", worked=False
         )
 
         result = await checker.check(staged_files, project_path)
@@ -343,16 +366,18 @@ class TestPreCommitChecker:
 
         # Create a recent decision without outcome
         from datetime import timedelta
+
         recent_time = datetime.now(timezone.utc) - timedelta(hours=12)
 
         from daem0nmcp.models import Memory
+
         async with db_manager.get_session() as session:
             decision = Memory(
                 category="decision",
                 content="Use Redis for caching",
                 created_at=recent_time,
                 outcome=None,
-                worked=None
+                worked=None,
             )
             session.add(decision)
             await session.flush()
@@ -362,7 +387,9 @@ class TestPreCommitChecker:
 
         assert result["can_commit"] is True  # Should still allow commit
         assert len(result["warnings"]) >= 1
-        pending_warnings = [w for w in result["warnings"] if w["type"] == "PENDING_DECISION_RECENT"]
+        pending_warnings = [
+            w for w in result["warnings"] if w["type"] == "PENDING_DECISION_RECENT"
+        ]
         assert len(pending_warnings) == 1
         assert pending_warnings[0]["memory_id"] == memory_id
 
@@ -377,10 +404,15 @@ class TestPreCommitCLI:
 
         result = subprocess.run(
             [sys.executable, "-m", "daem0nmcp.cli", "pre-commit", "--help"],
-            capture_output=True, text=True, stdin=subprocess.DEVNULL
+            capture_output=True,
+            text=True,
+            stdin=subprocess.DEVNULL,
         )
         assert result.returncode == 0
-        assert "pre-commit" in result.stdout.lower() or "interactive" in result.stdout.lower()
+        assert (
+            "pre-commit" in result.stdout.lower()
+            or "interactive" in result.stdout.lower()
+        )
 
     def test_precommit_with_no_staged_files(self, tmp_path):
         """pre-commit with no files should pass."""
@@ -389,13 +421,19 @@ class TestPreCommitCLI:
 
         # Use Popen for better handle management on Windows
         proc = subprocess.Popen(
-            [sys.executable, "-m", "daem0nmcp.cli",
-             "--project-path", str(tmp_path),
-             "pre-commit", "--staged-files"],
+            [
+                sys.executable,
+                "-m",
+                "daem0nmcp.cli",
+                "--project-path",
+                str(tmp_path),
+                "pre-commit",
+                "--staged-files",
+            ],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             stdin=subprocess.DEVNULL,
-            text=True
+            text=True,
         )
         stdout, stderr = proc.communicate()
         # Should pass (exit 0) with no files in a clean temp directory
@@ -412,20 +450,31 @@ class TestStatusCLI:
 
         result = subprocess.run(
             [sys.executable, "-m", "daem0nmcp.cli", "status", "--help"],
-            capture_output=True, text=True, stdin=subprocess.DEVNULL
+            capture_output=True,
+            text=True,
+            stdin=subprocess.DEVNULL,
         )
         assert result.returncode == 0
 
     def test_status_json_output(self, tmp_path):
         """status --json should return valid JSON."""
+        import json
         import subprocess
         import sys
-        import json
 
         result = subprocess.run(
-            [sys.executable, "-m", "daem0nmcp.cli",
-             "--project-path", str(tmp_path), "--json", "status"],
-            capture_output=True, text=True, stdin=subprocess.DEVNULL
+            [
+                sys.executable,
+                "-m",
+                "daem0nmcp.cli",
+                "--project-path",
+                str(tmp_path),
+                "--json",
+                "status",
+            ],
+            capture_output=True,
+            text=True,
+            stdin=subprocess.DEVNULL,
         )
         assert result.returncode == 0
         data = json.loads(result.stdout)
@@ -443,7 +492,9 @@ class TestRecordOutcomeCLI:
 
         result = subprocess.run(
             [sys.executable, "-m", "daem0nmcp.cli", "record-outcome", "--help"],
-            capture_output=True, text=True, stdin=subprocess.DEVNULL
+            capture_output=True,
+            text=True,
+            stdin=subprocess.DEVNULL,
         )
         assert result.returncode == 0
         assert "memory" in result.stdout.lower() or "outcome" in result.stdout.lower()
@@ -454,8 +505,17 @@ class TestRecordOutcomeCLI:
         import sys
 
         result = subprocess.run(
-            [sys.executable, "-m", "daem0nmcp.cli", "record-outcome", "1", "test outcome"],
-            capture_output=True, text=True, stdin=subprocess.DEVNULL
+            [
+                sys.executable,
+                "-m",
+                "daem0nmcp.cli",
+                "record-outcome",
+                "1",
+                "test outcome",
+            ],
+            capture_output=True,
+            text=True,
+            stdin=subprocess.DEVNULL,
         )
         assert result.returncode == 1
         assert "must specify" in result.stderr.lower()
@@ -471,7 +531,9 @@ class TestInstallHooksCLI:
 
         result = subprocess.run(
             [sys.executable, "-m", "daem0nmcp.cli", "install-hooks", "--help"],
-            capture_output=True, text=True, stdin=subprocess.DEVNULL
+            capture_output=True,
+            text=True,
+            stdin=subprocess.DEVNULL,
         )
         assert result.returncode == 0
 
@@ -485,9 +547,17 @@ class TestInstallHooksCLI:
         git_dir.mkdir(parents=True)
 
         result = subprocess.run(
-            [sys.executable, "-m", "daem0nmcp.cli",
-             "--project-path", str(tmp_path), "install-hooks"],
-            capture_output=True, text=True, stdin=subprocess.DEVNULL
+            [
+                sys.executable,
+                "-m",
+                "daem0nmcp.cli",
+                "--project-path",
+                str(tmp_path),
+                "install-hooks",
+            ],
+            capture_output=True,
+            text=True,
+            stdin=subprocess.DEVNULL,
         )
 
         assert result.returncode == 0
@@ -504,7 +574,9 @@ class TestInstallHooksCLI:
 
         result = subprocess.run(
             [sys.executable, "-m", "daem0nmcp.cli", "uninstall-hooks", "--help"],
-            capture_output=True, text=True, stdin=subprocess.DEVNULL
+            capture_output=True,
+            text=True,
+            stdin=subprocess.DEVNULL,
         )
         assert result.returncode == 0
 
@@ -515,23 +587,29 @@ class TestMCPSessionTracking:
     @pytest.fixture
     def db_manager(self, tmp_path):
         from daem0nmcp.database import DatabaseManager
+
         return DatabaseManager(str(tmp_path / "storage"))
 
     @pytest.fixture
     def memory_mgr(self, db_manager):
         from daem0nmcp.memory import MemoryManager
+
         return MemoryManager(db_manager)
 
     @pytest.fixture
     def session_mgr(self, db_manager):
         from daem0nmcp.enforcement import SessionManager
+
         return SessionManager(db_manager)
 
     @pytest.mark.asyncio
-    async def test_remember_adds_pending_decision(self, db_manager, memory_mgr, session_mgr):
+    async def test_remember_adds_pending_decision(
+        self, db_manager, memory_mgr, session_mgr
+    ):
         """remember() should add decision to pending_decisions."""
         await db_manager.init_db()
         import os
+
         project_path = os.getcwd()  # Uses default
 
         # Create a decision
@@ -539,7 +617,7 @@ class TestMCPSessionTracking:
             category="decision",
             content="Test decision",
             rationale="Test rationale",
-            project_path=project_path
+            project_path=project_path,
         )
 
         # Check session state
@@ -549,22 +627,21 @@ class TestMCPSessionTracking:
         assert result["id"] in pending
 
     @pytest.mark.asyncio
-    async def test_record_outcome_removes_pending(self, db_manager, memory_mgr, session_mgr):
+    async def test_record_outcome_removes_pending(
+        self, db_manager, memory_mgr, session_mgr
+    ):
         """record_outcome() should remove from pending_decisions."""
         await db_manager.init_db()
         import os
+
         project_path = os.getcwd()
 
         # Create and record outcome
         result = await memory_mgr.remember(
-            category="decision",
-            content="Test decision",
-            project_path=project_path
+            category="decision", content="Test decision", project_path=project_path
         )
         await memory_mgr.record_outcome(
-            memory_id=result["id"],
-            outcome="It worked",
-            worked=True
+            memory_id=result["id"], outcome="It worked", worked=True
         )
 
         # Check session state - should be removed from pending

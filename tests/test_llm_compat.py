@@ -10,21 +10,22 @@ Covers:
 """
 
 import json
-import pytest
-import tempfile
 import shutil
+import tempfile
 from unittest.mock import AsyncMock, patch
+
+import pytest
 
 from daem0nmcp.database import DatabaseManager
 from daem0nmcp.memory import MemoryManager
-from daem0nmcp.models import Memory
 from daem0nmcp.migrations.schema import MIGRATIONS
+from daem0nmcp.models import Memory
 from daem0nmcp.transforms.covenant import CovenantMiddleware, client_meta_var
-
 
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
+
 
 @pytest.fixture
 def temp_storage():
@@ -50,17 +51,18 @@ async def memory_manager(temp_storage):
 # Tests
 # ---------------------------------------------------------------------------
 
+
 class TestMemoryModelProvenance:
     """Verify Memory model has provenance columns."""
 
     def test_memory_model_has_provenance_columns(self):
         """Memory model must have source_client and source_model as Column attributes."""
-        assert hasattr(Memory, 'source_client')
-        assert hasattr(Memory, 'source_model')
+        assert hasattr(Memory, "source_client")
+        assert hasattr(Memory, "source_model")
         # Verify column names are in the table
         col_names = [c.name for c in Memory.__table__.columns]
-        assert 'source_client' in col_names
-        assert 'source_model' in col_names
+        assert "source_client" in col_names
+        assert "source_model" in col_names
 
 
 class TestMigration15:
@@ -138,7 +140,9 @@ class TestInscribeDispatchClientMeta:
         # Simulate middleware having set the ContextVar
         token = client_meta_var.set(meta)
         try:
-            with patch("daem0nmcp.context_manager.get_project_context", return_value=mock_ctx):
+            with patch(
+                "daem0nmcp.context_manager.get_project_context", return_value=mock_ctx
+            ):
                 result = await inscribe.dispatch(
                     action="remember",
                     project_path="/tmp/test-project",
@@ -165,7 +169,9 @@ class TestInscribeDispatchClientMeta:
         # Ensure ContextVar is cleared
         token = client_meta_var.set(None)
         try:
-            with patch("daem0nmcp.context_manager.get_project_context", return_value=mock_ctx):
+            with patch(
+                "daem0nmcp.context_manager.get_project_context", return_value=mock_ctx
+            ):
                 result = await inscribe.dispatch(
                     action="remember",
                     project_path="/tmp/test-project",
@@ -194,7 +200,9 @@ class TestInscribeDispatchClientMeta:
 
         token = client_meta_var.set(meta)
         try:
-            with patch("daem0nmcp.context_manager.get_project_context", return_value=mock_ctx):
+            with patch(
+                "daem0nmcp.context_manager.get_project_context", return_value=mock_ctx
+            ):
                 result = await inscribe.dispatch(
                     action="remember",
                     project_path="/tmp/test-project",
@@ -216,9 +224,9 @@ class TestCovenantMiddleware:
     def test_covenant_middleware_has_on_initialize(self):
         """CovenantMiddleware must have an on_initialize method and client_name property."""
         middleware = CovenantMiddleware(get_state=lambda p: None)
-        assert hasattr(middleware, 'on_initialize')
+        assert hasattr(middleware, "on_initialize")
         assert callable(middleware.on_initialize)
-        assert hasattr(middleware, 'client_name')
+        assert hasattr(middleware, "client_name")
         # client_name should be None before any initialization
         assert middleware.client_name is None
 
@@ -226,10 +234,17 @@ class TestCovenantMiddleware:
     async def test_middleware_strips_client_meta_from_args(self):
         """on_call_tool should pop _client_meta from arguments and set client_meta_var."""
         middleware = CovenantMiddleware(
-            get_state=lambda p: {"briefed": True, "context_checks": [{"timestamp": "2025-01-01T00:00:00+00:00"}]},
+            get_state=lambda p: {
+                "briefed": True,
+                "context_checks": [{"timestamp": "2025-01-01T00:00:00+00:00"}],
+            },
         )
 
-        meta = {"client": "opencode", "providerID": "anthropic", "modelID": "claude-sonnet-4"}
+        meta = {
+            "client": "opencode",
+            "providerID": "anthropic",
+            "modelID": "claude-sonnet-4",
+        }
         arguments = {
             "action": "remember",
             "project_path": "/tmp/test",
@@ -261,7 +276,10 @@ class TestCovenantMiddleware:
     async def test_middleware_handles_malformed_client_meta(self):
         """on_call_tool should handle malformed _client_meta without raising."""
         middleware = CovenantMiddleware(
-            get_state=lambda p: {"briefed": True, "context_checks": [{"timestamp": "2025-01-01T00:00:00+00:00"}]},
+            get_state=lambda p: {
+                "briefed": True,
+                "context_checks": [{"timestamp": "2025-01-01T00:00:00+00:00"}],
+            },
         )
 
         arguments = {
@@ -286,7 +304,10 @@ class TestCovenantMiddleware:
     async def test_middleware_no_client_meta_clears_var(self):
         """on_call_tool without _client_meta should set client_meta_var to None."""
         middleware = CovenantMiddleware(
-            get_state=lambda p: {"briefed": True, "context_checks": [{"timestamp": "2025-01-01T00:00:00+00:00"}]},
+            get_state=lambda p: {
+                "briefed": True,
+                "context_checks": [{"timestamp": "2025-01-01T00:00:00+00:00"}],
+            },
         )
 
         # Pre-set the var to simulate a previous call that had metadata

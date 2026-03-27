@@ -14,7 +14,7 @@ All result dataclasses are defined here as the shared foundation used
 by the individual cognitive modules (simulate.py, evolve.py, debate.py).
 """
 
-from dataclasses import dataclass, asdict
+from dataclasses import asdict, dataclass
 from typing import Any, Dict, List, Optional
 
 __all__ = [
@@ -30,6 +30,7 @@ __all__ = [
 # Temporal Scrying -- counterfactual decision replay
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class SimulationResult:
     """Result of counterfactual decision simulation.
@@ -42,13 +43,13 @@ class SimulationResult:
     decision_id: int
     decision_content: str
     decision_time: str  # ISO timestamp of the original decision
-    historical_context: Dict[str, Any]  # What was known at decision time
-    current_context: Dict[str, Any]  # What is known now
-    knowledge_diff: Dict[str, Any]  # Structured diff (new, invalidated, changed)
+    historical_context: dict[str, Any]  # What was known at decision time
+    current_context: dict[str, Any]  # What is known now
+    knowledge_diff: dict[str, Any]  # Structured diff (new, invalidated, changed)
     counterfactual_assessment: str  # Text summary of what changed
     confidence: float  # 0.0-1.0 -- how much the evidence landscape shifted
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         """Serialize to a plain dict for MCP tool return values."""
         return asdict(self)
 
@@ -56,6 +57,7 @@ class SimulationResult:
 # ---------------------------------------------------------------------------
 # Rule Entropy Analysis -- staleness detection and evolution suggestions
 # ---------------------------------------------------------------------------
+
 
 @dataclass
 class StalenessReport:
@@ -72,12 +74,12 @@ class StalenessReport:
     code_drift_score: float  # How much referenced code has changed
     outcome_correlation_score: float  # Worked/failed ratio quality
     age_factor: float  # Time-based decay contribution
-    referenced_entities: List[Dict[str, Any]]  # Code entities mentioned in trigger
-    missing_entities: List[str]  # Entities no longer in codebase
-    outcome_summary: Dict[str, int]  # {"worked": N, "failed": M, "unknown": K}
-    evolution_suggestions: List[Dict[str, Any]]  # Concrete proposed changes
+    referenced_entities: list[dict[str, Any]]  # Code entities mentioned in trigger
+    missing_entities: list[str]  # Entities no longer in codebase
+    outcome_summary: dict[str, int]  # {"worked": N, "failed": M, "unknown": K}
+    evolution_suggestions: list[dict[str, Any]]  # Concrete proposed changes
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         """Serialize to a plain dict for MCP tool return values."""
         return asdict(self)
 
@@ -85,6 +87,7 @@ class StalenessReport:
 # ---------------------------------------------------------------------------
 # Adversarial Council -- memory-grounded debate
 # ---------------------------------------------------------------------------
+
 
 @dataclass
 class DebateArgument:
@@ -97,13 +100,13 @@ class DebateArgument:
 
     perspective: str  # "advocate" or "challenger"
     position: str
-    evidence_ids: List[int]  # Memory IDs supporting this argument
-    evidence_summaries: List[str]  # Content previews of cited memories
+    evidence_ids: list[int]  # Memory IDs supporting this argument
+    evidence_summaries: list[str]  # Content previews of cited memories
     evidence_strength: float  # Aggregate evidence score (0.0-1.0)
     outcome_support: int  # Count of worked=True evidence
     outcome_against: int  # Count of worked=False evidence
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         """Serialize to a plain dict for MCP tool return values."""
         return asdict(self)
 
@@ -123,7 +126,7 @@ class DebateRound:
     advocate_score: float  # Running cumulative score
     challenger_score: float  # Running cumulative score
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         """Serialize to a plain dict for MCP tool return values."""
         result = asdict(self)
         # asdict handles nested dataclasses automatically
@@ -143,17 +146,17 @@ class DebateResult:
     topic: str
     advocate_position: str
     challenger_position: str
-    rounds: List[DebateRound]
+    rounds: list[DebateRound]
     total_rounds: int
     converged: bool  # Did positions stabilize before max rounds?
-    convergence_round: Optional[int]  # Round at which convergence was detected
+    convergence_round: int | None  # Round at which convergence was detected
     synthesis: str  # Consensus statement
     confidence: float  # How strong the consensus is (0.0-1.0)
     winning_perspective: str  # "advocate", "challenger", or "balanced"
-    all_evidence_ids: List[int]  # All memory IDs cited across all rounds
-    consensus_memory_id: Optional[int]  # ID of persisted consensus memory
+    all_evidence_ids: list[int]  # All memory IDs cited across all rounds
+    consensus_memory_id: int | None  # ID of persisted consensus memory
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         """Serialize to a plain dict for MCP tool return values."""
         result = asdict(self)
         # asdict recursively converts nested dataclasses (DebateRound,

@@ -19,7 +19,6 @@ import logging
 import os
 import time
 from dataclasses import dataclass, field
-from typing import List, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -27,11 +26,12 @@ logger = logging.getLogger(__name__)
 @dataclass
 class ExecutionResult:
     """Result of sandboxed code execution."""
+
     success: bool
     output: str
-    error: Optional[str] = None
+    error: str | None = None
     execution_time_ms: int = 0
-    logs: List[str] = field(default_factory=list)
+    logs: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -42,13 +42,14 @@ class StructuredExecutionResult:
     this preserves the error classification information needed
     by the Reflexion Evaluator for failure classification.
     """
+
     success: bool
     output: str
-    error_name: Optional[str] = None
-    error_value: Optional[str] = None
-    error_traceback: Optional[str] = None
+    error_name: str | None = None
+    error_value: str | None = None
+    error_traceback: str | None = None
     execution_time_ms: int = 0
-    logs: List[str] = field(default_factory=list)
+    logs: list[str] = field(default_factory=list)
 
 
 class SandboxExecutor:
@@ -77,7 +78,7 @@ class SandboxExecutor:
     def __init__(
         self,
         timeout_seconds: int = 30,
-        api_key: Optional[str] = None,
+        api_key: str | None = None,
     ):
         """
         Initialize SandboxExecutor.
@@ -93,7 +94,10 @@ class SandboxExecutor:
     def _check_availability(self) -> bool:
         """Check if E2B sandbox is available."""
         try:
-            from e2b_code_interpreter import Sandbox  # noqa: F401 (import tests availability)
+            from e2b_code_interpreter import (
+                Sandbox,  # noqa: F401 (import tests availability)
+            )
+
             if not self._api_key:
                 logger.warning("E2B_API_KEY not set - sandbox unavailable")
                 return False
@@ -146,7 +150,7 @@ class SandboxExecutor:
                 logs = []
                 if execution.logs:
                     logs = [
-                        log.line if hasattr(log, 'line') else str(log)
+                        log.line if hasattr(log, "line") else str(log)
                         for log in execution.logs
                     ]
 
@@ -217,7 +221,7 @@ class SandboxExecutor:
                 logs = []
                 if execution.logs:
                     logs = [
-                        log.line if hasattr(log, 'line') else str(log)
+                        log.line if hasattr(log, "line") else str(log)
                         for log in execution.logs
                     ]
 
@@ -226,10 +230,16 @@ class SandboxExecutor:
                 error_traceback = None
 
                 if execution.error:
-                    error_name = getattr(execution.error, 'name', type(execution.error).__name__)
-                    error_value = getattr(execution.error, 'value', str(execution.error))
-                    error_traceback = getattr(execution.error, 'traceback', None)
-                    logger.warning(f"Sandbox structured execution error: {error_name}: {error_value}")
+                    error_name = getattr(
+                        execution.error, "name", type(execution.error).__name__
+                    )
+                    error_value = getattr(
+                        execution.error, "value", str(execution.error)
+                    )
+                    error_traceback = getattr(execution.error, "traceback", None)
+                    logger.warning(
+                        f"Sandbox structured execution error: {error_name}: {error_value}"
+                    )
 
                 elapsed_ms = int((time.time() - start_time) * 1000)
 

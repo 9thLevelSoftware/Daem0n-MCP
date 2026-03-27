@@ -5,9 +5,8 @@ Git hook templates for Daem0nMCP enforcement.
 import os
 import stat
 from pathlib import Path
-from typing import Tuple
 
-PRE_COMMIT_HOOK = '''#!/bin/sh
+PRE_COMMIT_HOOK = """#!/bin/sh
 # Daem0nMCP Pre-Commit Enforcement Hook
 # Checks staged files against memories before allowing commit
 
@@ -19,16 +18,16 @@ python -m daem0nmcp.cli --project-path "$PROJECT_ROOT" pre-commit
 
 # Exit with the same code
 exit $?
-'''
+"""
 
-POST_COMMIT_HOOK = '''#!/bin/sh
+POST_COMMIT_HOOK = """#!/bin/sh
 # Daem0nMCP Post-Commit Hook
 # Detects when enforcement was bypassed via --no-verify
 # (placeholder for future bypass logging)
-'''
+"""
 
 
-def install_hooks(project_path: str, force: bool = False) -> Tuple[bool, str]:
+def install_hooks(project_path: str, force: bool = False) -> tuple[bool, str]:
     """
     Install git hooks for enforcement.
 
@@ -60,18 +59,24 @@ def install_hooks(project_path: str, force: bool = False) -> Tuple[bool, str]:
         messages.append("pre-commit hook installed")
 
     pre_commit.write_text(PRE_COMMIT_HOOK)
-    os.chmod(pre_commit, os.stat(pre_commit).st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+    os.chmod(
+        pre_commit,
+        os.stat(pre_commit).st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH,
+    )
 
     # Install post-commit hook (optional, only if it doesn't exist)
     if not post_commit.exists() or force:
         post_commit.write_text(POST_COMMIT_HOOK)
-        os.chmod(post_commit, os.stat(post_commit).st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+        os.chmod(
+            post_commit,
+            os.stat(post_commit).st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH,
+        )
         messages.append("post-commit hook installed")
 
     return True, "; ".join(messages)
 
 
-def uninstall_hooks(project_path: str) -> Tuple[bool, str]:
+def uninstall_hooks(project_path: str) -> tuple[bool, str]:
     """
     Remove daem0nmcp git hooks.
 

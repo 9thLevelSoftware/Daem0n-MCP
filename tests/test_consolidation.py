@@ -1,14 +1,15 @@
 """Tests for episodic-to-semantic memory consolidation."""
 
-import pytest
 from unittest.mock import AsyncMock
 
+import pytest
+
 from daem0nmcp.reflexion.consolidation import (
+    DEFAULT_CONSOLIDATION_THRESHOLD,
+    check_and_consolidate,
     consolidate_reflections,
     extract_common_elements,
     identify_pattern_type,
-    check_and_consolidate,
-    DEFAULT_CONSOLIDATION_THRESHOLD,
 )
 
 
@@ -114,7 +115,11 @@ class TestConsolidateReflections:
         # Mock 5+ reflections with same signature
         mock_memory_manager.recall.return_value = {
             "memories": [
-                {"id": i, "content": f"Reflection {i} about database error", "tags": ["reflection", "conflict", "sig:abc123"]}
+                {
+                    "id": i,
+                    "content": f"Reflection {i} about database error",
+                    "tags": ["reflection", "conflict", "sig:abc123"],
+                }
                 for i in range(1, 7)  # 6 reflections
             ]
         }
@@ -159,7 +164,11 @@ class TestConsolidateReflections:
         """Should link pattern to source reflections via supersedes."""
         mock_memory_manager.recall.return_value = {
             "memories": [
-                {"id": i, "content": f"Reflection {i}", "tags": ["reflection", "sig:abc123"]}
+                {
+                    "id": i,
+                    "content": f"Reflection {i}",
+                    "tags": ["reflection", "sig:abc123"],
+                }
                 for i in range(1, 6)
             ]
         }
@@ -186,7 +195,11 @@ class TestConsolidateReflections:
 
         mock_memory_manager.recall.return_value = {
             "memories": [
-                {"id": i, "content": f"Reflection {i}", "tags": ["reflection", "sig:abc123"]}
+                {
+                    "id": i,
+                    "content": f"Reflection {i}",
+                    "tags": ["reflection", "sig:abc123"],
+                }
                 for i in range(1, 6)
             ]
         }
@@ -205,7 +218,11 @@ class TestConsolidateReflections:
         """Pattern should include error signature in tags."""
         mock_memory_manager.recall.return_value = {
             "memories": [
-                {"id": i, "content": f"Reflection {i}", "tags": ["reflection", "sig:xyz789"]}
+                {
+                    "id": i,
+                    "content": f"Reflection {i}",
+                    "tags": ["reflection", "sig:xyz789"],
+                }
                 for i in range(1, 6)
             ]
         }
@@ -236,7 +253,11 @@ class TestConsolidateReflections:
         """Should return None if remember fails."""
         mock_memory_manager.recall.return_value = {
             "memories": [
-                {"id": i, "content": f"Reflection {i}", "tags": ["reflection", "sig:abc123"]}
+                {
+                    "id": i,
+                    "content": f"Reflection {i}",
+                    "tags": ["reflection", "sig:abc123"],
+                }
                 for i in range(1, 6)
             ]
         }
@@ -269,10 +290,19 @@ class TestCheckAndConsolidate:
                 # All reflections
                 return {
                     "memories": [
-                        {"id": i, "content": f"Reflection {i}", "tags": ["reflection", "conflict", "sig:aaa"]}
+                        {
+                            "id": i,
+                            "content": f"Reflection {i}",
+                            "tags": ["reflection", "conflict", "sig:aaa"],
+                        }
                         for i in range(1, 6)
-                    ] + [
-                        {"id": i + 10, "content": f"Reflection {i}", "tags": ["reflection", "factual_error", "sig:bbb"]}
+                    ]
+                    + [
+                        {
+                            "id": i + 10,
+                            "content": f"Reflection {i}",
+                            "tags": ["reflection", "factual_error", "sig:bbb"],
+                        }
                         for i in range(1, 6)
                     ]
                 }
@@ -281,10 +311,19 @@ class TestCheckAndConsolidate:
                 return {"memories": []}
             else:
                 # Consolidation recall
-                return {"memories": [
-                    {"id": i, "content": f"Reflection {i}", "tags": ["reflection", f"sig:{kwargs.get('tags', ['sig:unknown'])[1][4:]}"]}
-                    for i in range(1, 6)
-                ]}
+                return {
+                    "memories": [
+                        {
+                            "id": i,
+                            "content": f"Reflection {i}",
+                            "tags": [
+                                "reflection",
+                                f"sig:{kwargs.get('tags', ['sig:unknown'])[1][4:]}",
+                            ],
+                        }
+                        for i in range(1, 6)
+                    ]
+                }
 
         mock_memory_manager.recall = AsyncMock(side_effect=mock_recall)
 
@@ -307,7 +346,11 @@ class TestCheckAndConsolidate:
                 # All reflections with sig:aaa
                 return {
                     "memories": [
-                        {"id": i, "content": f"Reflection {i}", "tags": ["reflection", "sig:aaa"]}
+                        {
+                            "id": i,
+                            "content": f"Reflection {i}",
+                            "tags": ["reflection", "sig:aaa"],
+                        }
                         for i in range(1, 6)
                     ]
                 }
@@ -333,7 +376,11 @@ class TestCheckAndConsolidate:
         """Should ignore signatures below threshold."""
         mock_memory_manager.recall.return_value = {
             "memories": [
-                {"id": i, "content": f"Reflection {i}", "tags": ["reflection", "sig:aaa"]}
+                {
+                    "id": i,
+                    "content": f"Reflection {i}",
+                    "tags": ["reflection", "sig:aaa"],
+                }
                 for i in range(1, 4)  # Only 3 reflections, below threshold
             ]
         }

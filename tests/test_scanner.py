@@ -1,12 +1,12 @@
 """Tests for the TODO/FIXME scanner functionality."""
 
+# Import the scanner function directly
+import sys
 import tempfile
 from pathlib import Path
 
-# Import the scanner function directly
-import sys
 sys.path.insert(0, str(Path(__file__).parent.parent))
-from daem0nmcp.server import _scan_for_todos, TODO_PATTERN
+from daem0nmcp.server import TODO_PATTERN, _scan_for_todos
 
 
 class TestTodoPattern:
@@ -85,10 +85,10 @@ x = 1
 """)
             result = _scan_for_todos(tmpdir)
             assert len(result) == 3
-            types = {r['type'] for r in result}
-            assert 'TODO' in types
-            assert 'FIXME' in types
-            assert 'HACK' in types
+            types = {r["type"] for r in result}
+            assert "TODO" in types
+            assert "FIXME" in types
+            assert "HACK" in types
 
     def test_scan_includes_line_numbers(self):
         """Test that scanner includes line numbers."""
@@ -97,7 +97,7 @@ x = 1
             test_file.write_text("# Line 1\n# TODO: On line 2\n# Line 3\n")
             result = _scan_for_todos(tmpdir)
             assert len(result) == 1
-            assert result[0]['line'] == 2
+            assert result[0]["line"] == 2
 
     def test_scan_skips_node_modules(self):
         """Test that scanner skips node_modules."""
@@ -114,7 +114,7 @@ x = 1
 
             result = _scan_for_todos(tmpdir)
             assert len(result) == 1
-            assert result[0]['file'] == 'index.js'
+            assert result[0]["file"] == "index.js"
 
     def test_scan_skips_pycache(self):
         """Test that scanner skips __pycache__."""
@@ -140,7 +140,7 @@ x = 1
 
             result = _scan_for_todos(tmpdir)
             assert len(result) == 1
-            assert result[0]['file'] == 'code.py'
+            assert result[0]["file"] == "code.py"
 
     def test_scan_truncates_long_content(self):
         """Test that scanner truncates very long TODO content."""
@@ -151,7 +151,7 @@ x = 1
 
             result = _scan_for_todos(tmpdir)
             assert len(result) == 1
-            assert len(result[0]['content']) <= 200
+            assert len(result[0]["content"]) <= 200
 
     def test_scan_nonexistent_path(self):
         """Test scanning a path that doesn't exist."""

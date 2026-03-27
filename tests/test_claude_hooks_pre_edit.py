@@ -3,10 +3,10 @@
 import pytest
 import pytest_asyncio
 
-from daem0nmcp.database import DatabaseManager
-from daem0nmcp.memory import MemoryManager
-from daem0nmcp.enforcement import SessionManager
 from daem0nmcp.claude_hooks.pre_edit import async_main
+from daem0nmcp.database import DatabaseManager
+from daem0nmcp.enforcement import SessionManager
+from daem0nmcp.memory import MemoryManager
 
 
 @pytest_asyncio.fixture

@@ -52,7 +52,7 @@ class LogFileChannel:
         log_path: Path,
         max_size_mb: float = 10.0,
         include_memories: bool = True,
-        truncate_content: int = 200
+        truncate_content: int = 200,
     ):
         """
         Initialize the log file channel.
@@ -128,10 +128,12 @@ class LogFileChannel:
                 if self._truncate_content > 0:
                     content = mem_copy.get("content", "")
                     if len(content) > self._truncate_content:
-                        mem_copy["content"] = content[:self._truncate_content] + "..."
+                        mem_copy["content"] = content[: self._truncate_content] + "..."
                     rationale = mem_copy.get("rationale", "")
                     if rationale and len(rationale) > self._truncate_content:
-                        mem_copy["rationale"] = rationale[:self._truncate_content] + "..."
+                        mem_copy["rationale"] = (
+                            rationale[: self._truncate_content] + "..."
+                        )
 
                 memories.append(mem_copy)
 
@@ -184,7 +186,7 @@ class LogFileChannel:
             return entries
 
         try:
-            with open(self._log_path, "r", encoding="utf-8") as f:
+            with open(self._log_path, encoding="utf-8") as f:
                 lines = f.readlines()
 
             # Parse last N lines

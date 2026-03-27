@@ -22,7 +22,7 @@ import logging
 from abc import ABC, abstractmethod
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set, Tuple
+from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import func, select
 
@@ -31,11 +31,16 @@ if TYPE_CHECKING:
     from .scheduler import IdleDreamScheduler
 
 try:
-    from ..models import Memory, MemoryEntityRef, MemoryRelationship, MemoryCommunity
     from ..config import settings
+    from ..models import Memory, MemoryCommunity, MemoryEntityRef, MemoryRelationship
 except ImportError:
-    from daem0nmcp.models import Memory, MemoryEntityRef, MemoryRelationship, MemoryCommunity
     from daem0nmcp.config import settings
+    from daem0nmcp.models import (
+        Memory,
+        MemoryCommunity,
+        MemoryEntityRef,
+        MemoryRelationship,
+    )
 
 from .persistence import DreamResult, DreamSession, persist_dream_result
 
@@ -88,13 +93,17 @@ class FailedDecisionReview(DreamStrategy):
 
     def __init__(
         self,
-        max_decisions: Optional[int] = None,
-        min_age_hours: Optional[int] = None,
-        review_cooldown_hours: Optional[int] = None,
+        max_decisions: int | None = None,
+        min_age_hours: int | None = None,
+        review_cooldown_hours: int | None = None,
     ):
         self._max_decisions = max_decisions or settings.dream_max_decisions_per_session
         self._min_age_hours = min_age_hours or settings.dream_min_decision_age_hours
-        self._review_cooldown_hours = review_cooldown_hours if review_cooldown_hours is not None else settings.dream_review_cooldown_hours
+        self._review_cooldown_hours = (
+            review_cooldown_hours
+            if review_cooldown_hours is not None
+            else settings.dream_review_cooldown_hours
+        )
         self._logger = logging.getLogger(__name__)
 
     async def execute(
@@ -139,9 +148,7 @@ class FailedDecisionReview(DreamStrategy):
 
         return session
 
-    async def _get_failed_decisions(
-        self, ctx: "ProjectContext"
-    ) -> List[Any]:
+    async def _get_failed_decisions(self, ctx: "ProjectContext") -> list[Any]:
         """Query worked=False decisions from the database.
 
         Uses its own database session (not held open across the
@@ -178,10 +185,7 @@ class FailedDecisionReview(DreamStrategy):
                 )
 
                 original_count = len(decisions)
-                decisions = [
-                    d for d in decisions
-                    if d.id not in recently_reviewed_ids
-                ]
+                decisions = [d for d in decisions if d.id not in recently_reviewed_ids]
                 skipped = original_count - len(decisions)
                 if skipped > 0:
                     self._logger.info(
@@ -195,9 +199,7 @@ class FailedDecisionReview(DreamStrategy):
             self._logger.warning("Failed to query failed decisions: %s", e)
             return []
 
-    async def _get_recently_reviewed_ids(
-        self, db_session
-    ) -> set:
+    async def _get_recently_reviewed_ids(self, db_session) -> set:
         """Get IDs of decisions that were reviewed within the cooldown window.
 
         Queries learning memories with dream+re-evaluation tags created
@@ -255,8 +257,8 @@ class FailedDecisionReview(DreamStrategy):
             )
 
             # Extract evidence summaries across all categories
-            evidence_items: List[Dict[str, Any]] = []
-            evidence_ids: List[int] = []
+            evidence_items: list[dict[str, Any]] = []
+            evidence_ids: list[int] = []
 
             for category_key in ("decisions", "patterns", "learnings", "warnings"):
                 for mem in evidence.get(category_key, []):
@@ -313,9 +315,7 @@ class FailedDecisionReview(DreamStrategy):
             )
 
         except Exception as e:
-            self._logger.warning(
-                "Error re-evaluating decision #%d: %s", decision.id, e
-            )
+            self._logger.warning("Error re-evaluating decision #%d: %s", decision.id, e)
             return DreamResult(
                 source_decision_id=decision.id,
                 original_content=getattr(decision, "content", "")[:200],
@@ -398,7 +398,7 @@ class ConnectionDiscovery(DreamStrategy):
 
     async def _find_unlinked_pairs(
         self, ctx: "ProjectContext"
-    ) -> List[Tuple[int, int, Set[str]]]:
+    ) -> list[tuple[int, int, set[str]]]:
         """Find memory pairs sharing entities but lacking relationship edges.
 
         Returns:
@@ -428,18 +428,19 @@ class ConnectionDiscovery(DreamStrategy):
             except ImportError:
                 from ..models import ExtractedEntity
             name_rows = await db_session.execute(
-                select(ExtractedEntity.id, ExtractedEntity.name)
-                .where(ExtractedEntity.id.in_(entity_ids))
+                select(ExtractedEntity.id, ExtractedEntity.name).where(
+                    ExtractedEntity.id.in_(entity_ids)
+                )
             )
-            entity_names: Dict[int, str] = {r[0]: r[1] for r in name_rows.all()}
+            entity_names: dict[int, str] = {r[0]: r[1] for r in name_rows.all()}
 
             # Group memory_ids by entity_id
-            entity_to_memories: Dict[int, Set[int]] = defaultdict(set)
+            entity_to_memories: dict[int, set[int]] = defaultdict(set)
             for entity_id, memory_id in refs:
                 entity_to_memories[entity_id].add(memory_id)
 
             # Find pairs sharing >= min_shared_entities
-            pair_shared: Dict[Tuple[int, int], Set[str]] = defaultdict(set)
+            pair_shared: dict[tuple[int, int], set[str]] = defaultdict(set)
             for entity_id, memory_ids in entity_to_memories.items():
                 if len(memory_ids) < 2:
                     continue
@@ -471,7 +472,7 @@ class ConnectionDiscovery(DreamStrategy):
                     MemoryRelationship.target_id.in_(all_ids),
                 )
             )
-            existing_edges: Set[Tuple[int, int]] = set()
+            existing_edges: set[tuple[int, int]] = set()
             for src, tgt in existing_rows.all():
                 existing_edges.add((src, tgt))
                 existing_edges.add((tgt, src))
@@ -510,9 +511,7 @@ class CommunityRefresh(DreamStrategy):
         try:
             import leidenalg  # noqa: F401
         except ImportError:
-            self._logger.warning(
-                "leidenalg not installed -- skipping CommunityRefresh"
-            )
+            self._logger.warning("leidenalg not installed -- skipping CommunityRefresh")
             return session
 
         try:
@@ -567,16 +566,15 @@ class CommunityRefresh(DreamStrategy):
 
             if last_community_at is None:
                 # No communities exist yet -- check if there are enough memories
-                count_result = await db_session.execute(
-                    select(func.count(Memory.id))
-                )
+                count_result = await db_session.execute(select(func.count(Memory.id)))
                 total = count_result.scalar() or 0
                 return total >= self._staleness_threshold
 
             # Count memories created since the last community build
             count_result = await db_session.execute(
-                select(func.count(Memory.id))
-                .where(Memory.created_at > last_community_at)
+                select(func.count(Memory.id)).where(
+                    Memory.created_at > last_community_at
+                )
             )
             new_count = count_result.scalar() or 0
             return new_count >= self._staleness_threshold
@@ -602,17 +600,35 @@ class PendingOutcomeResolver(DreamStrategy):
 
     def __init__(
         self,
-        max_decisions: Optional[int] = None,
-        min_age_hours: Optional[int] = None,
-        cooldown_hours: Optional[int] = None,
-        evidence_threshold: Optional[int] = None,
-        dry_run: Optional[bool] = None,
+        max_decisions: int | None = None,
+        min_age_hours: int | None = None,
+        cooldown_hours: int | None = None,
+        evidence_threshold: int | None = None,
+        dry_run: bool | None = None,
     ):
-        self._max_decisions = max_decisions if max_decisions is not None else settings.dream_pending_max_per_session
-        self._min_age_hours = min_age_hours if min_age_hours is not None else settings.dream_pending_min_age_hours
-        self._cooldown_hours = cooldown_hours if cooldown_hours is not None else settings.dream_pending_cooldown_hours
-        self._evidence_threshold = evidence_threshold if evidence_threshold is not None else settings.dream_pending_evidence_threshold
-        self._dry_run = dry_run if dry_run is not None else settings.dream_pending_dry_run
+        self._max_decisions = (
+            max_decisions
+            if max_decisions is not None
+            else settings.dream_pending_max_per_session
+        )
+        self._min_age_hours = (
+            min_age_hours
+            if min_age_hours is not None
+            else settings.dream_pending_min_age_hours
+        )
+        self._cooldown_hours = (
+            cooldown_hours
+            if cooldown_hours is not None
+            else settings.dream_pending_cooldown_hours
+        )
+        self._evidence_threshold = (
+            evidence_threshold
+            if evidence_threshold is not None
+            else settings.dream_pending_evidence_threshold
+        )
+        self._dry_run = (
+            dry_run if dry_run is not None else settings.dream_pending_dry_run
+        )
         self._logger = logging.getLogger(__name__)
 
     async def execute(
@@ -625,7 +641,8 @@ class PendingOutcomeResolver(DreamStrategy):
         session.strategies_run.append(self.name)
         self._logger.info(
             "Dream session %s: Starting PendingOutcomeResolver (dry_run=%s)",
-            session.session_id, self._dry_run,
+            session.session_id,
+            self._dry_run,
         )
 
         decisions = await self._get_pending_decisions(ctx)
@@ -672,7 +689,8 @@ class PendingOutcomeResolver(DreamStrategy):
                     except Exception as e:
                         self._logger.warning(
                             "Failed to record outcome for decision #%d: %s",
-                            decision.id, e,
+                            decision.id,
+                            e,
                         )
 
             # Persist actionable results (not insufficient_evidence)
@@ -685,9 +703,7 @@ class PendingOutcomeResolver(DreamStrategy):
 
         return session
 
-    async def _get_pending_decisions(
-        self, ctx: "ProjectContext"
-    ) -> List[Any]:
+    async def _get_pending_decisions(self, ctx: "ProjectContext") -> list[Any]:
         """Query pending decisions (outcome IS NULL, worked IS NULL).
 
         Filters:
@@ -725,10 +741,7 @@ class PendingOutcomeResolver(DreamStrategy):
                 )
 
                 original_count = len(decisions)
-                decisions = [
-                    d for d in decisions
-                    if d.id not in recently_reviewed_ids
-                ]
+                decisions = [d for d in decisions if d.id not in recently_reviewed_ids]
                 skipped = original_count - len(decisions)
                 if skipped > 0:
                     self._logger.info(
@@ -742,9 +755,7 @@ class PendingOutcomeResolver(DreamStrategy):
             self._logger.warning("Failed to query pending decisions: %s", e)
             return []
 
-    async def _get_recently_reviewed_ids(
-        self, db_session
-    ) -> set:
+    async def _get_recently_reviewed_ids(self, db_session) -> set:
         """Get IDs of pending decisions reviewed within the cooldown window.
 
         Queries learning memories with dream+pending-resolution tags created
@@ -795,8 +806,8 @@ class PendingOutcomeResolver(DreamStrategy):
             )
 
             # Gather evidence items across all categories
-            evidence_items: List[Dict[str, Any]] = []
-            evidence_ids: List[int] = []
+            evidence_items: list[dict[str, Any]] = []
+            evidence_ids: list[int] = []
 
             for category_key in ("decisions", "patterns", "learnings", "warnings"):
                 for mem in evidence.get(category_key, []):
@@ -811,7 +822,8 @@ class PendingOutcomeResolver(DreamStrategy):
                 1 for mem in evidence_items if mem.get("worked") is True
             )
             negative_count = sum(
-                1 for mem in evidence_items
+                1
+                for mem in evidence_items
                 if mem.get("worked") is False or mem.get("category") == "warning"
             )
 

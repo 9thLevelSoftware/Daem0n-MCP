@@ -5,15 +5,17 @@ tool calls to ensure proper communion (get_briefing) and counsel (context_check)
 before allowing operations.
 """
 
-import pytest
-from unittest.mock import AsyncMock
 from datetime import datetime, timezone
+from unittest.mock import AsyncMock
+
+import pytest
 
 
 @pytest.mark.asyncio
 async def test_covenant_transform_exists():
     """Verify CovenantTransform can be imported."""
     from daem0nmcp.transforms.covenant import CovenantTransform
+
     assert CovenantTransform is not None
 
 
@@ -28,7 +30,7 @@ async def test_covenant_transform_blocks_without_briefing():
     result = transform.check_tool_access(
         tool_name="remember",
         project_path="/test/project",
-        get_state=lambda p: {"briefed": False, "context_checks": []}
+        get_state=lambda p: {"briefed": False, "context_checks": []},
     )
 
     assert result is not None
@@ -47,7 +49,7 @@ async def test_covenant_transform_allows_exempt_tools():
     result = transform.check_tool_access(
         tool_name="get_briefing",
         project_path="/test/project",
-        get_state=lambda p: {"briefed": False, "context_checks": []}
+        get_state=lambda p: {"briefed": False, "context_checks": []},
     )
 
     assert result is None  # None means allowed
@@ -64,7 +66,7 @@ async def test_covenant_transform_blocks_counsel_required():
     result = transform.check_tool_access(
         tool_name="remember",
         project_path="/test/project",
-        get_state=lambda p: {"briefed": True, "context_checks": []}
+        get_state=lambda p: {"briefed": True, "context_checks": []},
     )
 
     assert result is not None
@@ -86,9 +88,12 @@ async def test_covenant_transform_allows_with_fresh_counsel():
         get_state=lambda p: {
             "briefed": True,
             "context_checks": [
-                {"topic": "remember", "timestamp": datetime.now(timezone.utc).isoformat()}
-            ]
-        }
+                {
+                    "topic": "remember",
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                }
+            ],
+        },
     )
 
     assert result is None  # None means allowed
@@ -97,8 +102,9 @@ async def test_covenant_transform_allows_with_fresh_counsel():
 @pytest.mark.asyncio
 async def test_covenant_transform_blocks_stale_counsel():
     """Tools should be blocked when counsel is stale (expired)."""
-    from daem0nmcp.transforms.covenant import CovenantTransform
     from datetime import timedelta
+
+    from daem0nmcp.transforms.covenant import CovenantTransform
 
     transform = CovenantTransform()
 
@@ -111,8 +117,8 @@ async def test_covenant_transform_blocks_stale_counsel():
             "briefed": True,
             "context_checks": [
                 {"topic": "remember", "timestamp": stale_time.isoformat()}
-            ]
-        }
+            ],
+        },
     )
 
     assert result is not None
@@ -131,7 +137,7 @@ async def test_covenant_transform_communion_only_tools():
     result = transform.check_tool_access(
         tool_name="record_outcome",
         project_path="/test/project",
-        get_state=lambda p: {"briefed": True, "context_checks": []}
+        get_state=lambda p: {"briefed": True, "context_checks": []},
     )
 
     # Should be allowed because record_outcome only needs communion, not counsel
@@ -149,7 +155,7 @@ async def test_covenant_transform_read_only_tools_exempt():
     result = transform.check_tool_access(
         tool_name="recall",
         project_path="/test/project",
-        get_state=lambda p: {"briefed": False, "context_checks": []}
+        get_state=lambda p: {"briefed": False, "context_checks": []},
     )
 
     assert result is None  # None means allowed
@@ -166,7 +172,7 @@ async def test_covenant_transform_health_exempt():
     result = transform.check_tool_access(
         tool_name="health",
         project_path="/test/project",
-        get_state=lambda p: {"briefed": False, "context_checks": []}
+        get_state=lambda p: {"briefed": False, "context_checks": []},
     )
 
     assert result is None  # None means allowed
@@ -183,7 +189,7 @@ async def test_covenant_transform_context_check_exempt():
     result = transform.check_tool_access(
         tool_name="context_check",
         project_path="/test/project",
-        get_state=lambda p: {"briefed": True, "context_checks": []}
+        get_state=lambda p: {"briefed": True, "context_checks": []},
     )
 
     assert result is None  # None means allowed
@@ -193,9 +199,9 @@ async def test_covenant_transform_context_check_exempt():
 async def test_covenant_transform_tool_classifications():
     """Verify tool classification sets are properly defined."""
     from daem0nmcp.transforms.covenant import (
-        COVENANT_EXEMPT_TOOLS,
         COMMUNION_REQUIRED_TOOLS,
         COUNSEL_REQUIRED_TOOLS,
+        COVENANT_EXEMPT_TOOLS,
     )
 
     # Entry points and diagnostics should be exempt
@@ -255,9 +261,7 @@ async def test_covenant_transform_no_project_path():
 
     # health tool doesn't need project_path
     result = transform.check_tool_access(
-        tool_name="health",
-        project_path=None,
-        get_state=lambda p: None
+        tool_name="health", project_path=None, get_state=lambda p: None
     )
 
     assert result is None  # None means allowed
@@ -272,9 +276,7 @@ async def test_covenant_transform_missing_state():
 
     # State callback returns None
     result = transform.check_tool_access(
-        tool_name="remember",
-        project_path="/test/project",
-        get_state=lambda p: None
+        tool_name="remember", project_path="/test/project", get_state=lambda p: None
     )
 
     assert result is not None
@@ -286,20 +288,26 @@ async def test_covenant_transform_missing_state():
 # COVENANT MIDDLEWARE TESTS
 # ============================================================================
 
+
 @pytest.mark.asyncio
 async def test_covenant_middleware_exists():
     """Verify CovenantMiddleware can be imported."""
     from daem0nmcp.transforms.covenant import CovenantMiddleware
+
     assert CovenantMiddleware is not None
 
 
 @pytest.mark.asyncio
 async def test_covenant_middleware_inherits_from_fastmcp_middleware():
     """Verify CovenantMiddleware inherits from FastMCP Middleware when available."""
-    from daem0nmcp.transforms.covenant import CovenantMiddleware, _FASTMCP_MIDDLEWARE_AVAILABLE
+    from daem0nmcp.transforms.covenant import (
+        _FASTMCP_MIDDLEWARE_AVAILABLE,
+        CovenantMiddleware,
+    )
 
     if _FASTMCP_MIDDLEWARE_AVAILABLE:
         from fastmcp.server.middleware import Middleware
+
         assert issubclass(CovenantMiddleware, Middleware)
     else:
         # When FastMCP middleware is not available, it falls back to object
@@ -319,8 +327,12 @@ async def test_covenant_middleware_has_on_call_tool():
 @pytest.mark.asyncio
 async def test_covenant_middleware_blocks_via_transform():
     """Verify CovenantMiddleware uses CovenantTransform for enforcement."""
-    from daem0nmcp.transforms.covenant import CovenantMiddleware, _FASTMCP_MIDDLEWARE_AVAILABLE
     import json
+
+    from daem0nmcp.transforms.covenant import (
+        _FASTMCP_MIDDLEWARE_AVAILABLE,
+        CovenantMiddleware,
+    )
 
     if not _FASTMCP_MIDDLEWARE_AVAILABLE:
         pytest.skip("FastMCP 3.0 middleware not available")
@@ -334,8 +346,7 @@ async def test_covenant_middleware_blocks_via_transform():
     from mcp import types as mt
 
     mock_message = mt.CallToolRequestParams(
-        name="remember",
-        arguments={"project_path": "/test/project", "content": "test"}
+        name="remember", arguments={"project_path": "/test/project", "content": "test"}
     )
 
     class MockContext:
@@ -348,6 +359,7 @@ async def test_covenant_middleware_blocks_via_transform():
 
     # Should be blocked - FastMCP 3.0 returns ToolResult, not raw list
     from fastmcp.tools import ToolResult
+
     assert result is not None
     assert isinstance(result, ToolResult)
     assert len(result.content) == 1
@@ -365,7 +377,10 @@ async def test_covenant_middleware_blocks_via_transform():
 @pytest.mark.asyncio
 async def test_covenant_middleware_allows_valid_requests():
     """Verify CovenantMiddleware allows requests that satisfy covenant."""
-    from daem0nmcp.transforms.covenant import CovenantMiddleware, _FASTMCP_MIDDLEWARE_AVAILABLE
+    from daem0nmcp.transforms.covenant import (
+        _FASTMCP_MIDDLEWARE_AVAILABLE,
+        CovenantMiddleware,
+    )
 
     if not _FASTMCP_MIDDLEWARE_AVAILABLE:
         pytest.skip("FastMCP 3.0 middleware not available")
@@ -375,8 +390,11 @@ async def test_covenant_middleware_allows_valid_requests():
         get_state=lambda p: {
             "briefed": True,
             "context_checks": [
-                {"topic": "remember", "timestamp": datetime.now(timezone.utc).isoformat()}
-            ]
+                {
+                    "topic": "remember",
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                }
+            ],
         }
     )
 
@@ -384,8 +402,7 @@ async def test_covenant_middleware_allows_valid_requests():
     from mcp import types as mt
 
     mock_message = mt.CallToolRequestParams(
-        name="remember",
-        arguments={"project_path": "/test/project", "content": "test"}
+        name="remember", arguments={"project_path": "/test/project", "content": "test"}
     )
 
     class MockContext:
@@ -408,7 +425,10 @@ async def test_covenant_middleware_allows_valid_requests():
 @pytest.mark.asyncio
 async def test_covenant_middleware_allows_exempt_tools():
     """Verify CovenantMiddleware allows exempt tools without checking state."""
-    from daem0nmcp.transforms.covenant import CovenantMiddleware, _FASTMCP_MIDDLEWARE_AVAILABLE
+    from daem0nmcp.transforms.covenant import (
+        _FASTMCP_MIDDLEWARE_AVAILABLE,
+        CovenantMiddleware,
+    )
 
     if not _FASTMCP_MIDDLEWARE_AVAILABLE:
         pytest.skip("FastMCP 3.0 middleware not available")
@@ -422,8 +442,7 @@ async def test_covenant_middleware_allows_exempt_tools():
     from mcp import types as mt
 
     mock_message = mt.CallToolRequestParams(
-        name="get_briefing",
-        arguments={"project_path": "/test/project"}
+        name="get_briefing", arguments={"project_path": "/test/project"}
     )
 
     class MockContext:
@@ -445,6 +464,7 @@ async def test_covenant_middleware_allows_exempt_tools():
 # SERVER INTEGRATION TESTS
 # ============================================================================
 
+
 def test_server_has_covenant_middleware():
     """Verify server has CovenantMiddleware registered."""
     from daem0nmcp.transforms.covenant import _FASTMCP_MIDDLEWARE_AVAILABLE
@@ -459,6 +479,7 @@ def test_server_has_covenant_middleware():
 
     # Verify it's a CovenantMiddleware instance
     from daem0nmcp.transforms.covenant import CovenantMiddleware
+
     assert isinstance(_covenant_middleware, CovenantMiddleware)
 
 
@@ -534,8 +555,7 @@ async def test_server_integration_context_check_enables_counsel(tmp_path):
 
     # Call context_check
     result = await server.context_check(
-        description="About to remember something",
-        project_path=project_path
+        description="About to remember something", project_path=project_path
     )
     assert result is not None
 

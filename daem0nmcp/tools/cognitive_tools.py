@@ -1,24 +1,26 @@
 """Cognitive tools: simulate_decision, evolve_rule, debate_internal."""
 
 import logging
-from typing import Dict, Optional, Any
+from typing import Any
 
 try:
-    from ..mcp_instance import mcp
     from .. import __version__
     from ..context_manager import (
-        get_project_context, _default_project_path,
+        _default_project_path,
         _missing_project_path_error,
+        get_project_context,
     )
     from ..logging_config import with_request_id
+    from ..mcp_instance import mcp
 except ImportError:
-    from daem0nmcp.mcp_instance import mcp
     from daem0nmcp import __version__
     from daem0nmcp.context_manager import (
-        get_project_context, _default_project_path,
+        _default_project_path,
         _missing_project_path_error,
+        get_project_context,
     )
     from daem0nmcp.logging_config import with_request_id
+    from daem0nmcp.mcp_instance import mcp
 
 logger = logging.getLogger(__name__)
 
@@ -27,8 +29,8 @@ logger = logging.getLogger(__name__)
 @with_request_id
 async def simulate_decision(
     decision_id: int,
-    project_path: Optional[str] = None,
-) -> Dict[str, Any]:
+    project_path: str | None = None,
+) -> dict[str, Any]:
     """
     Temporal Scrying -- replay a past decision with current knowledge.
 
@@ -57,9 +59,9 @@ async def simulate_decision(
 @mcp.tool(version=__version__)
 @with_request_id
 async def evolve_rule(
-    rule_id: Optional[int] = None,
-    project_path: Optional[str] = None,
-) -> Dict[str, Any]:
+    rule_id: int | None = None,
+    project_path: str | None = None,
+) -> dict[str, Any]:
     """
     Rule Entropy Analysis -- examine rules for signs of decay and drift.
 
@@ -91,8 +93,8 @@ async def debate_internal(
     topic: str,
     advocate_position: str,
     challenger_position: str,
-    project_path: Optional[str] = None,
-) -> Dict[str, Any]:
+    project_path: str | None = None,
+) -> dict[str, Any]:
     """
     Adversarial Council -- convene an internal debate grounded in memory evidence.
 

@@ -19,14 +19,13 @@ Key design choices:
 from __future__ import annotations
 
 import logging
-from typing import Dict, Optional, Tuple
 
 import numpy as np
 from sentence_transformers.util import cos_sim
 
+from .config import settings
 from .recall_planner import QueryComplexity
 from .vectors import _get_model
-from .config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -34,7 +33,7 @@ logger = logging.getLogger(__name__)
 class ExemplarQueryClassifier:
     """Semantic query-complexity classifier using exemplar embeddings."""
 
-    EXEMPLARS: Dict[QueryComplexity, list[str]] = {
+    EXEMPLARS: dict[QueryComplexity, list[str]] = {
         QueryComplexity.SIMPLE: [
             "what is this",
             "define a concept",
@@ -75,7 +74,7 @@ class ExemplarQueryClassifier:
         self._model = model
         self._threshold = confidence_threshold
         self._initialized: bool = False
-        self._exemplar_embeddings: Optional[Dict[QueryComplexity, np.ndarray]] = None
+        self._exemplar_embeddings: dict[QueryComplexity, np.ndarray] | None = None
 
     def _ensure_initialized(self) -> None:
         """Compute exemplar embeddings on first use (lazy)."""
@@ -85,10 +84,12 @@ class ExemplarQueryClassifier:
         if self._model is None:
             self._model = _get_model()
 
-        embeddings: Dict[QueryComplexity, np.ndarray] = {}
+        embeddings: dict[QueryComplexity, np.ndarray] = {}
         for level, texts in self.EXEMPLARS.items():
             prefixed_texts = [f"{settings.embedding_query_prefix}{t}" for t in texts]
-            embeddings[level] = self._model.encode(prefixed_texts, convert_to_numpy=True)
+            embeddings[level] = self._model.encode(
+                prefixed_texts, convert_to_numpy=True
+            )
 
         self._exemplar_embeddings = embeddings
         self._initialized = True
@@ -98,9 +99,7 @@ class ExemplarQueryClassifier:
     # Classification
     # ------------------------------------------------------------------
 
-    def classify(
-        self, query: str
-    ) -> Tuple[QueryComplexity, float, Dict[str, float]]:
+    def classify(self, query: str) -> tuple[QueryComplexity, float, dict[str, float]]:
         """Classify *query* complexity via cosine similarity to exemplars.
 
         Returns
@@ -116,7 +115,7 @@ class ExemplarQueryClassifier:
             f"{settings.embedding_query_prefix}{query}", convert_to_numpy=True
         )
 
-        scores: Dict[str, float] = {}
+        scores: dict[str, float] = {}
         best_level = self.FALLBACK_LEVEL
         best_score = -1.0
 
@@ -139,7 +138,7 @@ class ExemplarQueryClassifier:
 # Module-level convenience singleton
 # ------------------------------------------------------------------
 
-_default_classifier: Optional[ExemplarQueryClassifier] = None
+_default_classifier: ExemplarQueryClassifier | None = None
 
 
 def get_classifier() -> ExemplarQueryClassifier:
@@ -152,6 +151,6 @@ def get_classifier() -> ExemplarQueryClassifier:
 
 def classify_query(
     query: str,
-) -> Tuple[QueryComplexity, float, Dict[str, float]]:
+) -> tuple[QueryComplexity, float, dict[str, float]]:
     """Convenience wrapper around the singleton classifier."""
     return get_classifier().classify(query)

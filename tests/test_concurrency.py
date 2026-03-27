@@ -4,15 +4,16 @@ Tests race conditions, concurrent context access, and thread safety
 of caching and memory operations.
 """
 
-import pytest
 import asyncio
-import tempfile
 import shutil
+import tempfile
 
+import pytest
+
+from daem0nmcp.cache import TTLCache, get_recall_cache, get_rules_cache
 from daem0nmcp.database import DatabaseManager
 from daem0nmcp.memory import MemoryManager
 from daem0nmcp.rules import RulesEngine
-from daem0nmcp.cache import TTLCache, get_recall_cache, get_rules_cache
 
 
 @pytest.fixture
@@ -54,11 +55,12 @@ class TestConcurrentMemoryAccess:
     @pytest.mark.asyncio
     async def test_concurrent_remember(self, memory_manager):
         """Test that concurrent remember operations don't conflict."""
+
         async def create_memory(index: int):
             return await memory_manager.remember(
                 category="decision",
                 content=f"Concurrent decision number {index} for testing",
-                tags=[f"test_{index}"]
+                tags=[f"test_{index}"],
             )
 
         # Create 10 memories concurrently
@@ -81,7 +83,7 @@ class TestConcurrentMemoryAccess:
             await memory_manager.remember(
                 category="pattern",
                 content=f"Pattern for concurrent recall test {i}",
-                tags=["concurrent"]
+                tags=["concurrent"],
             )
 
         async def recall_memory():
@@ -106,7 +108,7 @@ class TestConcurrentMemoryAccess:
             await memory_manager.remember(
                 category="learning",
                 content=f"Interleaved test memory {index}",
-                tags=["interleaved"]
+                tags=["interleaved"],
             )
 
             # Immediately try to recall
@@ -128,22 +130,18 @@ class TestConcurrentMemoryAccess:
         memory_ids = []
         for i in range(5):
             result = await memory_manager.remember(
-                category="decision",
-                content=f"Decision for outcome test {i}"
+                category="decision", content=f"Decision for outcome test {i}"
             )
             memory_ids.append(result["id"])
 
         async def record_outcome(mem_id: int, worked: bool):
             return await memory_manager.record_outcome(
-                mem_id,
-                f"Outcome for {mem_id}",
-                worked=worked
+                mem_id, f"Outcome for {mem_id}", worked=worked
             )
 
         # Record outcomes concurrently (alternating worked/failed)
         tasks = [
-            record_outcome(mem_id, i % 2 == 0)
-            for i, mem_id in enumerate(memory_ids)
+            record_outcome(mem_id, i % 2 == 0) for i, mem_id in enumerate(memory_ids)
         ]
         results = await asyncio.gather(*tasks)
 
@@ -158,11 +156,12 @@ class TestConcurrentRulesAccess:
     @pytest.mark.asyncio
     async def test_concurrent_add_rule(self, rules_engine):
         """Test that concurrent rule additions don't conflict."""
+
         async def add_rule(index: int):
             return await rules_engine.add_rule(
                 trigger=f"Concurrent rule trigger {index}",
                 must_do=[f"Action {index}"],
-                priority=index
+                priority=index,
             )
 
         # Add 10 rules concurrently
@@ -183,8 +182,7 @@ class TestConcurrentRulesAccess:
         # Create some rules first
         for i in range(5):
             await rules_engine.add_rule(
-                trigger=f"Concurrent check trigger {i}",
-                must_do=[f"Action {i}"]
+                trigger=f"Concurrent check trigger {i}", must_do=[f"Action {i}"]
             )
 
         get_rules_cache().clear()
@@ -208,8 +206,7 @@ class TestConcurrentRulesAccess:
         async def add_and_check(index: int):
             # Add a rule
             await rules_engine.add_rule(
-                trigger=f"Interleaved rule {index}",
-                must_do=[f"Action {index}"]
+                trigger=f"Interleaved rule {index}", must_do=[f"Action {index}"]
             )
 
             # Immediately check
@@ -247,10 +244,7 @@ class TestCacheConcurrency:
                 errors.append(str(e))
 
         # Start multiple threads
-        threads = [
-            threading.Thread(target=worker, args=(i, 100))
-            for i in range(10)
-        ]
+        threads = [threading.Thread(target=worker, args=(i, 100)) for i in range(10)]
 
         for t in threads:
             t.start()
@@ -340,6 +334,7 @@ class TestDatabaseConcurrency:
     @pytest.mark.asyncio
     async def test_concurrent_sessions(self, db_manager):
         """Test that concurrent database sessions work correctly."""
+
         async def use_session(index: int):
             async with db_manager.get_session():
                 # Simulate some work
@@ -363,8 +358,7 @@ class TestDatabaseConcurrency:
             try:
                 # Create a memory
                 result = await memory_manager.remember(
-                    category="decision",
-                    content=f"Transaction test {index}"
+                    category="decision", content=f"Transaction test {index}"
                 )
 
                 # Verify it was created

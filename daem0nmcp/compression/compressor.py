@@ -4,8 +4,9 @@ Context Compressor - LLMLingua-2 integration for intelligent prompt compression.
 Implements lazy initialization to avoid blocking startup and memory waste
 when compression isn't needed. Uses tiktoken for accurate token counting.
 """
+
 import logging
-from typing import Optional, List, Dict, Any
+from typing import Any
 
 from .config import CompressionConfig
 from .entity_preserver import CodeEntityPreserver
@@ -28,19 +29,19 @@ class ContextCompressor:
             compressed = compressor.compress(context)
     """
 
-    def __init__(self, config: Optional[CompressionConfig] = None):
+    def __init__(self, config: CompressionConfig | None = None):
         self.config = config or CompressionConfig()
         self._compressor = None  # Lazy loaded
-        self._tokenizer = None   # Lazy loaded
+        self._tokenizer = None  # Lazy loaded
         self._entity_preserver = CodeEntityPreserver()  # Code entity preservation
 
     def _ensure_initialized(self) -> None:
         """Lazy-load the compressor and tokenizer on first use."""
         if self._compressor is None:
             try:
+                import tiktoken
                 import torch
                 from llmlingua import PromptCompressor
-                import tiktoken
 
                 # Determine device
                 if self.config.device == "auto":
@@ -68,6 +69,7 @@ class ContextCompressor:
         """Count tokens in text using tiktoken."""
         if self._tokenizer is None:
             import tiktoken
+
             self._tokenizer = tiktoken.get_encoding("cl100k_base")
         return len(self._tokenizer.encode(text))
 
@@ -84,9 +86,9 @@ class ContextCompressor:
     def compress(
         self,
         context: str,
-        rate: Optional[float] = None,
-        force_tokens: Optional[List[str]] = None,
-    ) -> Dict[str, Any]:
+        rate: float | None = None,
+        force_tokens: list[str] | None = None,
+    ) -> dict[str, Any]:
         """
         Compress context using LLMLingua-2.
 
@@ -143,8 +145,8 @@ class ContextCompressor:
     def compress_simple(
         self,
         context: str,
-        rate: Optional[float] = None,
-        force_tokens: Optional[List[str]] = None,
+        rate: float | None = None,
+        force_tokens: list[str] | None = None,
     ) -> str:
         """
         Simple compress that returns just the compressed text.
@@ -157,9 +159,9 @@ class ContextCompressor:
     def compress_with_code_preservation(
         self,
         context: str,
-        rate: Optional[float] = None,
-        additional_force_tokens: Optional[List[str]] = None,
-    ) -> Dict[str, Any]:
+        rate: float | None = None,
+        additional_force_tokens: list[str] | None = None,
+    ) -> dict[str, Any]:
         """
         Compress with automatic code entity preservation.
 

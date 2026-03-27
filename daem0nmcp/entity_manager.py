@@ -8,14 +8,15 @@ Handles:
 """
 
 import logging
-from typing import Dict, List, Any, Optional
 from datetime import datetime, timezone
-from sqlalchemy import select, or_
+from typing import Any
+
+from sqlalchemy import or_, select
 
 from .database import DatabaseManager
-from .models import ExtractedEntity, MemoryEntityRef, Memory
 from .entity_extractor import EntityExtractor
 from .graph.entity_resolver import EntityResolver
+from .models import ExtractedEntity, Memory, MemoryEntityRef
 
 logger = logging.getLogger(__name__)
 
@@ -35,8 +36,8 @@ class EntityManager:
         memory_id: int,
         content: str,
         project_path: str,
-        rationale: Optional[str] = None
-    ) -> Dict[str, Any]:
+        rationale: str | None = None,
+    ) -> dict[str, Any]:
         """
         Extract entities from a memory and create relationships.
 
@@ -61,11 +62,7 @@ class EntityManager:
         extracted = self.extractor.extract_all(text)
 
         if not extracted:
-            return {
-                "memory_id": memory_id,
-                "entities_found": 0,
-                "refs_created": 0
-            }
+            return {"memory_id": memory_id, "entities_found": 0, "refs_created": 0}
 
         refs_created = 0
 
@@ -76,14 +73,14 @@ class EntityManager:
                     session,
                     project_path=project_path,
                     entity_type=entity_data["type"],
-                    name=entity_data["name"]
+                    name=entity_data["name"],
                 )
 
                 # Create reference if not exists
                 existing_ref = await session.execute(
                     select(MemoryEntityRef).where(
                         MemoryEntityRef.memory_id == memory_id,
-                        MemoryEntityRef.entity_id == entity.id
+                        MemoryEntityRef.entity_id == entity.id,
                     )
                 )
                 if not existing_ref.scalar_one_or_none():
@@ -91,7 +88,7 @@ class EntityManager:
                         memory_id=memory_id,
                         entity_id=entity.id,
                         relationship="mentions",
-                        context_snippet=entity_data.get("context")
+                        context_snippet=entity_data.get("context"),
                     )
                     session.add(ref)
                     refs_created += 1
@@ -99,22 +96,18 @@ class EntityManager:
         return {
             "memory_id": memory_id,
             "entities_found": len(extracted),
-            "refs_created": refs_created
+            "refs_created": refs_created,
         }
 
     async def _get_or_create_entity(
-        self,
-        session,
-        project_path: str,
-        entity_type: str,
-        name: str
+        self, session, project_path: str, entity_type: str, name: str
     ) -> ExtractedEntity:
         """Get existing entity or create new one using resolver."""
         entity_id, is_new = await self.resolver.resolve(
             name=name,
             entity_type=entity_type,
             project_path=project_path,
-            session=session
+            session=session,
         )
 
         # Get the entity object
@@ -127,10 +120,7 @@ class EntityManager:
 
         return entity
 
-    async def get_entities_for_memory(
-        self,
-        memory_id: int
-    ) -> List[Dict[str, Any]]:
+    async def get_entities_for_memory(self, memory_id: int) -> list[dict[str, Any]]:
         """Get all entities referenced by a memory."""
         async with self.db.get_session() as session:
             result = await session.execute(
@@ -148,17 +138,14 @@ class EntityManager:
                     "qualified_name": entity.qualified_name,
                     "mention_count": entity.mention_count,
                     "relationship": ref.relationship,
-                    "context_snippet": ref.context_snippet
+                    "context_snippet": ref.context_snippet,
                 }
                 for entity, ref in rows
             ]
 
     async def get_memories_for_entity(
-        self,
-        entity_name: str,
-        project_path: str,
-        entity_type: Optional[str] = None
-    ) -> Dict[str, Any]:
+        self, entity_name: str, project_path: str, entity_type: str | None = None
+    ) -> dict[str, Any]:
         """
         Get all memories that reference a specific entity.
 
@@ -170,8 +157,8 @@ class EntityManager:
                 ExtractedEntity.project_path == project_path,
                 or_(
                     ExtractedEntity.name == entity_name,
-                    ExtractedEntity.qualified_name == entity_name
-                )
+                    ExtractedEntity.qualified_name == entity_name,
+                ),
             )
             if entity_type:
                 query = query.where(ExtractedEntity.entity_type == entity_type)
@@ -180,18 +167,12 @@ class EntityManager:
             entities = result.scalars().all()
 
             if not entities:
-                return {
-                    "entity_name": entity_name,
-                    "found": False,
-                    "memories": []
-                }
+                return {"entity_name": entity_name, "found": False, "memories": []}
 
             # Get all memory IDs that reference these entities
             entity_ids = [e.id for e in entities]
             refs_result = await session.execute(
-                select(MemoryEntityRef).where(
-                    MemoryEntityRef.entity_id.in_(entity_ids)
-                )
+                select(MemoryEntityRef).where(MemoryEntityRef.entity_id.in_(entity_ids))
             )
             refs = refs_result.scalars().all()
             memory_ids = list(set(r.memory_id for r in refs))
@@ -203,7 +184,7 @@ class EntityManager:
                     "found": True,
                     "entity_types": [e.entity_type for e in entities],
                     "mention_count": sum(e.mention_count for e in entities),
-                    "memories": []
+                    "memories": [],
                 }
 
             memories_result = await session.execute(
@@ -225,18 +206,17 @@ class EntityManager:
                         "tags": m.tags,
                         "outcome": m.outcome,
                         "worked": m.worked,
-                        "created_at": m.created_at.isoformat() if m.created_at else None
+                        "created_at": m.created_at.isoformat()
+                        if m.created_at
+                        else None,
                     }
                     for m in memories
-                ]
+                ],
             }
 
     async def get_popular_entities(
-        self,
-        project_path: str,
-        entity_type: Optional[str] = None,
-        limit: int = 20
-    ) -> List[Dict[str, Any]]:
+        self, project_path: str, entity_type: str | None = None, limit: int = 20
+    ) -> list[dict[str, Any]]:
         """Get most frequently mentioned entities."""
         async with self.db.get_session() as session:
             query = (
@@ -258,7 +238,7 @@ class EntityManager:
                     "type": e.entity_type,
                     "name": e.name,
                     "qualified_name": e.qualified_name,
-                    "mention_count": e.mention_count
+                    "mention_count": e.mention_count,
                 }
                 for e in entities
             ]

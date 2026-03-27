@@ -13,12 +13,13 @@ Time dimensions:
 
 import logging
 from datetime import datetime, timezone
-from typing import List, Optional, TYPE_CHECKING
+from typing import TYPE_CHECKING
 
-from sqlalchemy import select, or_
+from sqlalchemy import or_, select
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
+
     from ..models import MemoryVersion
 
 logger = logging.getLogger(__name__)
@@ -29,14 +30,14 @@ async def create_temporal_version(
     memory_id: int,
     version_number: int,
     content: str,
-    rationale: Optional[str],
+    rationale: str | None,
     context: dict,
     tags: list,
-    outcome: Optional[str],
-    worked: Optional[bool],
+    outcome: str | None,
+    worked: bool | None,
     change_type: str,
-    change_description: Optional[str] = None,
-    valid_from: Optional[datetime] = None,
+    change_description: str | None = None,
+    valid_from: datetime | None = None,
 ) -> "MemoryVersion":
     """
     Create a MemoryVersion with proper bi-temporal timestamps.
@@ -94,8 +95,8 @@ async def get_versions_at_time(
     session: "AsyncSession",
     memory_id: int,
     as_of_valid_time: datetime,
-    as_of_transaction_time: Optional[datetime] = None,
-) -> List["MemoryVersion"]:
+    as_of_transaction_time: datetime | None = None,
+) -> list["MemoryVersion"]:
     """
     Get memory versions valid at a specific point in time.
 
@@ -152,7 +153,7 @@ async def invalidate_version(
     session: "AsyncSession",
     version_id: int,
     invalidated_by_version_id: int,
-    invalidation_time: Optional[datetime] = None,
+    invalidation_time: datetime | None = None,
 ) -> bool:
     """
     Mark a version as invalidated (set valid_to).
@@ -170,6 +171,7 @@ async def invalidate_version(
         True if version was invalidated, False if already invalid
     """
     from sqlalchemy import update
+
     from ..models import MemoryVersion
 
     if invalidation_time is None:
@@ -227,6 +229,7 @@ async def trace_knowledge_evolution(
         - invalidated_by_version_id: What version invalidated this
     """
     from sqlalchemy import select
+
     from ..models import ExtractedEntity, MemoryEntityRef, MemoryVersion
 
     # First, get the entity
@@ -276,8 +279,7 @@ async def trace_knowledge_evolution(
 
     # Order by valid_from (when true), then transaction_time (when learned)
     query = query.order_by(
-        MemoryVersion.valid_from.asc().nullsfirst(),
-        MemoryVersion.changed_at.asc()
+        MemoryVersion.valid_from.asc().nullsfirst(), MemoryVersion.changed_at.asc()
     )
 
     versions_result = await session.execute(query)
@@ -316,11 +318,13 @@ async def trace_knowledge_evolution(
             current_beliefs.append(entry)
 
         if v.invalidated_by_version_id is not None:
-            invalidation_chain.append({
-                "invalidated_version_id": v.id,
-                "invalidated_by_version_id": v.invalidated_by_version_id,
-                "invalidation_time": v.valid_to.isoformat() if v.valid_to else None,
-            })
+            invalidation_chain.append(
+                {
+                    "invalidated_version_id": v.id,
+                    "invalidated_by_version_id": v.invalidated_by_version_id,
+                    "invalidation_time": v.valid_to.isoformat() if v.valid_to else None,
+                }
+            )
 
     return {
         "found": True,

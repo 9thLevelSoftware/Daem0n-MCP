@@ -11,10 +11,11 @@ These tests verify:
 5. Edge cases: naive datetime, future happened_at, no as_of_time
 """
 
-import pytest
-import tempfile
 import shutil
-from datetime import datetime, timezone, timedelta
+import tempfile
+from datetime import datetime, timedelta, timezone
+
+import pytest
 
 
 @pytest.fixture
@@ -55,6 +56,7 @@ async def db_manager(temp_storage):
 # Test Class 1: MCP Tool Parameter Tests
 # ============================================================================
 
+
 class TestMCPToolParameters:
     """Verify MCP tools accept bi-temporal parameters."""
 
@@ -70,7 +72,7 @@ class TestMCPToolParameters:
             category="decision",
             content="User prefers Python over JavaScript",
             happened_at=past_time,
-            project_path=covenant_compliant_project
+            project_path=covenant_compliant_project,
         )
 
         assert "error" not in result
@@ -78,7 +80,9 @@ class TestMCPToolParameters:
         assert result["category"] == "decision"
 
     @pytest.mark.asyncio
-    async def test_remember_rejects_invalid_happened_at(self, covenant_compliant_project):
+    async def test_remember_rejects_invalid_happened_at(
+        self, covenant_compliant_project
+    ):
         """remember should return error for invalid happened_at format."""
         from daem0nmcp import server
 
@@ -86,7 +90,7 @@ class TestMCPToolParameters:
             category="decision",
             content="Test decision",
             happened_at="not-a-valid-date",
-            project_path=covenant_compliant_project
+            project_path=covenant_compliant_project,
         )
 
         assert "error" in result
@@ -102,7 +106,7 @@ class TestMCPToolParameters:
         await server.remember(
             category="pattern",
             content="Always use type hints in Python",
-            project_path=covenant_compliant_project
+            project_path=covenant_compliant_project,
         )
 
         # Query with as_of_time
@@ -110,7 +114,7 @@ class TestMCPToolParameters:
         result = await server.recall(
             topic="type hints",
             as_of_time=future_time,
-            project_path=covenant_compliant_project
+            project_path=covenant_compliant_project,
         )
 
         assert "error" not in result
@@ -125,7 +129,7 @@ class TestMCPToolParameters:
         result = await server.recall(
             topic="anything",
             as_of_time="invalid-timestamp",
-            project_path=covenant_compliant_project
+            project_path=covenant_compliant_project,
         )
 
         assert "error" in result
@@ -133,7 +137,9 @@ class TestMCPToolParameters:
         assert "ISO format" in result["error"]
 
     @pytest.mark.asyncio
-    async def test_trace_evolution_exists_and_accepts_parameters(self, covenant_compliant_project):
+    async def test_trace_evolution_exists_and_accepts_parameters(
+        self, covenant_compliant_project
+    ):
         """trace_evolution MCP tool should exist and accept entity_name/entity_type/include_invalidated."""
         from daem0nmcp import server
 
@@ -142,20 +148,20 @@ class TestMCPToolParameters:
             entity_name="NonExistentEntity",
             entity_type="concept",
             include_invalidated=True,
-            project_path=covenant_compliant_project
+            project_path=covenant_compliant_project,
         )
 
         # Should not error on parameters - either found=False or timeline=[]
         assert "error" not in result or "not found" in result.get("error", "").lower()
 
     @pytest.mark.asyncio
-    async def test_trace_evolution_requires_name_or_id(self, covenant_compliant_project):
+    async def test_trace_evolution_requires_name_or_id(
+        self, covenant_compliant_project
+    ):
         """trace_evolution should require either entity_name or entity_id."""
         from daem0nmcp import server
 
-        result = await server.trace_evolution(
-            project_path=covenant_compliant_project
-        )
+        result = await server.trace_evolution(project_path=covenant_compliant_project)
 
         assert "error" in result
         assert "entity_name or entity_id" in result["error"].lower()
@@ -164,6 +170,7 @@ class TestMCPToolParameters:
 # ============================================================================
 # Test Class 2: happened_at Temporal Precision Tests
 # ============================================================================
+
 
 class TestHappenedAtPrecision:
     """Verify happened_at sets valid_from correctly."""
@@ -177,7 +184,7 @@ class TestHappenedAtPrecision:
         result = await memory_manager.remember(
             category="decision",
             content="Database uses PostgreSQL",
-            happened_at=one_week_ago
+            happened_at=one_week_ago,
         )
 
         assert "id" in result
@@ -192,7 +199,7 @@ class TestHappenedAtPrecision:
         valid_from_str = version.get("valid_from")
 
         if valid_from_str:
-            valid_from = datetime.fromisoformat(valid_from_str.replace('Z', '+00:00'))
+            valid_from = datetime.fromisoformat(valid_from_str.replace("Z", "+00:00"))
             # Allow 2 second tolerance for test execution
             assert abs((valid_from - one_week_ago).total_seconds()) < 2
 
@@ -206,14 +213,13 @@ class TestHappenedAtPrecision:
         await memory_manager.remember(
             category="pattern",
             content="Use async/await for I/O operations",
-            happened_at=today
+            happened_at=today,
         )
 
         # Query for yesterday (before the fact was valid)
         yesterday = today - timedelta(days=1)
         recall_result = await memory_manager.recall(
-            topic="async await I/O",
-            as_of_time=yesterday
+            topic="async await I/O", as_of_time=yesterday
         )
 
         # Should not find the pattern (it wasn't valid yesterday)
@@ -230,25 +236,27 @@ class TestHappenedAtPrecision:
         await memory_manager.remember(
             category="pattern",
             content="Always validate user input",
-            happened_at=yesterday
+            happened_at=yesterday,
         )
 
         # Query for today (after the fact was valid)
         tomorrow = datetime.now(timezone.utc) + timedelta(days=1)
         recall_result = await memory_manager.recall(
-            topic="validate user input",
-            as_of_time=tomorrow
+            topic="validate user input", as_of_time=tomorrow
         )
 
         # Should find the pattern
         patterns = recall_result.get("patterns", [])
-        matching = [p for p in patterns if "validate user input" in p.get("content", "")]
+        matching = [
+            p for p in patterns if "validate user input" in p.get("content", "")
+        ]
         assert len(matching) > 0, "Should find memory after its valid_from"
 
 
 # ============================================================================
 # Test Class 3: The Critical ROADMAP.md Scenario
 # ============================================================================
+
 
 class TestCriticalBitemporalScenario:
     """
@@ -259,8 +267,9 @@ class TestCriticalBitemporalScenario:
     @pytest.mark.asyncio
     async def test_full_invalidation_scenario(self, memory_manager, db_manager):
         """Full bi-temporal scenario with invalidation."""
-        from daem0nmcp.models import MemoryVersion
         from sqlalchemy import select
+
+        from daem0nmcp.models import MemoryVersion
 
         # T1: January 15 - We believe "Auth uses session cookies"
         t1 = datetime(2025, 1, 15, 10, 0, 0, tzinfo=timezone.utc)
@@ -269,7 +278,7 @@ class TestCriticalBitemporalScenario:
             category="pattern",
             content="Authentication uses session cookies",
             rationale="Observed in login flow",
-            happened_at=t1
+            happened_at=t1,
         )
         memory1_id = result1["id"]
 
@@ -280,7 +289,7 @@ class TestCriticalBitemporalScenario:
             category="pattern",
             content="Authentication uses JWT tokens, not session cookies",
             rationale="Code review revealed JWT implementation",
-            happened_at=t2
+            happened_at=t2,
         )
         memory2_id = result2["id"]
 
@@ -310,53 +319,56 @@ class TestCriticalBitemporalScenario:
         # Query at T1 (before invalidation) - should see session cookies
         recall_t1 = await memory_manager.recall(
             topic="authentication method",
-            as_of_time=t1 + timedelta(hours=1)  # Just after T1
+            as_of_time=t1 + timedelta(hours=1),  # Just after T1
         )
 
         # Query at T3 (after invalidation) - should see JWT, not cookies
         recall_t3 = await memory_manager.recall(
-            topic="authentication method",
-            as_of_time=t3
+            topic="authentication method", as_of_time=t3
         )
 
         # Verify T1 query returns session cookies belief
         patterns_t1 = recall_t1.get("patterns", [])
         session_cookie_found_t1 = any(
-            "session cookies" in p.get("content", "").lower()
-            for p in patterns_t1
+            "session cookies" in p.get("content", "").lower() for p in patterns_t1
         )
 
         # Verify T3 query returns JWT (current belief)
         patterns_t3 = recall_t3.get("patterns", [])
-        jwt_found_t3 = any(
-            "jwt" in p.get("content", "").lower()
-            for p in patterns_t3
-        )
+        jwt_found_t3 = any("jwt" in p.get("content", "").lower() for p in patterns_t3)
 
         # The invalidated memory should NOT appear in T3 query
         any(
             "session cookies" in p.get("content", "").lower()
-            and "not" not in p.get("content", "").lower()  # Exclude the correction message
+            and "not"
+            not in p.get("content", "").lower()  # Exclude the correction message
             for p in patterns_t3
         )
 
         # Assert the scenario
-        assert session_cookie_found_t1, "T1 query should return 'session cookies' belief"
+        assert session_cookie_found_t1, (
+            "T1 query should return 'session cookies' belief"
+        )
         assert jwt_found_t3, "T3 query should return 'JWT' belief"
         # Invalidated memory filtered out in T3
         # Note: This depends on as_of_time filtering which checks valid_to
 
     @pytest.mark.asyncio
-    async def test_trace_evolution_shows_invalidation_chain(self, memory_manager, db_manager):
+    async def test_trace_evolution_shows_invalidation_chain(
+        self, memory_manager, db_manager
+    ):
         """trace_evolution should show which versions superseded which."""
-        from daem0nmcp.models import Memory, MemoryVersion, ExtractedEntity, MemoryEntityRef
+        from daem0nmcp.models import (
+            ExtractedEntity,
+            Memory,
+            MemoryEntityRef,
+            MemoryVersion,
+        )
 
         # Create an entity
         async with db_manager.get_session() as session:
             entity = ExtractedEntity(
-                project_path="/test",
-                entity_type="concept",
-                name="AuthMethod"
+                project_path="/test", entity_type="concept", name="AuthMethod"
             )
             session.add(entity)
             await session.flush()
@@ -366,7 +378,7 @@ class TestCriticalBitemporalScenario:
             memory = Memory(
                 category="pattern",
                 content="Auth uses sessions",
-                keywords="auth sessions"
+                keywords="auth sessions",
             )
             session.add(memory)
             await session.flush()
@@ -377,24 +389,21 @@ class TestCriticalBitemporalScenario:
                 version_number=1,
                 content="Auth uses sessions",
                 change_type="created",
-                valid_from=datetime(2025, 1, 15, tzinfo=timezone.utc)
+                valid_from=datetime(2025, 1, 15, tzinfo=timezone.utc),
             )
             session.add(version)
             await session.flush()
 
             # Create entity reference (links memory to entity)
             ref = MemoryEntityRef(
-                memory_id=memory.id,
-                entity_id=entity_id,
-                relationship="mentions"
+                memory_id=memory.id, entity_id=entity_id, relationship="mentions"
             )
             session.add(ref)
             await session.commit()
 
         # Trace evolution
         evolution = await memory_manager.get_memory_evolution(
-            entity_name="AuthMethod",
-            include_invalidated=True
+            entity_name="AuthMethod", include_invalidated=True
         )
 
         assert evolution["found"] is True
@@ -411,6 +420,7 @@ class TestCriticalBitemporalScenario:
 # Test Class 4: Edge Cases
 # ============================================================================
 
+
 class TestEdgeCases:
     """Test edge cases for bi-temporal features."""
 
@@ -423,7 +433,7 @@ class TestEdgeCases:
         result = await memory_manager.remember(
             category="decision",
             content="Use UTC for all timestamps",
-            happened_at=naive_time
+            happened_at=naive_time,
         )
 
         assert "id" in result
@@ -437,7 +447,7 @@ class TestEdgeCases:
         result = await memory_manager.remember(
             category="decision",
             content="Deploy new version on this date",
-            happened_at=future_time
+            happened_at=future_time,
         )
 
         assert "id" in result
@@ -448,14 +458,11 @@ class TestEdgeCases:
         """Recall without as_of_time returns current knowledge state."""
         # Create a memory
         await memory_manager.remember(
-            category="pattern",
-            content="Log all errors to centralized system"
+            category="pattern", content="Log all errors to centralized system"
         )
 
         # Recall without as_of_time
-        result = await memory_manager.recall(
-            topic="error logging"
-        )
+        result = await memory_manager.recall(topic="error logging")
 
         # Should return results (current state)
         assert "error" not in result
@@ -474,7 +481,7 @@ class TestEdgeCases:
             category="decision",
             content="Test Z suffix handling",
             happened_at=timestamp_with_z,
-            project_path=covenant_compliant_project
+            project_path=covenant_compliant_project,
         )
 
         assert "error" not in result
@@ -492,7 +499,7 @@ class TestEdgeCases:
             category="decision",
             content="Test offset timezone handling",
             happened_at=timestamp_with_offset,
-            project_path=covenant_compliant_project
+            project_path=covenant_compliant_project,
         )
 
         assert "error" not in result
@@ -503,11 +510,14 @@ class TestEdgeCases:
 # Test Class 5: MCP Tool Verification (from plan)
 # ============================================================================
 
+
 class TestMCPToolVerification:
     """Verify MCP tools work end-to-end."""
 
     @pytest.mark.asyncio
-    async def test_remember_recall_roundtrip_with_temporal(self, covenant_compliant_project):
+    async def test_remember_recall_roundtrip_with_temporal(
+        self, covenant_compliant_project
+    ):
         """Full roundtrip: remember with happened_at, recall with as_of_time."""
         from daem0nmcp import server
 
@@ -520,31 +530,37 @@ class TestMCPToolVerification:
             category="pattern",
             content="Use dependency injection for testability",
             happened_at=two_days_ago,
-            project_path=covenant_compliant_project
+            project_path=covenant_compliant_project,
         )
 
         # Query at one day ago (after the fact was true) - should find it
         result_after = await server.recall(
             topic="dependency injection testability",
             as_of_time=one_day_ago,
-            project_path=covenant_compliant_project
+            project_path=covenant_compliant_project,
         )
 
         # Query at three days ago (before the fact was true) - should NOT find it
         result_before = await server.recall(
             topic="dependency injection testability",
             as_of_time=three_days_ago,
-            project_path=covenant_compliant_project
+            project_path=covenant_compliant_project,
         )
 
         # Verify results
         patterns_after = result_after.get("patterns", [])
         patterns_before = result_before.get("patterns", [])
 
-        found_after = any("dependency injection" in p.get("content", "") for p in patterns_after)
-        found_before = any("dependency injection" in p.get("content", "") for p in patterns_before)
+        found_after = any(
+            "dependency injection" in p.get("content", "") for p in patterns_after
+        )
+        found_before = any(
+            "dependency injection" in p.get("content", "") for p in patterns_before
+        )
 
-        assert found_after or len(patterns_after) >= 0, "Should potentially find pattern after valid_from"
+        assert found_after or len(patterns_after) >= 0, (
+            "Should potentially find pattern after valid_from"
+        )
         # Before valid_from, definitely should not find
         assert not found_before, "Should NOT find pattern before valid_from"
 
@@ -561,7 +577,7 @@ class TestMCPToolVerification:
             entity = ExtractedEntity(
                 project_path=covenant_compliant_project,
                 entity_type="concept",
-                name="TestableEntity"
+                name="TestableEntity",
             )
             session.add(entity)
             await session.commit()
@@ -570,7 +586,7 @@ class TestMCPToolVerification:
         result = await server.trace_evolution(
             entity_name="TestableEntity",
             include_invalidated=True,
-            project_path=covenant_compliant_project
+            project_path=covenant_compliant_project,
         )
 
         assert result["found"] is True

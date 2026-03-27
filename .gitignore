@@ -66,9 +66,6 @@ enhancements.md
 # Internal dev scripts
 scripts/condense_docstrings.py
 
-# Lock files
-uv.lock
-
 # Node.js
 node_modules/
 package-lock.json

@@ -15,7 +15,7 @@ class TestContextEngineeringRequirements:
 
     def test_context_01_llmlingua2_integration(self):
         """CONTEXT-01: LLMLingua-2 integrated for intelligent prompt compression."""
-        from daem0nmcp.compression import ContextCompressor, CompressionConfig
+        from daem0nmcp.compression import CompressionConfig, ContextCompressor
 
         # Compressor initializes
         compressor = ContextCompressor()
@@ -40,7 +40,11 @@ class TestContextEngineeringRequirements:
 
     def test_context_03_compression_ratio_target(self):
         """CONTEXT-03: 3x-6x compression achieved (config)."""
-        from daem0nmcp.compression import CompressionConfig, COMPRESSION_RATES, ContentType
+        from daem0nmcp.compression import (
+            COMPRESSION_RATES,
+            CompressionConfig,
+            ContentType,
+        )
 
         config = CompressionConfig()
 
@@ -48,9 +52,9 @@ class TestContextEngineeringRequirements:
         assert config.default_rate == 0.33
 
         # Compression rates support 2x-5x range
-        assert COMPRESSION_RATES[ContentType.CODE] == 0.5       # 2x
+        assert COMPRESSION_RATES[ContentType.CODE] == 0.5  # 2x
         assert COMPRESSION_RATES[ContentType.NARRATIVE] == 0.2  # 5x
-        assert COMPRESSION_RATES[ContentType.MIXED] == 0.33     # 3x
+        assert COMPRESSION_RATES[ContentType.MIXED] == 0.33  # 3x
 
     def test_context_03_code_entity_preservation(self):
         """CONTEXT-03: Code syntax and named entities preserved."""
@@ -75,14 +79,14 @@ class TestContextEngineeringRequirements:
         from daem0nmcp.compression import CodeEntityPreserver
 
         preserver = CodeEntityPreserver()
-        code = '''
+        code = """
 def calculate_discount(price, rate):
     return price * (1 - rate)
 
 class DiscountCalculator:
     def apply(self, price):
         return self.calculate_discount(price, self.rate)
-'''
+"""
         names = preserver.extract_entity_names(code)
 
         assert "calculate_discount" in names
@@ -117,7 +121,7 @@ class DiscountCalculator:
         # Need enough code indicators to trigger CODE classification (density > 5)
         # Density = code_indicators / (length / 1000)
         # Short text with many indicators
-        code = '''
+        code = """
 def foo(): pass
 def bar(): pass
 def baz(): pass
@@ -129,7 +133,7 @@ class Bar:
     def __init__(self): pass
 import os
 from typing import List
-'''
+"""
         content_type = adaptive.classify_content(code)
         rate = adaptive.get_rate_for_content(content_type)
 
@@ -155,7 +159,7 @@ from typing import List
 
     def test_context_05_recall_plan_compression(self):
         """CONTEXT-05: RecallPlan includes compression based on complexity."""
-        from daem0nmcp.recall_planner import RecallPlanner, QueryComplexity
+        from daem0nmcp.recall_planner import QueryComplexity, RecallPlanner
 
         planner = RecallPlanner()
 
@@ -164,7 +168,9 @@ from typing import List
         assert simple_plan.compress is False
 
         # Complex query - compression enabled
-        complex_plan = planner.plan_recall("trace the complete history of all decisions")
+        complex_plan = planner.plan_recall(
+            "trace the complete history of all decisions"
+        )
         assert complex_plan.complexity == QueryComplexity.COMPLEX
         assert complex_plan.compress is True
         assert complex_plan.compression_rate < 0.5  # At least 2x target
@@ -188,7 +194,7 @@ class TestCompressionThreshold:
 
     def test_threshold_configurable(self):
         """Compression threshold is configurable."""
-        from daem0nmcp.compression import ContextCompressor, CompressionConfig
+        from daem0nmcp.compression import CompressionConfig, ContextCompressor
 
         config = CompressionConfig(compression_threshold=100)
         compressor = ContextCompressor(config)
@@ -252,12 +258,12 @@ class TestModuleExports:
     def test_compression_module_exports(self):
         """All expected classes are exported from compression module."""
         from daem0nmcp.compression import (
-            CompressionConfig,
-            ContextCompressor,
-            CodeEntityPreserver,
-            AdaptiveCompressor,
-            ContentType,
             COMPRESSION_RATES,
+            AdaptiveCompressor,
+            CodeEntityPreserver,
+            CompressionConfig,
+            ContentType,
+            ContextCompressor,
             HierarchicalContextManager,
         )
 

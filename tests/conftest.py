@@ -13,13 +13,15 @@ from pathlib import Path
 import pytest
 
 # Register pytest-asyncio plugin
-pytest_plugins = ('pytest_asyncio',)
+pytest_plugins = ("pytest_asyncio",)
 
 
 SAFE_TMP_ROOT = Path(__file__).resolve().parent.parent / ".test_tmp"
 
 
-def _safe_mkdtemp(suffix: str | None = None, prefix: str | None = None, dir: str | None = None) -> str:
+def _safe_mkdtemp(
+    suffix: str | None = None, prefix: str | None = None, dir: str | None = None
+) -> str:
     base = Path(dir) if dir else SAFE_TMP_ROOT
     base.mkdir(parents=True, exist_ok=True)
     name_prefix = "tmp" if prefix is None else prefix
@@ -31,7 +33,12 @@ def _safe_mkdtemp(suffix: str | None = None, prefix: str | None = None, dir: str
 
 
 class _SafeTemporaryDirectory:
-    def __init__(self, suffix: str | None = None, prefix: str | None = None, dir: str | None = None):
+    def __init__(
+        self,
+        suffix: str | None = None,
+        prefix: str | None = None,
+        dir: str | None = None,
+    ):
         self.name = _safe_mkdtemp(suffix=suffix, prefix=prefix, dir=dir)
 
     def __enter__(self) -> str:
@@ -56,9 +63,7 @@ os.environ["GIT_CEILING_DIRECTORIES"] = str(SAFE_TMP_ROOT)
 
 def pytest_configure(config):
     """Configure custom pytest markers and ensure tmp directories exist."""
-    config.addinivalue_line(
-        "markers", "asyncio: mark test as an asyncio test."
-    )
+    config.addinivalue_line("markers", "asyncio: mark test as an asyncio test.")
     config.addinivalue_line(
         "markers", "slow: mark test as slow (requires model loading)."
     )
@@ -111,8 +116,8 @@ async def covenant_compliant_project(tmp_path):
     Returns the project path that can be used with tools requiring
     communion and/or counsel.
     """
-    from daem0nmcp.database import DatabaseManager
     from daem0nmcp import server
+    from daem0nmcp.database import DatabaseManager
 
     project_path = str(tmp_path)
     storage_path = str(tmp_path / "storage")

@@ -1,8 +1,10 @@
 # tests/test_rwlock.py
 """Tests for async read-write lock."""
 
-import pytest
 import asyncio
+
+import pytest
+
 from daem0nmcp.rwlock import RWLock
 
 

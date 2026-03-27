@@ -1,8 +1,19 @@
 """Background dreaming -- autonomous reasoning during idle periods."""
 
+from .persistence import (
+    DreamResult,
+    DreamSession,
+    persist_dream_result,
+    persist_session_summary,
+)
 from .scheduler import IdleDreamScheduler
-from .persistence import DreamSession, DreamResult, persist_dream_result, persist_session_summary
-from .strategies import DreamStrategy, FailedDecisionReview, ConnectionDiscovery, CommunityRefresh, PendingOutcomeResolver
+from .strategies import (
+    CommunityRefresh,
+    ConnectionDiscovery,
+    DreamStrategy,
+    FailedDecisionReview,
+    PendingOutcomeResolver,
+)
 
 __all__ = [
     "IdleDreamScheduler",

@@ -3,9 +3,9 @@
 import pytest
 import pytest_asyncio
 
+from daem0nmcp.claude_hooks.stop import analyse_and_remember
 from daem0nmcp.database import DatabaseManager
 from daem0nmcp.memory import MemoryManager
-from daem0nmcp.claude_hooks.stop import analyse_and_remember
 
 
 @pytest_asyncio.fixture
@@ -26,7 +26,10 @@ async def tmp_project(tmp_path):
 async def test_completion_signal_triggers_reminder(tmp_project):
     messages = [
         {"role": "user", "content": "Implement the login feature"},
-        {"role": "assistant", "content": "I've successfully implemented the login feature. All tasks complete."},
+        {
+            "role": "assistant",
+            "content": "I've successfully implemented the login feature. All tasks complete.",
+        },
     ]
     state = {"reminder_count": 0, "last_reminder_turn": -1}
     result = await analyse_and_remember(str(tmp_project), messages, state)
@@ -37,7 +40,10 @@ async def test_completion_signal_triggers_reminder(tmp_project):
 async def test_no_completion_no_output(tmp_project):
     messages = [
         {"role": "user", "content": "What does this function do?"},
-        {"role": "assistant", "content": "Let me explain the function. It processes input data."},
+        {
+            "role": "assistant",
+            "content": "Let me explain the function. It processes input data.",
+        },
     ]
     state = {"reminder_count": 0, "last_reminder_turn": -1}
     result = await analyse_and_remember(str(tmp_project), messages, state)
@@ -49,10 +55,13 @@ async def test_no_completion_no_output(tmp_project):
 async def test_auto_captures_decisions(tmp_project):
     messages = [
         {"role": "user", "content": "Add caching to the API"},
-        {"role": "assistant", "content": (
-            "I will use Redis for caching because it provides fast in-memory storage "
-            "with persistence options. Implementation is complete and all tasks are done."
-        )},
+        {
+            "role": "assistant",
+            "content": (
+                "I will use Redis for caching because it provides fast in-memory storage "
+                "with persistence options. Implementation is complete and all tasks are done."
+            ),
+        },
     ]
     state = {"reminder_count": 0, "last_reminder_turn": -1}
     result = await analyse_and_remember(str(tmp_project), messages, state)

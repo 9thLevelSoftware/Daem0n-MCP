@@ -10,16 +10,24 @@ class TestConsultImport:
 
     def test_module_imports(self):
         from daem0nmcp.workflows import consult
+
         assert hasattr(consult, "dispatch")
         assert hasattr(consult, "VALID_ACTIONS")
 
     def test_valid_actions_contents(self):
         from daem0nmcp.workflows.consult import VALID_ACTIONS
+
         expected = {
-            "preflight", "recall", "recall_file", "recall_entity",
-            "recall_hierarchical", "search", "check_rules", "compress",
+            "preflight",
+            "recall",
+            "recall_file",
+            "recall_entity",
+            "recall_hierarchical",
+            "search",
+            "check_rules",
+            "compress",
         }
-        assert VALID_ACTIONS == expected
+        assert expected == VALID_ACTIONS
 
 
 class TestConsultValidation:
@@ -28,12 +36,14 @@ class TestConsultValidation:
     @pytest.mark.asyncio
     async def test_invalid_action_raises(self):
         from daem0nmcp.workflows.consult import dispatch
+
         with pytest.raises(InvalidActionError):
             await dispatch(action="nonexistent", project_path="/tmp")
 
     @pytest.mark.asyncio
     async def test_preflight_requires_description(self):
         from daem0nmcp.workflows.consult import dispatch
+
         with pytest.raises(MissingParamError) as exc_info:
             await dispatch(action="preflight", project_path="/tmp")
         assert exc_info.value.param == "description"
@@ -41,6 +51,7 @@ class TestConsultValidation:
     @pytest.mark.asyncio
     async def test_recall_requires_topic(self):
         from daem0nmcp.workflows.consult import dispatch
+
         with pytest.raises(MissingParamError) as exc_info:
             await dispatch(action="recall", project_path="/tmp")
         assert exc_info.value.param == "topic"
@@ -48,6 +59,7 @@ class TestConsultValidation:
     @pytest.mark.asyncio
     async def test_recall_file_requires_file_path(self):
         from daem0nmcp.workflows.consult import dispatch
+
         with pytest.raises(MissingParamError) as exc_info:
             await dispatch(action="recall_file", project_path="/tmp")
         assert exc_info.value.param == "file_path"
@@ -55,6 +67,7 @@ class TestConsultValidation:
     @pytest.mark.asyncio
     async def test_recall_entity_requires_entity_name(self):
         from daem0nmcp.workflows.consult import dispatch
+
         with pytest.raises(MissingParamError) as exc_info:
             await dispatch(action="recall_entity", project_path="/tmp")
         assert exc_info.value.param == "entity_name"
@@ -62,6 +75,7 @@ class TestConsultValidation:
     @pytest.mark.asyncio
     async def test_recall_hierarchical_requires_topic(self):
         from daem0nmcp.workflows.consult import dispatch
+
         with pytest.raises(MissingParamError) as exc_info:
             await dispatch(action="recall_hierarchical", project_path="/tmp")
         assert exc_info.value.param == "topic"
@@ -69,6 +83,7 @@ class TestConsultValidation:
     @pytest.mark.asyncio
     async def test_search_requires_query(self):
         from daem0nmcp.workflows.consult import dispatch
+
         with pytest.raises(MissingParamError) as exc_info:
             await dispatch(action="search", project_path="/tmp")
         assert exc_info.value.param == "query"
@@ -76,6 +91,7 @@ class TestConsultValidation:
     @pytest.mark.asyncio
     async def test_check_rules_requires_action_desc(self):
         from daem0nmcp.workflows.consult import dispatch
+
         with pytest.raises(MissingParamError) as exc_info:
             await dispatch(action="check_rules", project_path="/tmp")
         assert exc_info.value.param == "action_desc"
@@ -83,6 +99,7 @@ class TestConsultValidation:
     @pytest.mark.asyncio
     async def test_compress_requires_compress_text(self):
         from daem0nmcp.workflows.consult import dispatch
+
         with pytest.raises(MissingParamError) as exc_info:
             await dispatch(action="compress", project_path="/tmp")
         assert exc_info.value.param == "compress_text"

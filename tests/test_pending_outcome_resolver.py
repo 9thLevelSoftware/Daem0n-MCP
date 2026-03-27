@@ -12,10 +12,10 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from daem0nmcp.dreaming.persistence import DreamSession
 from daem0nmcp.dreaming.strategies import PendingOutcomeResolver
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def _make_memory(
     id: int,
@@ -34,9 +34,7 @@ def _make_memory(
     mem.outcome = outcome
     mem.worked = worked
     mem.archived = archived
-    mem.created_at = created_at or (
-        datetime.now(timezone.utc) - timedelta(hours=48)
-    )
+    mem.created_at = created_at or (datetime.now(timezone.utc) - timedelta(hours=48))
     mem.category = category
     mem.context = {}
     mem.tags = tags or []
@@ -55,7 +53,9 @@ def _make_recall_result(memories=None):
         "limit": 10,
         "has_more": False,
         "summary": None,
-        "decisions": [m for m in memories if m.get("category", "decision") == "decision"],
+        "decisions": [
+            m for m in memories if m.get("category", "decision") == "decision"
+        ],
         "patterns": [m for m in memories if m.get("category") == "pattern"],
         "learnings": [m for m in memories if m.get("category") == "learning"],
         "warnings": [m for m in memories if m.get("category") == "warning"],
@@ -90,7 +90,9 @@ def _make_ctx(memories_from_db=None, recall_result=None, review_memories=None):
 
     if review_memories is not None:
         mock_result_decisions = MagicMock()
-        mock_result_decisions.scalars.return_value.all.return_value = memories_from_db or []
+        mock_result_decisions.scalars.return_value.all.return_value = (
+            memories_from_db or []
+        )
         mock_result_reviews = MagicMock()
         mock_result_reviews.scalars.return_value.all.return_value = review_memories
         mock_session.execute = AsyncMock(
@@ -177,9 +179,16 @@ class TestCooldownSkipsRecent:
 
         ctx, _ = _make_ctx(
             memories_from_db=[mem1, mem2],
-            recall_result=_make_recall_result([
-                {"id": 200, "content": "ev", "worked": None, "category": "decision"},
-            ]),
+            recall_result=_make_recall_result(
+                [
+                    {
+                        "id": 200,
+                        "content": "ev",
+                        "worked": None,
+                        "category": "decision",
+                    },
+                ]
+            ),
             review_memories=[review_mem],
         )
         scheduler = _make_scheduler(user_active_set=False)
@@ -202,9 +211,16 @@ class TestCooldownZeroDisables:
 
         ctx, _ = _make_ctx(
             memories_from_db=[mem1],
-            recall_result=_make_recall_result([
-                {"id": 200, "content": "ev", "worked": None, "category": "decision"},
-            ]),
+            recall_result=_make_recall_result(
+                [
+                    {
+                        "id": 200,
+                        "content": "ev",
+                        "worked": None,
+                        "category": "decision",
+                    },
+                ]
+            ),
         )
         scheduler = _make_scheduler(user_active_set=False)
         session = _make_session()
@@ -223,9 +239,16 @@ class TestInsufficientEvidenceSparse:
         mem = _make_memory(id=10, content="pending decision X")
 
         # Only the decision itself returned -- after excluding self, 0 items
-        recall_result = _make_recall_result([
-            {"id": 10, "content": "pending decision X", "worked": None, "category": "decision"},
-        ])
+        recall_result = _make_recall_result(
+            [
+                {
+                    "id": 10,
+                    "content": "pending decision X",
+                    "worked": None,
+                    "category": "decision",
+                },
+            ]
+        )
 
         ctx, _ = _make_ctx(memories_from_db=[mem], recall_result=recall_result)
         scheduler = _make_scheduler(user_active_set=False)
@@ -251,11 +274,13 @@ class TestInsufficientEvidenceBelowThreshold:
         mem = _make_memory(id=10, content="pending decision Y")
 
         # 3 items but only 2 directional (below threshold of 3)
-        recall_result = _make_recall_result([
-            {"id": 100, "content": "ev1", "worked": True, "category": "decision"},
-            {"id": 101, "content": "ev2", "worked": True, "category": "learning"},
-            {"id": 102, "content": "ev3", "worked": None, "category": "pattern"},
-        ])
+        recall_result = _make_recall_result(
+            [
+                {"id": 100, "content": "ev1", "worked": True, "category": "decision"},
+                {"id": 101, "content": "ev2", "worked": True, "category": "learning"},
+                {"id": 102, "content": "ev3", "worked": None, "category": "pattern"},
+            ]
+        )
 
         ctx, _ = _make_ctx(memories_from_db=[mem], recall_result=recall_result)
         scheduler = _make_scheduler(user_active_set=False)
@@ -274,12 +299,14 @@ class TestMixedEvidenceFlagged:
         """positive + negative -> flagged_for_review, persisted."""
         mem = _make_memory(id=10, content="pending decision Z")
 
-        recall_result = _make_recall_result([
-            {"id": 100, "content": "ev1", "worked": True, "category": "decision"},
-            {"id": 101, "content": "ev2", "worked": True, "category": "learning"},
-            {"id": 102, "content": "ev3", "worked": True, "category": "pattern"},
-            {"id": 103, "content": "warn", "worked": None, "category": "warning"},
-        ])
+        recall_result = _make_recall_result(
+            [
+                {"id": 100, "content": "ev1", "worked": True, "category": "decision"},
+                {"id": 101, "content": "ev2", "worked": True, "category": "learning"},
+                {"id": 102, "content": "ev3", "worked": True, "category": "pattern"},
+                {"id": 103, "content": "warn", "worked": None, "category": "warning"},
+            ]
+        )
 
         ctx, _ = _make_ctx(memories_from_db=[mem], recall_result=recall_result)
         scheduler = _make_scheduler(user_active_set=False)
@@ -304,11 +331,13 @@ class TestUnanimousPositive:
         """3+ worked=True, 0 negative -> auto_resolved_success."""
         mem = _make_memory(id=10, content="pending decision success")
 
-        recall_result = _make_recall_result([
-            {"id": 100, "content": "ev1", "worked": True, "category": "decision"},
-            {"id": 101, "content": "ev2", "worked": True, "category": "learning"},
-            {"id": 102, "content": "ev3", "worked": True, "category": "pattern"},
-        ])
+        recall_result = _make_recall_result(
+            [
+                {"id": 100, "content": "ev1", "worked": True, "category": "decision"},
+                {"id": 101, "content": "ev2", "worked": True, "category": "learning"},
+                {"id": 102, "content": "ev3", "worked": True, "category": "pattern"},
+            ]
+        )
 
         ctx, _ = _make_ctx(memories_from_db=[mem], recall_result=recall_result)
         scheduler = _make_scheduler(user_active_set=False)
@@ -327,11 +356,13 @@ class TestUnanimousNegative:
         """3+ failed/warnings, 0 positive -> auto_resolved_failure."""
         mem = _make_memory(id=10, content="pending decision fail")
 
-        recall_result = _make_recall_result([
-            {"id": 100, "content": "ev1", "worked": False, "category": "decision"},
-            {"id": 101, "content": "ev2", "worked": False, "category": "learning"},
-            {"id": 102, "content": "warn", "worked": None, "category": "warning"},
-        ])
+        recall_result = _make_recall_result(
+            [
+                {"id": 100, "content": "ev1", "worked": False, "category": "decision"},
+                {"id": 101, "content": "ev2", "worked": False, "category": "learning"},
+                {"id": 102, "content": "warn", "worked": None, "category": "warning"},
+            ]
+        )
 
         ctx, _ = _make_ctx(memories_from_db=[mem], recall_result=recall_result)
         scheduler = _make_scheduler(user_active_set=False)
@@ -350,11 +381,13 @@ class TestAutoResolveCallsRecordOutcome:
         """record_outcome called with correct args on auto_resolved_success."""
         mem = _make_memory(id=42, content="pending decision to resolve")
 
-        recall_result = _make_recall_result([
-            {"id": 100, "content": "ev1", "worked": True, "category": "decision"},
-            {"id": 101, "content": "ev2", "worked": True, "category": "learning"},
-            {"id": 102, "content": "ev3", "worked": True, "category": "pattern"},
-        ])
+        recall_result = _make_recall_result(
+            [
+                {"id": 100, "content": "ev1", "worked": True, "category": "decision"},
+                {"id": 101, "content": "ev2", "worked": True, "category": "learning"},
+                {"id": 102, "content": "ev3", "worked": True, "category": "pattern"},
+            ]
+        )
 
         ctx, _ = _make_ctx(memories_from_db=[mem], recall_result=recall_result)
         scheduler = _make_scheduler(user_active_set=False)
@@ -382,11 +415,13 @@ class TestOutcomeTextPrefix:
         """Outcome starts with [DREAM AUTO-RESOLVED]."""
         mem = _make_memory(id=10, content="pending decision prefix test")
 
-        recall_result = _make_recall_result([
-            {"id": 100, "content": "ev1", "worked": True, "category": "decision"},
-            {"id": 101, "content": "ev2", "worked": True, "category": "learning"},
-            {"id": 102, "content": "ev3", "worked": True, "category": "pattern"},
-        ])
+        recall_result = _make_recall_result(
+            [
+                {"id": 100, "content": "ev1", "worked": True, "category": "decision"},
+                {"id": 101, "content": "ev2", "worked": True, "category": "learning"},
+                {"id": 102, "content": "ev3", "worked": True, "category": "pattern"},
+            ]
+        )
 
         ctx, _ = _make_ctx(memories_from_db=[mem], recall_result=recall_result)
         scheduler = _make_scheduler(user_active_set=False)
@@ -411,11 +446,13 @@ class TestDryRunDowngrades:
         """dry_run=True -> flagged_for_review with [DRY RUN] prefix."""
         mem = _make_memory(id=10, content="pending decision dry run")
 
-        recall_result = _make_recall_result([
-            {"id": 100, "content": "ev1", "worked": True, "category": "decision"},
-            {"id": 101, "content": "ev2", "worked": True, "category": "learning"},
-            {"id": 102, "content": "ev3", "worked": True, "category": "pattern"},
-        ])
+        recall_result = _make_recall_result(
+            [
+                {"id": 100, "content": "ev1", "worked": True, "category": "decision"},
+                {"id": 101, "content": "ev2", "worked": True, "category": "learning"},
+                {"id": 102, "content": "ev3", "worked": True, "category": "pattern"},
+            ]
+        )
 
         ctx, _ = _make_ctx(memories_from_db=[mem], recall_result=recall_result)
         scheduler = _make_scheduler(user_active_set=False)
@@ -440,11 +477,13 @@ class TestDryRunNoRecordOutcome:
         """record_outcome never called in dry_run mode."""
         mem = _make_memory(id=10, content="pending decision no record")
 
-        recall_result = _make_recall_result([
-            {"id": 100, "content": "ev1", "worked": True, "category": "decision"},
-            {"id": 101, "content": "ev2", "worked": True, "category": "learning"},
-            {"id": 102, "content": "ev3", "worked": True, "category": "pattern"},
-        ])
+        recall_result = _make_recall_result(
+            [
+                {"id": 100, "content": "ev1", "worked": True, "category": "decision"},
+                {"id": 101, "content": "ev2", "worked": True, "category": "learning"},
+                {"id": 102, "content": "ev3", "worked": True, "category": "pattern"},
+            ]
+        )
 
         ctx, _ = _make_ctx(memories_from_db=[mem], recall_result=recall_result)
         scheduler = _make_scheduler(user_active_set=False)
@@ -468,11 +507,13 @@ class TestSessionTracksOutcomesResolved:
         """outcomes_resolved increments on auto-resolve (not dry_run)."""
         mem = _make_memory(id=10, content="pending decision track")
 
-        recall_result = _make_recall_result([
-            {"id": 100, "content": "ev1", "worked": True, "category": "decision"},
-            {"id": 101, "content": "ev2", "worked": True, "category": "learning"},
-            {"id": 102, "content": "ev3", "worked": True, "category": "pattern"},
-        ])
+        recall_result = _make_recall_result(
+            [
+                {"id": 100, "content": "ev1", "worked": True, "category": "decision"},
+                {"id": 101, "content": "ev2", "worked": True, "category": "learning"},
+                {"id": 102, "content": "ev3", "worked": True, "category": "pattern"},
+            ]
+        )
 
         ctx, _ = _make_ctx(memories_from_db=[mem], recall_result=recall_result)
         scheduler = _make_scheduler(user_active_set=False)
@@ -538,10 +579,22 @@ class TestSelfReferenceExcluded:
         mem = _make_memory(id=10, content="pending self-ref test")
 
         # Only the decision itself in evidence -- should be excluded, leaving 0 items
-        recall_result = _make_recall_result([
-            {"id": 10, "content": "pending self-ref test", "worked": True, "category": "decision"},
-            {"id": 100, "content": "unrelated", "worked": None, "category": "pattern"},
-        ])
+        recall_result = _make_recall_result(
+            [
+                {
+                    "id": 10,
+                    "content": "pending self-ref test",
+                    "worked": True,
+                    "category": "decision",
+                },
+                {
+                    "id": 100,
+                    "content": "unrelated",
+                    "worked": None,
+                    "category": "pattern",
+                },
+            ]
+        )
 
         ctx, _ = _make_ctx(memories_from_db=[mem], recall_result=recall_result)
         scheduler = _make_scheduler(user_active_set=False)
@@ -565,9 +618,16 @@ class TestPersistNotCalledForInsufficient:
         mem = _make_memory(id=10, content="sparse pending")
 
         # Sparse evidence -> insufficient
-        recall_result = _make_recall_result([
-            {"id": 10, "content": "sparse pending", "worked": None, "category": "decision"},
-        ])
+        recall_result = _make_recall_result(
+            [
+                {
+                    "id": 10,
+                    "content": "sparse pending",
+                    "worked": None,
+                    "category": "decision",
+                },
+            ]
+        )
 
         ctx, _ = _make_ctx(memories_from_db=[mem], recall_result=recall_result)
         scheduler = _make_scheduler(user_active_set=False)
@@ -593,21 +653,30 @@ class TestOldestFirstOrdering:
         """Query uses created_at.asc() -- oldest decisions evaluated first."""
         # Youngest decision
         mem_new = _make_memory(
-            id=20, content="newer pending",
+            id=20,
+            content="newer pending",
             created_at=datetime.now(timezone.utc) - timedelta(hours=25),
         )
         # Oldest decision
         mem_old = _make_memory(
-            id=10, content="older pending",
+            id=10,
+            content="older pending",
             created_at=datetime.now(timezone.utc) - timedelta(hours=100),
         )
 
         # DB returns them in ASC order (oldest first)
         ctx, _ = _make_ctx(
             memories_from_db=[mem_old, mem_new],
-            recall_result=_make_recall_result([
-                {"id": 200, "content": "ev", "worked": None, "category": "decision"},
-            ]),
+            recall_result=_make_recall_result(
+                [
+                    {
+                        "id": 200,
+                        "content": "ev",
+                        "worked": None,
+                        "category": "decision",
+                    },
+                ]
+            ),
         )
         scheduler = _make_scheduler(user_active_set=False)
         session = _make_session()

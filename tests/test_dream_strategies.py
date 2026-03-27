@@ -13,16 +13,16 @@ import pytest
 
 from daem0nmcp.dreaming.persistence import DreamSession, persist_session_summary
 from daem0nmcp.dreaming.strategies import (
-    ConnectionDiscovery,
     CommunityRefresh,
+    ConnectionDiscovery,
     DreamStrategy,
     FailedDecisionReview,
 )
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def _make_memory(
     id: int,
@@ -40,9 +40,7 @@ def _make_memory(
     mem.outcome = outcome
     mem.worked = worked
     mem.archived = archived
-    mem.created_at = created_at or (
-        datetime.now(timezone.utc) - timedelta(hours=48)
-    )
+    mem.created_at = created_at or (datetime.now(timezone.utc) - timedelta(hours=48))
     mem.category = category
     mem.context = {}
     mem.tags = []
@@ -65,7 +63,9 @@ def _make_recall_result(memories=None):
         "limit": 5,
         "has_more": False,
         "summary": None,
-        "decisions": [m for m in memories if m.get("category", "decision") == "decision"],
+        "decisions": [
+            m for m in memories if m.get("category", "decision") == "decision"
+        ],
         "patterns": [m for m in memories if m.get("category") == "pattern"],
         "learnings": [m for m in memories if m.get("category") == "learning"],
         "warnings": [m for m in memories if m.get("category") == "warning"],
@@ -103,7 +103,9 @@ def _make_ctx(memories_from_db=None, recall_result=None, review_memories=None):
     if review_memories is not None:
         # Two sequential execute calls: first for failed decisions, second for review memories
         mock_result_decisions = MagicMock()
-        mock_result_decisions.scalars.return_value.all.return_value = memories_from_db or []
+        mock_result_decisions.scalars.return_value.all.return_value = (
+            memories_from_db or []
+        )
         mock_result_reviews = MagicMock()
         mock_result_reviews.scalars.return_value.all.return_value = review_memories
         mock_session.execute = AsyncMock(
@@ -164,11 +166,28 @@ class TestReviewsFailedDecisions:
         mem1 = _make_memory(id=10, content="decision A failed")
         mem2 = _make_memory(id=20, content="decision B failed")
 
-        recall_result = _make_recall_result([
-            {"id": 100, "content": "some evidence", "worked": None, "category": "decision"},
-            {"id": 101, "content": "more evidence", "worked": None, "category": "learning"},
-            {"id": 102, "content": "even more", "worked": None, "category": "pattern"},
-        ])
+        recall_result = _make_recall_result(
+            [
+                {
+                    "id": 100,
+                    "content": "some evidence",
+                    "worked": None,
+                    "category": "decision",
+                },
+                {
+                    "id": 101,
+                    "content": "more evidence",
+                    "worked": None,
+                    "category": "learning",
+                },
+                {
+                    "id": 102,
+                    "content": "even more",
+                    "worked": None,
+                    "category": "pattern",
+                },
+            ]
+        )
 
         ctx, _ = _make_ctx(memories_from_db=[mem1, mem2], recall_result=recall_result)
         scheduler = _make_scheduler(user_active_set=False)
@@ -189,11 +208,28 @@ class TestMaxDecisionsLimit:
         # Only 1 returned from DB because limit=1 in the query
         ctx, mock_session = _make_ctx(
             memories_from_db=[mem1],
-            recall_result=_make_recall_result([
-                {"id": 100, "content": "ev", "worked": None, "category": "decision"},
-                {"id": 101, "content": "ev2", "worked": None, "category": "learning"},
-                {"id": 102, "content": "ev3", "worked": None, "category": "pattern"},
-            ]),
+            recall_result=_make_recall_result(
+                [
+                    {
+                        "id": 100,
+                        "content": "ev",
+                        "worked": None,
+                        "category": "decision",
+                    },
+                    {
+                        "id": 101,
+                        "content": "ev2",
+                        "worked": None,
+                        "category": "learning",
+                    },
+                    {
+                        "id": 102,
+                        "content": "ev3",
+                        "worked": None,
+                        "category": "pattern",
+                    },
+                ]
+            ),
         )
         scheduler = _make_scheduler(user_active_set=False)
         session = _make_session()
@@ -231,10 +267,22 @@ class TestReEvaluateRevised:
         """When recall returns worked=True evidence, result_type should be 'revised'."""
         mem = _make_memory(id=10, content="Use approach X for caching")
 
-        recall_result = _make_recall_result([
-            {"id": 100, "content": "approach X works now", "worked": True, "category": "decision"},
-            {"id": 101, "content": "caching pattern", "worked": None, "category": "pattern"},
-        ])
+        recall_result = _make_recall_result(
+            [
+                {
+                    "id": 100,
+                    "content": "approach X works now",
+                    "worked": True,
+                    "category": "decision",
+                },
+                {
+                    "id": 101,
+                    "content": "caching pattern",
+                    "worked": None,
+                    "category": "pattern",
+                },
+            ]
+        )
 
         ctx, _ = _make_ctx(memories_from_db=[mem], recall_result=recall_result)
         scheduler = _make_scheduler(user_active_set=False)
@@ -255,9 +303,16 @@ class TestReEvaluateSparseEvidence:
         mem = _make_memory(id=10, content="Use approach Y")
 
         # Only return the decision itself -- no other evidence
-        recall_result = _make_recall_result([
-            {"id": 10, "content": "Use approach Y", "worked": False, "category": "decision"},
-        ])
+        recall_result = _make_recall_result(
+            [
+                {
+                    "id": 10,
+                    "content": "Use approach Y",
+                    "worked": False,
+                    "category": "decision",
+                },
+            ]
+        )
 
         ctx, _ = _make_ctx(memories_from_db=[mem], recall_result=recall_result)
         scheduler = _make_scheduler(user_active_set=False)
@@ -276,11 +331,28 @@ class TestReEvaluateConfirmedFailure:
         """When recall returns evidence but no worked=True, result_type should be 'confirmed_failure'."""
         mem = _make_memory(id=10, content="Use approach Z")
 
-        recall_result = _make_recall_result([
-            {"id": 100, "content": "Z is problematic", "worked": False, "category": "decision"},
-            {"id": 101, "content": "Z related warning", "worked": None, "category": "warning"},
-            {"id": 102, "content": "Z context", "worked": None, "category": "learning"},
-        ])
+        recall_result = _make_recall_result(
+            [
+                {
+                    "id": 100,
+                    "content": "Z is problematic",
+                    "worked": False,
+                    "category": "decision",
+                },
+                {
+                    "id": 101,
+                    "content": "Z related warning",
+                    "worked": None,
+                    "category": "warning",
+                },
+                {
+                    "id": 102,
+                    "content": "Z context",
+                    "worked": None,
+                    "category": "learning",
+                },
+            ]
+        )
 
         ctx, _ = _make_ctx(memories_from_db=[mem], recall_result=recall_result)
         scheduler = _make_scheduler(user_active_set=False)
@@ -307,15 +379,34 @@ class TestPersistCalledForInsights:
             call_index += 1
             if call_index == 1:
                 # First decision: returns worked=True evidence -> revised
-                return _make_recall_result([
-                    {"id": 100, "content": "ev", "worked": True, "category": "decision"},
-                    {"id": 101, "content": "ev2", "worked": None, "category": "pattern"},
-                ])
+                return _make_recall_result(
+                    [
+                        {
+                            "id": 100,
+                            "content": "ev",
+                            "worked": True,
+                            "category": "decision",
+                        },
+                        {
+                            "id": 101,
+                            "content": "ev2",
+                            "worked": None,
+                            "category": "pattern",
+                        },
+                    ]
+                )
             else:
                 # Second decision: sparse evidence -> needs_more_data
-                return _make_recall_result([
-                    {"id": 20, "content": "approach B", "worked": False, "category": "decision"},
-                ])
+                return _make_recall_result(
+                    [
+                        {
+                            "id": 20,
+                            "content": "approach B",
+                            "worked": False,
+                            "category": "decision",
+                        },
+                    ]
+                )
 
         ctx, _ = _make_ctx(memories_from_db=[mem_revised, mem_sparse])
         ctx.memory_manager.recall = AsyncMock(side_effect=mock_recall)
@@ -387,6 +478,7 @@ class TestDreamStrategyABC:
 
     def test_cannot_instantiate_base_class(self):
         from daem0nmcp.dreaming.strategies import DreamStrategy
+
         with pytest.raises(TypeError):
             DreamStrategy()  # type: ignore[abstract]
 
@@ -395,12 +487,26 @@ class TestResultProvenance:
     @pytest.mark.asyncio
     async def test_result_contains_provenance_fields(self):
         """DreamResult should contain source_decision_id, original_content, evidence_ids."""
-        mem = _make_memory(id=42, content="Use Redis for sessions", outcome="OOM killed")
+        mem = _make_memory(
+            id=42, content="Use Redis for sessions", outcome="OOM killed"
+        )
 
-        recall_result = _make_recall_result([
-            {"id": 200, "content": "Redis works for cache", "worked": True, "category": "decision"},
-            {"id": 201, "content": "Session pattern", "worked": None, "category": "pattern"},
-        ])
+        recall_result = _make_recall_result(
+            [
+                {
+                    "id": 200,
+                    "content": "Redis works for cache",
+                    "worked": True,
+                    "category": "decision",
+                },
+                {
+                    "id": 201,
+                    "content": "Session pattern",
+                    "worked": None,
+                    "category": "pattern",
+                },
+            ]
+        )
 
         ctx, _ = _make_ctx(memories_from_db=[mem], recall_result=recall_result)
         scheduler = _make_scheduler(user_active_set=False)
@@ -437,11 +543,28 @@ class TestCooldownSkipsRecentlyReviewedDecisions:
 
         ctx, _ = _make_ctx(
             memories_from_db=[mem1, mem2],
-            recall_result=_make_recall_result([
-                {"id": 200, "content": "ev", "worked": None, "category": "decision"},
-                {"id": 201, "content": "ev2", "worked": None, "category": "learning"},
-                {"id": 202, "content": "ev3", "worked": None, "category": "pattern"},
-            ]),
+            recall_result=_make_recall_result(
+                [
+                    {
+                        "id": 200,
+                        "content": "ev",
+                        "worked": None,
+                        "category": "decision",
+                    },
+                    {
+                        "id": 201,
+                        "content": "ev2",
+                        "worked": None,
+                        "category": "learning",
+                    },
+                    {
+                        "id": 202,
+                        "content": "ev3",
+                        "worked": None,
+                        "category": "pattern",
+                    },
+                ]
+            ),
             review_memories=[review_mem],
         )
         scheduler = _make_scheduler(user_active_set=False)
@@ -479,11 +602,28 @@ class TestCooldownAllowsOldReviews:
         # We simulate this by returning an empty review_memories list.
         ctx, _ = _make_ctx(
             memories_from_db=[mem1],
-            recall_result=_make_recall_result([
-                {"id": 200, "content": "ev", "worked": None, "category": "decision"},
-                {"id": 201, "content": "ev2", "worked": None, "category": "learning"},
-                {"id": 202, "content": "ev3", "worked": None, "category": "pattern"},
-            ]),
+            recall_result=_make_recall_result(
+                [
+                    {
+                        "id": 200,
+                        "content": "ev",
+                        "worked": None,
+                        "category": "decision",
+                    },
+                    {
+                        "id": 201,
+                        "content": "ev2",
+                        "worked": None,
+                        "category": "learning",
+                    },
+                    {
+                        "id": 202,
+                        "content": "ev3",
+                        "worked": None,
+                        "category": "pattern",
+                    },
+                ]
+            ),
             review_memories=[],  # No recent reviews within cooldown window
         )
         scheduler = _make_scheduler(user_active_set=False)
@@ -507,11 +647,28 @@ class TestCooldownZeroDisablesFiltering:
 
         ctx, _ = _make_ctx(
             memories_from_db=[mem1],
-            recall_result=_make_recall_result([
-                {"id": 200, "content": "ev", "worked": None, "category": "decision"},
-                {"id": 201, "content": "ev2", "worked": None, "category": "learning"},
-                {"id": 202, "content": "ev3", "worked": None, "category": "pattern"},
-            ]),
+            recall_result=_make_recall_result(
+                [
+                    {
+                        "id": 200,
+                        "content": "ev",
+                        "worked": None,
+                        "category": "decision",
+                    },
+                    {
+                        "id": 201,
+                        "content": "ev2",
+                        "worked": None,
+                        "category": "learning",
+                    },
+                    {
+                        "id": 202,
+                        "content": "ev3",
+                        "worked": None,
+                        "category": "pattern",
+                    },
+                ]
+            ),
         )
         scheduler = _make_scheduler(user_active_set=False)
         session = _make_session()
@@ -565,7 +722,9 @@ class TestConnectionDiscoveryNoop:
         session = _make_session()
 
         strategy = ConnectionDiscovery()
-        with patch.object(strategy, "_find_unlinked_pairs", new_callable=AsyncMock, return_value=[]):
+        with patch.object(
+            strategy, "_find_unlinked_pairs", new_callable=AsyncMock, return_value=[]
+        ):
             result = await strategy.execute(session, ctx, scheduler)
 
         assert result.insights_generated == 0
@@ -586,7 +745,9 @@ class TestConnectionDiscoveryCreatesLinks:
         session = _make_session()
 
         strategy = ConnectionDiscovery(confidence=0.7)
-        with patch.object(strategy, "_find_unlinked_pairs", new_callable=AsyncMock, return_value=pairs):
+        with patch.object(
+            strategy, "_find_unlinked_pairs", new_callable=AsyncMock, return_value=pairs
+        ):
             result = await strategy.execute(session, ctx, scheduler)
 
         assert ctx.memory_manager.link_memories.call_count == 3
@@ -616,7 +777,9 @@ class TestConnectionDiscoveryMaxConnections:
         session = _make_session()
 
         strategy = ConnectionDiscovery(max_connections=2)
-        with patch.object(strategy, "_find_unlinked_pairs", new_callable=AsyncMock, return_value=pairs):
+        with patch.object(
+            strategy, "_find_unlinked_pairs", new_callable=AsyncMock, return_value=pairs
+        ):
             result = await strategy.execute(session, ctx, scheduler)
 
         assert ctx.memory_manager.link_memories.call_count == 2
@@ -633,7 +796,9 @@ class TestConnectionDiscoverySkipsAlreadyLinked:
         session = _make_session()
 
         strategy = ConnectionDiscovery()
-        with patch.object(strategy, "_find_unlinked_pairs", new_callable=AsyncMock, return_value=pairs):
+        with patch.object(
+            strategy, "_find_unlinked_pairs", new_callable=AsyncMock, return_value=pairs
+        ):
             result = await strategy.execute(session, ctx, scheduler)
 
         assert result.insights_generated == 0
@@ -649,7 +814,9 @@ class TestConnectionDiscoveryYield:
         session = _make_session()
 
         strategy = ConnectionDiscovery()
-        with patch.object(strategy, "_find_unlinked_pairs", new_callable=AsyncMock, return_value=pairs):
+        with patch.object(
+            strategy, "_find_unlinked_pairs", new_callable=AsyncMock, return_value=pairs
+        ):
             result = await strategy.execute(session, ctx, scheduler)
 
         assert result.interrupted is True
@@ -666,7 +833,8 @@ class TestConnectionDiscoveryQueryError:
 
         strategy = ConnectionDiscovery()
         with patch.object(
-            strategy, "_find_unlinked_pairs",
+            strategy,
+            "_find_unlinked_pairs",
             new_callable=AsyncMock,
             side_effect=RuntimeError("DB error"),
         ):
@@ -686,7 +854,9 @@ class TestConnectionDiscoveryInvalidatesCache:
         session = _make_session()
 
         strategy = ConnectionDiscovery()
-        with patch.object(strategy, "_find_unlinked_pairs", new_callable=AsyncMock, return_value=pairs):
+        with patch.object(
+            strategy, "_find_unlinked_pairs", new_callable=AsyncMock, return_value=pairs
+        ):
             await strategy.execute(session, ctx, scheduler)
 
         ctx.memory_manager.invalidate_graph_cache.assert_called_once()
@@ -706,11 +876,15 @@ class TestCommunityRefreshNotStale:
         session = _make_session()
 
         strategy = CommunityRefresh(staleness_threshold=10)
-        with patch.object(strategy, "_check_staleness", new_callable=AsyncMock, return_value=False):
-            with patch("daem0nmcp.dreaming.strategies.CommunityRefresh.execute.__module__", create=True):
-                # Patch leidenalg import
-                with patch.dict("sys.modules", {"leidenalg": MagicMock()}):
-                    result = await strategy.execute(session, ctx, scheduler)
+        with patch.object(
+            strategy, "_check_staleness", new_callable=AsyncMock, return_value=False
+        ), patch(
+            "daem0nmcp.dreaming.strategies.CommunityRefresh.execute.__module__",
+            create=True,
+        ):
+            # Patch leidenalg import
+            with patch.dict("sys.modules", {"leidenalg": MagicMock()}):
+                result = await strategy.execute(session, ctx, scheduler)
 
         assert result.insights_generated == 0
         assert "CommunityRefresh" in result.strategies_run
@@ -726,7 +900,9 @@ class TestCommunityRefreshStale:
         session = _make_session()
 
         mock_cm_instance = MagicMock()
-        mock_cm_instance.detect_communities_from_graph = AsyncMock(return_value=[{"name": "test"}])
+        mock_cm_instance.detect_communities_from_graph = AsyncMock(
+            return_value=[{"name": "test"}]
+        )
         mock_cm_instance.save_communities = AsyncMock(return_value={"created": 1})
 
         mock_cm_class = MagicMock(return_value=mock_cm_instance)
@@ -734,12 +910,16 @@ class TestCommunityRefreshStale:
         mock_communities_module.CommunityManager = mock_cm_class
 
         strategy = CommunityRefresh(staleness_threshold=10)
-        with patch.object(strategy, "_check_staleness", new_callable=AsyncMock, return_value=True):
-            with patch.dict("sys.modules", {
+        with patch.object(
+            strategy, "_check_staleness", new_callable=AsyncMock, return_value=True
+        ), patch.dict(
+            "sys.modules",
+            {
                 "leidenalg": MagicMock(),
                 "daem0nmcp.communities": mock_communities_module,
-            }):
-                result = await strategy.execute(session, ctx, scheduler)
+            },
+        ):
+            result = await strategy.execute(session, ctx, scheduler)
 
         mock_cm_instance.detect_communities_from_graph.assert_called_once()
         mock_cm_instance.save_communities.assert_called_once()
@@ -766,12 +946,16 @@ class TestCommunityRefreshNoCommunities:
         strategy = CommunityRefresh(staleness_threshold=5)
 
         # Mock _check_staleness to return True (no communities, enough memories)
-        with patch.object(strategy, "_check_staleness", new_callable=AsyncMock, return_value=True):
-            with patch.dict("sys.modules", {
+        with patch.object(
+            strategy, "_check_staleness", new_callable=AsyncMock, return_value=True
+        ), patch.dict(
+            "sys.modules",
+            {
                 "leidenalg": MagicMock(),
                 "daem0nmcp.communities": mock_communities_module,
-            }):
-                await strategy.execute(session, ctx, scheduler)
+            },
+        ):
+            await strategy.execute(session, ctx, scheduler)
 
         mock_cm_instance.detect_communities_from_graph.assert_called_once()
 
@@ -788,6 +972,7 @@ class TestCommunityRefreshMissingLeidenalg:
 
         # Force leidenalg import to fail
         import sys
+
         original = sys.modules.get("leidenalg")
         sys.modules["leidenalg"] = None  # type: ignore[assignment]
         try:
@@ -812,9 +997,10 @@ class TestCommunityRefreshYield:
         session = _make_session()
 
         strategy = CommunityRefresh(staleness_threshold=10)
-        with patch.object(strategy, "_check_staleness", new_callable=AsyncMock, return_value=True):
-            with patch.dict("sys.modules", {"leidenalg": MagicMock()}):
-                result = await strategy.execute(session, ctx, scheduler)
+        with patch.object(
+            strategy, "_check_staleness", new_callable=AsyncMock, return_value=True
+        ), patch.dict("sys.modules", {"leidenalg": MagicMock()}):
+            result = await strategy.execute(session, ctx, scheduler)
 
         assert result.interrupted is True
         assert result.insights_generated == 0
@@ -830,7 +1016,9 @@ class TestCommunityRefreshInvalidatesCache:
         session = _make_session()
 
         mock_cm_instance = MagicMock()
-        mock_cm_instance.detect_communities_from_graph = AsyncMock(return_value=[{"name": "c1"}])
+        mock_cm_instance.detect_communities_from_graph = AsyncMock(
+            return_value=[{"name": "c1"}]
+        )
         mock_cm_instance.save_communities = AsyncMock(return_value={"created": 1})
 
         mock_cm_class = MagicMock(return_value=mock_cm_instance)
@@ -838,12 +1026,16 @@ class TestCommunityRefreshInvalidatesCache:
         mock_communities_module.CommunityManager = mock_cm_class
 
         strategy = CommunityRefresh(staleness_threshold=10)
-        with patch.object(strategy, "_check_staleness", new_callable=AsyncMock, return_value=True):
-            with patch.dict("sys.modules", {
+        with patch.object(
+            strategy, "_check_staleness", new_callable=AsyncMock, return_value=True
+        ), patch.dict(
+            "sys.modules",
+            {
                 "leidenalg": MagicMock(),
                 "daem0nmcp.communities": mock_communities_module,
-            }):
-                await strategy.execute(session, ctx, scheduler)
+            },
+        ):
+            await strategy.execute(session, ctx, scheduler)
 
         ctx.memory_manager.invalidate_graph_cache.assert_called_once()
 
@@ -944,7 +1136,8 @@ class TestDreamSessionStrategiesRun:
         call_kwargs = mock_mm.remember.call_args.kwargs
         assert "strategies_run" in call_kwargs["context"]
         assert call_kwargs["context"]["strategies_run"] == [
-            "FailedDecisionReview", "ConnectionDiscovery"
+            "FailedDecisionReview",
+            "ConnectionDiscovery",
         ]
         assert "strategies:" in call_kwargs["content"]
 

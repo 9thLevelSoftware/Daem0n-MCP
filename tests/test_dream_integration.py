@@ -15,22 +15,21 @@ import pytest
 
 from daem0nmcp.dreaming.scheduler import IdleDreamScheduler
 from daem0nmcp.transforms.covenant import (
-    CovenantMiddleware,
     _FASTMCP_MIDDLEWARE_AVAILABLE,
+    CovenantMiddleware,
 )
-
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def _make_get_state(briefed=True, context_checks=None):
     """Return a get_state callback for CovenantMiddleware."""
     state = {
         "briefed": briefed,
-        "context_checks": context_checks or [
-            {"timestamp": datetime.now(timezone.utc).isoformat()}
-        ],
+        "context_checks": context_checks
+        or [{"timestamp": datetime.now(timezone.utc).isoformat()}],
     }
     return lambda _path: state
 
@@ -239,9 +238,7 @@ class TestFetchDreamSessions:
         from daem0nmcp.tools.briefing import _fetch_dream_sessions
 
         ctx = MagicMock()
-        ctx.db_manager.get_session = MagicMock(
-            side_effect=RuntimeError("db error")
-        )
+        ctx.db_manager.get_session = MagicMock(side_effect=RuntimeError("db error"))
 
         result = await _fetch_dream_sessions(ctx, limit=5)
         assert result == []
@@ -349,18 +346,28 @@ class TestBriefingIncludesDreamSessions:
             patch("daem0nmcp.tools.briefing.get_project_context") as mock_get_ctx,
             patch("daem0nmcp.tools.briefing._fetch_recent_context") as mock_recent,
             patch("daem0nmcp.tools.briefing._get_git_changes", return_value=None),
-            patch("daem0nmcp.tools.briefing._get_linked_projects_summary", new_callable=AsyncMock, return_value=[]),
-            patch("daem0nmcp.tools.briefing._fetch_dream_sessions", new_callable=AsyncMock, return_value=[]),
+            patch(
+                "daem0nmcp.tools.briefing._get_linked_projects_summary",
+                new_callable=AsyncMock,
+                return_value=[],
+            ),
+            patch(
+                "daem0nmcp.tools.briefing._fetch_dream_sessions",
+                new_callable=AsyncMock,
+                return_value=[],
+            ),
         ):
             # Setup mock context
             mock_ctx = MagicMock()
             mock_ctx.project_path = "/test/project"
             mock_ctx.briefed = False
             mock_ctx.context_checks = []
-            mock_ctx.memory_manager.get_statistics = AsyncMock(return_value={
-                "total_memories": 5,
-                "by_category": {},
-            })
+            mock_ctx.memory_manager.get_statistics = AsyncMock(
+                return_value={
+                    "total_memories": 5,
+                    "by_category": {},
+                }
+            )
             mock_ctx.db_manager = MagicMock()
 
             mock_get_ctx.return_value = mock_ctx
@@ -378,9 +385,13 @@ class TestBriefingIncludesDreamSessions:
             }
 
             # Mock active context manager
-            with patch("daem0nmcp.tools.briefing.ActiveContextManager", create=True) as mock_acm_cls:
+            with patch(
+                "daem0nmcp.tools.briefing.ActiveContextManager", create=True
+            ) as mock_acm_cls:
                 mock_acm = MagicMock()
-                mock_acm.get_active_context = AsyncMock(return_value={"count": 0, "items": []})
+                mock_acm.get_active_context = AsyncMock(
+                    return_value={"count": 0, "items": []}
+                )
                 mock_acm.cleanup_expired = AsyncMock()
                 mock_acm_cls.return_value = mock_acm
 

@@ -94,4 +94,6 @@ def test_install_preserves_existing_opencode_json(tmp_path):
 
     # Plugin file should still be created independently
     plugin = tmp_path / ".opencode" / "plugins" / "daem0n.ts"
-    assert plugin.exists(), "Plugin file should be created even when opencode.json exists"
+    assert plugin.exists(), (
+        "Plugin file should be created even when opencode.json exists"
+    )

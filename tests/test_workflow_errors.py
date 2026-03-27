@@ -1,13 +1,13 @@
 """Tests for workflow error handling."""
 
 
-
 class TestWorkflowErrors:
     """Verify workflow error types are importable and well-formed."""
 
     def test_workflow_error_exists(self):
         """WorkflowError base class should be importable."""
         from daem0nmcp.workflows.errors import WorkflowError
+
         assert issubclass(WorkflowError, Exception)
 
     def test_invalid_action_error(self):

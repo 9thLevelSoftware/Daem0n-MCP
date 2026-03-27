@@ -18,19 +18,25 @@ class TestRememberCLI:
         """CLI remember command should create a memory."""
         result = subprocess.run(
             [
-                sys.executable, "-m", "daem0nmcp.cli",
-                "--project-path", str(tmp_path),
+                sys.executable,
+                "-m",
+                "daem0nmcp.cli",
+                "--project-path",
+                str(tmp_path),
                 "--json",
                 "remember",
-                "--category", "decision",
-                "--content", "Test decision from CLI",
-                "--rationale", "Testing CLI interface"
+                "--category",
+                "decision",
+                "--content",
+                "Test decision from CLI",
+                "--rationale",
+                "Testing CLI interface",
             ],
             capture_output=True,
             text=True,
             timeout=_CLI_TIMEOUT,
             env=_CLI_ENV,
-            stdin=subprocess.DEVNULL
+            stdin=subprocess.DEVNULL,
         )
 
         assert result.returncode == 0, f"Failed: {result.stderr}"
@@ -42,19 +48,25 @@ class TestRememberCLI:
         """CLI remember should accept file_path."""
         result = subprocess.run(
             [
-                sys.executable, "-m", "daem0nmcp.cli",
-                "--project-path", str(tmp_path),
+                sys.executable,
+                "-m",
+                "daem0nmcp.cli",
+                "--project-path",
+                str(tmp_path),
                 "--json",
                 "remember",
-                "--category", "warning",
-                "--content", "Don't modify this file carelessly",
-                "--file-path", "src/critical.py"
+                "--category",
+                "warning",
+                "--content",
+                "Don't modify this file carelessly",
+                "--file-path",
+                "src/critical.py",
             ],
             capture_output=True,
             text=True,
             timeout=_CLI_TIMEOUT,
             env=_CLI_ENV,
-            stdin=subprocess.DEVNULL
+            stdin=subprocess.DEVNULL,
         )
 
         assert result.returncode == 0

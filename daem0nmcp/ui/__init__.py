@@ -10,15 +10,16 @@ Exports:
     format_search_results: Format search results as text
     format_briefing: Format briefing as text
 """
-from .resources import MCP_APPS_MIME, register_ui_resources
+
 from .fallback import (
-    format_with_ui_hint,
-    format_search_results,
     format_briefing,
-    format_covenant_status,
     format_community_cluster,
+    format_covenant_status,
     format_graph_path,
+    format_search_results,
+    format_with_ui_hint,
 )
+from .resources import MCP_APPS_MIME, register_ui_resources
 
 __all__ = [
     "MCP_APPS_MIME",

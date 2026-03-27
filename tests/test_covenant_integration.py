@@ -1,8 +1,8 @@
 """Integration tests for Sacred Covenant enforcement on MCP tools."""
 
-import pytest
 from unittest.mock import patch
 
+import pytest
 
 
 class TestCovenantIntegration:
@@ -11,11 +11,13 @@ class TestCovenantIntegration:
     @pytest.fixture
     def db_manager(self, tmp_path):
         from daem0nmcp.database import DatabaseManager
+
         return DatabaseManager(str(tmp_path / "storage"))
 
     @pytest.fixture
     def memory_mgr(self, db_manager):
         from daem0nmcp.memory import MemoryManager
+
         return MemoryManager(db_manager)
 
     @pytest.mark.asyncio
@@ -24,6 +26,7 @@ class TestCovenantIntegration:
         await db_manager.init_db()
 
         from daem0nmcp import server
+
         server._project_contexts.clear()
 
         result = await server.remember(
@@ -41,6 +44,7 @@ class TestCovenantIntegration:
         await db_manager.init_db()
 
         from daem0nmcp import server
+
         server._project_contexts.clear()
 
         project_path = str(db_manager.storage_path.parent.parent)
@@ -62,6 +66,7 @@ class TestCovenantIntegration:
         await db_manager.init_db()
 
         from daem0nmcp import server
+
         server._project_contexts.clear()
 
         project_path = str(db_manager.storage_path.parent.parent)
@@ -71,8 +76,10 @@ class TestCovenantIntegration:
         # Mock recall, check_rules, and _check_conflicts to avoid
         # vector dimension mismatch (384-dim stored vs 256-dim query)
         ctx = await server.get_project_context(project_path)
-        with patch.object(ctx.memory_manager, 'recall', return_value={}), \
-             patch.object(ctx.rules_engine, 'check_rules', return_value={}):
+        with (
+            patch.object(ctx.memory_manager, "recall", return_value={}),
+            patch.object(ctx.rules_engine, "check_rules", return_value={}),
+        ):
             await server.context_check(
                 description="About to record a decision",
                 project_path=project_path,
@@ -81,7 +88,7 @@ class TestCovenantIntegration:
         # Disable Qdrant to avoid dimension mismatch (384-dim bootstrap vs 256-dim model)
         # This test validates covenant enforcement, not vector storage
         ctx.memory_manager._qdrant = None
-        with patch.object(ctx.memory_manager, '_check_conflicts', return_value=[]):
+        with patch.object(ctx.memory_manager, "_check_conflicts", return_value=[]):
             result = await server.remember(
                 category="decision",
                 content="Test decision",
@@ -97,6 +104,7 @@ class TestCovenantIntegration:
         await db_manager.init_db()
 
         from daem0nmcp import server
+
         server._project_contexts.clear()
 
         project_path = str(db_manager.storage_path.parent.parent)
@@ -120,6 +128,7 @@ class TestCovenantIntegration:
         await db_manager.init_db()
 
         from daem0nmcp import server
+
         server._project_contexts.clear()
 
         project_path = str(db_manager.storage_path.parent.parent)

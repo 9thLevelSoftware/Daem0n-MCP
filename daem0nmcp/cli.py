@@ -27,16 +27,15 @@ Global Options:
     --project-path PATH Specify project root path (sets DAEM0NMCP_PROJECT_ROOT)
 """
 
-import sys
-import os
-import asyncio
 import argparse
+import asyncio
 import json
+import os
+import sys
+from datetime import datetime
 from pathlib import Path
 
-from datetime import datetime
-
-from .config import settings, Settings
+from .config import Settings, settings
 from .database import DatabaseManager
 from .memory import MemoryManager
 from .rules import RulesEngine
@@ -49,12 +48,16 @@ def safe_print(text: str, file=None) -> None:
         print(text, file=output)
     except UnicodeEncodeError:
         # Replace unencodable characters with ASCII equivalents or ?
-        encoding = output.encoding or 'utf-8'
-        safe_text = text.encode(encoding, errors='replace').decode(encoding, errors='replace')
+        encoding = output.encoding or "utf-8"
+        safe_text = text.encode(encoding, errors="replace").decode(
+            encoding, errors="replace"
+        )
         print(safe_text, file=output)
 
 
-async def check_file(filepath: str, db: DatabaseManager, memory: MemoryManager, rules: RulesEngine) -> dict:
+async def check_file(
+    filepath: str, db: DatabaseManager, memory: MemoryManager, rules: RulesEngine
+) -> dict:
     """Check a file against memories and rules."""
     await db.init_db()
 
@@ -63,42 +66,42 @@ async def check_file(filepath: str, db: DatabaseManager, memory: MemoryManager, 
         "warnings": [],
         "blockers": [],
         "must_do": [],
-        "must_not": []
+        "must_not": [],
     }
 
     # Get file-specific memories
-    file_memories = await memory.recall_for_file(filepath, project_path=settings.project_root)
+    file_memories = await memory.recall_for_file(
+        filepath, project_path=settings.project_root
+    )
 
     # Check for warnings in file memories
-    for cat in ['warnings', 'decisions', 'patterns', 'learnings']:
+    for cat in ["warnings", "decisions", "patterns", "learnings"]:
         for mem in file_memories.get(cat, []):
-            if mem.get('worked') is False:
-                results["warnings"].append({
-                    "type": "FAILED_APPROACH",
-                    "content": mem['content'],
-                    "outcome": mem.get('outcome')
-                })
-            elif cat == 'warnings':
-                results["warnings"].append({
-                    "type": "WARNING",
-                    "content": mem['content']
-                })
+            if mem.get("worked") is False:
+                results["warnings"].append(
+                    {
+                        "type": "FAILED_APPROACH",
+                        "content": mem["content"],
+                        "outcome": mem.get("outcome"),
+                    }
+                )
+            elif cat == "warnings":
+                results["warnings"].append(
+                    {"type": "WARNING", "content": mem["content"]}
+                )
 
     # Check rules based on filename
     filename = Path(filepath).name
     rule_check = await rules.check_rules(f"modifying {filename}")
 
-    if rule_check.get('guidance'):
-        guidance = rule_check['guidance']
-        results["must_do"] = guidance.get('must_do', [])
-        results["must_not"] = guidance.get('must_not', [])
+    if rule_check.get("guidance"):
+        guidance = rule_check["guidance"]
+        results["must_do"] = guidance.get("must_do", [])
+        results["must_not"] = guidance.get("must_not", [])
 
         # Rule warnings become blockers if high priority
-        for warning in guidance.get('warnings', []):
-            results["warnings"].append({
-                "type": "RULE_WARNING",
-                "content": warning
-            })
+        for warning in guidance.get("warnings", []):
+            results["warnings"].append({"type": "RULE_WARNING", "content": warning})
 
     return results
 
@@ -109,10 +112,14 @@ async def get_briefing(db: DatabaseManager, memory: MemoryManager) -> dict:
     return await memory.get_statistics()
 
 
-async def get_enforcement_status(db: DatabaseManager, memory: MemoryManager, project_path: str) -> dict:
+async def get_enforcement_status(
+    db: DatabaseManager, memory: MemoryManager, project_path: str
+) -> dict:
     """Get current enforcement status."""
     from datetime import timezone
-    from sqlalchemy import select, func
+
+    from sqlalchemy import func, select
+
     from .models import Memory
 
     await db.init_db()
@@ -134,12 +141,16 @@ async def get_enforcement_status(db: DatabaseManager, memory: MemoryManager, pro
                 created = created.replace(tzinfo=timezone.utc)
             age = now - created
 
-            pending.append({
-                "id": mem.id,
-                "content": mem.content,
-                "age_hours": int(age.total_seconds() / 3600),
-                "created_at": mem.created_at.isoformat() if mem.created_at else None,
-            })
+            pending.append(
+                {
+                    "id": mem.id,
+                    "content": mem.content,
+                    "age_hours": int(age.total_seconds() / 3600),
+                    "created_at": mem.created_at.isoformat()
+                    if mem.created_at
+                    else None,
+                }
+            )
 
         # Get total count
         total_result = await session.execute(select(func.count(Memory.id)))
@@ -152,22 +163,24 @@ async def get_enforcement_status(db: DatabaseManager, memory: MemoryManager, pro
     }
 
 
-async def record_outcome_cli(memory: MemoryManager, memory_id: int, outcome: str, worked: bool) -> dict:
+async def record_outcome_cli(
+    memory: MemoryManager, memory_id: int, outcome: str, worked: bool
+) -> dict:
     """Record outcome via CLI."""
     await memory.db.init_db()
 
     try:
         result = await memory.record_outcome(
-            memory_id=memory_id,
-            outcome=outcome,
-            worked=worked
+            memory_id=memory_id, outcome=outcome, worked=worked
         )
         return {"success": True, "memory": result}
     except Exception as e:
         return {"success": False, "error": str(e)}
 
 
-async def run_precommit(checker, staged_files: list, project_path: str, interactive: bool, json_output: bool) -> int:
+async def run_precommit(
+    checker, staged_files: list, project_path: str, interactive: bool, json_output: bool
+) -> int:
     """
     Run pre-commit checks and return exit code.
 
@@ -183,10 +196,16 @@ async def run_precommit(checker, staged_files: list, project_path: str, interact
     """
     try:
         await checker.db.init_db()
-        result = await checker.check(staged_files=staged_files, project_path=project_path)
+        result = await checker.check(
+            staged_files=staged_files, project_path=project_path
+        )
     except Exception as e:
         if json_output:
-            print(json.dumps({"error": str(e), "can_commit": False, "blocks": [], "warnings": []}))
+            print(
+                json.dumps(
+                    {"error": str(e), "can_commit": False, "blocks": [], "warnings": []}
+                )
+            )
         else:
             print(f"ERROR: Pre-commit check failed: {e}", file=sys.stderr)
         return 1
@@ -218,12 +237,16 @@ async def run_precommit(checker, staged_files: list, project_path: str, interact
     if result["blocks"]:
         print("\nCommit blocked. Resolve issues with:")
         print("  python -m daem0nmcp.cli status")
-        print("  python -m daem0nmcp.cli record-outcome <id> \"<outcome>\" --worked|--failed")
+        print(
+            '  python -m daem0nmcp.cli record-outcome <id> "<outcome>" --worked|--failed'
+        )
         return 1
 
     # Warnings only - can proceed with confirmation
     if interactive:
-        response = input("\nProceed with commit despite warnings? [y/N]: ").strip().lower()
+        response = (
+            input("\nProceed with commit despite warnings? [y/N]: ").strip().lower()
+        )
         if response != "y":
             print("Commit cancelled by user.")
             return 2
@@ -238,7 +261,7 @@ def format_check_result(result: dict) -> str:
     if result["warnings"]:
         for w in result["warnings"]:
             lines.append(f"WARNING [{w['type']}]: {w['content']}")
-            if w.get('outcome'):
+            if w.get("outcome"):
                 lines.append(f"  Outcome: {w['outcome']}")
 
     if result["must_do"]:
@@ -275,88 +298,156 @@ def main():
     subparsers.add_parser("briefing", help="Get session briefing")
 
     # scan-todos command
-    scan_parser = subparsers.add_parser("scan-todos", help="Scan for TODO/FIXME comments")
-    scan_parser.add_argument("--auto-remember", action="store_true", help="Auto-create warnings")
+    scan_parser = subparsers.add_parser(
+        "scan-todos", help="Scan for TODO/FIXME comments"
+    )
+    scan_parser.add_argument(
+        "--auto-remember", action="store_true", help="Auto-create warnings"
+    )
     scan_parser.add_argument("--path", help="Path to scan", default=".")
 
     # migrate command
     migrate_parser = subparsers.add_parser("migrate", help="Run database migrations")
-    migrate_parser.add_argument("--backfill-vectors", action="store_true",
-                                help="Backfill vector embeddings for existing memories")
+    migrate_parser.add_argument(
+        "--backfill-vectors",
+        action="store_true",
+        help="Backfill vector embeddings for existing memories",
+    )
 
     # pre-commit command
-    precommit_parser = subparsers.add_parser("pre-commit", help="Run pre-commit enforcement checks")
-    precommit_parser.add_argument("--interactive", "-i", action="store_true",
-                                  help="Prompt for resolution of warnings")
-    precommit_parser.add_argument("--staged-files", nargs="*", default=None,
-                                  help="Staged files (auto-detected from git if not provided)")
+    precommit_parser = subparsers.add_parser(
+        "pre-commit", help="Run pre-commit enforcement checks"
+    )
+    precommit_parser.add_argument(
+        "--interactive",
+        "-i",
+        action="store_true",
+        help="Prompt for resolution of warnings",
+    )
+    precommit_parser.add_argument(
+        "--staged-files",
+        nargs="*",
+        default=None,
+        help="Staged files (auto-detected from git if not provided)",
+    )
 
     # status command
-    subparsers.add_parser("status", help="Show enforcement status (pending decisions, warnings)")
+    subparsers.add_parser(
+        "status", help="Show enforcement status (pending decisions, warnings)"
+    )
 
     # record-outcome command
-    record_parser = subparsers.add_parser("record-outcome", help="Record outcome for a decision")
-    record_parser.add_argument("memory_id", type=int, help="Memory ID to record outcome for")
+    record_parser = subparsers.add_parser(
+        "record-outcome", help="Record outcome for a decision"
+    )
+    record_parser.add_argument(
+        "memory_id", type=int, help="Memory ID to record outcome for"
+    )
     record_parser.add_argument("outcome", help="Description of what happened")
-    record_parser.add_argument("--worked", action="store_true", help="The decision worked")
-    record_parser.add_argument("--failed", action="store_true", help="The decision failed")
+    record_parser.add_argument(
+        "--worked", action="store_true", help="The decision worked"
+    )
+    record_parser.add_argument(
+        "--failed", action="store_true", help="The decision failed"
+    )
 
     # install-hooks command
-    install_parser = subparsers.add_parser("install-hooks", help="Install git hooks for enforcement")
-    install_parser.add_argument("--force", "-f", action="store_true", help="Overwrite existing hooks")
+    install_parser = subparsers.add_parser(
+        "install-hooks", help="Install git hooks for enforcement"
+    )
+    install_parser.add_argument(
+        "--force", "-f", action="store_true", help="Overwrite existing hooks"
+    )
 
     # uninstall-hooks command
     subparsers.add_parser("uninstall-hooks", help="Remove daem0nmcp git hooks")
 
     # install-claude-hooks command
-    install_claude_parser = subparsers.add_parser("install-claude-hooks", help="Install Claude Code hooks for Daem0n enforcement")
-    install_claude_parser.add_argument("--dry-run", action="store_true", help="Show what would change")
+    install_claude_parser = subparsers.add_parser(
+        "install-claude-hooks", help="Install Claude Code hooks for Daem0n enforcement"
+    )
+    install_claude_parser.add_argument(
+        "--dry-run", action="store_true", help="Show what would change"
+    )
 
     # uninstall-claude-hooks command
-    uninstall_claude_parser = subparsers.add_parser("uninstall-claude-hooks", help="Remove Daem0n Claude Code hooks")
-    uninstall_claude_parser.add_argument("--dry-run", action="store_true", help="Show what would change")
+    uninstall_claude_parser = subparsers.add_parser(
+        "uninstall-claude-hooks", help="Remove Daem0n Claude Code hooks"
+    )
+    uninstall_claude_parser.add_argument(
+        "--dry-run", action="store_true", help="Show what would change"
+    )
 
     # install-opencode command
     install_oc_parser = subparsers.add_parser(
         "install-opencode",
-        help="Install OpenCode integration (creates .opencode/ directory and config)"
+        help="Install OpenCode integration (creates .opencode/ directory and config)",
     )
     install_oc_parser.add_argument(
-        "--dry-run", action="store_true",
-        help="Show what would be created without making changes"
+        "--dry-run",
+        action="store_true",
+        help="Show what would be created without making changes",
     )
     install_oc_parser.add_argument(
-        "--force", "-f", action="store_true",
-        help="Overwrite existing configuration files"
+        "--force",
+        "-f",
+        action="store_true",
+        help="Overwrite existing configuration files",
     )
 
     # watch command
     watch_parser = subparsers.add_parser("watch", help="Start file watcher daemon")
-    watch_parser.add_argument("--debounce", type=float, default=1.0,
-                              help="Debounce interval in seconds (default: 1.0)")
-    watch_parser.add_argument("--no-system", action="store_true",
-                              help="Disable system notifications")
-    watch_parser.add_argument("--no-log", action="store_true",
-                              help="Disable log file channel")
-    watch_parser.add_argument("--no-poll", action="store_true",
-                              help="Disable editor poll channel")
-    watch_parser.add_argument("--extensions", nargs="*", default=None,
-                              help="File extensions to watch (e.g., .py .ts)")
+    watch_parser.add_argument(
+        "--debounce",
+        type=float,
+        default=1.0,
+        help="Debounce interval in seconds (default: 1.0)",
+    )
+    watch_parser.add_argument(
+        "--no-system", action="store_true", help="Disable system notifications"
+    )
+    watch_parser.add_argument(
+        "--no-log", action="store_true", help="Disable log file channel"
+    )
+    watch_parser.add_argument(
+        "--no-poll", action="store_true", help="Disable editor poll channel"
+    )
+    watch_parser.add_argument(
+        "--extensions",
+        nargs="*",
+        default=None,
+        help="File extensions to watch (e.g., .py .ts)",
+    )
 
     # index command
-    index_parser = subparsers.add_parser("index", help="Index code entities for understanding")
+    index_parser = subparsers.add_parser(
+        "index", help="Index code entities for understanding"
+    )
     index_parser.add_argument("--path", help="Path to index (default: project root)")
-    index_parser.add_argument("--patterns", nargs="*", default=None,
-                              help="Glob patterns for files (e.g., **/*.py **/*.ts)")
+    index_parser.add_argument(
+        "--patterns",
+        nargs="*",
+        default=None,
+        help="Glob patterns for files (e.g., **/*.py **/*.ts)",
+    )
 
     # remember command (for hooks to create memories via CLI)
-    remember_parser = subparsers.add_parser("remember", help="Create a memory from the command line (for hooks)")
-    remember_parser.add_argument("--category", required=True,
-                                 choices=["decision", "pattern", "warning", "learning"],
-                                 help="Memory category")
+    remember_parser = subparsers.add_parser(
+        "remember", help="Create a memory from the command line (for hooks)"
+    )
+    remember_parser.add_argument(
+        "--category",
+        required=True,
+        choices=["decision", "pattern", "warning", "learning"],
+        help="Memory category",
+    )
     remember_parser.add_argument("--content", required=True, help="The memory content")
-    remember_parser.add_argument("--rationale", default=None, help="Why this is important")
-    remember_parser.add_argument("--file-path", default=None, help="Associated file path")
+    remember_parser.add_argument(
+        "--rationale", default=None, help="Why this is important"
+    )
+    remember_parser.add_argument(
+        "--file-path", default=None, help="Associated file path"
+    )
     remember_parser.add_argument("--tags", default=None, help="Comma-separated tags")
 
     args = parser.parse_args()
@@ -368,7 +459,7 @@ def main():
     # Set project path if provided and reload settings
     active_settings = settings
     if args.project_path:
-        os.environ['DAEM0NMCP_PROJECT_ROOT'] = args.project_path
+        os.environ["DAEM0NMCP_PROJECT_ROOT"] = args.project_path
         # Create new settings instance to pick up the env var
         active_settings = Settings()
 
@@ -378,11 +469,12 @@ def main():
 
     if args.command == "install-opencode":
         from .opencode_install import install_opencode
+
         project_path = args.project_path or os.getcwd()
         success, message = install_opencode(
             project_path,
-            dry_run=getattr(args, 'dry_run', False),
-            force=getattr(args, 'force', False),
+            dry_run=getattr(args, "dry_run", False),
+            force=getattr(args, "force", False),
         )
         if args.json:
             print(json.dumps({"success": success, "message": message}))
@@ -392,6 +484,7 @@ def main():
 
     elif args.command == "install-hooks":
         from .hooks import install_hooks
+
         project_path = args.project_path or os.getcwd()
         success, message = install_hooks(project_path, force=args.force)
         if args.json:
@@ -402,6 +495,7 @@ def main():
 
     elif args.command == "uninstall-hooks":
         from .hooks import uninstall_hooks
+
         project_path = args.project_path or os.getcwd()
         success, message = uninstall_hooks(project_path)
         if args.json:
@@ -412,7 +506,8 @@ def main():
 
     elif args.command == "install-claude-hooks":
         from .claude_hooks.install import install_claude_hooks
-        success, message = install_claude_hooks(dry_run=getattr(args, 'dry_run', False))
+
+        success, message = install_claude_hooks(dry_run=getattr(args, "dry_run", False))
         if args.json:
             print(json.dumps({"success": success, "message": message}))
         else:
@@ -421,7 +516,10 @@ def main():
 
     elif args.command == "uninstall-claude-hooks":
         from .claude_hooks.install import uninstall_claude_hooks
-        success, message = uninstall_claude_hooks(dry_run=getattr(args, 'dry_run', False))
+
+        success, message = uninstall_claude_hooks(
+            dry_run=getattr(args, "dry_run", False)
+        )
         if args.json:
             print(json.dumps({"success": success, "message": message}))
         else:
@@ -449,7 +547,7 @@ def main():
         else:
             print(f"Total memories: {result.get('total_memories', 0)}")
             print(f"By category: {result.get('by_category', {})}")
-            if result.get('learning_insights', {}).get('suggestion'):
+            if result.get("learning_insights", {}).get("suggestion"):
                 safe_print(f"Suggestion: {result['learning_insights']['suggestion']}")
 
     elif args.command == "scan-todos":
@@ -458,33 +556,32 @@ def main():
 
         todos = _scan_for_todos(args.path)
         if args.json:
-            result = {
-                "total": len(todos),
-                "todos": todos
-            }
+            result = {"total": len(todos), "todos": todos}
             print(json.dumps(result, default=str))
         else:
             print(f"Found {len(todos)} TODO/FIXME items:")
             for todo in todos[:20]:  # Limit output
-                safe_print(f"  [{todo['type']}] {todo['file']}:{todo['line']} - {todo['content'][:60]}")
+                safe_print(
+                    f"  [{todo['type']}] {todo['file']}:{todo['line']} - {todo['content'][:60]}"
+                )
             if len(todos) > 20:
                 print(f"  ... and {len(todos) - 20} more")
 
     elif args.command == "migrate":
-        from .migrations import run_migrations, migrate_and_backfill_vectors
+        from .migrations import migrate_and_backfill_vectors, run_migrations
 
         db_path = str(Path(storage_path) / "daem0nmcp.db")
 
         if args.backfill_vectors:
             result = migrate_and_backfill_vectors(db_path)
             if args.json:
-                result['database'] = db_path
+                result["database"] = db_path
                 print(json.dumps(result, default=str))
             else:
                 print(f"Database: {db_path}")
                 print("\nMigration complete:")
                 print(f"  Schema migrations: {result['schema_migrations']}")
-                for m in result.get('applied', []):
+                for m in result.get("applied", []):
                     safe_print(f"    - {m}")
                 print(f"  Vectors backfilled: {result['vectors_backfilled']}")
                 print(f"  Vectors available: {result['vectors_available']}")
@@ -496,7 +593,7 @@ def main():
                     "database": db_path,
                     "schema_migrations": count,
                     "applied": applied,
-                    "up_to_date": count == 0
+                    "up_to_date": count == 0,
                 }
                 print(json.dumps(result, default=str))
             else:
@@ -506,7 +603,9 @@ def main():
                     print(f"  - {m}")
                 if count == 0:
                     print("Database is up to date.")
-                print("\nTo also backfill vectors, run: python -m daem0nmcp.cli migrate --backfill-vectors")
+                print(
+                    "\nTo also backfill vectors, run: python -m daem0nmcp.cli migrate --backfill-vectors"
+                )
 
     elif args.command == "status":
         project_path = args.project_path or os.getcwd()
@@ -514,7 +613,16 @@ def main():
             result = asyncio.run(get_enforcement_status(db, memory, project_path))
         except Exception as e:
             if args.json:
-                print(json.dumps({"error": str(e), "pending_decisions": [], "total_memories": 0, "blocking_count": 0}))
+                print(
+                    json.dumps(
+                        {
+                            "error": str(e),
+                            "pending_decisions": [],
+                            "total_memories": 0,
+                            "blocking_count": 0,
+                        }
+                    )
+                )
             else:
                 print(f"ERROR: Failed to get status: {e}", file=sys.stderr)
             sys.exit(1)
@@ -523,12 +631,14 @@ def main():
             print(json.dumps(result, default=str))
         else:
             print(f"Pending decisions (no outcome): {len(result['pending_decisions'])}")
-            for mem in result['pending_decisions'][:10]:
-                age = mem.get('age_hours', 0)
+            for mem in result["pending_decisions"][:10]:
+                age = mem.get("age_hours", 0)
                 status = "BLOCKING" if age > 24 else "recent"
-                safe_print(f"  [{status}] #{mem['id']}: {mem['content'][:60]} ({age}h old)")
+                safe_print(
+                    f"  [{status}] #{mem['id']}: {mem['content'][:60]} ({age}h old)"
+                )
 
-            if len(result['pending_decisions']) > 10:
+            if len(result["pending_decisions"]) > 10:
                 print(f"  ... and {len(result['pending_decisions']) - 10} more")
 
             print(f"\nTotal memories: {result['total_memories']}")
@@ -536,6 +646,7 @@ def main():
 
     elif args.command == "pre-commit":
         import subprocess
+
         from .enforcement import PreCommitChecker
 
         # Get staged files from git if not provided
@@ -544,16 +655,24 @@ def main():
             try:
                 result = subprocess.run(
                     ["git", "diff", "--cached", "--name-only"],
-                    capture_output=True, text=True, check=False,
-                    cwd=args.project_path or "."
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                    cwd=args.project_path or ".",
                 )
-                staged_files = [f.strip() for f in result.stdout.strip().split("\n") if f.strip()]
+                staged_files = [
+                    f.strip() for f in result.stdout.strip().split("\n") if f.strip()
+                ]
             except (subprocess.SubprocessError, FileNotFoundError, OSError):
                 staged_files = []
 
         project_path = args.project_path or os.getcwd()
         checker = PreCommitChecker(db, memory)
-        exit_code = asyncio.run(run_precommit(checker, staged_files, project_path, args.interactive, args.json))
+        exit_code = asyncio.run(
+            run_precommit(
+                checker, staged_files, project_path, args.interactive, args.json
+            )
+        )
         sys.exit(exit_code)
 
     elif args.command == "record-outcome":
@@ -566,7 +685,9 @@ def main():
 
         project_path = args.project_path or os.getcwd()
         worked = args.worked
-        result = asyncio.run(record_outcome_cli(memory, args.memory_id, args.outcome, worked))
+        result = asyncio.run(
+            record_outcome_cli(memory, args.memory_id, args.outcome, worked)
+        )
 
         if args.json:
             print(json.dumps(result, default=str))
@@ -580,8 +701,8 @@ def main():
                 sys.exit(1)
 
     elif args.command == "watch":
-        from .watcher import FileWatcher, WatcherConfig, LoggingChannel
-        from .channels import SystemNotifyChannel, LogFileChannel, EditorPollChannel
+        from .channels import EditorPollChannel, LogFileChannel, SystemNotifyChannel
+        from .watcher import FileWatcher, LoggingChannel, WatcherConfig
 
         project_path = Path(args.project_path or os.getcwd()).resolve()
 
@@ -601,8 +722,7 @@ def main():
 
         # Build config
         config = WatcherConfig(
-            debounce_seconds=args.debounce,
-            watch_extensions=args.extensions or []
+            debounce_seconds=args.debounce, watch_extensions=args.extensions or []
         )
 
         # Create watcher
@@ -610,7 +730,7 @@ def main():
             project_path=project_path,
             memory_manager=memory,
             channels=channels,
-            config=config
+            config=config,
         )
 
         async def run_watcher():
@@ -652,9 +772,16 @@ def main():
 
         if not is_available():
             if args.json:
-                print(json.dumps({"error": "tree-sitter-languages not installed", "indexed": 0}))
+                print(
+                    json.dumps(
+                        {"error": "tree-sitter-languages not installed", "indexed": 0}
+                    )
+                )
             else:
-                print("ERROR: Code indexing requires tree-sitter-languages", file=sys.stderr)
+                print(
+                    "ERROR: Code indexing requires tree-sitter-languages",
+                    file=sys.stderr,
+                )
                 print("Install with: pip install tree-sitter-languages")
             sys.exit(1)
 
@@ -665,6 +792,7 @@ def main():
         qdrant = None
         try:
             from .qdrant_store import QdrantVectorStore
+
             qdrant = QdrantVectorStore(storage_path=str(storage_path))
         except Exception:
             pass
@@ -685,7 +813,7 @@ def main():
             print(f"  Files skipped: {result.get('files_skipped', 0)}")
             print(f"  Project: {result.get('project', target_path)}")
 
-            if result.get('error'):
+            if result.get("error"):
                 safe_print(f"\nError: {result['error']}")
                 sys.exit(1)
 
@@ -708,8 +836,8 @@ def main():
                 category=args.category,
                 content=args.content,
                 rationale=args.rationale,
-                file_path=getattr(args, 'file_path', None),
-                tags=tag_list
+                file_path=getattr(args, "file_path", None),
+                tags=tag_list,
             )
 
             return result

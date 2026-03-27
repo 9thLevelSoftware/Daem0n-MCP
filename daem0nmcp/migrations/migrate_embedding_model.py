@@ -41,7 +41,9 @@ def _resolve_db_path(project_path: str) -> str:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Re-encode memory embeddings for new model")
+    parser = argparse.ArgumentParser(
+        description="Re-encode memory embeddings for new model"
+    )
     parser.add_argument(
         "--project-path",
         default=os.getcwd(),
@@ -105,7 +107,9 @@ def main():
     batch_qdrant = []
 
     for row in cursor:
-        mem_id, content, rationale, category, tags, file_path, worked, is_permanent = row
+        mem_id, content, rationale, category, tags, file_path, worked, is_permanent = (
+            row
+        )
         text = content
         if rationale:
             text += " " + rationale
@@ -121,17 +125,19 @@ def main():
             if qdrant is not None:
                 embedding_list = vectors.decode(embedding_bytes)
                 if embedding_list:
-                    batch_qdrant.append({
-                        "id": mem_id,
-                        "embedding": embedding_list,
-                        "metadata": {
-                            "category": category,
-                            "tags": tags.split(",") if tags else [],
-                            "file_path": file_path,
-                            "worked": worked,
-                            "is_permanent": is_permanent,
-                        },
-                    })
+                    batch_qdrant.append(
+                        {
+                            "id": mem_id,
+                            "embedding": embedding_list,
+                            "metadata": {
+                                "category": category,
+                                "tags": tags.split(",") if tags else [],
+                                "file_path": file_path,
+                                "worked": worked,
+                                "is_permanent": is_permanent,
+                            },
+                        }
+                    )
 
             migrated += 1
 
@@ -144,9 +150,13 @@ def main():
                 conn.commit()
 
                 for item in batch_qdrant:
-                    qdrant.upsert_memory(item["id"], item["embedding"], item["metadata"])
+                    qdrant.upsert_memory(
+                        item["id"], item["embedding"], item["metadata"]
+                    )
 
-                logger.info(f"Progress: {migrated}/{total} ({migrated*100//total}%)")
+                logger.info(
+                    f"Progress: {migrated}/{total} ({migrated * 100 // total}%)"
+                )
                 batch_updates.clear()
                 batch_qdrant.clear()
 
@@ -167,7 +177,9 @@ def main():
     elapsed = time.time() - start_time
     conn.close()
 
-    logger.info(f"Migration complete: {migrated} migrated, {failed} failed, {elapsed:.1f}s elapsed")
+    logger.info(
+        f"Migration complete: {migrated} migrated, {failed} failed, {elapsed:.1f}s elapsed"
+    )
 
 
 if __name__ == "__main__":

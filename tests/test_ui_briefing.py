@@ -1,13 +1,14 @@
 """Tests for briefing dashboard UI rendering."""
 
 import pytest
-from daem0nmcp.ui.resources import _build_briefing_ui
-from daem0nmcp.ui.fallback import format_briefing_text
 
+from daem0nmcp.ui.fallback import format_briefing_text
+from daem0nmcp.ui.resources import _build_briefing_ui
 
 # =============================================================================
 # Test Data Fixtures
 # =============================================================================
+
 
 @pytest.fixture
 def sample_briefing_data():
@@ -16,69 +17,58 @@ def sample_briefing_data():
         "status": "ready",
         "statistics": {
             "total_memories": 42,
-            "by_category": {
-                "decision": 15,
-                "warning": 8,
-                "pattern": 12,
-                "learning": 7
-            },
+            "by_category": {"decision": 15, "warning": 8, "pattern": 12, "learning": 7},
             "outcome_rates": {
                 "success_rate": 0.73,
                 "total_decisions": 15,
-                "with_outcome": 11
-            }
+                "with_outcome": 11,
+            },
         },
         "recent_decisions": [
             {
                 "id": 1,
                 "content": "Use PostgreSQL for the main database",
                 "worked": True,
-                "created_at": "2024-01-15T10:30:00Z"
+                "created_at": "2024-01-15T10:30:00Z",
             },
             {
                 "id": 2,
                 "content": "Try caching with Redis for session storage",
                 "worked": False,
-                "created_at": "2024-01-14T14:20:00Z"
+                "created_at": "2024-01-14T14:20:00Z",
             },
             {
                 "id": 3,
                 "content": "Implement JWT authentication",
                 "worked": None,  # Pending
-                "created_at": "2024-01-16T09:00:00Z"
-            }
+                "created_at": "2024-01-16T09:00:00Z",
+            },
         ],
         "active_warnings": [
             {
                 "id": 10,
                 "content": "API rate limits may be hit during peak hours",
-                "severity": "high"
+                "severity": "high",
             },
             {
                 "id": 11,
                 "content": "Consider adding request throttling",
-                "severity": "medium"
-            }
+                "severity": "medium",
+            },
         ],
         "failed_approaches": [
-            {
-                "id": 20,
-                "content": "SQLite doesn't scale for concurrent writes"
-            }
+            {"id": 20, "content": "SQLite doesn't scale for concurrent writes"}
         ],
         "git_changes": {
             "total": 5,
             "files": [
                 {"status": "A", "path": "src/api/auth.py"},
                 {"status": "M", "path": "src/config.py"},
-                {"status": "D", "path": "src/old_handler.py"}
-            ]
+                {"status": "D", "path": "src/old_handler.py"},
+            ],
         },
-        "focus_areas": [
-            {"topic": "authentication"},
-            {"topic": "database design"}
-        ],
-        "message": "3 active warnings require attention."
+        "focus_areas": [{"topic": "authentication"}, {"topic": "database design"}],
+        "message": "3 active warnings require attention.",
     }
 
 
@@ -90,20 +80,21 @@ def empty_briefing_data():
         "statistics": {
             "total_memories": 0,
             "by_category": {},
-            "outcome_rates": {"success_rate": 0}
+            "outcome_rates": {"success_rate": 0},
         },
         "recent_decisions": [],
         "active_warnings": [],
         "failed_approaches": [],
         "git_changes": {},
         "focus_areas": None,
-        "message": ""
+        "message": "",
     }
 
 
 # =============================================================================
 # Statistics Panel Tests
 # =============================================================================
+
 
 class TestStatisticsPanel:
     """Tests for the statistics summary panel."""
@@ -115,7 +106,7 @@ class TestStatisticsPanel:
         assert ">42<" in html  # total_memories in value div
         assert ">15<" in html  # decisions count
         # Check warnings count (8) appears - need to be careful as 8 appears in other places
-        assert "daemon-stat__value\">8<" in html or ">8</div>" in html
+        assert 'daemon-stat__value">8<' in html or ">8</div>" in html
 
     def test_statistics_success_rate_displayed(self, sample_briefing_data):
         """Success rate is displayed as percentage."""
@@ -137,6 +128,7 @@ class TestStatisticsPanel:
 # =============================================================================
 # Accordion Section Tests
 # =============================================================================
+
 
 class TestAccordionSections:
     """Tests for accordion section rendering."""
@@ -184,6 +176,7 @@ class TestAccordionSections:
 # Decision Outcome Tests
 # =============================================================================
 
+
 class TestDecisionOutcomes:
     """Tests for decision outcome indicators."""
 
@@ -214,6 +207,7 @@ class TestDecisionOutcomes:
 # Warning Severity Tests
 # =============================================================================
 
+
 class TestWarningSeverity:
     """Tests for warning severity styling."""
 
@@ -236,6 +230,7 @@ class TestWarningSeverity:
 # =============================================================================
 # Git Changes Tests
 # =============================================================================
+
 
 class TestGitChanges:
     """Tests for git changes section."""
@@ -263,6 +258,7 @@ class TestGitChanges:
 # Briefing Message Tests
 # =============================================================================
 
+
 class TestBriefingMessage:
     """Tests for briefing message display."""
 
@@ -283,6 +279,7 @@ class TestBriefingMessage:
 # =============================================================================
 # Text Fallback Tests
 # =============================================================================
+
 
 class TestTextFallback:
     """Tests for text fallback formatter."""
@@ -334,6 +331,7 @@ class TestTextFallback:
 # Header and Status Tests
 # =============================================================================
 
+
 class TestHeaderAndStatus:
     """Tests for briefing header and status."""
 
@@ -358,6 +356,7 @@ class TestHeaderAndStatus:
 # Tool Integration Tests
 # =============================================================================
 
+
 class TestGetBriefingVisualTool:
     """Tests for get_briefing_visual tool output format."""
 
@@ -368,7 +367,7 @@ class TestGetBriefingVisualTool:
         result = format_with_ui_hint(
             data=sample_briefing_data,
             ui_resource="ui://daem0n/briefing",
-            text="fallback text"
+            text="fallback text",
         )
 
         assert "ui_resource" in result
@@ -381,9 +380,7 @@ class TestGetBriefingVisualTool:
         from daem0nmcp.ui.fallback import format_with_ui_hint
 
         result = format_with_ui_hint(
-            data=sample_briefing_data,
-            ui_resource="ui://daem0n/briefing",
-            text=""
+            data=sample_briefing_data, ui_resource="ui://daem0n/briefing", text=""
         )
 
         assert result["status"] == "ready"
@@ -395,9 +392,7 @@ class TestGetBriefingVisualTool:
 
         text = format_briefing_text(sample_briefing_data)
         result = format_with_ui_hint(
-            data=sample_briefing_data,
-            ui_resource="ui://daem0n/briefing",
-            text=text
+            data=sample_briefing_data, ui_resource="ui://daem0n/briefing", text=text
         )
 
         assert "Session Briefing" in result["text"]

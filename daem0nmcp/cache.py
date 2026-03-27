@@ -5,10 +5,11 @@ Provides a lightweight in-memory cache with automatic expiration.
 No external dependencies required.
 """
 
-import time
 import logging
-from typing import Any, Dict, Tuple, Hashable
+import time
+from collections.abc import Hashable
 from threading import Lock
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -35,12 +36,12 @@ class TTLCache:
         """
         self.ttl = ttl
         self.maxsize = maxsize
-        self._cache: Dict[Hashable, Tuple[float, Any]] = {}
+        self._cache: dict[Hashable, tuple[float, Any]] = {}
         self._lock = Lock()
         self._hits = 0
         self._misses = 0
 
-    def get(self, key: Hashable) -> Tuple[bool, Any]:
+    def get(self, key: Hashable) -> tuple[bool, Any]:
         """
         Get a value from the cache.
 
@@ -128,7 +129,7 @@ class TTLCache:
         del self._cache[oldest_key]
 
     @property
-    def stats(self) -> Dict[str, Any]:
+    def stats(self) -> dict[str, Any]:
         """Get cache statistics."""
         with self._lock:
             total = self._hits + self._misses
@@ -139,7 +140,7 @@ class TTLCache:
                 "ttl": self.ttl,
                 "hits": self._hits,
                 "misses": self._misses,
-                "hit_rate": hit_rate
+                "hit_rate": hit_rate,
             }
 
     def __len__(self) -> int:
@@ -148,7 +149,7 @@ class TTLCache:
             return len(self._cache)
 
 
-def make_cache_key(*args, **kwargs) -> Tuple:
+def make_cache_key(*args, **kwargs) -> tuple:
     """
     Create a hashable cache key from arguments.
 
@@ -159,6 +160,7 @@ def make_cache_key(*args, **kwargs) -> Tuple:
     Returns:
         A hashable tuple suitable for use as a cache key
     """
+
     # Convert lists to tuples for hashability
     def make_hashable(obj):
         if isinstance(obj, list):
@@ -190,14 +192,11 @@ def get_rules_cache() -> TTLCache:
     return _rules_cache
 
 
-def clear_all_caches() -> Dict[str, int]:
+def clear_all_caches() -> dict[str, int]:
     """
     Clear all global caches.
 
     Returns:
         Dict with cache names and number of entries cleared
     """
-    return {
-        "recall": _recall_cache.clear(),
-        "rules": _rules_cache.clear()
-    }
+    return {"recall": _recall_cache.clear(), "rules": _rules_cache.clear()}

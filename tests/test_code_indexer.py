@@ -7,11 +7,12 @@ NOTE: tree-sitter-language-pack is a REQUIRED dependency.
 These tests will fail if it's not installed.
 """
 
-import pytest
-from pathlib import Path
-from datetime import datetime, timezone
-import tempfile
 import shutil
+import tempfile
+from datetime import datetime, timezone
+from pathlib import Path
+
+import pytest
 
 # tree-sitter-language-pack is required, not optional
 
@@ -45,7 +46,7 @@ def helper_function():
 
     # Create TypeScript file
     ts_file = temp_dir / "service.ts"
-    ts_file.write_text('''
+    ts_file.write_text("""
 /**
  * API Service for backend communication.
  */
@@ -68,11 +69,11 @@ interface User {
     id: number;
     name: string;
 }
-''')
+""")
 
     # Create JavaScript file
     js_file = temp_dir / "utils.js"
-    js_file.write_text('''
+    js_file.write_text("""
 /**
  * Utility functions.
  */
@@ -85,11 +86,11 @@ class Logger {
 function calculateTotal(items) {
     return items.reduce((sum, item) => sum + item.price, 0);
 }
-''')
+""")
 
     # Create Go file
     go_file = temp_dir / "main.go"
-    go_file.write_text('''
+    go_file.write_text("""
 package main
 
 // Server represents an HTTP server.
@@ -106,11 +107,11 @@ func (s *Server) Start() error {
 func NewServer(port int) *Server {
     return &Server{Port: port}
 }
-''')
+""")
 
     # Create Rust file
     rs_file = temp_dir / "lib.rs"
-    rs_file.write_text('''
+    rs_file.write_text("""
 /// Configuration for the application.
 pub struct Config {
     pub port: u16,
@@ -130,7 +131,7 @@ impl Config {
 
 /// Helper function.
 fn helper() {}
-''')
+""")
 
     yield temp_dir
 
@@ -144,6 +145,7 @@ class TestTreeSitterIndexer:
     def test_is_available(self):
         """Test availability check."""
         from daem0nmcp.code_indexer import is_available
+
         # tree-sitter-languages is a required dependency
         assert is_available() is True
 
@@ -154,11 +156,11 @@ class TestTreeSitterIndexer:
         indexer = TreeSitterIndexer()
         extensions = indexer.get_supported_extensions()
 
-        assert '.py' in extensions
-        assert '.ts' in extensions
-        assert '.js' in extensions
-        assert '.go' in extensions
-        assert '.rs' in extensions
+        assert ".py" in extensions
+        assert ".ts" in extensions
+        assert ".js" in extensions
+        assert ".go" in extensions
+        assert ".rs" in extensions
 
     def test_index_python_file(self, temp_project):
         """Test indexing a Python file."""
@@ -170,16 +172,16 @@ class TestTreeSitterIndexer:
         entities = list(indexer.index_file(py_file, temp_project))
 
         # Should find class and functions
-        names = [e['name'] for e in entities]
-        assert 'UserService' in names
-        assert 'authenticate' in names
-        assert 'get_user' in names
-        assert 'helper_function' in names
+        names = [e["name"] for e in entities]
+        assert "UserService" in names
+        assert "authenticate" in names
+        assert "get_user" in names
+        assert "helper_function" in names
 
         # Check entity types
-        types = {e['name']: e['entity_type'] for e in entities}
-        assert types['UserService'] == 'class'
-        assert types['authenticate'] == 'function'
+        types = {e["name"]: e["entity_type"] for e in entities}
+        assert types["UserService"] == "class"
+        assert types["authenticate"] == "function"
 
     def test_index_typescript_file(self, temp_project):
         """Test indexing a TypeScript file."""
@@ -190,10 +192,10 @@ class TestTreeSitterIndexer:
 
         entities = list(indexer.index_file(ts_file, temp_project))
 
-        names = [e['name'] for e in entities]
-        assert 'ApiService' in names
-        assert 'formatDate' in names
-        assert 'User' in names
+        names = [e["name"] for e in entities]
+        assert "ApiService" in names
+        assert "formatDate" in names
+        assert "User" in names
 
     def test_index_javascript_file(self, temp_project):
         """Test indexing a JavaScript file."""
@@ -204,9 +206,9 @@ class TestTreeSitterIndexer:
 
         entities = list(indexer.index_file(js_file, temp_project))
 
-        names = [e['name'] for e in entities]
-        assert 'Logger' in names
-        assert 'calculateTotal' in names
+        names = [e["name"] for e in entities]
+        assert "Logger" in names
+        assert "calculateTotal" in names
 
     def test_index_go_file(self, temp_project):
         """Test indexing a Go file."""
@@ -217,9 +219,9 @@ class TestTreeSitterIndexer:
 
         entities = list(indexer.index_file(go_file, temp_project))
 
-        names = [e['name'] for e in entities]
+        names = [e["name"] for e in entities]
         # Parser finds functions: Start (method) and NewServer (function)
-        assert 'NewServer' in names or 'Start' in names
+        assert "NewServer" in names or "Start" in names
         assert len(entities) >= 1
 
     def test_index_rust_file(self, temp_project):
@@ -231,9 +233,9 @@ class TestTreeSitterIndexer:
 
         entities = list(indexer.index_file(rs_file, temp_project))
 
-        names = [e['name'] for e in entities]
+        names = [e["name"] for e in entities]
         # Parser finds struct Config and trait User
-        assert 'Config' in names or 'User' in names
+        assert "Config" in names or "User" in names
         assert len(entities) >= 1
 
     def test_entity_has_required_fields(self, temp_project):
@@ -247,13 +249,13 @@ class TestTreeSitterIndexer:
         assert len(entities) > 0
 
         entity = entities[0]
-        assert 'id' in entity
-        assert 'name' in entity
-        assert 'entity_type' in entity
-        assert 'file_path' in entity
-        assert 'project_path' in entity
-        assert 'line_start' in entity
-        assert 'line_end' in entity
+        assert "id" in entity
+        assert "name" in entity
+        assert "entity_type" in entity
+        assert "file_path" in entity
+        assert "project_path" in entity
+        assert "line_start" in entity
+        assert "line_end" in entity
 
     def test_entity_id_is_deterministic(self, temp_project):
         """Test that entity IDs are deterministic."""
@@ -265,8 +267,8 @@ class TestTreeSitterIndexer:
         entities1 = list(indexer.index_file(py_file, temp_project))
         entities2 = list(indexer.index_file(py_file, temp_project))
 
-        ids1 = {e['id'] for e in entities1}
-        ids2 = {e['id'] for e in entities2}
+        ids1 = {e["id"] for e in entities1}
+        ids2 = {e["id"] for e in entities2}
 
         assert ids1 == ids2
 
@@ -293,11 +295,11 @@ class TestTreeSitterIndexer:
         entities = list(indexer.index_file(py_file, temp_project))
 
         # Find UserService class - docstring extraction depends on parser
-        user_service = next(e for e in entities if e['name'] == 'UserService')
+        user_service = next(e for e in entities if e["name"] == "UserService")
         # Docstring may or may not be extracted depending on tree-sitter version
         # The important thing is the entity was found
         assert user_service is not None
-        assert user_service['entity_type'] == 'class'
+        assert user_service["entity_type"] == "class"
 
     def test_extract_signature(self, temp_project):
         """Test that signatures are extracted."""
@@ -309,9 +311,9 @@ class TestTreeSitterIndexer:
         entities = list(indexer.index_file(py_file, temp_project))
 
         # Find authenticate method
-        auth = next(e for e in entities if e['name'] == 'authenticate')
-        assert auth.get('signature') is not None
-        assert 'def authenticate' in auth['signature']
+        auth = next(e for e in entities if e["name"] == "authenticate")
+        assert auth.get("signature") is not None
+        assert "def authenticate" in auth["signature"]
 
 
 class TestCodeIndexManager:
@@ -335,9 +337,9 @@ class TestCodeIndexManager:
         indexer = CodeIndexManager(db=db_manager, qdrant=None)
         result = await indexer.index_project(str(temp_project))
 
-        assert result['indexed'] > 0
-        assert result['files_processed'] > 0
-        assert result['project'] == str(temp_project)
+        assert result["indexed"] > 0
+        assert result["files_processed"] > 0
+        assert result["project"] == str(temp_project)
 
     @pytest.mark.asyncio
     async def test_index_with_patterns(self, temp_project, db_manager):
@@ -347,10 +349,10 @@ class TestCodeIndexManager:
         indexer = CodeIndexManager(db=db_manager, qdrant=None)
 
         # Only index Python files
-        result = await indexer.index_project(str(temp_project), patterns=['**/*.py'])
+        result = await indexer.index_project(str(temp_project), patterns=["**/*.py"])
 
-        assert result['indexed'] > 0
-        assert result['files_processed'] == 1
+        assert result["indexed"] > 0
+        assert result["files_processed"] == 1
 
     @pytest.mark.asyncio
     async def test_find_entity(self, temp_project, db_manager):
@@ -360,10 +362,10 @@ class TestCodeIndexManager:
         indexer = CodeIndexManager(db=db_manager, qdrant=None)
         await indexer.index_project(str(temp_project))
 
-        entity = await indexer.find_entity('UserService', str(temp_project))
+        entity = await indexer.find_entity("UserService", str(temp_project))
         assert entity is not None
-        assert entity['name'] == 'UserService'
-        assert entity['entity_type'] == 'class'
+        assert entity["name"] == "UserService"
+        assert entity["entity_type"] == "class"
 
     @pytest.mark.asyncio
     async def test_find_entity_not_found(self, temp_project, db_manager):
@@ -373,7 +375,7 @@ class TestCodeIndexManager:
         indexer = CodeIndexManager(db=db_manager, qdrant=None)
         await indexer.index_project(str(temp_project))
 
-        entity = await indexer.find_entity('NonExistent', str(temp_project))
+        entity = await indexer.find_entity("NonExistent", str(temp_project))
         assert entity is None
 
     @pytest.mark.asyncio
@@ -384,9 +386,9 @@ class TestCodeIndexManager:
         indexer = CodeIndexManager(db=db_manager, qdrant=None)
         await indexer.index_project(str(temp_project))
 
-        result = await indexer.analyze_impact('UserService', str(temp_project))
-        assert result['found'] is True
-        assert result['entity'] == 'UserService'
+        result = await indexer.analyze_impact("UserService", str(temp_project))
+        assert result["found"] is True
+        assert result["entity"] == "UserService"
 
     @pytest.mark.asyncio
     async def test_analyze_impact_not_found(self, temp_project, db_manager):
@@ -396,8 +398,8 @@ class TestCodeIndexManager:
         indexer = CodeIndexManager(db=db_manager, qdrant=None)
         await indexer.index_project(str(temp_project))
 
-        result = await indexer.analyze_impact('NonExistent', str(temp_project))
-        assert result['found'] is False
+        result = await indexer.analyze_impact("NonExistent", str(temp_project))
+        assert result["found"] is False
 
     @pytest.mark.asyncio
     async def test_skip_directories(self, temp_project, db_manager):
@@ -413,14 +415,15 @@ class TestCodeIndexManager:
         result = await indexer.index_project(str(temp_project))
 
         # The node_modules file should be skipped
-        assert result['files_skipped'] >= 1
+        assert result["files_skipped"] >= 1
 
     @pytest.mark.asyncio
     async def test_reindex_clears_old_entities(self, temp_project, db_manager):
         """Test that reindexing clears old entities."""
+        from sqlalchemy import select
+
         from daem0nmcp.code_indexer import CodeIndexManager
         from daem0nmcp.models import CodeEntity
-        from sqlalchemy import select
 
         indexer = CodeIndexManager(db=db_manager, qdrant=None)
 
@@ -495,32 +498,37 @@ class TestLanguageQueries:
     def test_python_queries_exist(self):
         """Test that Python queries are defined."""
         from daem0nmcp.code_indexer import ENTITY_QUERIES
-        assert 'python' in ENTITY_QUERIES
-        assert 'class_definition' in ENTITY_QUERIES['python']
-        assert 'function_definition' in ENTITY_QUERIES['python']
+
+        assert "python" in ENTITY_QUERIES
+        assert "class_definition" in ENTITY_QUERIES["python"]
+        assert "function_definition" in ENTITY_QUERIES["python"]
 
     def test_typescript_queries_exist(self):
         """Test that TypeScript queries are defined."""
         from daem0nmcp.code_indexer import ENTITY_QUERIES
-        assert 'typescript' in ENTITY_QUERIES
-        assert 'class_declaration' in ENTITY_QUERIES['typescript']
+
+        assert "typescript" in ENTITY_QUERIES
+        assert "class_declaration" in ENTITY_QUERIES["typescript"]
 
     def test_javascript_queries_exist(self):
         """Test that JavaScript queries are defined."""
         from daem0nmcp.code_indexer import ENTITY_QUERIES
-        assert 'javascript' in ENTITY_QUERIES
+
+        assert "javascript" in ENTITY_QUERIES
 
     def test_go_queries_exist(self):
         """Test that Go queries are defined."""
         from daem0nmcp.code_indexer import ENTITY_QUERIES
-        assert 'go' in ENTITY_QUERIES
+
+        assert "go" in ENTITY_QUERIES
 
     def test_rust_queries_exist(self):
         """Test that Rust queries are defined."""
         from daem0nmcp.code_indexer import ENTITY_QUERIES
-        assert 'rust' in ENTITY_QUERIES
-        assert 'struct_item' in ENTITY_QUERIES['rust']
-        assert 'function_item' in ENTITY_QUERIES['rust']
+
+        assert "rust" in ENTITY_QUERIES
+        assert "struct_item" in ENTITY_QUERIES["rust"]
+        assert "function_item" in ENTITY_QUERIES["rust"]
 
 
 class TestLanguageConfig:
@@ -529,41 +537,48 @@ class TestLanguageConfig:
     def test_python_extension(self):
         """Test Python extension mapping."""
         from daem0nmcp.code_indexer import LANGUAGE_CONFIG
-        assert LANGUAGE_CONFIG['.py'] == 'python'
+
+        assert LANGUAGE_CONFIG[".py"] == "python"
 
     def test_typescript_extensions(self):
         """Test TypeScript extension mappings."""
         from daem0nmcp.code_indexer import LANGUAGE_CONFIG
-        assert LANGUAGE_CONFIG['.ts'] == 'typescript'
-        assert LANGUAGE_CONFIG['.tsx'] == 'tsx'
+
+        assert LANGUAGE_CONFIG[".ts"] == "typescript"
+        assert LANGUAGE_CONFIG[".tsx"] == "tsx"
 
     def test_javascript_extensions(self):
         """Test JavaScript extension mappings."""
         from daem0nmcp.code_indexer import LANGUAGE_CONFIG
-        assert LANGUAGE_CONFIG['.js'] == 'javascript'
-        assert LANGUAGE_CONFIG['.mjs'] == 'javascript'
+
+        assert LANGUAGE_CONFIG[".js"] == "javascript"
+        assert LANGUAGE_CONFIG[".mjs"] == "javascript"
 
     def test_go_extension(self):
         """Test Go extension mapping."""
         from daem0nmcp.code_indexer import LANGUAGE_CONFIG
-        assert LANGUAGE_CONFIG['.go'] == 'go'
+
+        assert LANGUAGE_CONFIG[".go"] == "go"
 
     def test_rust_extension(self):
         """Test Rust extension mapping."""
         from daem0nmcp.code_indexer import LANGUAGE_CONFIG
-        assert LANGUAGE_CONFIG['.rs'] == 'rust'
+
+        assert LANGUAGE_CONFIG[".rs"] == "rust"
 
     def test_c_extensions(self):
         """Test C extension mappings."""
         from daem0nmcp.code_indexer import LANGUAGE_CONFIG
-        assert LANGUAGE_CONFIG['.c'] == 'c'
-        assert LANGUAGE_CONFIG['.h'] == 'c'
+
+        assert LANGUAGE_CONFIG[".c"] == "c"
+        assert LANGUAGE_CONFIG[".h"] == "c"
 
     def test_cpp_extensions(self):
         """Test C++ extension mappings."""
         from daem0nmcp.code_indexer import LANGUAGE_CONFIG
-        assert LANGUAGE_CONFIG['.cpp'] == 'cpp'
-        assert LANGUAGE_CONFIG['.hpp'] == 'cpp'
+
+        assert LANGUAGE_CONFIG[".cpp"] == "cpp"
+        assert LANGUAGE_CONFIG[".hpp"] == "cpp"
 
 
 class TestCodeEntityModel:
@@ -572,8 +587,9 @@ class TestCodeEntityModel:
     @pytest.fixture
     async def db_manager(self):
         """Create a database manager for testing."""
-        from daem0nmcp.database import DatabaseManager
         import tempfile
+
+        from daem0nmcp.database import DatabaseManager
 
         temp_dir = Path(tempfile.mkdtemp())
         db = DatabaseManager(str(temp_dir / ".daem0nmcp" / "storage"))
@@ -620,8 +636,9 @@ class TestMemoryCodeRefModel:
     @pytest.fixture
     async def db_manager(self):
         """Create a database manager for testing."""
-        from daem0nmcp.database import DatabaseManager
         import tempfile
+
+        from daem0nmcp.database import DatabaseManager
 
         temp_dir = Path(tempfile.mkdtemp())
         db = DatabaseManager(str(temp_dir / ".daem0nmcp" / "storage"))

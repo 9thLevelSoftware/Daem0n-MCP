@@ -12,8 +12,8 @@ Consolidates 67 tools into 8 workflow-oriented tools:
 - maintain: Housekeeping & federation
 """
 
-from .errors import WorkflowError, InvalidActionError, MissingParamError
-from . import commune, consult, inscribe, reflect, understand, govern, explore, maintain
+from . import commune, consult, explore, govern, inscribe, maintain, reflect, understand
+from .errors import InvalidActionError, MissingParamError, WorkflowError
 
 __all__ = [
     "WorkflowError",

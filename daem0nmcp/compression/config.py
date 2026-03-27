@@ -1,6 +1,6 @@
 """Compression configuration for LLMLingua-2."""
+
 from dataclasses import dataclass, field
-from typing import List
 
 
 @dataclass
@@ -20,10 +20,22 @@ class CompressionConfig:
     device: str = "auto"
 
     # Base tokens to always preserve (punctuation, structure)
-    base_force_tokens: List[str] = field(default_factory=lambda: [
-        ".", "\n", "?", "!", ",", ":",  # Punctuation
-        "(", ")", "{", "}", "[", "]",    # Brackets
-    ])
+    base_force_tokens: list[str] = field(
+        default_factory=lambda: [
+            ".",
+            "\n",
+            "?",
+            "!",
+            ",",
+            ":",  # Punctuation
+            "(",
+            ")",
+            "{",
+            "}",
+            "[",
+            "]",  # Brackets
+        ]
+    )
 
     # Whether to drop consecutive duplicate tokens
     drop_consecutive: bool = True

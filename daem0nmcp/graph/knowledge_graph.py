@@ -15,12 +15,14 @@ Edge types:
 """
 
 import logging
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set
+from typing import TYPE_CHECKING, Any
 
 import networkx as nx
 
 from .traversal import (
     find_related_memories as _find_related_memories,
+)
+from .traversal import (
     get_graph_metrics,
     trace_causal_chain,
     trace_knowledge_evolution,
@@ -126,7 +128,7 @@ class KnowledgeGraph:
             ref_result = await session.execute(select(MemoryEntityRef))
             refs = ref_result.scalars().all()
 
-            memory_ids_seen: Set[int] = set()
+            memory_ids_seen: set[int] = set()
 
             for ref in refs:
                 memory_node_id = f"memory:{ref.memory_id}"
@@ -216,9 +218,7 @@ class KnowledgeGraph:
         """
         return self._graph.has_node(node_id)
 
-    def get_neighbors(
-        self, node_id: str, direction: str = "both"
-    ) -> List[str]:
+    def get_neighbors(self, node_id: str, direction: str = "both") -> list[str]:
         """
         Get connected nodes for a given node.
 
@@ -241,7 +241,7 @@ class KnowledgeGraph:
             successors = set(self._graph.successors(node_id))
             return list(predecessors | successors)
 
-    def get_node_attributes(self, node_id: str) -> Optional[dict]:
+    def get_node_attributes(self, node_id: str) -> dict | None:
         """
         Get attributes for a node.
 
@@ -255,9 +255,7 @@ class KnowledgeGraph:
             return None
         return dict(self._graph.nodes[node_id])
 
-    def get_edge_attributes(
-        self, source_id: str, target_id: str
-    ) -> Optional[dict]:
+    def get_edge_attributes(self, source_id: str, target_id: str) -> dict | None:
         """
         Get attributes for an edge.
 
@@ -276,7 +274,7 @@ class KnowledgeGraph:
     # Traversal Helpers
     # =========================================================================
 
-    def get_entity_nodes(self, entity_type: Optional[str] = None) -> List[str]:
+    def get_entity_nodes(self, entity_type: str | None = None) -> list[str]:
         """
         Get all entity node IDs, optionally filtered by type.
 
@@ -294,7 +292,7 @@ class KnowledgeGraph:
                     result.append(node_id)
         return result
 
-    def get_memory_nodes(self) -> List[str]:
+    def get_memory_nodes(self) -> list[str]:
         """
         Get all memory node IDs.
 
@@ -307,7 +305,7 @@ class KnowledgeGraph:
             if attrs.get("node_type") == "memory"
         ]
 
-    def get_memories_for_entity(self, entity_id: int) -> List[int]:
+    def get_memories_for_entity(self, entity_id: int) -> list[int]:
         """
         Get memory IDs that reference a given entity.
 
@@ -332,7 +330,7 @@ class KnowledgeGraph:
                     continue
         return memory_ids
 
-    def get_entities_for_memory(self, memory_id: int) -> List[int]:
+    def get_entities_for_memory(self, memory_id: int) -> list[int]:
         """
         Get entity IDs referenced by a given memory.
 
@@ -357,9 +355,7 @@ class KnowledgeGraph:
                     continue
         return entity_ids
 
-    def get_related_memories(
-        self, memory_id: int, max_depth: int = 2
-    ) -> List[int]:
+    def get_related_memories(self, memory_id: int, max_depth: int = 2) -> list[int]:
         """
         Find memories related to the given memory via relationships.
 
@@ -396,9 +392,7 @@ class KnowledgeGraph:
 
         return related_memory_ids
 
-    def get_common_entities(
-        self, memory_id_a: int, memory_id_b: int
-    ) -> List[int]:
+    def get_common_entities(self, memory_id_a: int, memory_id_b: int) -> list[int]:
         """
         Find entities shared between two memories.
 
@@ -416,9 +410,7 @@ class KnowledgeGraph:
         entities_b = set(self.get_entities_for_memory(memory_id_b))
         return list(entities_a & entities_b)
 
-    def get_entity_neighborhood(
-        self, entity_id: int, max_hops: int = 2
-    ) -> dict:
+    def get_entity_neighborhood(self, entity_id: int, max_hops: int = 2) -> dict:
         """
         Get the neighborhood of an entity including connected memories.
 
@@ -445,7 +437,7 @@ class KnowledgeGraph:
         direct_memory_ids = self.get_memories_for_entity(entity_id)
 
         # Related memories: explore from direct memories
-        related_memory_ids: Set[int] = set()
+        related_memory_ids: set[int] = set()
         if max_hops > 1:
             for mem_id in direct_memory_ids:
                 related = self.get_related_memories(mem_id, max_depth=max_hops - 1)
@@ -474,7 +466,7 @@ class KnowledgeGraph:
         start_memory_id: int,
         end_memory_id: int,
         max_depth: int = 5,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """
         Find causal paths between two memories.
 
@@ -496,10 +488,10 @@ class KnowledgeGraph:
     async def get_related(
         self,
         memory_id: int,
-        relationship_types: Optional[List[str]] = None,
+        relationship_types: list[str] | None = None,
         direction: str = "both",
         max_depth: int = 2,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """
         Find memories related to a given memory.
 
@@ -522,7 +514,7 @@ class KnowledgeGraph:
     async def trace_evolution(
         self,
         entity_id: int,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """
         Trace how knowledge about an entity evolved over time.
 
@@ -537,7 +529,7 @@ class KnowledgeGraph:
         await self.ensure_loaded()
         return await trace_knowledge_evolution(self._graph, entity_id, self._db)
 
-    def get_metrics(self) -> Dict[str, Any]:
+    def get_metrics(self) -> dict[str, Any]:
         """
         Get metrics about the knowledge graph structure.
 

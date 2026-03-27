@@ -12,10 +12,10 @@ import pytest
 from daem0nmcp.cognitive import SimulationResult
 from daem0nmcp.cognitive.simulate import run_simulation
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def _make_memory(
     id: int,
@@ -30,9 +30,7 @@ def _make_memory(
     mem.content = content
     mem.outcome = outcome
     mem.worked = worked
-    mem.created_at = created_at or (
-        datetime.now(timezone.utc) - timedelta(hours=48)
-    )
+    mem.created_at = created_at or (datetime.now(timezone.utc) - timedelta(hours=48))
     return mem
 
 
@@ -48,7 +46,9 @@ def _make_recall_result(memories=None):
         "limit": 5,
         "has_more": False,
         "summary": None,
-        "decisions": [m for m in memories if m.get("category", "decision") == "decision"],
+        "decisions": [
+            m for m in memories if m.get("category", "decision") == "decision"
+        ],
         "patterns": [m for m in memories if m.get("category") == "pattern"],
         "learnings": [m for m in memories if m.get("category") == "learning"],
         "warnings": [m for m in memories if m.get("category") == "warning"],
@@ -115,18 +115,39 @@ class TestSimulateDecisionBasic:
     async def test_simulate_decision_basic(self):
         """Basic simulation: decision found, version exists, knowledge diff populated."""
         decision_time = datetime.now(timezone.utc) - timedelta(days=5)
-        decision_mem = _make_memory(id=1, content="Use Redis for caching", created_at=decision_time)
+        decision_mem = _make_memory(
+            id=1, content="Use Redis for caching", created_at=decision_time
+        )
 
         version = MagicMock()
         version.changed_at = decision_time
 
-        historical = _make_recall_result([
-            {"id": 10, "content": "old evidence", "worked": True, "category": "decision"},
-        ])
-        current = _make_recall_result([
-            {"id": 10, "content": "old evidence", "worked": True, "category": "decision"},
-            {"id": 20, "content": "new evidence", "worked": None, "category": "learning"},
-        ])
+        historical = _make_recall_result(
+            [
+                {
+                    "id": 10,
+                    "content": "old evidence",
+                    "worked": True,
+                    "category": "decision",
+                },
+            ]
+        )
+        current = _make_recall_result(
+            [
+                {
+                    "id": 10,
+                    "content": "old evidence",
+                    "worked": True,
+                    "category": "decision",
+                },
+                {
+                    "id": 20,
+                    "content": "new evidence",
+                    "worked": None,
+                    "category": "learning",
+                },
+            ]
+        )
 
         ctx = _make_ctx(
             decision_memory=decision_mem,
@@ -148,7 +169,9 @@ class TestSimulateDecisionNoVersionsFallback:
     async def test_simulate_decision_no_versions_fallback(self):
         """When no version records exist, falls back to Memory.created_at."""
         decision_time = datetime.now(timezone.utc) - timedelta(days=3)
-        decision_mem = _make_memory(id=2, content="Use PostgreSQL", created_at=decision_time)
+        decision_mem = _make_memory(
+            id=2, content="Use PostgreSQL", created_at=decision_time
+        )
 
         ctx = _make_ctx(
             decision_memory=decision_mem,
@@ -178,11 +201,23 @@ class TestSimulateDecisionNoChanges:
     async def test_simulate_decision_no_changes(self):
         """When historical and current recall return same memories, no changes detected."""
         decision_time = datetime.now(timezone.utc) - timedelta(days=1)
-        decision_mem = _make_memory(id=3, content="Keep using REST", created_at=decision_time)
+        decision_mem = _make_memory(
+            id=3, content="Keep using REST", created_at=decision_time
+        )
 
         same_memories = [
-            {"id": 10, "content": "REST is stable", "worked": True, "category": "decision"},
-            {"id": 11, "content": "REST pattern", "worked": None, "category": "pattern"},
+            {
+                "id": 10,
+                "content": "REST is stable",
+                "worked": True,
+                "category": "decision",
+            },
+            {
+                "id": 11,
+                "content": "REST pattern",
+                "worked": None,
+                "category": "pattern",
+            },
         ]
         same_recall = _make_recall_result(same_memories)
 
@@ -206,16 +241,42 @@ class TestSimulateDecisionNewEvidence:
     async def test_simulate_decision_new_evidence(self):
         """When current recall has more memories than historical, new_evidence is populated."""
         decision_time = datetime.now(timezone.utc) - timedelta(days=7)
-        decision_mem = _make_memory(id=4, content="Deploy to AWS", created_at=decision_time)
+        decision_mem = _make_memory(
+            id=4, content="Deploy to AWS", created_at=decision_time
+        )
 
-        historical = _make_recall_result([
-            {"id": 10, "content": "AWS setup", "worked": True, "category": "decision"},
-        ])
-        current = _make_recall_result([
-            {"id": 10, "content": "AWS setup", "worked": True, "category": "decision"},
-            {"id": 20, "content": "GCP comparison", "worked": True, "category": "learning"},
-            {"id": 30, "content": "cost analysis", "worked": None, "category": "pattern"},
-        ])
+        historical = _make_recall_result(
+            [
+                {
+                    "id": 10,
+                    "content": "AWS setup",
+                    "worked": True,
+                    "category": "decision",
+                },
+            ]
+        )
+        current = _make_recall_result(
+            [
+                {
+                    "id": 10,
+                    "content": "AWS setup",
+                    "worked": True,
+                    "category": "decision",
+                },
+                {
+                    "id": 20,
+                    "content": "GCP comparison",
+                    "worked": True,
+                    "category": "learning",
+                },
+                {
+                    "id": 30,
+                    "content": "cost analysis",
+                    "worked": None,
+                    "category": "pattern",
+                },
+            ]
+        )
 
         ctx = _make_ctx(
             decision_memory=decision_mem,

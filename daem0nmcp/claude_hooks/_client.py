@@ -112,6 +112,7 @@ def run_hook_safely(main_func, timeout_seconds: int = 5) -> None:
     On timeout or exception, exits cleanly with code 0 so hooks never
     break the user's workflow.
     """
+
     def _timeout_handler():
         # Last-resort kill.  os._exit bypasses Python cleanup but
         # guarantees termination even if the main thread is stuck in

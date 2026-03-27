@@ -3,10 +3,10 @@
 import pytest
 import pytest_asyncio
 
-from daem0nmcp.database import DatabaseManager
-from daem0nmcp.memory import MemoryManager
-from daem0nmcp.enforcement import SessionManager
 from daem0nmcp.claude_hooks.session_start import async_main
+from daem0nmcp.database import DatabaseManager
+from daem0nmcp.enforcement import SessionManager
+from daem0nmcp.memory import MemoryManager
 
 
 @pytest_asyncio.fixture
@@ -21,9 +21,19 @@ async def tmp_project(tmp_path):
     await db.init_db()
     memory = MemoryManager(db)
 
-    await memory.remember(category="decision", content="Use Redis for caching", project_path=str(tmp_path))
-    await memory.remember(category="pattern", content="Always use dependency injection", project_path=str(tmp_path))
-    await memory.remember(category="warning", content="SQLite locks under heavy load", project_path=str(tmp_path))
+    await memory.remember(
+        category="decision", content="Use Redis for caching", project_path=str(tmp_path)
+    )
+    await memory.remember(
+        category="pattern",
+        content="Always use dependency injection",
+        project_path=str(tmp_path),
+    )
+    await memory.remember(
+        category="warning",
+        content="SQLite locks under heavy load",
+        project_path=str(tmp_path),
+    )
 
     yield tmp_path
 

@@ -9,7 +9,7 @@ import json
 import logging
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, Optional, Any
+from typing import Any
 
 from daem0nmcp.watcher import WatcherNotification
 
@@ -74,7 +74,7 @@ class EditorPollChannel:
         poll_path: Path,
         max_entries: int = 50,
         entry_ttl_seconds: int = 3600,
-        include_top_memories: int = 3
+        include_top_memories: int = 3,
     ):
         """
         Initialize the editor poll channel.
@@ -89,11 +89,11 @@ class EditorPollChannel:
         self._max_entries = max_entries
         self._entry_ttl_seconds = entry_ttl_seconds
         self._include_top_memories = include_top_memories
-        self._project_path: Optional[Path] = None
+        self._project_path: Path | None = None
 
         # In-memory state (persisted to file)
-        self._files: Dict[str, Dict[str, Any]] = {}
-        self._last_updated: Optional[datetime] = None
+        self._files: dict[str, dict[str, Any]] = {}
+        self._last_updated: datetime | None = None
 
         # Ensure parent directory exists
         self._poll_path.parent.mkdir(parents=True, exist_ok=True)
@@ -142,7 +142,7 @@ class EditorPollChannel:
     def _build_file_entry(self, notification: WatcherNotification) -> dict:
         """Build a file entry dictionary."""
         # Count by category
-        categories: Dict[str, int] = {}
+        categories: dict[str, int] = {}
         has_warnings = False
         has_failures = False
 
@@ -166,17 +166,19 @@ class EditorPollChannel:
         # Include top memories
         if self._include_top_memories > 0:
             top_memories = []
-            for mem in notification.memories[:self._include_top_memories]:
+            for mem in notification.memories[: self._include_top_memories]:
                 content = mem.get("content", "")
                 if len(content) > 100:
                     content = content[:97] + "..."
 
-                top_memories.append({
-                    "id": mem.get("id"),
-                    "category": mem.get("category"),
-                    "content": content,
-                    "worked": mem.get("worked"),
-                })
+                top_memories.append(
+                    {
+                        "id": mem.get("id"),
+                        "category": mem.get("category"),
+                        "content": content,
+                        "worked": mem.get("worked"),
+                    }
+                )
             entry["top_memories"] = top_memories
 
         return entry
@@ -192,7 +194,9 @@ class EditorPollChannel:
                 last_change = entry.get("last_change")
                 if last_change:
                     try:
-                        change_time = datetime.fromisoformat(last_change.replace("Z", "+00:00"))
+                        change_time = datetime.fromisoformat(
+                            last_change.replace("Z", "+00:00")
+                        )
                         age = (now - change_time).total_seconds()
                         if age > self._entry_ttl_seconds:
                             to_remove.append(file_path)
@@ -236,7 +240,9 @@ class EditorPollChannel:
         """Save state to poll file."""
         state = {
             "version": self.CURRENT_VERSION,
-            "updated_at": self._last_updated.isoformat() if self._last_updated else None,
+            "updated_at": self._last_updated.isoformat()
+            if self._last_updated
+            else None,
             "project_path": str(self._project_path) if self._project_path else None,
             "files": self._files,
             "stats": self._build_stats(),
@@ -251,7 +257,7 @@ class EditorPollChannel:
             return
 
         try:
-            with open(self._poll_path, "r", encoding="utf-8") as f:
+            with open(self._poll_path, encoding="utf-8") as f:
                 state = json.load(f)
 
             # Check version compatibility
@@ -304,7 +310,7 @@ class EditorPollChannel:
             return True
         return False
 
-    def get_file_info(self, file_path: Path) -> Optional[dict]:
+    def get_file_info(self, file_path: Path) -> dict | None:
         """
         Get the poll info for a specific file.
 
@@ -316,7 +322,7 @@ class EditorPollChannel:
         """
         return self._files.get(str(file_path))
 
-    def get_all_files(self) -> Dict[str, dict]:
+    def get_all_files(self) -> dict[str, dict]:
         """
         Get all tracked files.
 

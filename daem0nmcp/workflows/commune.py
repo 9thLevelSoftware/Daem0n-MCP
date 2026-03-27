@@ -10,38 +10,40 @@ Actions:
 - updates: Check if daemon knowledge has changed since a timestamp
 """
 
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from .errors import InvalidActionError
 
-VALID_ACTIONS = frozenset({
-    "briefing",
-    "active_context",
-    "triggers",
-    "health",
-    "covenant",
-    "updates",
-})
+VALID_ACTIONS = frozenset(
+    {
+        "briefing",
+        "active_context",
+        "triggers",
+        "health",
+        "covenant",
+        "updates",
+    }
+)
 
 
 async def dispatch(
     action: str,
     project_path: str,
     *,
-    focus_areas: Optional[List[str]] = None,
+    focus_areas: list[str] | None = None,
     visual: bool = False,
     # triggers params
-    file_path: Optional[str] = None,
-    tags: Optional[List[str]] = None,
-    entities: Optional[List[str]] = None,
+    file_path: str | None = None,
+    tags: list[str] | None = None,
+    entities: list[str] | None = None,
     limit: int = 5,
     # updates params
-    since: Optional[str] = None,
+    since: str | None = None,
     interval_seconds: int = 10,
     # communities visual param
-    parent_community_id: Optional[int] = None,
+    parent_community_id: int | None = None,
     **kwargs,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Dispatch action to appropriate handler."""
     if action not in VALID_ACTIONS:
         raise InvalidActionError(action, sorted(VALID_ACTIONS))
@@ -51,9 +53,7 @@ async def dispatch(
     elif action == "active_context":
         return await _do_active_context(project_path)
     elif action == "triggers":
-        return await _do_triggers(
-            project_path, file_path, tags, entities, limit
-        )
+        return await _do_triggers(project_path, file_path, tags, entities, limit)
     elif action == "health":
         return await _do_health(project_path)
     elif action == "covenant":
@@ -66,9 +66,9 @@ async def dispatch(
 
 async def _do_briefing(
     project_path: str,
-    focus_areas: Optional[List[str]],
+    focus_areas: list[str] | None,
     visual: bool,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Get session briefing."""
     from ..server import get_briefing, get_briefing_visual
 
@@ -76,12 +76,10 @@ async def _do_briefing(
         return await get_briefing_visual(
             project_path=project_path, focus_areas=focus_areas
         )
-    return await get_briefing(
-        project_path=project_path, focus_areas=focus_areas
-    )
+    return await get_briefing(project_path=project_path, focus_areas=focus_areas)
 
 
-async def _do_active_context(project_path: str) -> Dict[str, Any]:
+async def _do_active_context(project_path: str) -> dict[str, Any]:
     """Get all always-hot memories."""
     from ..server import get_active_context
 
@@ -90,11 +88,11 @@ async def _do_active_context(project_path: str) -> Dict[str, Any]:
 
 async def _do_triggers(
     project_path: str,
-    file_path: Optional[str],
-    tags: Optional[List[str]],
-    entities: Optional[List[str]],
+    file_path: str | None,
+    tags: list[str] | None,
+    entities: list[str] | None,
     limit: int,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Check context triggers and get auto-recalled memories."""
     from ..server import check_context_triggers
 
@@ -107,16 +105,14 @@ async def _do_triggers(
     )
 
 
-async def _do_health(project_path: str) -> Dict[str, Any]:
+async def _do_health(project_path: str) -> dict[str, Any]:
     """Get server health and stats."""
     from ..server import health
 
     return await health(project_path=project_path)
 
 
-async def _do_covenant(
-    project_path: str, visual: bool
-) -> Dict[str, Any]:
+async def _do_covenant(project_path: str, visual: bool) -> dict[str, Any]:
     """Get Sacred Covenant status."""
     from ..server import get_covenant_status, get_covenant_status_visual
 
@@ -127,9 +123,9 @@ async def _do_covenant(
 
 async def _do_updates(
     project_path: str,
-    since: Optional[str],
+    since: str | None,
     interval_seconds: int,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Check if daemon knowledge has changed."""
     from ..server import check_for_updates
 

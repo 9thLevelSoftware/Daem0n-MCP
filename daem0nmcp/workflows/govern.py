@@ -10,18 +10,20 @@ Actions:
 - remove_trigger: Remove a context trigger
 """
 
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from .errors import InvalidActionError, MissingParamError
 
-VALID_ACTIONS = frozenset({
-    "add_rule",
-    "update_rule",
-    "list_rules",
-    "add_trigger",
-    "list_triggers",
-    "remove_trigger",
-})
+VALID_ACTIONS = frozenset(
+    {
+        "add_rule",
+        "update_rule",
+        "list_rules",
+        "add_trigger",
+        "list_triggers",
+        "remove_trigger",
+    }
+)
 
 
 async def dispatch(
@@ -29,27 +31,27 @@ async def dispatch(
     project_path: str,
     *,
     # add_rule params
-    trigger: Optional[str] = None,
-    must_do: Optional[List[str]] = None,
-    must_not: Optional[List[str]] = None,
-    ask_first: Optional[List[str]] = None,
-    warnings: Optional[List[str]] = None,
+    trigger: str | None = None,
+    must_do: list[str] | None = None,
+    must_not: list[str] | None = None,
+    ask_first: list[str] | None = None,
+    warnings: list[str] | None = None,
     priority: int = 0,
     # update_rule params
-    rule_id: Optional[int] = None,
-    enabled: Optional[bool] = None,
+    rule_id: int | None = None,
+    enabled: bool | None = None,
     # list_rules params
     enabled_only: bool = True,
     limit: int = 50,
     # add_trigger params
-    trigger_type: Optional[str] = None,
-    pattern: Optional[str] = None,
-    recall_topic: Optional[str] = None,
-    recall_categories: Optional[List[str]] = None,
+    trigger_type: str | None = None,
+    pattern: str | None = None,
+    recall_topic: str | None = None,
+    recall_categories: list[str] | None = None,
     # list_triggers params
     active_only: bool = True,
     # remove_trigger params
-    trigger_id: Optional[int] = None,
+    trigger_id: int | None = None,
     **kwargs,
 ) -> Any:
     """Dispatch action to appropriate handler."""
@@ -60,16 +62,27 @@ async def dispatch(
         if not trigger:
             raise MissingParamError("trigger", action)
         return await _do_add_rule(
-            project_path, trigger, must_do, must_not,
-            ask_first, warnings, priority,
+            project_path,
+            trigger,
+            must_do,
+            must_not,
+            ask_first,
+            warnings,
+            priority,
         )
 
     elif action == "update_rule":
         if rule_id is None:
             raise MissingParamError("rule_id", action)
         return await _do_update_rule(
-            project_path, rule_id, must_do, must_not,
-            ask_first, warnings, priority, enabled,
+            project_path,
+            rule_id,
+            must_do,
+            must_not,
+            ask_first,
+            warnings,
+            priority,
+            enabled,
         )
 
     elif action == "list_rules":
@@ -83,8 +96,12 @@ async def dispatch(
         if not recall_topic:
             raise MissingParamError("recall_topic", action)
         return await _do_add_trigger(
-            project_path, trigger_type, pattern,
-            recall_topic, recall_categories, priority,
+            project_path,
+            trigger_type,
+            pattern,
+            recall_topic,
+            recall_categories,
+            priority,
         )
 
     elif action == "list_triggers":
@@ -101,12 +118,12 @@ async def dispatch(
 async def _do_add_rule(
     project_path: str,
     trigger: str,
-    must_do: Optional[List[str]],
-    must_not: Optional[List[str]],
-    ask_first: Optional[List[str]],
-    warnings: Optional[List[str]],
+    must_do: list[str] | None,
+    must_not: list[str] | None,
+    ask_first: list[str] | None,
+    warnings: list[str] | None,
     priority: int,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Add a decision tree rule."""
     from ..server import add_rule
 
@@ -124,13 +141,13 @@ async def _do_add_rule(
 async def _do_update_rule(
     project_path: str,
     rule_id: int,
-    must_do: Optional[List[str]],
-    must_not: Optional[List[str]],
-    ask_first: Optional[List[str]],
-    warnings: Optional[List[str]],
+    must_do: list[str] | None,
+    must_not: list[str] | None,
+    ask_first: list[str] | None,
+    warnings: list[str] | None,
     priority: int,
-    enabled: Optional[bool],
-) -> Dict[str, Any]:
+    enabled: bool | None,
+) -> dict[str, Any]:
     """Update an existing rule."""
     from ..server import update_rule
 
@@ -146,9 +163,7 @@ async def _do_update_rule(
     )
 
 
-async def _do_list_rules(
-    project_path: str, enabled_only: bool, limit: int
-) -> Any:
+async def _do_list_rules(project_path: str, enabled_only: bool, limit: int) -> Any:
     """List all configured rules."""
     from ..server import list_rules
 
@@ -162,9 +177,9 @@ async def _do_add_trigger(
     trigger_type: str,
     pattern: str,
     recall_topic: str,
-    recall_categories: Optional[List[str]],
+    recall_categories: list[str] | None,
     priority: int,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Create auto-recall trigger."""
     from ..server import add_context_trigger
 
@@ -178,9 +193,7 @@ async def _do_add_trigger(
     )
 
 
-async def _do_list_triggers(
-    project_path: str, active_only: bool
-) -> Dict[str, Any]:
+async def _do_list_triggers(project_path: str, active_only: bool) -> dict[str, Any]:
     """List all configured context triggers."""
     from ..server import list_context_triggers
 
@@ -189,9 +202,7 @@ async def _do_list_triggers(
     )
 
 
-async def _do_remove_trigger(
-    project_path: str, trigger_id: int
-) -> Dict[str, Any]:
+async def _do_remove_trigger(project_path: str, trigger_id: int) -> dict[str, Any]:
     """Remove a context trigger."""
     from ..server import remove_context_trigger
 

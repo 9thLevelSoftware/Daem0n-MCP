@@ -1,9 +1,10 @@
 """Tests for database migrations."""
 
-import pytest
-import tempfile
 import sqlite3
+import tempfile
 from pathlib import Path
+
+import pytest
 
 
 class TestMigrations:
@@ -70,6 +71,7 @@ class TestMigrations:
         yield str(db_path)
 
         import shutil
+
         shutil.rmtree(temp_dir, ignore_errors=True)
 
     def test_migration_adds_vector_embedding(self, legacy_db):
@@ -116,9 +118,9 @@ class TestMigrations:
                 "SELECT name FROM sqlite_master WHERE type='trigger' AND tbl_name='memories'"
             )
             triggers = [row[0] for row in cursor.fetchall()]
-            assert 'memories_ai' in triggers  # After insert
-            assert 'memories_au' in triggers  # After update
-            assert 'memories_ad' in triggers  # After delete
+            assert "memories_ai" in triggers  # After insert
+            assert "memories_au" in triggers  # After update
+            assert "memories_ad" in triggers  # After delete
 
     def test_migration_adds_pinned_archived_columns(self, legacy_db):
         """Verify migration adds pinned and archived columns."""
@@ -222,21 +224,31 @@ def test_migration_14_bitemporal_columns():
 
         assert "valid_from" in columns, "valid_from column missing"
         assert "valid_to" in columns, "valid_to column missing"
-        assert "invalidated_by_version_id" in columns, "invalidated_by_version_id column missing"
+        assert "invalidated_by_version_id" in columns, (
+            "invalidated_by_version_id column missing"
+        )
 
         # Verify backfill worked (valid_from should equal changed_at)
-        cursor.execute("SELECT valid_from, changed_at FROM memory_versions WHERE id = 1")
+        cursor.execute(
+            "SELECT valid_from, changed_at FROM memory_versions WHERE id = 1"
+        )
         row = cursor.fetchone()
         assert row[0] is not None, "valid_from should be backfilled"
         assert row[0] == row[1], "valid_from should equal changed_at after backfill"
 
         # Verify indexes exist
-        cursor.execute("SELECT name FROM sqlite_master WHERE type='index' AND name LIKE '%temporal%'")
+        cursor.execute(
+            "SELECT name FROM sqlite_master WHERE type='index' AND name LIKE '%temporal%'"
+        )
         indexes = {row[0] for row in cursor.fetchall()}
         assert "idx_memory_versions_temporal" in indexes, "Temporal index missing"
 
-        cursor.execute("SELECT name FROM sqlite_master WHERE type='index' AND name LIKE '%transaction%'")
+        cursor.execute(
+            "SELECT name FROM sqlite_master WHERE type='index' AND name LIKE '%transaction%'"
+        )
         indexes = {row[0] for row in cursor.fetchall()}
-        assert "idx_memory_versions_transaction" in indexes, "Transaction time index missing"
+        assert "idx_memory_versions_transaction" in indexes, (
+            "Transaction time index missing"
+        )
 
         conn.close()

@@ -17,7 +17,7 @@ memory with full provenance tags (TOOL-04).
 
 import logging
 import uuid
-from typing import TYPE_CHECKING, Any, Dict, List, Optional
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from ..context_manager import ProjectContext
@@ -27,7 +27,7 @@ try:
 except ImportError:
     from daem0nmcp.config import settings
 
-from . import DebateArgument, DebateRound, DebateResult
+from . import DebateArgument, DebateResult, DebateRound
 
 logger = logging.getLogger(__name__)
 
@@ -36,7 +36,8 @@ logger = logging.getLogger(__name__)
 # Evidence scoring
 # ---------------------------------------------------------------------------
 
-def score_evidence(memories: List[Dict[str, Any]]) -> float:
+
+def score_evidence(memories: list[dict[str, Any]]) -> float:
     """Score evidence strength from recalled memories.
 
     Returns a float in [0.0, 1.0].  Higher scores indicate stronger
@@ -78,7 +79,8 @@ def score_evidence(memories: List[Dict[str, Any]]) -> float:
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _extract_memories(recall_result: Dict[str, Any]) -> List[Dict[str, Any]]:
+
+def _extract_memories(recall_result: dict[str, Any]) -> list[dict[str, Any]]:
     """Extract a flat list of memory dicts from a ``recall()`` result.
 
     Handles both result structures:
@@ -101,7 +103,7 @@ def _extract_memories(recall_result: Dict[str, Any]) -> List[Dict[str, Any]]:
             return memories_val
 
     # Categorized structure (normal recall result)
-    flat: List[Dict[str, Any]] = []
+    flat: list[dict[str, Any]] = []
     for cat_key in ("decisions", "patterns", "warnings", "learnings"):
         entries = recall_result.get(cat_key)
         if isinstance(entries, list):
@@ -138,10 +140,8 @@ async def _gather_evidence(
 
     memories = _extract_memories(recall_result)
 
-    evidence_ids: List[int] = [m["id"] for m in memories if "id" in m]
-    evidence_summaries: List[str] = [
-        m.get("content", "")[:100] for m in memories[:5]
-    ]
+    evidence_ids: list[int] = [m["id"] for m in memories if "id" in m]
+    evidence_summaries: list[str] = [m.get("content", "")[:100] for m in memories[:5]]
     evidence_strength = score_evidence(memories)
     outcome_support = sum(1 for m in memories if m.get("worked") is True)
     outcome_against = sum(1 for m in memories if m.get("worked") is False)
@@ -160,6 +160,7 @@ async def _gather_evidence(
 # ---------------------------------------------------------------------------
 # Main entry point
 # ---------------------------------------------------------------------------
+
 
 async def run_debate(
     topic: str,
@@ -238,7 +239,7 @@ async def _run_debate_inner(
     )
     min_evidence: int = getattr(settings, "cognitive_debate_min_evidence", 2)
 
-    rounds: List[DebateRound] = []
+    rounds: list[DebateRound] = []
     prev_advocate_score: float = 0.0
     prev_challenger_score: float = 0.0
 
@@ -286,12 +287,10 @@ async def _run_debate_inner(
     # Debate rounds
     # ------------------------------------------------------------------
     converged = False
-    convergence_round: Optional[int] = None
+    convergence_round: int | None = None
 
     for round_num in range(1, max_rounds + 1):
-        advocate = await _gather_evidence(
-            topic, advocate_position, "advocate", ctx
-        )
+        advocate = await _gather_evidence(topic, advocate_position, "advocate", ctx)
         challenger = await _gather_evidence(
             topic, challenger_position, "challenger", ctx
         )
@@ -391,7 +390,7 @@ async def _run_debate_inner(
     # ------------------------------------------------------------------
     # Generate synthesis
     # ------------------------------------------------------------------
-    synthesis_parts: List[str] = [
+    synthesis_parts: list[str] = [
         f"The Adversarial Council has deliberated on '{topic}' "
         f"for {total_rounds} round{'s' if total_rounds != 1 else ''}.",
     ]
@@ -407,8 +406,7 @@ async def _run_debate_inner(
         )
     else:
         synthesis_parts.append(
-            f"The {winning_perspective} position prevails: "
-            f"'{winning_position}'."
+            f"The {winning_perspective} position prevails: '{winning_position}'."
         )
     synthesis_parts.append(
         f"Confidence: {confidence:.2f} based on "
@@ -420,7 +418,7 @@ async def _run_debate_inner(
     # ------------------------------------------------------------------
     # Persist consensus memory (TOOL-04)
     # ------------------------------------------------------------------
-    consensus_memory_id: Optional[int] = None
+    consensus_memory_id: int | None = None
     try:
         remember_result = await ctx.memory_manager.remember(
             category="learning",

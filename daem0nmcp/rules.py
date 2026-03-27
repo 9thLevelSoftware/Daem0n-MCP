@@ -9,14 +9,15 @@ This module handles:
 """
 
 import logging
-from typing import Optional, List, Dict, Any
 from datetime import datetime, timezone
-from sqlalchemy import select, desc
+from typing import Any
 
+from sqlalchemy import desc, select
+
+from .cache import get_rules_cache, make_cache_key
 from .database import DatabaseManager
 from .models import Rule
 from .similarity import TFIDFIndex, extract_keywords
-from .cache import get_rules_cache, make_cache_key
 
 logger = logging.getLogger(__name__)
 
@@ -37,9 +38,9 @@ class RulesEngine:
 
     def __init__(self, db_manager: DatabaseManager):
         self.db = db_manager
-        self._index: Optional[TFIDFIndex] = None
+        self._index: TFIDFIndex | None = None
         self._index_loaded = False
-        self._index_built_at: Optional[datetime] = None
+        self._index_built_at: datetime | None = None
 
     async def _ensure_index(self) -> TFIDFIndex:
         """Ensure the TF-IDF index is loaded with all rules."""
@@ -91,12 +92,12 @@ class RulesEngine:
     async def add_rule(
         self,
         trigger: str,
-        must_do: Optional[List[str]] = None,
-        must_not: Optional[List[str]] = None,
-        ask_first: Optional[List[str]] = None,
-        warnings: Optional[List[str]] = None,
-        priority: int = 0
-    ) -> Dict[str, Any]:
+        must_do: list[str] | None = None,
+        must_not: list[str] | None = None,
+        ask_first: list[str] | None = None,
+        warnings: list[str] | None = None,
+        priority: int = 0,
+    ) -> dict[str, Any]:
         """
         Add a new rule to the decision tree.
 
@@ -122,7 +123,7 @@ class RulesEngine:
             ask_first=ask_first or [],
             warnings=warnings or [],
             priority=priority,
-            enabled=True
+            enabled=True,
         )
 
         async with self.db.get_session() as session:
@@ -147,15 +148,15 @@ class RulesEngine:
                 "ask_first": ask_first or [],
                 "warnings": warnings or [],
                 "priority": priority,
-                "created_at": rule.created_at.isoformat()
+                "created_at": rule.created_at.isoformat(),
             }
 
     async def check_rules(
         self,
         action: str,
-        context: Optional[Dict[str, Any]] = None,
-        threshold: float = 0.15
-    ) -> Dict[str, Any]:
+        context: dict[str, Any] | None = None,
+        threshold: float = 0.15,
+    ) -> dict[str, Any]:
         """
         Check if an action triggers any rules and return guidance.
 
@@ -189,7 +190,7 @@ class RulesEngine:
                 "action": action,
                 "matched_rules": 0,
                 "guidance": None,
-                "message": "No rules match this action - proceed with caution"
+                "message": "No rules match this action - proceed with caution",
             }
 
         # Get full rule objects
@@ -198,18 +199,19 @@ class RulesEngine:
 
         async with self.db.get_session() as session:
             result = await session.execute(
-                select(Rule)
-                .where(Rule.id.in_(rule_ids))
-                .where(Rule.enabled == True)  # noqa: E712
+                select(Rule).where(Rule.id.in_(rule_ids)).where(Rule.enabled == True)  # noqa: E712
             )
             rules = {r.id: r for r in result.scalars().all()}
 
         # Sort by priority then score
         sorted_matches = sorted(
-            [(rule_id, score_map[rule_id], rules[rule_id])
-             for rule_id, _ in matches if rule_id in rules],
+            [
+                (rule_id, score_map[rule_id], rules[rule_id])
+                for rule_id, _ in matches
+                if rule_id in rules
+            ],
             key=lambda x: (x[2].priority, x[1]),
-            reverse=True
+            reverse=True,
         )
 
         if not sorted_matches:
@@ -217,16 +219,11 @@ class RulesEngine:
                 "action": action,
                 "matched_rules": 0,
                 "guidance": None,
-                "message": "No active rules match this action"
+                "message": "No active rules match this action",
             }
 
         # Combine guidance from matching rules
-        combined = {
-            "must_do": [],
-            "must_not": [],
-            "ask_first": [],
-            "warnings": []
-        }
+        combined = {"must_do": [], "must_not": [], "ask_first": [], "warnings": []}
 
         matched_details = []
         for rule_id, score, rule in sorted_matches:
@@ -235,12 +232,14 @@ class RulesEngine:
             combined["ask_first"].extend(rule.ask_first)
             combined["warnings"].extend(rule.warnings)
 
-            matched_details.append({
-                "id": rule.id,
-                "trigger": rule.trigger,
-                "match_score": round(score, 3),
-                "priority": rule.priority
-            })
+            matched_details.append(
+                {
+                    "id": rule.id,
+                    "trigger": rule.trigger,
+                    "match_score": round(score, 3),
+                    "priority": rule.priority,
+                }
+            )
 
         # Deduplicate while preserving order
         combined["must_do"] = list(dict.fromkeys(combined["must_do"]))
@@ -267,7 +266,7 @@ class RulesEngine:
             "rules": matched_details,
             "guidance": combined,
             "has_blockers": has_blockers,
-            "message": message
+            "message": message,
         }
 
         # Cache the result
@@ -276,10 +275,8 @@ class RulesEngine:
         return result
 
     async def list_rules(
-        self,
-        enabled_only: bool = True,
-        limit: int = 50
-    ) -> List[Dict[str, Any]]:
+        self, enabled_only: bool = True, limit: int = 50
+    ) -> list[dict[str, Any]]:
         """List all rules."""
         async with self.db.get_session() as session:
             query = select(Rule).order_by(desc(Rule.priority), desc(Rule.created_at))
@@ -302,7 +299,7 @@ class RulesEngine:
                     "warnings": r.warnings,
                     "priority": r.priority,
                     "enabled": r.enabled,
-                    "created_at": r.created_at.isoformat()
+                    "created_at": r.created_at.isoformat(),
                 }
                 for r in rules
             ]
@@ -310,18 +307,16 @@ class RulesEngine:
     async def update_rule(
         self,
         rule_id: int,
-        must_do: Optional[List[str]] = None,
-        must_not: Optional[List[str]] = None,
-        ask_first: Optional[List[str]] = None,
-        warnings: Optional[List[str]] = None,
-        priority: Optional[int] = None,
-        enabled: Optional[bool] = None
-    ) -> Dict[str, Any]:
+        must_do: list[str] | None = None,
+        must_not: list[str] | None = None,
+        ask_first: list[str] | None = None,
+        warnings: list[str] | None = None,
+        priority: int | None = None,
+        enabled: bool | None = None,
+    ) -> dict[str, Any]:
         """Update an existing rule."""
         async with self.db.get_session() as session:
-            result = await session.execute(
-                select(Rule).where(Rule.id == rule_id)
-            )
+            result = await session.execute(select(Rule).where(Rule.id == rule_id))
             rule = result.scalar_one_or_none()
 
             if not rule:
@@ -342,18 +337,12 @@ class RulesEngine:
                 # Invalidate index if enabled status changed
                 self._invalidate_index()
 
-            return {
-                "id": rule.id,
-                "trigger": rule.trigger,
-                "updated": True
-            }
+            return {"id": rule.id, "trigger": rule.trigger, "updated": True}
 
-    async def delete_rule(self, rule_id: int) -> Dict[str, Any]:
+    async def delete_rule(self, rule_id: int) -> dict[str, Any]:
         """Delete a rule."""
         async with self.db.get_session() as session:
-            result = await session.execute(
-                select(Rule).where(Rule.id == rule_id)
-            )
+            result = await session.execute(select(Rule).where(Rule.id == rule_id))
             rule = result.scalar_one_or_none()
 
             if not rule:
@@ -365,21 +354,12 @@ class RulesEngine:
             # Invalidate index
             self._invalidate_index()
 
-            return {
-                "deleted": True,
-                "trigger": trigger
-            }
+            return {"deleted": True, "trigger": trigger}
 
-    async def add_warning_to_rule(
-        self,
-        rule_id: int,
-        warning: str
-    ) -> Dict[str, Any]:
+    async def add_warning_to_rule(self, rule_id: int, warning: str) -> dict[str, Any]:
         """Add a warning to an existing rule (from learned experience)."""
         async with self.db.get_session() as session:
-            result = await session.execute(
-                select(Rule).where(Rule.id == rule_id)
-            )
+            result = await session.execute(select(Rule).where(Rule.id == rule_id))
             rule = result.scalar_one_or_none()
 
             if not rule:
@@ -388,17 +368,11 @@ class RulesEngine:
             if warning not in rule.warnings:
                 rule.warnings = rule.warnings + [warning]
 
-            return {
-                "id": rule.id,
-                "trigger": rule.trigger,
-                "warnings": rule.warnings
-            }
+            return {"id": rule.id, "trigger": rule.trigger, "warnings": rule.warnings}
 
     async def find_similar_rules(
-        self,
-        trigger: str,
-        limit: int = 5
-    ) -> List[Dict[str, Any]]:
+        self, trigger: str, limit: int = 5
+    ) -> list[dict[str, Any]]:
         """
         Find rules similar to a given trigger.
 
@@ -414,9 +388,7 @@ class RulesEngine:
         score_map = {rule_id: score for rule_id, score in matches}
 
         async with self.db.get_session() as session:
-            result = await session.execute(
-                select(Rule).where(Rule.id.in_(rule_ids))
-            )
+            result = await session.execute(select(Rule).where(Rule.id.in_(rule_ids)))
             rules = result.scalars().all()
 
             return [
@@ -425,12 +397,12 @@ class RulesEngine:
                     "trigger": r.trigger,
                     "similarity": round(score_map[r.id], 3),
                     "must_do_count": len(r.must_do),
-                    "warnings_count": len(r.warnings)
+                    "warnings_count": len(r.warnings),
                 }
                 for r in rules
             ]
 
-    async def rebuild_index(self) -> Dict[str, Any]:
+    async def rebuild_index(self) -> dict[str, Any]:
         """Force rebuild of TF-IDF index for rules."""
         self._index = TFIDFIndex()
         self._index_loaded = False
@@ -449,5 +421,5 @@ class RulesEngine:
 
         return {
             "rules_indexed": len(rules),
-            "built_at": self._index_built_at.isoformat()
+            "built_at": self._index_built_at.isoformat(),
         }

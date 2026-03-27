@@ -19,6 +19,7 @@ from ._client import get_project_path, succeed
 
 # Keep async_main for test compatibility -------------------------------------------------
 
+
 async def async_main(project_path: str) -> str:
     """
     Core async logic.  Returns the briefing text (empty string if nothing).
@@ -26,7 +27,7 @@ async def async_main(project_path: str) -> str:
     Separated from ``main()`` so tests can call it inside an existing
     event loop without needing a subprocess.
     """
-    from ._client import get_managers, run_async  # noqa: F811 – lazy import
+    from ._client import get_managers  # noqa: F811 – lazy import
 
     db, memory, _rules = get_managers(project_path)
     await db.init_db()
@@ -34,6 +35,7 @@ async def async_main(project_path: str) -> str:
     stats = await memory.get_statistics()
 
     from ..enforcement import SessionManager
+
     session_mgr = SessionManager(db)
     await session_mgr.mark_briefed(project_path)
 
@@ -75,14 +77,10 @@ def _fast_briefing(project_path: str) -> str:
         )
         by_cat = {row[0]: row[1] for row in cursor.fetchall()}
 
-        cursor = conn.execute(
-            "SELECT COUNT(id) FROM memories WHERE worked = 1"
-        )
+        cursor = conn.execute("SELECT COUNT(id) FROM memories WHERE worked = 1")
         worked = cursor.fetchone()[0] or 0
 
-        cursor = conn.execute(
-            "SELECT COUNT(id) FROM memories WHERE worked = 0"
-        )
+        cursor = conn.execute("SELECT COUNT(id) FROM memories WHERE worked = 0")
         failed = cursor.fetchone()[0] or 0
 
         total = sum(by_cat.values())
@@ -127,6 +125,7 @@ def _fast_briefing(project_path: str) -> str:
 
 # Shared formatting ----------------------------------------------------------------------
 
+
 def _format_briefing(stats: dict) -> str:
     total = stats.get("total_memories", 0)
     by_cat = stats.get("by_category", {})
@@ -151,6 +150,7 @@ def _format_briefing(stats: dict) -> str:
 
 # Entry points --------------------------------------------------------------------------
 
+
 def main() -> None:
     project_path = get_project_path()
     if project_path is None:
@@ -164,6 +164,7 @@ def main() -> None:
 
 if __name__ == "__main__":
     import warnings
+
     warnings.filterwarnings("ignore")  # stderr output → Claude Code "hook error"
 
     from daem0nmcp.claude_hooks._client import run_hook_safely

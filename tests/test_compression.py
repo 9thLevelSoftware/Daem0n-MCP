@@ -1,4 +1,5 @@
 """Tests for compression module."""
+
 import pytest
 
 from daem0nmcp.compression import CompressionConfig, ContextCompressor
@@ -81,7 +82,9 @@ class TestContextCompressor:
 
     def test_should_compress_over_threshold(self):
         """should_compress returns True for long text."""
-        config = CompressionConfig(compression_threshold=10)  # Low threshold for testing
+        config = CompressionConfig(
+            compression_threshold=10
+        )  # Low threshold for testing
         compressor = ContextCompressor(config)
         long_text = "This is a longer text that should exceed the threshold. " * 10
         assert compressor.should_compress(long_text)
@@ -137,9 +140,10 @@ class TestAdaptiveCompressor:
     def test_classify_code(self):
         """Classifies code-heavy content correctly."""
         from daem0nmcp.compression import AdaptiveCompressor, ContentType
+
         adaptive = AdaptiveCompressor()
 
-        code = '''
+        code = """
 def function_one():
     return 1
 
@@ -149,12 +153,13 @@ def function_two():
 class MyClass:
     def __init__(self):
         self.value = 42
-'''
+"""
         assert adaptive.classify_content(code) == ContentType.CODE
 
     def test_classify_narrative(self):
         """Classifies narrative content correctly."""
         from daem0nmcp.compression import AdaptiveCompressor, ContentType
+
         adaptive = AdaptiveCompressor()
 
         prose = """
@@ -168,6 +173,7 @@ class MyClass:
     def test_classify_mixed(self):
         """Classifies mixed content correctly."""
         from daem0nmcp.compression import AdaptiveCompressor, ContentType
+
         adaptive = AdaptiveCompressor()
 
         mixed = """
@@ -183,6 +189,7 @@ class MyClass:
     def test_get_rate_for_code(self):
         """Code gets conservative 2x compression."""
         from daem0nmcp.compression import AdaptiveCompressor, ContentType
+
         adaptive = AdaptiveCompressor()
 
         rate = adaptive.get_rate_for_content(ContentType.CODE)
@@ -191,6 +198,7 @@ class MyClass:
     def test_get_rate_for_narrative(self):
         """Narrative gets aggressive 5x compression."""
         from daem0nmcp.compression import AdaptiveCompressor, ContentType
+
         adaptive = AdaptiveCompressor()
 
         rate = adaptive.get_rate_for_content(ContentType.NARRATIVE)
@@ -199,6 +207,7 @@ class MyClass:
     def test_compress_includes_content_type(self):
         """Compression result includes detected content type."""
         from daem0nmcp.compression import AdaptiveCompressor
+
         adaptive = AdaptiveCompressor()
 
         result = adaptive.compress("This is prose.")
@@ -208,6 +217,7 @@ class MyClass:
     def test_compress_simple_returns_string(self):
         """compress_simple returns just the text."""
         from daem0nmcp.compression import AdaptiveCompressor
+
         adaptive = AdaptiveCompressor()
 
         result = adaptive.compress_simple("Short text.")

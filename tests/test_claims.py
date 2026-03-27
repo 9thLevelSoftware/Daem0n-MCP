@@ -3,7 +3,6 @@
 Tests pattern-based extraction of verifiable claims from text.
 """
 
-
 from daem0nmcp.reflexion.claims import (
     Claim,
     ClaimType,
@@ -59,16 +58,23 @@ class TestExtractMemoryReference:
         claims = extract_claims("We decided to use SQLite for storage.")
         assert len(claims) >= 1
         # Find the memory reference claim specifically
-        memory_claims = [c for c in claims if c.claim_type == ClaimType.MEMORY_REFERENCE]
+        memory_claims = [
+            c for c in claims if c.claim_type == ClaimType.MEMORY_REFERENCE
+        ]
         assert len(memory_claims) >= 1
         assert memory_claims[0].verification_level == VerificationLevel.MANDATORY
-        assert "use SQLite" in memory_claims[0].subject or "use SQLite" in memory_claims[0].text
+        assert (
+            "use SQLite" in memory_claims[0].subject
+            or "use SQLite" in memory_claims[0].text
+        )
 
     def test_extract_previous_decision(self) -> None:
         """'Previously we...' is a memory reference claim."""
         claims = extract_claims("Previously we implemented caching.")
         assert len(claims) >= 1
-        memory_claims = [c for c in claims if c.claim_type == ClaimType.MEMORY_REFERENCE]
+        memory_claims = [
+            c for c in claims if c.claim_type == ClaimType.MEMORY_REFERENCE
+        ]
         assert len(memory_claims) >= 1
         assert memory_claims[0].verification_level == VerificationLevel.MANDATORY
 
@@ -76,7 +82,9 @@ class TestExtractMemoryReference:
         """'I remember...' is a memory reference claim."""
         claims = extract_claims("I remember that we discussed async patterns.")
         assert len(claims) >= 1
-        memory_claims = [c for c in claims if c.claim_type == ClaimType.MEMORY_REFERENCE]
+        memory_claims = [
+            c for c in claims if c.claim_type == ClaimType.MEMORY_REFERENCE
+        ]
         assert len(memory_claims) >= 1
         assert memory_claims[0].verification_level == VerificationLevel.MANDATORY
 
@@ -84,7 +92,9 @@ class TestExtractMemoryReference:
         """'You mentioned...' is a memory reference claim."""
         claims = extract_claims("You mentioned that testing is important.")
         assert len(claims) >= 1
-        memory_claims = [c for c in claims if c.claim_type == ClaimType.MEMORY_REFERENCE]
+        memory_claims = [
+            c for c in claims if c.claim_type == ClaimType.MEMORY_REFERENCE
+        ]
         assert len(memory_claims) >= 1
         assert memory_claims[0].verification_level == VerificationLevel.MANDATORY
 
@@ -92,14 +102,18 @@ class TestExtractMemoryReference:
         """'We agreed...' is a memory reference claim."""
         claims = extract_claims("We agreed to follow TDD methodology.")
         assert len(claims) >= 1
-        memory_claims = [c for c in claims if c.claim_type == ClaimType.MEMORY_REFERENCE]
+        memory_claims = [
+            c for c in claims if c.claim_type == ClaimType.MEMORY_REFERENCE
+        ]
         assert len(memory_claims) >= 1
 
     def test_last_time_pattern(self) -> None:
         """'Last time we...' is a memory reference claim."""
         claims = extract_claims("Last time we fixed the memory leak issue.")
         assert len(claims) >= 1
-        memory_claims = [c for c in claims if c.claim_type == ClaimType.MEMORY_REFERENCE]
+        memory_claims = [
+            c for c in claims if c.claim_type == ClaimType.MEMORY_REFERENCE
+        ]
         assert len(memory_claims) >= 1
 
 
@@ -110,7 +124,9 @@ class TestExtractFactualAssertion:
         """'X is Y' is a factual assertion."""
         claims = extract_claims("Python is a programming language.")
         assert len(claims) >= 1
-        factual_claims = [c for c in claims if c.claim_type == ClaimType.FACTUAL_ASSERTION]
+        factual_claims = [
+            c for c in claims if c.claim_type == ClaimType.FACTUAL_ASSERTION
+        ]
         assert len(factual_claims) >= 1
         assert factual_claims[0].verification_level == VerificationLevel.BEST_EFFORT
 
@@ -118,21 +134,27 @@ class TestExtractFactualAssertion:
         """'X uses Y' is a factual assertion."""
         claims = extract_claims("FastAPI uses Starlette under the hood.")
         assert len(claims) >= 1
-        factual_claims = [c for c in claims if c.claim_type == ClaimType.FACTUAL_ASSERTION]
+        factual_claims = [
+            c for c in claims if c.claim_type == ClaimType.FACTUAL_ASSERTION
+        ]
         assert len(factual_claims) >= 1
 
     def test_extract_supports_pattern(self) -> None:
         """'X supports Y' is a factual assertion."""
         claims = extract_claims("The API supports JSON responses.")
         assert len(claims) >= 1
-        factual_claims = [c for c in claims if c.claim_type == ClaimType.FACTUAL_ASSERTION]
+        factual_claims = [
+            c for c in claims if c.claim_type == ClaimType.FACTUAL_ASSERTION
+        ]
         assert len(factual_claims) >= 1
 
     def test_extract_returns_pattern(self) -> None:
         """'X returns Y' is a factual assertion."""
         claims = extract_claims("The function returns a dictionary.")
         assert len(claims) >= 1
-        factual_claims = [c for c in claims if c.claim_type == ClaimType.FACTUAL_ASSERTION]
+        factual_claims = [
+            c for c in claims if c.claim_type == ClaimType.FACTUAL_ASSERTION
+        ]
         assert len(factual_claims) >= 1
 
 
@@ -143,7 +165,9 @@ class TestOutcomeReference:
         """'That approach worked' is an outcome reference."""
         claims = extract_claims("That approach worked well for us.")
         assert len(claims) >= 1
-        outcome_claims = [c for c in claims if c.claim_type == ClaimType.OUTCOME_REFERENCE]
+        outcome_claims = [
+            c for c in claims if c.claim_type == ClaimType.OUTCOME_REFERENCE
+        ]
         assert len(outcome_claims) >= 1
         assert outcome_claims[0].verification_level == VerificationLevel.MANDATORY
 
@@ -151,7 +175,9 @@ class TestOutcomeReference:
         """'The X failed' is an outcome reference."""
         claims = extract_claims("The initial implementation failed.")
         assert len(claims) >= 1
-        outcome_claims = [c for c in claims if c.claim_type == ClaimType.OUTCOME_REFERENCE]
+        outcome_claims = [
+            c for c in claims if c.claim_type == ClaimType.OUTCOME_REFERENCE
+        ]
         assert len(outcome_claims) >= 1
         assert outcome_claims[0].verification_level == VerificationLevel.MANDATORY
 
@@ -159,7 +185,9 @@ class TestOutcomeReference:
         """'It succeeded' is an outcome reference."""
         claims = extract_claims("It succeeded after the refactor.")
         assert len(claims) >= 1
-        outcome_claims = [c for c in claims if c.claim_type == ClaimType.OUTCOME_REFERENCE]
+        outcome_claims = [
+            c for c in claims if c.claim_type == ClaimType.OUTCOME_REFERENCE
+        ]
         assert len(outcome_claims) >= 1
 
 
@@ -278,20 +306,26 @@ class TestVerificationLevels:
     def test_memory_claims_are_mandatory(self) -> None:
         """Memory reference claims have mandatory verification."""
         claims = extract_claims("We decided to use async patterns.")
-        memory_claims = [c for c in claims if c.claim_type == ClaimType.MEMORY_REFERENCE]
+        memory_claims = [
+            c for c in claims if c.claim_type == ClaimType.MEMORY_REFERENCE
+        ]
         for claim in memory_claims:
             assert claim.verification_level == VerificationLevel.MANDATORY
 
     def test_outcome_claims_are_mandatory(self) -> None:
         """Outcome reference claims have mandatory verification."""
         claims = extract_claims("That solution worked perfectly.")
-        outcome_claims = [c for c in claims if c.claim_type == ClaimType.OUTCOME_REFERENCE]
+        outcome_claims = [
+            c for c in claims if c.claim_type == ClaimType.OUTCOME_REFERENCE
+        ]
         for claim in outcome_claims:
             assert claim.verification_level == VerificationLevel.MANDATORY
 
     def test_factual_claims_are_best_effort(self) -> None:
         """Factual assertion claims have best_effort verification."""
         claims = extract_claims("Python uses dynamic typing.")
-        factual_claims = [c for c in claims if c.claim_type == ClaimType.FACTUAL_ASSERTION]
+        factual_claims = [
+            c for c in claims if c.claim_type == ClaimType.FACTUAL_ASSERTION
+        ]
         for claim in factual_claims:
             assert claim.verification_level == VerificationLevel.BEST_EFFORT

@@ -12,7 +12,7 @@ import re
 import sys
 from pathlib import Path
 
-from ._client import get_project_path, get_managers, run_async, succeed
+from ._client import get_managers, get_project_path, run_async, succeed
 
 # ─── transcript analysis ───────────────────────────────────────────
 
@@ -46,18 +46,33 @@ EXPLORATION_PATTERNS = [
 ]
 
 DECISION_PATTERNS = [
-    (r"(?:i(?:'ll|'m going to| will| decided to))\s+(?:use|implement|add|create|choose)\s+(.{20,150})", "decision"),
-    (r"(?:chose|selected|picked|went with)\s+(.{20,100})\s+(?:because|since|for)", "decision"),
-    (r"(?:the (?:best|right|correct) (?:approach|solution|way) is)\s+(.{20,150})", "decision"),
+    (
+        r"(?:i(?:'ll|'m going to| will| decided to))\s+(?:use|implement|add|create|choose)\s+(.{20,150})",
+        "decision",
+    ),
+    (
+        r"(?:chose|selected|picked|went with)\s+(.{20,100})\s+(?:because|since|for)",
+        "decision",
+    ),
+    (
+        r"(?:the (?:best|right|correct) (?:approach|solution|way) is)\s+(.{20,150})",
+        "decision",
+    ),
     (r"(?:pattern|approach|convention):\s*(.{20,150})", "pattern"),
     (r"(?:warning|caution|avoid|don't|do not):\s*(.{20,150})", "warning"),
-    (r"(?:learned|discovered|found out|realized)\s+(?:that\s+)?(.{20,150})", "learning"),
+    (
+        r"(?:learned|discovered|found out|realized)\s+(?:that\s+)?(.{20,150})",
+        "learning",
+    ),
 ]
 
-FILE_MENTION_PATTERN = r"(?:in|to|from|at|file)\s+[`'\"]?([a-zA-Z0-9_/.\\\-]+\.[a-zA-Z0-9]+)[`'\"]?"
+FILE_MENTION_PATTERN = (
+    r"(?:in|to|from|at|file)\s+[`'\"]?([a-zA-Z0-9_/.\\\-]+\.[a-zA-Z0-9]+)[`'\"]?"
+)
 
 
 # ─── anti-loop state ───────────────────────────────────────────────
+
 
 def _state_dir() -> Path:
     d = Path.home() / ".daem0nmcp" / "hook_state"
@@ -90,13 +105,14 @@ def _save_state(state: dict) -> None:
 
 # ─── transcript reading ───────────────────────────────────────────
 
+
 def _read_transcript() -> list[dict]:
     path = os.environ.get("CLAUDE_TRANSCRIPT_PATH", "")
     if not path or not Path(path).exists():
         return []
     messages = []
     try:
-        with open(path, "r", encoding="utf-8") as f:
+        with open(path, encoding="utf-8") as f:
             for line in f:
                 line = line.strip()
                 if line:
@@ -142,6 +158,7 @@ def _get_recent_tool_calls(messages: list[dict], lookback: int = 10) -> list[str
 
 # ─── pattern helpers ───────────────────────────────────────────────
 
+
 def _matches_any(text: str, patterns: list[str]) -> bool:
     text_lower = text.lower()
     return any(re.search(p, text_lower) for p in patterns)
@@ -164,15 +181,18 @@ def _extract_decisions(text: str) -> list[dict]:
             seen.add(content.lower())
             ctx = text[max(0, match.start() - 200) : match.end() + 200]
             file_match = re.search(FILE_MENTION_PATTERN, ctx)
-            decisions.append({
-                "category": category,
-                "content": content[:200],
-                "file_path": file_match.group(1) if file_match else None,
-            })
+            decisions.append(
+                {
+                    "category": category,
+                    "content": content[:200],
+                    "file_path": file_match.group(1) if file_match else None,
+                }
+            )
     return decisions[:5]
 
 
 # ─── auto-remember via direct import ──────────────────────────────
+
 
 async def _async_auto_remember(decisions: list[dict], project_path: str) -> list[int]:
     """Remember decisions directly using MemoryManager."""
@@ -195,8 +215,10 @@ async def _async_auto_remember(decisions: list[dict], project_path: str) -> list
 
 # ─── testable core logic ─────────────────────────────────────────
 
+
 class StopResult:
     """Value object returned by ``analyse_and_remember``."""
+
     __slots__ = ("message",)
 
     def __init__(self, message: str):
@@ -265,6 +287,7 @@ async def analyse_and_remember(
 
 # ─── main ─────────────────────────────────────────────────────────
 
+
 def main() -> None:
     project_path = get_project_path()
     if project_path is None:
@@ -285,6 +308,7 @@ def main() -> None:
 
 if __name__ == "__main__":
     import warnings
+
     warnings.filterwarnings("ignore")
 
     from daem0nmcp.claude_hooks._client import run_hook_safely

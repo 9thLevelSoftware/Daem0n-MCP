@@ -14,17 +14,19 @@ import pytest
 from daem0nmcp.recall_planner import QueryComplexity
 from daem0nmcp.retrieval_router import RetrievalRouter
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def _make_mock_mm(hybrid_results=None, qdrant=None):
     """Return a mock MemoryManager with _hybrid_search and optional _qdrant."""
     mm = MagicMock()
     mm._hybrid_search.return_value = hybrid_results or [(1, 0.9), (2, 0.7)]
     mm._qdrant = qdrant
-    mm._knowledge_graph = None  # Prevent MagicMock auto-attribute from shadowing router's self._kg
+    mm._knowledge_graph = (
+        None  # Prevent MagicMock auto-attribute from shadowing router's self._kg
+    )
     mm.db = MagicMock()
     mm.db.storage_path = "/tmp/test"
     return mm
@@ -94,8 +96,10 @@ class TestActiveMode:
 
         router = RetrievalRouter(memory_manager=mm, classifier=clf)
 
-        with patch("daem0nmcp.retrieval_router.settings") as mock_settings, \
-             patch("daem0nmcp.retrieval_router.vectors") as mock_vectors:
+        with (
+            patch("daem0nmcp.retrieval_router.settings") as mock_settings,
+            patch("daem0nmcp.retrieval_router.vectors") as mock_vectors,
+        ):
             mock_settings.auto_zoom_enabled = True
             mock_settings.auto_zoom_shadow = False
             mock_settings.auto_zoom_confidence_threshold = 0.25
@@ -133,23 +137,23 @@ class TestActiveMode:
         clf = _make_mock_classifier(QueryComplexity.COMPLEX, 0.85)
         kg = _make_mock_kg(node_count=50)
 
-        router = RetrievalRouter(
-            memory_manager=mm, knowledge_graph=kg, classifier=clf
-        )
+        router = RetrievalRouter(memory_manager=mm, knowledge_graph=kg, classifier=clf)
 
-        with patch("daem0nmcp.retrieval_router.settings") as mock_settings, \
-             patch(
-                 "daem0nmcp.graph.traversal.find_related_memories",
-                 new_callable=AsyncMock,
-                 return_value={
-                     "found": True,
-                     "source_memory_id": 1,
-                     "total_related": 1,
-                     "by_relationship": {
-                         "led_to": [{"memory_id": 99, "depth": 1, "confidence": 0.9}]
-                     },
-                 },
-             ) as _mock_find:  # noqa: F841
+        with (
+            patch("daem0nmcp.retrieval_router.settings") as mock_settings,
+            patch(
+                "daem0nmcp.graph.traversal.find_related_memories",
+                new_callable=AsyncMock,
+                return_value={
+                    "found": True,
+                    "source_memory_id": 1,
+                    "total_related": 1,
+                    "by_relationship": {
+                        "led_to": [{"memory_id": 99, "depth": 1, "confidence": 0.9}]
+                    },
+                },
+            ) as _mock_find,
+        ):  # noqa: F841
             mock_settings.auto_zoom_enabled = True
             mock_settings.auto_zoom_shadow = False
             mock_settings.auto_zoom_confidence_threshold = 0.25
@@ -194,9 +198,7 @@ class TestFallbackPaths:
         clf = _make_mock_classifier(QueryComplexity.COMPLEX, 0.85)
         kg = _make_mock_kg(node_count=0)
 
-        router = RetrievalRouter(
-            memory_manager=mm, knowledge_graph=kg, classifier=clf
-        )
+        router = RetrievalRouter(memory_manager=mm, knowledge_graph=kg, classifier=clf)
 
         with patch("daem0nmcp.retrieval_router.settings") as mock_settings:
             mock_settings.auto_zoom_enabled = True
@@ -217,9 +219,7 @@ class TestFallbackPaths:
         kg = AsyncMock()
         kg.ensure_loaded = AsyncMock(side_effect=RuntimeError("DB connection lost"))
 
-        router = RetrievalRouter(
-            memory_manager=mm, knowledge_graph=kg, classifier=clf
-        )
+        router = RetrievalRouter(memory_manager=mm, knowledge_graph=kg, classifier=clf)
 
         with patch("daem0nmcp.retrieval_router.settings") as mock_settings:
             mock_settings.auto_zoom_enabled = True

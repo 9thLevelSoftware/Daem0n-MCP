@@ -6,16 +6,14 @@ RRF formula: score(d) = Σ 1 / (k + rank(d))
 where k is a constant (typically 60) and rank starts at 1.
 """
 
-from typing import Dict, List, Optional, Tuple
 
 from .bm25_index import BM25Index
 from .vectors import VectorIndex
 
 
 def reciprocal_rank_fusion(
-    ranked_lists: List[List[Tuple[int, float]]],
-    k: int = 60
-) -> List[Tuple[int, float]]:
+    ranked_lists: list[list[tuple[int, float]]], k: int = 60
+) -> list[tuple[int, float]]:
     """
     Combine multiple ranked lists using Reciprocal Rank Fusion.
 
@@ -26,7 +24,7 @@ def reciprocal_rank_fusion(
     Returns:
         Fused list of (doc_id, rrf_score) tuples, sorted by score descending.
     """
-    rrf_scores: Dict[int, float] = {}
+    rrf_scores: dict[int, float] = {}
 
     for results in ranked_lists:
         for rank, (doc_id, _) in enumerate(results, start=1):
@@ -49,8 +47,8 @@ class RRFHybridSearch:
     def __init__(
         self,
         bm25_index: BM25Index,
-        vector_index: Optional[VectorIndex] = None,
-        k: int = 60
+        vector_index: VectorIndex | None = None,
+        k: int = 60,
     ):
         self.bm25 = bm25_index
         self.vectors = vector_index
@@ -63,8 +61,8 @@ class RRFHybridSearch:
         bm25_candidates: int = 50,
         vector_candidates: int = 50,
         bm25_threshold: float = 0.0,
-        vector_threshold: float = 0.3
-    ) -> List[Tuple[int, float]]:
+        vector_threshold: float = 0.3,
+    ) -> list[tuple[int, float]]:
         """
         Hybrid search with RRF fusion.
 
@@ -83,9 +81,7 @@ class RRFHybridSearch:
 
         # Get BM25 results
         bm25_results = self.bm25.search(
-            query,
-            top_k=bm25_candidates,
-            threshold=bm25_threshold
+            query, top_k=bm25_candidates, threshold=bm25_threshold
         )
         if bm25_results:
             ranked_lists.append(bm25_results)
@@ -93,9 +89,7 @@ class RRFHybridSearch:
         # Get vector results if available
         if self.vectors and len(self.vectors) > 0:
             vector_results = self.vectors.search(
-                query,
-                top_k=vector_candidates,
-                threshold=vector_threshold
+                query, top_k=vector_candidates, threshold=vector_threshold
             )
             if vector_results:
                 ranked_lists.append(vector_results)

@@ -11,7 +11,7 @@ class TestProjectLinkModel:
         """ProjectLink model should be importable."""
         from daem0nmcp.models import ProjectLink
 
-        assert hasattr(ProjectLink, '__tablename__')
+        assert hasattr(ProjectLink, "__tablename__")
         assert ProjectLink.__tablename__ == "project_links"
 
     def test_project_link_has_required_fields(self):
@@ -33,6 +33,7 @@ class TestProjectLinkMigration:
     @pytest.fixture
     def db_manager(self, tmp_path):
         from daem0nmcp.database import DatabaseManager
+
         return DatabaseManager(str(tmp_path / "storage"))
 
     @pytest.mark.asyncio
@@ -41,6 +42,7 @@ class TestProjectLinkMigration:
         await db_manager.init_db()
 
         import sqlite3
+
         conn = sqlite3.connect(str(db_manager.db_path))
         cursor = conn.cursor()
         cursor.execute(
@@ -58,11 +60,13 @@ class TestLinkManager:
     @pytest.fixture
     def db_manager(self, tmp_path):
         from daem0nmcp.database import DatabaseManager
+
         return DatabaseManager(str(tmp_path / "storage"))
 
     @pytest.fixture
     def link_manager(self, db_manager):
         from daem0nmcp.links import LinkManager
+
         return LinkManager(db_manager)
 
     @pytest.mark.asyncio
@@ -73,7 +77,7 @@ class TestLinkManager:
         result = await link_manager.link_projects(
             source_path="/repos/backend",
             linked_path="/repos/client",
-            relationship="same-project"
+            relationship="same-project",
         )
 
         assert result["status"] == "linked"
@@ -85,7 +89,9 @@ class TestLinkManager:
         """Should list all linked projects."""
         await db_manager.init_db()
 
-        await link_manager.link_projects("/repos/backend", "/repos/client", "same-project")
+        await link_manager.link_projects(
+            "/repos/backend", "/repos/client", "same-project"
+        )
         await link_manager.link_projects("/repos/backend", "/repos/shared", "upstream")
 
         links = await link_manager.list_linked_projects("/repos/backend")
@@ -100,7 +106,9 @@ class TestLinkManager:
         """Should remove a link between projects."""
         await db_manager.init_db()
 
-        await link_manager.link_projects("/repos/backend", "/repos/client", "same-project")
+        await link_manager.link_projects(
+            "/repos/backend", "/repos/client", "same-project"
+        )
         result = await link_manager.unlink_projects("/repos/backend", "/repos/client")
 
         assert result["status"] == "unlinked"
@@ -113,8 +121,12 @@ class TestLinkManager:
         """Should not allow duplicate links."""
         await db_manager.init_db()
 
-        await link_manager.link_projects("/repos/backend", "/repos/client", "same-project")
-        result = await link_manager.link_projects("/repos/backend", "/repos/client", "same-project")
+        await link_manager.link_projects(
+            "/repos/backend", "/repos/client", "same-project"
+        )
+        result = await link_manager.link_projects(
+            "/repos/backend", "/repos/client", "same-project"
+        )
 
         assert result["status"] == "already_linked"
 
@@ -125,6 +137,7 @@ class TestLinkTools:
     @pytest.fixture
     def db_manager(self, tmp_path):
         from daem0nmcp.database import DatabaseManager
+
         return DatabaseManager(str(tmp_path / "storage"))
 
     @pytest.mark.asyncio
@@ -133,6 +146,7 @@ class TestLinkTools:
         await db_manager.init_db()
 
         from daem0nmcp import server
+
         server._project_contexts.clear()
 
         project_path = str(db_manager.storage_path.parent.parent)
@@ -143,7 +157,7 @@ class TestLinkTools:
         result = await server.link_projects(
             linked_path="/repos/client",
             relationship="same-project",
-            project_path=project_path
+            project_path=project_path,
         )
 
         assert result["status"] == "linked"
@@ -154,6 +168,7 @@ class TestLinkTools:
         await db_manager.init_db()
 
         from daem0nmcp import server
+
         server._project_contexts.clear()
 
         project_path = str(db_manager.storage_path.parent.parent)
@@ -162,7 +177,7 @@ class TestLinkTools:
         await server.link_projects(
             linked_path="/repos/client",
             relationship="same-project",
-            project_path=project_path
+            project_path=project_path,
         )
 
         result = await server.list_linked_projects(project_path=project_path)
@@ -176,6 +191,7 @@ class TestLinkTools:
         await db_manager.init_db()
 
         from daem0nmcp import server
+
         server._project_contexts.clear()
 
         project_path = str(db_manager.storage_path.parent.parent)
@@ -184,12 +200,11 @@ class TestLinkTools:
         await server.link_projects(
             linked_path="/repos/client",
             relationship="same-project",
-            project_path=project_path
+            project_path=project_path,
         )
 
         result = await server.unlink_projects(
-            linked_path="/repos/client",
-            project_path=project_path
+            linked_path="/repos/client", project_path=project_path
         )
 
         assert result["status"] == "unlinked"
@@ -201,23 +216,27 @@ class TestCrossProjectRecall:
     @pytest.fixture
     def backend_db(self, tmp_path):
         from daem0nmcp.database import DatabaseManager
+
         db = DatabaseManager(str(tmp_path / "backend" / ".daem0nmcp"))
         return db
 
     @pytest.fixture
     def client_db(self, tmp_path):
         from daem0nmcp.database import DatabaseManager
+
         db = DatabaseManager(str(tmp_path / "client" / ".daem0nmcp"))
         return db
 
     @pytest.mark.asyncio
-    async def test_recall_includes_linked_memories(self, tmp_path, backend_db, client_db):
+    async def test_recall_includes_linked_memories(
+        self, tmp_path, backend_db, client_db
+    ):
         """recall with include_linked=True should span linked projects."""
         await backend_db.init_db()
         await client_db.init_db()
 
-        from daem0nmcp.memory import MemoryManager
         from daem0nmcp.links import LinkManager
+        from daem0nmcp.memory import MemoryManager
 
         backend_memory = MemoryManager(backend_db)
         client_memory = MemoryManager(client_db)
@@ -226,14 +245,14 @@ class TestCrossProjectRecall:
         await client_memory.remember(
             category="pattern",
             content="Use React Query for API calls",
-            project_path=str(tmp_path / "client")
+            project_path=str(tmp_path / "client"),
         )
 
         # Add memory to backend
         await backend_memory.remember(
             category="pattern",
             content="Use FastAPI for REST endpoints",
-            project_path=str(tmp_path / "backend")
+            project_path=str(tmp_path / "backend"),
         )
 
         # Link backend -> client
@@ -241,14 +260,12 @@ class TestCrossProjectRecall:
         await backend_links.link_projects(
             source_path=str(tmp_path / "backend"),
             linked_path=str(tmp_path / "client"),
-            relationship="same-project"
+            relationship="same-project",
         )
 
         # Recall from backend with include_linked
         result = await backend_memory.recall(
-            topic="API",
-            project_path=str(tmp_path / "backend"),
-            include_linked=True
+            topic="API", project_path=str(tmp_path / "backend"), include_linked=True
         )
 
         # Should find memories from both projects
@@ -263,6 +280,7 @@ class TestLinkedBriefing:
     async def test_briefing_shows_linked_projects(self, tmp_path):
         """get_briefing should mention linked projects."""
         from pathlib import Path
+
         from daem0nmcp import server
         from daem0nmcp.database import DatabaseManager
         from daem0nmcp.links import LinkManager
@@ -291,7 +309,7 @@ class TestLinkedBriefing:
         await client_memory.remember(
             category="warning",
             content="Don't use localStorage for auth tokens",
-            project_path=client_path
+            project_path=client_path,
         )
 
         # Link backend -> client (use normalized path to match get_project_context)
@@ -299,7 +317,7 @@ class TestLinkedBriefing:
         await backend_links.link_projects(
             source_path=backend_path,
             linked_path=client_path,
-            relationship="same-project"
+            relationship="same-project",
         )
 
         # Get briefing for backend
@@ -311,7 +329,9 @@ class TestLinkedBriefing:
         # Verify the linked project data structure is correctly populated
         linked = result["linked_projects"][0]
         assert linked["path"] == client_path
-        assert linked["available"] is True  # Now should work with correct .daem0nmcp path
+        assert (
+            linked["available"] is True
+        )  # Now should work with correct .daem0nmcp path
         assert linked["relationship"] == "same-project"
         # With correct storage path, we should see the warning we added
         assert linked["warning_count"] == 1
@@ -324,9 +344,9 @@ class TestLinkedProjectsE2E:
     @pytest.mark.asyncio
     async def test_complete_linked_workflow(self, tmp_path):
         """Test: link -> briefing -> recall -> unlink."""
+        from daem0nmcp import server
         from daem0nmcp.database import DatabaseManager
         from daem0nmcp.memory import MemoryManager
-        from daem0nmcp import server
 
         # Setup two project directories with CORRECT storage paths
         backend_path = tmp_path / "backend"
@@ -349,19 +369,19 @@ class TestLinkedProjectsE2E:
         await backend_mem.remember(
             category="decision",
             content="Use PostgreSQL for data persistence",
-            project_path=str(backend_path)
+            project_path=str(backend_path),
         )
 
         await client_mem.remember(
             category="warning",
             content="Never store tokens in localStorage",
-            project_path=str(client_path)
+            project_path=str(client_path),
         )
 
         await client_mem.remember(
             category="pattern",
             content="Use HttpOnly cookies for auth",
-            project_path=str(client_path)
+            project_path=str(client_path),
         )
 
         # 1. COMMUNION - get briefing
@@ -374,7 +394,7 @@ class TestLinkedProjectsE2E:
             linked_path=str(client_path),
             relationship="same-project",
             label="Frontend client",
-            project_path=str(backend_path)
+            project_path=str(backend_path),
         )
         assert link_result["status"] == "linked"
 
@@ -386,14 +406,11 @@ class TestLinkedProjectsE2E:
 
         # 4. RECALL WITH LINKED
         await server.context_check(
-            description="checking auth patterns",
-            project_path=str(backend_path)
+            description="checking auth patterns", project_path=str(backend_path)
         )
 
         recall_result = await server.recall(
-            topic="auth tokens",
-            include_linked=True,
-            project_path=str(backend_path)
+            topic="auth tokens", include_linked=True, project_path=str(backend_path)
         )
 
         # Should find client's warning about localStorage
@@ -406,8 +423,7 @@ class TestLinkedProjectsE2E:
 
         # 6. UNLINK
         unlink_result = await server.unlink_projects(
-            linked_path=str(client_path),
-            project_path=str(backend_path)
+            linked_path=str(client_path), project_path=str(backend_path)
         )
         assert unlink_result["status"] == "unlinked"
 
@@ -423,8 +439,8 @@ class TestDatabaseConsolidation:
     async def test_consolidate_linked_databases(self, tmp_path):
         """Should merge memories from child repos into parent."""
         from daem0nmcp.database import DatabaseManager
-        from daem0nmcp.memory import MemoryManager
         from daem0nmcp.links import LinkManager
+        from daem0nmcp.memory import MemoryManager
 
         # Setup parent and two child repos
         parent_path = tmp_path / "project"
@@ -447,12 +463,12 @@ class TestDatabaseConsolidation:
         await backend_mem.remember(
             category="decision",
             content="Use PostgreSQL",
-            project_path=str(backend_path)
+            project_path=str(backend_path),
         )
         await client_mem.remember(
             category="warning",
             content="Don't use localStorage for tokens",
-            project_path=str(client_path)
+            project_path=str(client_path),
         )
 
         # Initialize parent database
@@ -461,13 +477,17 @@ class TestDatabaseConsolidation:
 
         # Link children to parent
         parent_links = LinkManager(parent_db)
-        await parent_links.link_projects(str(parent_path), str(backend_path), "same-project")
-        await parent_links.link_projects(str(parent_path), str(client_path), "same-project")
+        await parent_links.link_projects(
+            str(parent_path), str(backend_path), "same-project"
+        )
+        await parent_links.link_projects(
+            str(parent_path), str(client_path), "same-project"
+        )
 
         # CONSOLIDATE - merge child DBs into parent
         result = await parent_links.consolidate_linked_databases(
             target_path=str(parent_path),
-            archive_sources=False  # Don't archive in test
+            archive_sources=False,  # Don't archive in test
         )
 
         assert result["status"] == "consolidated"
@@ -500,11 +520,12 @@ class TestDatabaseConsolidation:
     @pytest.mark.asyncio
     async def test_consolidate_tracks_merged_from_source(self, tmp_path):
         """Merged memories should have _merged_from in context."""
-        from daem0nmcp.database import DatabaseManager
-        from daem0nmcp.memory import MemoryManager
-        from daem0nmcp.links import LinkManager
-        from daem0nmcp.models import Memory
         from sqlalchemy import select
+
+        from daem0nmcp.database import DatabaseManager
+        from daem0nmcp.links import LinkManager
+        from daem0nmcp.memory import MemoryManager
+        from daem0nmcp.models import Memory
 
         # Setup parent and child
         parent_path = tmp_path / "project"
@@ -518,18 +539,19 @@ class TestDatabaseConsolidation:
         await child_mem.remember(
             category="pattern",
             content="Always use async/await",
-            project_path=str(child_path)
+            project_path=str(child_path),
         )
 
         parent_db = DatabaseManager(str(parent_path / ".daem0nmcp" / "storage"))
         await parent_db.init_db()
 
         parent_links = LinkManager(parent_db)
-        await parent_links.link_projects(str(parent_path), str(child_path), "same-project")
+        await parent_links.link_projects(
+            str(parent_path), str(child_path), "same-project"
+        )
 
         await parent_links.consolidate_linked_databases(
-            target_path=str(parent_path),
-            archive_sources=False
+            target_path=str(parent_path), archive_sources=False
         )
 
         # Check that merged memory has _merged_from in context
@@ -546,9 +568,9 @@ class TestDatabaseConsolidation:
     @pytest.mark.asyncio
     async def test_consolidate_linked_databases_tool(self, tmp_path):
         """Test the MCP tool for consolidating databases."""
+        from daem0nmcp import server
         from daem0nmcp.database import DatabaseManager
         from daem0nmcp.memory import MemoryManager
-        from daem0nmcp import server
 
         server._project_contexts.clear()
 
@@ -565,7 +587,7 @@ class TestDatabaseConsolidation:
         await child_mem.remember(
             category="decision",
             content="Use Redis for caching",
-            project_path=str(child_path)
+            project_path=str(child_path),
         )
 
         # Initialize parent
@@ -577,13 +599,12 @@ class TestDatabaseConsolidation:
         await server.link_projects(
             linked_path=str(child_path),
             relationship="same-project",
-            project_path=str(parent_path)
+            project_path=str(parent_path),
         )
 
         # Consolidate via MCP tool
         result = await server.consolidate_linked_databases(
-            archive_sources=False,
-            project_path=str(parent_path)
+            archive_sources=False, project_path=str(parent_path)
         )
 
         assert result["status"] == "consolidated"

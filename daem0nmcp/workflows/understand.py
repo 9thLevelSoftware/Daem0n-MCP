@@ -9,17 +9,19 @@ Actions:
 - refactor: Generate refactor suggestions for a file
 """
 
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from .errors import InvalidActionError, MissingParamError
 
-VALID_ACTIONS = frozenset({
-    "index",
-    "find",
-    "impact",
-    "todos",
-    "refactor",
-})
+VALID_ACTIONS = frozenset(
+    {
+        "index",
+        "find",
+        "impact",
+        "todos",
+        "refactor",
+    }
+)
 
 
 async def dispatch(
@@ -27,20 +29,20 @@ async def dispatch(
     project_path: str,
     *,
     # index params
-    path: Optional[str] = None,
-    patterns: Optional[List[str]] = None,
+    path: str | None = None,
+    patterns: list[str] | None = None,
     # find params
-    query: Optional[str] = None,
+    query: str | None = None,
     limit: int = 20,
     # impact params
-    entity_name: Optional[str] = None,
+    entity_name: str | None = None,
     # todos params
     auto_remember: bool = False,
-    types: Optional[List[str]] = None,
+    types: list[str] | None = None,
     # refactor params
-    file_path: Optional[str] = None,
+    file_path: str | None = None,
     **kwargs,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Dispatch action to appropriate handler."""
     if action not in VALID_ACTIONS:
         raise InvalidActionError(action, sorted(VALID_ACTIONS))
@@ -71,45 +73,35 @@ async def dispatch(
 
 async def _do_index(
     project_path: str,
-    path: Optional[str],
-    patterns: Optional[List[str]],
-) -> Dict[str, Any]:
+    path: str | None,
+    patterns: list[str] | None,
+) -> dict[str, Any]:
     """Index code structure using tree-sitter."""
     from ..server import index_project
 
-    return await index_project(
-        path=path, patterns=patterns, project_path=project_path
-    )
+    return await index_project(path=path, patterns=patterns, project_path=project_path)
 
 
-async def _do_find(
-    project_path: str, query: str, limit: int
-) -> Dict[str, Any]:
+async def _do_find(project_path: str, query: str, limit: int) -> dict[str, Any]:
     """Semantic search across indexed code entities."""
     from ..server import find_code
 
-    return await find_code(
-        query=query, project_path=project_path, limit=limit
-    )
+    return await find_code(query=query, project_path=project_path, limit=limit)
 
 
-async def _do_impact(
-    project_path: str, entity_name: str
-) -> Dict[str, Any]:
+async def _do_impact(project_path: str, entity_name: str) -> dict[str, Any]:
     """Analyze blast radius of changing a code entity."""
     from ..server import analyze_impact
 
-    return await analyze_impact(
-        entity_name=entity_name, project_path=project_path
-    )
+    return await analyze_impact(entity_name=entity_name, project_path=project_path)
 
 
 async def _do_todos(
     project_path: str,
-    path: Optional[str],
+    path: str | None,
     auto_remember: bool,
-    types: Optional[List[str]],
-) -> Dict[str, Any]:
+    types: list[str] | None,
+) -> dict[str, Any]:
     """Scan codebase for TODO/FIXME/HACK/XXX/BUG comments."""
     from ..server import scan_todos
 
@@ -121,12 +113,8 @@ async def _do_todos(
     )
 
 
-async def _do_refactor(
-    project_path: str, file_path: str
-) -> Dict[str, Any]:
+async def _do_refactor(project_path: str, file_path: str) -> dict[str, Any]:
     """Generate refactor suggestions for a file."""
     from ..server import propose_refactor
 
-    return await propose_refactor(
-        file_path=file_path, project_path=project_path
-    )
+    return await propose_refactor(file_path=file_path, project_path=project_path)

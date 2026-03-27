@@ -2,9 +2,9 @@
 """Tests for TiMem-style recall planner."""
 
 from daem0nmcp.recall_planner import (
-    RecallPlanner,
     QueryComplexity,
-    classify_query_complexity
+    RecallPlanner,
+    classify_query_complexity,
 )
 
 
@@ -48,8 +48,7 @@ class TestRecallPlanner:
     def test_complex_query_uses_raw_memories(self):
         planner = RecallPlanner()
         plan = planner.plan_recall(
-            "trace auth flow through all components",
-            QueryComplexity.COMPLEX
+            "trace auth flow through all components", QueryComplexity.COMPLEX
         )
 
         assert plan.use_communities is True

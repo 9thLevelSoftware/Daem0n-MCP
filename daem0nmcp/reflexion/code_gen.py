@@ -15,7 +15,8 @@ from __future__ import annotations
 
 import logging
 import re
-from typing import Callable, List, Optional, TYPE_CHECKING
+from collections.abc import Callable
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from .claims import Claim
@@ -26,10 +27,10 @@ logger = logging.getLogger(__name__)
 
 
 def generate_verification_code(
-    claims: List["Claim"],
+    claims: list[Claim],
     draft: str,
-    llm_func: Optional[Callable[[str], str]] = None,
-) -> Optional[str]:
+    llm_func: Callable[[str], str] | None = None,
+) -> str | None:
     """Generate Python assertion code for code-verifiable claims.
 
     Filters claims to only code-verifiable ones, then generates Python
@@ -60,14 +61,13 @@ def generate_verification_code(
 
 
 def _generate_via_llm(
-    claims: List["Claim"],
+    claims: list[Claim],
     draft: str,
     llm_func: Callable[[str], str],
-) -> Optional[str]:
+) -> str | None:
     """Generate verification code using LLM."""
     claims_text = "\n".join(
-        f"  {i+1}. [{c.claim_type.value}] {c.text}"
-        for i, c in enumerate(claims)
+        f"  {i + 1}. [{c.claim_type.value}] {c.text}" for i, c in enumerate(claims)
     )
 
     prompt = f"""Generate Python code that verifies the following claims using assertions.
@@ -103,7 +103,7 @@ Output ONLY the Python code, no explanations."""
         return _generate_via_templates(claims)
 
 
-def _generate_via_templates(claims: List["Claim"]) -> Optional[str]:
+def _generate_via_templates(claims: list[Claim]) -> str | None:
     """Generate verification code using pattern templates."""
     lines = ["# Auto-generated verification code (template-based)"]
     generated_any = False
@@ -124,14 +124,13 @@ def _generate_via_templates(claims: List["Claim"]) -> Optional[str]:
     return "\n".join(lines)
 
 
-def _template_assertion(claim: "Claim") -> Optional[str]:
+def _template_assertion(claim: Claim) -> str | None:
     """Generate a single assertion from a claim using pattern matching."""
     text = claim.text
 
     # Pattern: "X returns None/True/False"
     match = re.search(
-        r"(\w+(?:\.\w+)*\(\))\s+returns?\s+(None|True|False)",
-        text, re.IGNORECASE
+        r"(\w+(?:\.\w+)*\(\))\s+returns?\s+(None|True|False)", text, re.IGNORECASE
     )
     if match:
         func_call = match.group(1)
@@ -140,15 +139,16 @@ def _template_assertion(claim: "Claim") -> Optional[str]:
             f"try:\n"
             f"    result = {func_call}\n"
             f"    assert result is {expected}, "
-            f"f\"{func_call} returned {{result}}, expected {expected}\"\n"
+            f'f"{func_call} returned {{result}}, expected {expected}"\n'
             f"except Exception as e:\n"
-            f"    assert False, f\"Could not verify: {{e}}\""
+            f'    assert False, f"Could not verify: {{e}}"'
         )
 
     # Pattern: "returns ValueError/TypeError/etc"
     match = re.search(
         r"(\w+(?:\.\w+)*\(.*?\))\s+(?:raises?|throws?)\s+(\w+Error)",
-        text, re.IGNORECASE
+        text,
+        re.IGNORECASE,
     )
     if match:
         func_call = match.group(1)
@@ -156,17 +156,18 @@ def _template_assertion(claim: "Claim") -> Optional[str]:
         return (
             f"try:\n"
             f"    {func_call}\n"
-            f"    assert False, \"{func_call} should raise {error_type}\"\n"
+            f'    assert False, "{func_call} should raise {error_type}"\n'
             f"except {error_type}:\n"
             f"    pass  # Expected\n"
             f"except Exception as e:\n"
-            f"    assert False, f\"Expected {error_type}, got {{type(e).__name__}}: {{e}}\""
+            f'    assert False, f"Expected {error_type}, got {{type(e).__name__}}: {{e}}"'
         )
 
     # Pattern: numeric result "sum of X to Y is Z" or "result is N"
     match = re.search(
         r"(?:sum|total|result|answer|value)\s+(?:of\s+)?.*?(?:is|equals?|=)\s+(\d+(?:\.\d+)?)",
-        text, re.IGNORECASE
+        text,
+        re.IGNORECASE,
     )
     if match:
         expected_value = match.group(1)

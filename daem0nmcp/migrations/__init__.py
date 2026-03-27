@@ -12,14 +12,13 @@ Available migrations:
 
 # Re-export schema migration functions from the original migrations module
 # The original migrations.py was renamed to schema.py to avoid module name conflicts
-from .schema import run_migrations, migrate_and_backfill_vectors, MIGRATIONS
-
 # Export vector migration function
 from .migrate_vectors import migrate_vectors_to_qdrant
+from .schema import MIGRATIONS, migrate_and_backfill_vectors, run_migrations
 
 __all__ = [
     "run_migrations",
     "migrate_and_backfill_vectors",
     "MIGRATIONS",
-    "migrate_vectors_to_qdrant"
+    "migrate_vectors_to_qdrant",
 ]

@@ -1,40 +1,42 @@
 """Agency tools: execute_python, compress_context, ingest_doc."""
 
+import logging
 import re
 import sys
-import logging
-from typing import Dict, List, Optional, Any, Set, Tuple
+from typing import Any
 
 try:
-    from ..mcp_instance import mcp
     from .. import __version__
+    from ..agency import (
+        CapabilityManager,
+        CapabilityScope,
+        SandboxExecutor,
+        check_capability,
+    )
+    from ..config import settings
     from ..context_manager import (
-        get_project_context, _default_project_path,
+        _default_project_path,
         _missing_project_path_error,
+        get_project_context,
     )
     from ..logging_config import with_request_id
-    from ..config import settings
-    from ..agency import (
-        SandboxExecutor,
-        CapabilityScope,
+    from ..mcp_instance import mcp
+except ImportError:
+    from daem0nmcp import __version__
+    from daem0nmcp.agency import (
         CapabilityManager,
+        CapabilityScope,
+        SandboxExecutor,
         check_capability,
     )
-except ImportError:
-    from daem0nmcp.mcp_instance import mcp
-    from daem0nmcp import __version__
+    from daem0nmcp.config import settings
     from daem0nmcp.context_manager import (
-        get_project_context, _default_project_path,
+        _default_project_path,
         _missing_project_path_error,
+        get_project_context,
     )
     from daem0nmcp.logging_config import with_request_id
-    from daem0nmcp.config import settings
-    from daem0nmcp.agency import (
-        SandboxExecutor,
-        CapabilityScope,
-        CapabilityManager,
-        check_capability,
-    )
+    from daem0nmcp.mcp_instance import mcp
 
 logger = logging.getLogger(__name__)
 
@@ -49,7 +51,7 @@ INGEST_TIMEOUT = settings.ingest_timeout
 ALLOWED_URL_SCHEMES = settings.allowed_url_schemes
 
 
-def _resolve_public_ips(hostname: str) -> Set[str]:
+def _resolve_public_ips(hostname: str) -> set[str]:
     """Resolve a hostname and ensure all IPs are public/global."""
     import ipaddress
     import socket
@@ -62,7 +64,7 @@ def _resolve_public_ips(hostname: str) -> Set[str]:
     if not addr_infos:
         raise ValueError("Host could not be resolved")
 
-    ips: Set[str] = set()
+    ips: set[str] = set()
     for _, _, _, _, sockaddr in addr_infos:
         ip_str = sockaddr[0]
         try:
@@ -76,7 +78,7 @@ def _resolve_public_ips(hostname: str) -> Set[str]:
     return ips
 
 
-def _validate_url(url: str) -> Tuple[Optional[str], Optional[Set[str]]]:
+def _validate_url(url: str) -> tuple[str | None, set[str] | None]:
     """
     Validate URL for ingestion.
     Returns (error_message, resolved_public_ips).
@@ -86,8 +88,8 @@ def _validate_url(url: str) -> Tuple[Optional[str], Optional[Set[str]]]:
     - SSRF protection: Blocks localhost and private IPs
     - Cloud metadata endpoint protection
     """
-    from urllib.parse import urlparse
     import ipaddress
+    from urllib.parse import urlparse
 
     try:
         parsed = urlparse(url)
@@ -95,7 +97,10 @@ def _validate_url(url: str) -> Tuple[Optional[str], Optional[Set[str]]]:
         return "Invalid URL format", None
 
     if parsed.scheme.lower() not in ALLOWED_URL_SCHEMES:
-        return f"Invalid URL scheme '{parsed.scheme}'. Allowed: {ALLOWED_URL_SCHEMES}", None
+        return (
+            f"Invalid URL scheme '{parsed.scheme}'. Allowed: {ALLOWED_URL_SCHEMES}",
+            None,
+        )
 
     if not parsed.netloc:
         return "URL must have a host", None
@@ -106,7 +111,7 @@ def _validate_url(url: str) -> Tuple[Optional[str], Optional[Set[str]]]:
         return "URL must have a valid hostname", None
 
     # Block localhost
-    if hostname.lower() in ['localhost', 'localhost.localdomain', '127.0.0.1', '::1']:
+    if hostname.lower() in ["localhost", "localhost.localdomain", "127.0.0.1", "::1"]:
         return "Localhost URLs are not allowed", None
 
     # If hostname is an IP literal, validate directly
@@ -126,7 +131,9 @@ def _validate_url(url: str) -> Tuple[Optional[str], Optional[Set[str]]]:
     return None, allowed_ips
 
 
-async def _fetch_and_extract(url: str, allowed_ips: Optional[Set[str]] = None) -> Optional[str]:
+async def _fetch_and_extract(
+    url: str, allowed_ips: set[str] | None = None
+) -> str | None:
     """Fetch URL and extract text content with size limits."""
     try:
         import httpx
@@ -143,46 +150,46 @@ async def _fetch_and_extract(url: str, allowed_ips: Optional[Set[str]] = None) -
             trust_env=False,
             limits=limits,
             headers={"Accept-Encoding": "identity"},
-        ) as client:
-            async with client.stream("GET", url) as response:
-                response.raise_for_status()
+        ) as client, client.stream("GET", url) as response:
+            response.raise_for_status()
 
-                # Check content length header first
-                content_length = response.headers.get("content-length")
-                if content_length:
+            # Check content length header first
+            content_length = response.headers.get("content-length")
+            if content_length:
+                try:
+                    if int(content_length) > MAX_CONTENT_SIZE:
+                        logger.warning(f"Content too large: {content_length} bytes")
+                        return None
+                except ValueError:
+                    pass
+
+            size = 0
+            chunks: list[bytes] = []
+            async for chunk in response.aiter_bytes():
+                size += len(chunk)
+                if size > MAX_CONTENT_SIZE:
+                    logger.warning(f"Content too large: {size} bytes")
+                    return None
+                chunks.append(chunk)
+
+            stream = response.extensions.get("network_stream")
+            if allowed_ips and stream and hasattr(stream, "get_extra_info"):
+                peer = stream.get_extra_info("peername")
+                peer_ip = None
+                if isinstance(peer, (tuple, list)) and peer:
+                    peer_ip = peer[0]
+                elif peer:
+                    peer_ip = str(peer)
+                if peer_ip:
                     try:
-                        if int(content_length) > MAX_CONTENT_SIZE:
-                            logger.warning(f"Content too large: {content_length} bytes")
-                            return None
+                        import ipaddress
+
+                        peer_ip = str(ipaddress.ip_address(peer_ip))
                     except ValueError:
-                        pass
-
-                size = 0
-                chunks: List[bytes] = []
-                async for chunk in response.aiter_bytes():
-                    size += len(chunk)
-                    if size > MAX_CONTENT_SIZE:
-                        logger.warning(f"Content too large: {size} bytes")
-                        return None
-                    chunks.append(chunk)
-
-                stream = response.extensions.get("network_stream")
-                if allowed_ips and stream and hasattr(stream, "get_extra_info"):
-                    peer = stream.get_extra_info("peername")
-                    peer_ip = None
-                    if isinstance(peer, (tuple, list)) and peer:
-                        peer_ip = peer[0]
-                    elif peer:
-                        peer_ip = str(peer)
-                    if peer_ip:
-                        try:
-                            import ipaddress
-                            peer_ip = str(ipaddress.ip_address(peer_ip))
-                        except ValueError:
-                            peer_ip = None
-                    if peer_ip and peer_ip not in allowed_ips:
-                        logger.warning(f"Resolved IP mismatch for {url}: {peer_ip}")
-                        return None
+                        peer_ip = None
+                if peer_ip and peer_ip not in allowed_ips:
+                    logger.warning(f"Resolved IP mismatch for {url}: {peer_ip}")
+                    return None
 
         encoding = response.encoding if response else "utf-8"
         text = b"".join(chunks).decode(encoding or "utf-8", errors="replace")
@@ -205,7 +212,9 @@ async def _fetch_and_extract(url: str, allowed_ips: Optional[Set[str]] = None) -
         return None
 
 
-def _chunk_markdown_content(content: str, chunk_size: int, max_chunks: int) -> List[str]:
+def _chunk_markdown_content(
+    content: str, chunk_size: int, max_chunks: int
+) -> list[str]:
     """
     Chunk content with markdown awareness.
 
@@ -221,7 +230,7 @@ def _chunk_markdown_content(content: str, chunk_size: int, max_chunks: int) -> L
         List of content chunks
     """
     # First, split at markdown headers
-    header_pattern = re.compile(r'\n(?=#{1,6}\s)')
+    header_pattern = re.compile(r"\n(?=#{1,6}\s)")
     sections = header_pattern.split(content)
 
     chunks = []
@@ -235,7 +244,7 @@ def _chunk_markdown_content(content: str, chunk_size: int, max_chunks: int) -> L
             chunks.append(section)
         else:
             # Section is too large - split by paragraphs first
-            paragraphs = re.split(r'\n\n+', section)
+            paragraphs = re.split(r"\n\n+", section)
             current_chunk = []
             current_size = 0
 
@@ -247,7 +256,7 @@ def _chunk_markdown_content(content: str, chunk_size: int, max_chunks: int) -> L
                 para_len = len(para) + 2
 
                 if current_size + para_len > chunk_size and current_chunk:
-                    chunks.append('\n\n'.join(current_chunk))
+                    chunks.append("\n\n".join(current_chunk))
                     current_chunk = []
                     current_size = 0
 
@@ -260,10 +269,10 @@ def _chunk_markdown_content(content: str, chunk_size: int, max_chunks: int) -> L
                         word_len = len(word) + 1
                         if word_size + word_len > chunk_size and word_chunk:
                             if current_chunk:
-                                chunks.append('\n\n'.join(current_chunk))
+                                chunks.append("\n\n".join(current_chunk))
                                 current_chunk = []
                                 current_size = 0
-                            chunks.append(' '.join(word_chunk))
+                            chunks.append(" ".join(word_chunk))
                             word_chunk = [word]
                             word_size = word_len
                         else:
@@ -271,14 +280,14 @@ def _chunk_markdown_content(content: str, chunk_size: int, max_chunks: int) -> L
                             word_size += word_len
 
                     if word_chunk:
-                        current_chunk.append(' '.join(word_chunk))
+                        current_chunk.append(" ".join(word_chunk))
                         current_size += word_size
                 else:
                     current_chunk.append(para)
                     current_size += para_len
 
             if current_chunk:
-                chunks.append('\n\n'.join(current_chunk))
+                chunks.append("\n\n".join(current_chunk))
 
         if len(chunks) >= max_chunks:
             logger.warning(f"Reached max chunks ({max_chunks}), stopping")
@@ -294,8 +303,8 @@ def _chunk_markdown_content(content: str, chunk_size: int, max_chunks: int) -> L
 @with_request_id
 async def compress_context(
     context: str,
-    rate: Optional[float] = None,
-    content_type: Optional[str] = None,
+    rate: float | None = None,
+    content_type: str | None = None,
     preserve_code: bool = True,
 ) -> str:
     """
@@ -359,9 +368,9 @@ async def compress_context(
 @with_request_id
 async def execute_python(
     code: str,
-    project_path: Optional[str] = None,
-    timeout_seconds: Optional[int] = None,
-) -> Dict[str, Any]:
+    project_path: str | None = None,
+    timeout_seconds: int | None = None,
+) -> dict[str, Any]:
     """
     Execute Python code in an isolated sandbox.
 
@@ -444,11 +453,8 @@ async def execute_python(
 @mcp.tool(version=__version__)
 @with_request_id
 async def ingest_doc(
-    url: str,
-    topic: str,
-    chunk_size: int = 2000,
-    project_path: Optional[str] = None
-) -> Dict[str, Any]:
+    url: str, topic: str, chunk_size: int = 2000, project_path: str | None = None
+) -> dict[str, Any]:
     """
     Fetch external docs from URL and store as learnings. Content is chunked.
 
@@ -480,42 +486,36 @@ async def ingest_doc(
     ctx = await get_project_context(project_path)
 
     # Use module-level lookup so tests can patch via daem0nmcp.server._fetch_and_extract
-    _mod = sys.modules.get('daem0nmcp.server', sys.modules[__name__])
-    _fetch_fn = getattr(_mod, '_fetch_and_extract', _fetch_and_extract)
+    _mod = sys.modules.get("daem0nmcp.server", sys.modules[__name__])
+    _fetch_fn = getattr(_mod, "_fetch_and_extract", _fetch_and_extract)
     content = await _fetch_fn(url, allowed_ips=allowed_ips)
 
     if content is None:
         return {
             "error": f"Failed to fetch URL. Ensure httpx and beautifulsoup4 are installed, "
-                     f"content is under {MAX_CONTENT_SIZE} bytes, and URL is accessible.",
-            "url": url
+            f"content is under {MAX_CONTENT_SIZE} bytes, and URL is accessible.",
+            "url": url,
         }
 
     if not content.strip():
-        return {
-            "error": "No text content found at URL",
-            "url": url
-        }
+        return {"error": "No text content found at URL", "url": url}
 
     # Chunk the content with markdown-aware splitting
     chunks = _chunk_markdown_content(content, chunk_size, MAX_CHUNKS)
 
     if not chunks:
-        return {
-            "error": "Failed to chunk content",
-            "url": url
-        }
+        return {"error": "Failed to chunk content", "url": url}
 
     # Store each chunk as a learning
     memories_created = []
     for i, chunk in enumerate(chunks):
         memory = await ctx.memory_manager.remember(
-            category='learning',
+            category="learning",
             content=chunk[:500] + "..." if len(chunk) > 500 else chunk,
-            rationale=f"Ingested from {url} (chunk {i+1}/{len(chunks)})",
-            tags=['docs', 'ingested', topic],
-            context={'source_url': url, 'chunk_index': i, 'total_chunks': len(chunks)},
-            project_path=ctx.project_path
+            rationale=f"Ingested from {url} (chunk {i + 1}/{len(chunks)})",
+            tags=["docs", "ingested", topic],
+            context={"source_url": url, "chunk_index": i, "total_chunks": len(chunks)},
+            project_path=ctx.project_path,
         )
         memories_created.append(memory)
 
@@ -527,5 +527,5 @@ async def ingest_doc(
         "total_chars": len(content),
         "truncated": len(chunks) >= MAX_CHUNKS,
         "message": f"Ingested {len(chunks)} chunks from {url}. Use recall('{topic}') to retrieve.",
-        "memory_ids": [m.get('id') for m in memories_created if 'id' in m]
+        "memory_ids": [m.get("id") for m in memories_created if "id" in m],
     }

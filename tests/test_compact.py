@@ -1,8 +1,9 @@
 """Integration tests for memory compaction feature."""
 
-import pytest
-import tempfile
 import shutil
+import tempfile
+
+import pytest
 
 from daem0nmcp.database import DatabaseManager
 from daem0nmcp.memory import MemoryManager
@@ -43,7 +44,7 @@ class TestCompactionIntegration:
                 content=f"Session {i}: Learned about API design pattern {i} and best practices",
                 rationale=f"Discovered while building feature {i}",
                 tags=["api", "patterns"],
-                project_path="/test"
+                project_path="/test",
             )
             created.append(mem)
 
@@ -57,7 +58,7 @@ class TestCompactionIntegration:
             summary="Comprehensive summary of API design patterns and best practices learned across 5 sessions.",
             limit=10,
             topic="api",
-            dry_run=True
+            dry_run=True,
         )
         assert dry_result["status"] == "dry_run"
         assert dry_result["would_compact"] == 5
@@ -67,7 +68,7 @@ class TestCompactionIntegration:
             summary="Comprehensive summary of API design patterns and best practices learned across 5 sessions.",
             limit=10,
             topic="api",
-            dry_run=False
+            dry_run=False,
         )
 
         assert result["status"] == "compacted"
@@ -97,13 +98,13 @@ class TestCompactionIntegration:
         mem = await memory_manager.remember(
             category="learning",
             content="Test memory for atomicity verification in compaction",
-            project_path="/test"
+            project_path="/test",
         )
 
         # Attempt compaction with invalid parameters (will fail validation)
         result = await memory_manager.compact_memories(
             summary="short",  # Too short - fails validation
-            limit=10
+            limit=10,
         )
         assert "error" in result
 

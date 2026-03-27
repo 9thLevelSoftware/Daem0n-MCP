@@ -13,12 +13,13 @@ Tiers:
 Dynamic rates increase proportionally to overshoot using square root dampening.
 Code syntax and entity names are preserved via AdaptiveCompressor + CodeEntityPreserver.
 """
+
 from __future__ import annotations
 
 import logging
 import math
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Dict, Any, Optional, List
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from daem0nmcp.compression import AdaptiveCompressor
@@ -31,18 +32,18 @@ class JITCompressionConfig:
     """Configuration for JIT compression tiers and rates."""
 
     # Thresholds (token counts)
-    soft_threshold: int = 4000       # Moderate compression kicks in
-    hard_threshold: int = 8000       # Aggressive compression
+    soft_threshold: int = 4000  # Moderate compression kicks in
+    hard_threshold: int = 8000  # Aggressive compression
     emergency_threshold: int = 16000  # Maximum compression
 
     # Base compression rates per tier
-    soft_rate: float = 0.5           # 2x compression at soft
-    hard_rate: float = 0.33          # 3x compression at hard
-    emergency_rate: float = 0.2      # 5x compression at emergency
+    soft_rate: float = 0.5  # 2x compression at soft
+    hard_rate: float = 0.33  # 3x compression at hard
+    emergency_rate: float = 0.2  # 5x compression at emergency
 
     # Rate clamps
-    min_rate: float = 0.15           # Never compress more than ~7x
-    max_rate: float = 0.6            # Never compress less than ~1.7x
+    min_rate: float = 0.15  # Never compress more than ~7x
+    max_rate: float = 0.6  # Never compress less than ~1.7x
 
 
 class JITCompressor:
@@ -70,8 +71,8 @@ class JITCompressor:
 
     def __init__(
         self,
-        adaptive_compressor: Optional["AdaptiveCompressor"] = None,
-        config: Optional[JITCompressionConfig] = None,
+        adaptive_compressor: AdaptiveCompressor | None = None,
+        config: JITCompressionConfig | None = None,
     ):
         """
         Initialize JIT compressor.
@@ -93,12 +94,13 @@ class JITCompressor:
 
         if self._compressor is None:
             from .adaptive import AdaptiveCompressor
+
             self._compressor = AdaptiveCompressor()
             logger.debug("JITCompressor: lazy-loaded AdaptiveCompressor")
 
         self._initialized = True
 
-    def _determine_tier(self, token_count: int) -> Optional[str]:
+    def _determine_tier(self, token_count: int) -> str | None:
         """
         Determine compression tier based on token count.
 
@@ -162,8 +164,8 @@ class JITCompressor:
         self,
         text: str,
         already_compressed: bool = False,
-        additional_force_tokens: Optional[List[str]] = None,
-    ) -> Dict[str, Any]:
+        additional_force_tokens: list[str] | None = None,
+    ) -> dict[str, Any]:
         """
         Compress text if it exceeds the soft threshold.
 
@@ -233,7 +235,7 @@ class JITCompressor:
 
 
 # Module-level singleton for convenience
-_default_jit: Optional[JITCompressor] = None
+_default_jit: JITCompressor | None = None
 
 
 def get_jit_compressor() -> JITCompressor:
@@ -247,8 +249,8 @@ def get_jit_compressor() -> JITCompressor:
 def jit_compress(
     text: str,
     already_compressed: bool = False,
-    additional_force_tokens: Optional[List[str]] = None,
-) -> Dict[str, Any]:
+    additional_force_tokens: list[str] | None = None,
+) -> dict[str, Any]:
     """
     Convenience function for JIT compression using the global singleton.
 

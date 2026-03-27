@@ -1,8 +1,9 @@
 """Tests for graph memory functionality (relationship edges between memories)."""
 
-import pytest
-import tempfile
 import shutil
+import tempfile
+
+import pytest
 
 from daem0nmcp.database import DatabaseManager
 from daem0nmcp.memory import MemoryManager
@@ -39,13 +40,13 @@ class TestLinkMemories:
             category="decision",
             content="Use PostgreSQL for the database",
             rationale="Better for complex queries",
-            project_path="/test/project"
+            project_path="/test/project",
         )
         mem2 = await memory_manager.remember(
             category="pattern",
             content="Always use connection pooling with PostgreSQL",
             rationale="Prevents connection exhaustion",
-            project_path="/test/project"
+            project_path="/test/project",
         )
         return mem1["id"], mem2["id"]
 
@@ -58,7 +59,7 @@ class TestLinkMemories:
             source_id=source_id,
             target_id=target_id,
             relationship="led_to",
-            description="Database choice led to pooling pattern"
+            description="Database choice led to pooling pattern",
         )
 
         assert result["status"] == "linked"
@@ -72,13 +73,14 @@ class TestLinkMemories:
         source_id, target_id = two_memories
 
         result = await memory_manager.link_memories(
-            source_id=source_id,
-            target_id=target_id,
-            relationship="invalid_type"
+            source_id=source_id, target_id=target_id, relationship="invalid_type"
         )
 
         assert "error" in result
-        assert "relationship" in result["error"].lower() or "invalid" in result["error"].lower()
+        assert (
+            "relationship" in result["error"].lower()
+            or "invalid" in result["error"].lower()
+        )
 
     @pytest.mark.asyncio
     async def test_link_validates_memory_exists(self, memory_manager, two_memories):
@@ -86,9 +88,7 @@ class TestLinkMemories:
         source_id, _ = two_memories
 
         result = await memory_manager.link_memories(
-            source_id=source_id,
-            target_id=99999,
-            relationship="led_to"
+            source_id=source_id, target_id=99999, relationship="led_to"
         )
 
         assert "error" in result
@@ -99,9 +99,7 @@ class TestLinkMemories:
         source_id, _ = two_memories
 
         result = await memory_manager.link_memories(
-            source_id=source_id,
-            target_id=source_id,
-            relationship="led_to"
+            source_id=source_id, target_id=source_id, relationship="led_to"
         )
 
         assert "error" in result
@@ -114,16 +112,12 @@ class TestLinkMemories:
 
         # First link succeeds
         await memory_manager.link_memories(
-            source_id=source_id,
-            target_id=target_id,
-            relationship="led_to"
+            source_id=source_id, target_id=target_id, relationship="led_to"
         )
 
         # Duplicate returns already_exists
         result = await memory_manager.link_memories(
-            source_id=source_id,
-            target_id=target_id,
-            relationship="led_to"
+            source_id=source_id, target_id=target_id, relationship="led_to"
         )
 
         assert result.get("status") == "already_exists" or "error" in result
@@ -138,17 +132,15 @@ class TestUnlinkMemories:
         mem1 = await memory_manager.remember(
             category="decision",
             content="Use Redis for caching",
-            project_path="/test/project"
+            project_path="/test/project",
         )
         mem2 = await memory_manager.remember(
             category="pattern",
             content="Cache invalidation strategy",
-            project_path="/test/project"
+            project_path="/test/project",
         )
         await memory_manager.link_memories(
-            source_id=mem1["id"],
-            target_id=mem2["id"],
-            relationship="led_to"
+            source_id=mem1["id"], target_id=mem2["id"], relationship="led_to"
         )
         return mem1["id"], mem2["id"]
 
@@ -158,22 +150,22 @@ class TestUnlinkMemories:
         source_id, target_id = linked_memories
 
         result = await memory_manager.unlink_memories(
-            source_id=source_id,
-            target_id=target_id,
-            relationship="led_to"
+            source_id=source_id, target_id=target_id, relationship="led_to"
         )
 
         assert result["status"] == "unlinked"
 
     @pytest.mark.asyncio
-    async def test_unlink_nonexistent_returns_not_found(self, memory_manager, linked_memories):
+    async def test_unlink_nonexistent_returns_not_found(
+        self, memory_manager, linked_memories
+    ):
         """Unlinking non-existent relationship returns not_found."""
         source_id, target_id = linked_memories
 
         result = await memory_manager.unlink_memories(
             source_id=source_id,
             target_id=target_id,
-            relationship="depends_on"  # Different relationship type
+            relationship="depends_on",  # Different relationship type
         )
 
         assert result.get("status") == "not_found" or "error" in result
@@ -188,17 +180,17 @@ class TestTraceChain:
         mem_a = await memory_manager.remember(
             category="decision",
             content="Memory A - the root decision",
-            project_path="/test/project"
+            project_path="/test/project",
         )
         mem_b = await memory_manager.remember(
             category="pattern",
             content="Memory B - derived pattern",
-            project_path="/test/project"
+            project_path="/test/project",
         )
         mem_c = await memory_manager.remember(
             category="learning",
             content="Memory C - final learning",
-            project_path="/test/project"
+            project_path="/test/project",
         )
 
         await memory_manager.link_memories(mem_a["id"], mem_b["id"], "led_to")
@@ -211,10 +203,7 @@ class TestTraceChain:
         """Tracing forward from root finds descendants."""
         a_id, b_id, c_id = chain_of_three
 
-        result = await memory_manager.trace_chain(
-            memory_id=a_id,
-            direction="forward"
-        )
+        result = await memory_manager.trace_chain(memory_id=a_id, direction="forward")
 
         assert result["memory_id"] == a_id
         found_ids = [m["id"] for m in result["chain"]]
@@ -226,10 +215,7 @@ class TestTraceChain:
         """Tracing backward from leaf finds ancestors."""
         a_id, b_id, c_id = chain_of_three
 
-        result = await memory_manager.trace_chain(
-            memory_id=c_id,
-            direction="backward"
-        )
+        result = await memory_manager.trace_chain(memory_id=c_id, direction="backward")
 
         assert result["memory_id"] == c_id
         found_ids = [m["id"] for m in result["chain"]]
@@ -241,10 +227,7 @@ class TestTraceChain:
         """Tracing both directions from middle finds all."""
         a_id, b_id, c_id = chain_of_three
 
-        result = await memory_manager.trace_chain(
-            memory_id=b_id,
-            direction="both"
-        )
+        result = await memory_manager.trace_chain(memory_id=b_id, direction="both")
 
         found_ids = [m["id"] for m in result["chain"]]
         assert a_id in found_ids
@@ -256,9 +239,7 @@ class TestTraceChain:
         a_id, b_id, c_id = chain_of_three
 
         result = await memory_manager.trace_chain(
-            memory_id=a_id,
-            direction="forward",
-            max_depth=1
+            memory_id=a_id, direction="forward", max_depth=1
         )
 
         found_ids = [m["id"] for m in result["chain"]]
@@ -270,10 +251,7 @@ class TestTraceChain:
         """Invalid direction returns error."""
         a_id, _, _ = chain_of_three
 
-        result = await memory_manager.trace_chain(
-            memory_id=a_id,
-            direction="invalid"
-        )
+        result = await memory_manager.trace_chain(memory_id=a_id, direction="invalid")
 
         assert "error" in result
 
@@ -291,10 +269,18 @@ class TestGetGraph:
            \\ /
             D
         """
-        mem_a = await memory_manager.remember(category="decision", content="A", project_path="/test")
-        mem_b = await memory_manager.remember(category="pattern", content="B", project_path="/test")
-        mem_c = await memory_manager.remember(category="pattern", content="C", project_path="/test")
-        mem_d = await memory_manager.remember(category="learning", content="D", project_path="/test")
+        mem_a = await memory_manager.remember(
+            category="decision", content="A", project_path="/test"
+        )
+        mem_b = await memory_manager.remember(
+            category="pattern", content="B", project_path="/test"
+        )
+        mem_c = await memory_manager.remember(
+            category="pattern", content="C", project_path="/test"
+        )
+        mem_d = await memory_manager.remember(
+            category="learning", content="D", project_path="/test"
+        )
 
         await memory_manager.link_memories(mem_a["id"], mem_b["id"], "led_to")
         await memory_manager.link_memories(mem_a["id"], mem_c["id"], "led_to")
@@ -304,7 +290,9 @@ class TestGetGraph:
         return mem_a["id"], mem_b["id"], mem_c["id"], mem_d["id"]
 
     @pytest.mark.asyncio
-    async def test_get_graph_returns_nodes_and_edges(self, memory_manager, diamond_graph):
+    async def test_get_graph_returns_nodes_and_edges(
+        self, memory_manager, diamond_graph
+    ):
         """get_graph returns all nodes and edges."""
         a_id, b_id, c_id, d_id = diamond_graph
 
@@ -321,12 +309,14 @@ class TestGetGraph:
         a_id, b_id, c_id, d_id = diamond_graph
 
         result = await memory_manager.get_graph(
-            memory_ids=[a_id, b_id, c_id, d_id],
-            format="mermaid"
+            memory_ids=[a_id, b_id, c_id, d_id], format="mermaid"
         )
 
         assert "mermaid" in result
-        assert "graph" in result["mermaid"].lower() or "flowchart" in result["mermaid"].lower()
+        assert (
+            "graph" in result["mermaid"].lower()
+            or "flowchart" in result["mermaid"].lower()
+        )
 
     @pytest.mark.asyncio
     async def test_get_graph_requires_ids_or_topic(self, memory_manager):
@@ -347,40 +337,41 @@ class TestCompactionGraph:
             mem = await memory_manager.remember(
                 category="learning",
                 content=f"Original learning {i} about testing patterns and best practices",
-                project_path="/test"
+                project_path="/test",
             )
             original_ids.append(mem["id"])
 
         result = await memory_manager.compact_memories(
             summary="Comprehensive summary of testing patterns and best practices learned over multiple sessions.",
             limit=10,
-            dry_run=False
+            dry_run=False,
         )
 
-        return {
-            "summary_id": result["summary_id"],
-            "original_ids": original_ids
-        }
+        return {"summary_id": result["summary_id"], "original_ids": original_ids}
 
     @pytest.mark.asyncio
-    async def test_compaction_creates_supersedes_edges(self, memory_manager, compacted_memories):
+    async def test_compaction_creates_supersedes_edges(
+        self, memory_manager, compacted_memories
+    ):
         """Compaction creates supersedes edges from summary to originals."""
         summary_id = compacted_memories["summary_id"]
         original_ids = compacted_memories["original_ids"]
 
         # Trace forward from summary should find all originals
         result = await memory_manager.trace_chain(
-            memory_id=summary_id,
-            direction="forward",
-            relationship_types=["supersedes"]
+            memory_id=summary_id, direction="forward", relationship_types=["supersedes"]
         )
 
         found_ids = [m["id"] for m in result["chain"]]
         for orig_id in original_ids:
-            assert orig_id in found_ids, f"Original {orig_id} should be linked via supersedes"
+            assert orig_id in found_ids, (
+                f"Original {orig_id} should be linked via supersedes"
+            )
 
     @pytest.mark.asyncio
-    async def test_compaction_archives_originals(self, memory_manager, compacted_memories):
+    async def test_compaction_archives_originals(
+        self, memory_manager, compacted_memories
+    ):
         """Original memories are archived after compaction."""
         original_ids = compacted_memories["original_ids"]
 
@@ -392,7 +383,9 @@ class TestCompactionGraph:
             all_found_ids.extend([m["id"] for m in result.get(cat, [])])
 
         for orig_id in original_ids:
-            assert orig_id not in all_found_ids, f"Archived memory {orig_id} should not appear in recall"
+            assert orig_id not in all_found_ids, (
+                f"Archived memory {orig_id} should not appear in recall"
+            )
 
     @pytest.mark.asyncio
     async def test_summary_appears_in_recall(self, memory_manager, compacted_memories):

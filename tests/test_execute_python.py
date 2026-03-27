@@ -269,6 +269,7 @@ class TestExecutePythonTool:
             finally:
                 server._sandbox_executor._sandbox_available = original
 
+
 # Integration tests - skip without E2B_API_KEY
 @pytest.mark.skipif(
     not os.environ.get("E2B_API_KEY"), reason="E2B_API_KEY not set - skip integration"

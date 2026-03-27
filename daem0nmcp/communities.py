@@ -11,9 +11,9 @@ detection that guarantees well-connected communities.
 
 import logging
 from collections import defaultdict
-from typing import Any, Dict, List, Optional, Set
+from typing import Any
 
-from sqlalchemy import select, delete
+from sqlalchemy import delete, select
 
 from .database import DatabaseManager
 from .graph import KnowledgeGraph
@@ -37,7 +37,7 @@ class CommunityManager:
     def __init__(
         self,
         db_manager: DatabaseManager,
-        summarizer: Optional[CommunitySummarizer] = None,
+        summarizer: CommunitySummarizer | None = None,
     ):
         self.db = db_manager
         self.summarizer = summarizer or CommunitySummarizer()
@@ -47,7 +47,7 @@ class CommunityManager:
         project_path: str,
         min_community_size: int = 2,
         min_shared_tags: int = 2,
-    ) -> List[Dict[str, Any]]:
+    ) -> list[dict[str, Any]]:
         """
         Detect communities based on tag co-occurrence (legacy method).
 
@@ -77,7 +77,7 @@ class CommunityManager:
             result = await session.execute(
                 select(Memory).where(
                     Memory.tags.isnot(None),
-                    (Memory.archived == False) | (Memory.archived.is_(None))  # noqa: E712
+                    (Memory.archived == False) | (Memory.archived.is_(None)),  # noqa: E712
                 )
             )
             memories = result.scalars().all()
@@ -86,8 +86,8 @@ class CommunityManager:
             return []
 
         # Build tag -> memory_ids mapping
-        tag_to_memories: Dict[str, Set[int]] = defaultdict(set)
-        memory_tags: Dict[int, Set[str]] = {}
+        tag_to_memories: dict[str, set[int]] = defaultdict(set)
+        memory_tags: dict[int, set[str]] = {}
 
         for mem in memories:
             if mem.tags:
@@ -108,7 +108,7 @@ class CommunityManager:
                 continue
 
             # Get dominant tags (appear in >50% of members)
-            tag_counts: Dict[str, int] = defaultdict(int)
+            tag_counts: dict[str, int] = defaultdict(int)
             for mem_id in member_ids:
                 for tag in memory_tags.get(mem_id, []):
                     tag_counts[tag] += 1
@@ -117,35 +117,41 @@ class CommunityManager:
             dominant_tags = sorted(
                 [t for t, c in tag_counts.items() if c >= threshold],
                 key=lambda t: tag_counts[t],
-                reverse=True
+                reverse=True,
             )
 
             # Generate name from top tags
-            name = " + ".join(dominant_tags[:3]) if dominant_tags else f"Cluster {cluster_id}"
+            name = (
+                " + ".join(dominant_tags[:3])
+                if dominant_tags
+                else f"Cluster {cluster_id}"
+            )
 
-            communities.append({
-                "name": name,
-                "tags": dominant_tags,
-                "member_ids": list(member_ids),
-                "member_count": len(member_ids),
-                "level": 0
-            })
+            communities.append(
+                {
+                    "name": name,
+                    "tags": dominant_tags,
+                    "member_ids": list(member_ids),
+                    "member_count": len(member_ids),
+                    "level": 0,
+                }
+            )
 
         return communities
 
     def _cluster_by_shared_tags(
         self,
-        memory_tags: Dict[int, Set[str]],
-        tag_to_memories: Dict[str, Set[int]],
-        min_shared: int
-    ) -> Dict[int, Set[int]]:
+        memory_tags: dict[int, set[str]],
+        tag_to_memories: dict[str, set[int]],
+        min_shared: int,
+    ) -> dict[int, set[int]]:
         """
         Cluster memories using union-find on shared tags.
 
         Two memories are in the same cluster if they share >= min_shared tags.
         """
         # Union-find data structure
-        parent: Dict[int, int] = {mid: mid for mid in memory_tags.keys()}
+        parent: dict[int, int] = {mid: mid for mid in memory_tags}
 
         def find(x: int) -> int:
             if parent[x] != x:
@@ -160,19 +166,19 @@ class CommunityManager:
         # Union memories that share enough tags
         memory_ids = list(memory_tags.keys())
         for i, mid1 in enumerate(memory_ids):
-            for mid2 in memory_ids[i + 1:]:
+            for mid2 in memory_ids[i + 1 :]:
                 shared = memory_tags[mid1] & memory_tags[mid2]
                 if len(shared) >= min_shared:
                     union(mid1, mid2)
 
         # Collect clusters
-        clusters: Dict[int, Set[int]] = defaultdict(set)
+        clusters: dict[int, set[int]] = defaultdict(set)
         for mid in memory_ids:
             clusters[find(mid)].add(mid)
 
         return clusters
 
-    async def _get_entity_names(self, entity_ids: List[int]) -> List[str]:
+    async def _get_entity_names(self, entity_ids: list[int]) -> list[str]:
         """Get entity names for a list of entity IDs, ordered by mention count."""
         if not entity_ids:
             return []
@@ -191,10 +197,10 @@ class CommunityManager:
     async def detect_communities_from_graph(
         self,
         project_path: str,
-        knowledge_graph: Optional[KnowledgeGraph] = None,
+        knowledge_graph: KnowledgeGraph | None = None,
         resolution: float = 1.0,
         min_community_size: int = 2,
-    ) -> List[Dict[str, Any]]:
+    ) -> list[dict[str, Any]]:
         """
         Detect communities using Leiden algorithm on the knowledge graph.
 
@@ -235,7 +241,7 @@ class CommunityManager:
         )
 
         # Group nodes by community
-        communities_nodes: Dict[int, List[str]] = defaultdict(list)
+        communities_nodes: dict[int, list[str]] = defaultdict(list)
         for node_id, comm_id in community_map.items():
             communities_nodes[comm_id].append(node_id)
 
@@ -270,15 +276,17 @@ class CommunityManager:
             else:
                 name = f"Community {comm_id}"
 
-            communities.append({
-                "name": name,
-                "tags": entity_names[:10],  # Use entity names as tags
-                "member_ids": memory_ids,
-                "member_count": len(memory_ids),
-                "entity_ids": entity_ids,
-                "level": 0,
-                "leiden_community_id": comm_id,
-            })
+            communities.append(
+                {
+                    "name": name,
+                    "tags": entity_names[:10],  # Use entity names as tags
+                    "member_ids": memory_ids,
+                    "member_count": len(memory_ids),
+                    "entity_ids": entity_ids,
+                    "level": 0,
+                    "leiden_community_id": comm_id,
+                }
+            )
 
         # Sort by size descending
         communities.sort(key=lambda c: c["member_count"], reverse=True)
@@ -288,9 +296,9 @@ class CommunityManager:
 
     async def generate_community_summary(
         self,
-        member_ids: List[int],
+        member_ids: list[int],
         community_name: str,
-        entity_names: Optional[List[str]] = None,
+        entity_names: list[str] | None = None,
     ) -> str:
         """
         Generate a summary for a community from its members.
@@ -336,9 +344,9 @@ class CommunityManager:
     async def save_communities(
         self,
         project_path: str,
-        communities: List[Dict[str, Any]],
+        communities: list[dict[str, Any]],
         replace_existing: bool = True,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """
         Persist detected communities to the database.
 
@@ -395,10 +403,8 @@ class CommunityManager:
         }
 
     async def get_communities(
-        self,
-        project_path: str,
-        level: Optional[int] = None
-    ) -> List[Dict[str, Any]]:
+        self, project_path: str, level: int | None = None
+    ) -> list[dict[str, Any]]:
         """
         Get all communities for a project.
 
@@ -432,15 +438,12 @@ class CommunityManager:
                     "member_ids": c.member_ids,
                     "level": c.level,
                     "parent_id": c.parent_id,
-                    "created_at": c.created_at.isoformat() if c.created_at else None
+                    "created_at": c.created_at.isoformat() if c.created_at else None,
                 }
                 for c in communities
             ]
 
-    async def get_community_members(
-        self,
-        community_id: int
-    ) -> Dict[str, Any]:
+    async def get_community_members(self, community_id: int) -> dict[str, Any]:
         """
         Get full memory content for a community's members.
 
@@ -471,16 +474,15 @@ class CommunityManager:
                         "rationale": m.rationale,
                         "tags": m.tags,
                         "outcome": m.outcome,
-                        "worked": m.worked
+                        "worked": m.worked,
                     }
                     for m in memories
-                ]
+                ],
             }
 
     async def get_community_members_by_ids(
-        self,
-        community_ids: List[int]
-    ) -> Dict[str, Any]:
+        self, community_ids: list[int]
+    ) -> dict[str, Any]:
         """
         Get member memory IDs for multiple communities at once.
 
@@ -497,9 +499,7 @@ class CommunityManager:
 
         async with self.db.get_session() as session:
             result = await session.execute(
-                select(MemoryCommunity).where(
-                    MemoryCommunity.id.in_(community_ids)
-                )
+                select(MemoryCommunity).where(MemoryCommunity.id.in_(community_ids))
             )
             communities = result.scalars().all()
 
@@ -508,7 +508,7 @@ class CommunityManager:
                     c.id: {
                         "name": c.name,
                         "member_ids": c.member_ids or [],
-                        "member_count": c.member_count
+                        "member_count": c.member_count,
                     }
                     for c in communities
                 }

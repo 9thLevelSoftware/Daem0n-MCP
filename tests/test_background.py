@@ -1,7 +1,8 @@
 """Tests for background task support."""
 
-import pytest
 import asyncio
+
+import pytest
 
 
 class TestBackgroundTasks:

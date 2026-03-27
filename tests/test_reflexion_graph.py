@@ -1,7 +1,8 @@
 """Tests for Reflexion LangGraph state machine."""
 
-import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
 
 from daem0nmcp.reflexion.graph import (
     build_reflexion_graph,
@@ -10,11 +11,11 @@ from daem0nmcp.reflexion.graph import (
     should_continue,
 )
 from daem0nmcp.reflexion.nodes import (
+    MAX_ITERATIONS,
+    QUALITY_THRESHOLD_EXIT,
     create_actor_node,
     create_evaluator_node,
     create_reflector_node,
-    QUALITY_THRESHOLD_EXIT,
-    MAX_ITERATIONS,
 )
 
 
@@ -236,7 +237,10 @@ class TestReflectorNode:
 
         result = reflector(state)
 
-        assert "hedging" in result["critique"].lower() or "remove" in result["critique"].lower()
+        assert (
+            "hedging" in result["critique"].lower()
+            or "remove" in result["critique"].lower()
+        )
 
     def test_reflector_handles_no_issues(self):
         """Reflector should handle case with no issues."""

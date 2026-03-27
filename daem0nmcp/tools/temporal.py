@@ -1,24 +1,26 @@
 """Temporal tools: trace_causal_path, trace_evolution."""
 
 import logging
-from typing import Dict, Optional, Any
+from typing import Any
 
 try:
-    from ..mcp_instance import mcp
     from .. import __version__
     from ..context_manager import (
-        get_project_context, _default_project_path,
+        _default_project_path,
         _missing_project_path_error,
+        get_project_context,
     )
     from ..logging_config import with_request_id
+    from ..mcp_instance import mcp
 except ImportError:
-    from daem0nmcp.mcp_instance import mcp
     from daem0nmcp import __version__
     from daem0nmcp.context_manager import (
-        get_project_context, _default_project_path,
+        _default_project_path,
         _missing_project_path_error,
+        get_project_context,
     )
     from daem0nmcp.logging_config import with_request_id
+    from daem0nmcp.mcp_instance import mcp
 
 logger = logging.getLogger(__name__)
 
@@ -29,8 +31,8 @@ async def trace_causal_path(
     start_memory_id: int,
     end_memory_id: int,
     max_depth: int = 5,
-    project_path: Optional[str] = None
-) -> Dict[str, Any]:
+    project_path: str | None = None,
+) -> dict[str, Any]:
     """
     Find causal paths between two memories. Answers: "How did decision X lead to outcome Y?"
 
@@ -49,19 +51,19 @@ async def trace_causal_path(
     return await knowledge_graph.trace_chain(
         start_memory_id=start_memory_id,
         end_memory_id=end_memory_id,
-        max_depth=max_depth
+        max_depth=max_depth,
     )
 
 
 @mcp.tool(version=__version__)
 @with_request_id
 async def trace_evolution(
-    entity_name: Optional[str] = None,
-    entity_type: Optional[str] = None,
+    entity_name: str | None = None,
+    entity_type: str | None = None,
     include_invalidated: bool = True,
-    entity_id: Optional[int] = None,
-    project_path: Optional[str] = None
-) -> Dict[str, Any]:
+    entity_id: int | None = None,
+    project_path: str | None = None,
+) -> dict[str, Any]:
     """
     Trace how knowledge about an entity evolved over time. Answers: "How has our understanding of X changed?"
 
@@ -90,7 +92,7 @@ async def trace_evolution(
         return await ctx.memory_manager.get_memory_evolution(
             entity_name=entity_name,
             entity_type=entity_type,
-            include_invalidated=include_invalidated
+            include_invalidated=include_invalidated,
         )
 
     # If only entity_id provided, use KnowledgeGraph.trace_evolution (graph-based)

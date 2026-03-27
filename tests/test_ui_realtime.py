@@ -3,6 +3,7 @@ Tests for real-time update detection functionality.
 
 Tests the check_for_updates tool and related change detection.
 """
+
 import tempfile
 from datetime import datetime, timezone
 

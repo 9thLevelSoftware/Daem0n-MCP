@@ -1,7 +1,6 @@
 """Tests for operational tools."""
 
 import pytest
-
 from conftest import ensure_covenant_compliance
 
 
@@ -23,9 +22,10 @@ class TestHealthTool:
     @pytest.mark.asyncio
     async def test_health_returns_statistics(self):
         """Verify health tool returns memory statistics."""
-        import tempfile
         import shutil
-        from daem0nmcp.server import health, _project_contexts
+        import tempfile
+
+        from daem0nmcp.server import _project_contexts, health
 
         temp_dir = tempfile.mkdtemp()
         try:
@@ -48,9 +48,10 @@ class TestExportImport:
     @pytest.mark.asyncio
     async def test_export_returns_json_structure(self):
         """Verify export returns proper JSON structure."""
-        import tempfile
         import shutil
-        from daem0nmcp.server import export_data, get_project_context, _project_contexts
+        import tempfile
+
+        from daem0nmcp.server import _project_contexts, export_data, get_project_context
 
         temp_dir = tempfile.mkdtemp()
         try:
@@ -58,12 +59,10 @@ class TestExportImport:
 
             ctx = await get_project_context(temp_dir)
             await ctx.memory_manager.remember(
-                category="decision",
-                content="Test export"
+                category="decision", content="Test export"
             )
             await ctx.rules_engine.add_rule(
-                trigger="test trigger",
-                must_do=["test action"]
+                trigger="test trigger", must_do=["test action"]
             )
 
             # Ensure covenant compliance before calling export_data
@@ -86,9 +85,15 @@ class TestExportImport:
     @pytest.mark.asyncio
     async def test_import_restores_data(self):
         """Verify import restores exported data."""
-        import tempfile
         import shutil
-        from daem0nmcp.server import export_data, import_data, get_project_context, _project_contexts
+        import tempfile
+
+        from daem0nmcp.server import (
+            _project_contexts,
+            export_data,
+            get_project_context,
+            import_data,
+        )
 
         temp_dir1 = tempfile.mkdtemp()
         temp_dir2 = tempfile.mkdtemp()
@@ -98,8 +103,7 @@ class TestExportImport:
             # Create data in first project
             ctx1 = await get_project_context(temp_dir1)
             await ctx1.memory_manager.remember(
-                category="decision",
-                content="Imported memory test"
+                category="decision", content="Imported memory test"
             )
 
             # Ensure covenant compliance before calling export_data
@@ -114,10 +118,7 @@ class TestExportImport:
             # Ensure covenant compliance for second project before calling import_data
             await ensure_covenant_compliance(temp_dir2)
 
-            result = await import_data(
-                data=exported,
-                project_path=temp_dir2
-            )
+            result = await import_data(data=exported, project_path=temp_dir2)
 
             assert result["memories_imported"] >= 1
 
@@ -143,9 +144,10 @@ class TestMaintenanceTools:
     @pytest.mark.asyncio
     async def test_pin_memory_prevents_decay(self):
         """Verify pinned memories don't decay."""
-        import tempfile
         import shutil
-        from daem0nmcp.server import pin_memory, get_project_context, _project_contexts
+        import tempfile
+
+        from daem0nmcp.server import _project_contexts, get_project_context, pin_memory
 
         temp_dir = tempfile.mkdtemp()
         try:
@@ -153,17 +155,14 @@ class TestMaintenanceTools:
             ctx = await get_project_context(temp_dir)
 
             mem = await ctx.memory_manager.remember(
-                category="decision",
-                content="Important decision to pin"
+                category="decision", content="Important decision to pin"
             )
 
             # Ensure covenant compliance before calling pin_memory
             await ensure_covenant_compliance(temp_dir)
 
             result = await pin_memory(
-                memory_id=mem["id"],
-                pinned=True,
-                project_path=temp_dir
+                memory_id=mem["id"], pinned=True, project_path=temp_dir
             )
 
             assert result.get("pinned")
@@ -177,9 +176,14 @@ class TestMaintenanceTools:
     @pytest.mark.asyncio
     async def test_prune_removes_old_memories(self):
         """Verify prune removes old, low-relevance memories."""
-        import tempfile
         import shutil
-        from daem0nmcp.server import prune_memories, get_project_context, _project_contexts
+        import tempfile
+
+        from daem0nmcp.server import (
+            _project_contexts,
+            get_project_context,
+            prune_memories,
+        )
 
         temp_dir = tempfile.mkdtemp()
         try:
@@ -188,8 +192,7 @@ class TestMaintenanceTools:
 
             # Add some memories
             await ctx.memory_manager.remember(
-                category="learning",
-                content="Old learning to prune"
+                category="learning", content="Old learning to prune"
             )
 
             # Ensure covenant compliance before calling prune_memories
@@ -199,7 +202,7 @@ class TestMaintenanceTools:
             result = await prune_memories(
                 older_than_days=0,  # Prune everything for test
                 dry_run=True,
-                project_path=temp_dir
+                project_path=temp_dir,
             )
 
             assert "would_prune" in result

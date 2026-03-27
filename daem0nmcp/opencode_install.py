@@ -12,7 +12,6 @@ import sys
 from pathlib import Path
 from typing import Any
 
-
 OPENCODE_JSON_TEMPLATE: dict[str, Any] = {
     "$schema": "https://opencode.ai/config.json",
     "mcp": {
@@ -20,11 +19,9 @@ OPENCODE_JSON_TEMPLATE: dict[str, Any] = {
             "type": "local",
             "command": ["python", "-m", "daem0nmcp"],
             "enabled": True,
-            "environment": {
-                "PYTHONUNBUFFERED": "1"
-            }
+            "environment": {"PYTHONUNBUFFERED": "1"},
         }
-    }
+    },
 }
 
 # Subdirectories to scaffold inside .opencode/
@@ -352,7 +349,9 @@ def install_opencode(
 
     lines.append("Client detection:")
     cc = clients["claude_code"]
-    lines.append(f"  Claude Code binary: {'found' if cc['binary_found'] else 'not found'}")
+    lines.append(
+        f"  Claude Code binary: {'found' if cc['binary_found'] else 'not found'}"
+    )
     lines.append(f"  .mcp.json: {'found' if cc['mcp_json'] else 'not found'}")
     lines.append(f"  .claude/: {'found' if cc['claude_dir'] else 'not found'}")
 
@@ -421,16 +420,20 @@ if __name__ == "__main__":
         description="Install OpenCode integration for Daem0n-MCP"
     )
     parser.add_argument(
-        "--dry-run", action="store_true",
-        help="Show what would be created without making changes"
+        "--dry-run",
+        action="store_true",
+        help="Show what would be created without making changes",
     )
     parser.add_argument(
-        "--force", "-f", action="store_true",
-        help="Overwrite existing configuration files"
+        "--force",
+        "-f",
+        action="store_true",
+        help="Overwrite existing configuration files",
     )
     parser.add_argument(
-        "--project-path", default=".",
-        help="Project root path (default: current directory)"
+        "--project-path",
+        default=".",
+        help="Project root path (default: current directory)",
     )
     args = parser.parse_args()
 

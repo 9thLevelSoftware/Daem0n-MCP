@@ -2,8 +2,8 @@
 """Integration tests for hybrid BM25 + vector search."""
 
 from daem0nmcp.bm25_index import BM25Index
-from daem0nmcp.vectors import VectorIndex
 from daem0nmcp.fusion import RRFHybridSearch
+from daem0nmcp.vectors import VectorIndex
 
 
 class TestHybridSearchIntegration:

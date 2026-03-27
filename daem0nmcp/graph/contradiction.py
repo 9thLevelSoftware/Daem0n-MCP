@@ -15,7 +15,7 @@ Links:
 import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -23,47 +23,45 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ..models import MemoryVersion
 from ..vectors import cosine_similarity, decode, encode_document
 
-
 # Similarity threshold: Above this = potentially discussing same topic
 SIMILARITY_THRESHOLD = 0.75
 
 # Negation patterns that indicate semantic opposition
 NEGATION_PATTERNS = [
     # Direct negation prefixes
-    (r'\bnot\s+', r'\b'),  # "not X" vs "X"
-    (r'\bno\s+', r'\b'),  # "no X" vs "X"
-    (r'\bnever\s+', r'\b'),  # "never X" vs "X"
-    (r'\bdon\'t\s+', r'\bdo\s+'),  # "don't X" vs "do X"
-    (r'\bdoesn\'t\s+', r'\bdoes\s+'),  # "doesn't X" vs "does X"
-    (r'\bwon\'t\s+', r'\bwill\s+'),  # "won't X" vs "will X"
-    (r'\bcan\'t\s+', r'\bcan\s+'),  # "can't X" vs "can X"
-    (r'\bcannot\s+', r'\bcan\s+'),  # "cannot X" vs "can X"
-    (r'\bshouldn\'t\s+', r'\bshould\s+'),  # "shouldn't X" vs "should X"
-    (r'\bisn\'t\s+', r'\bis\s+'),  # "isn't X" vs "is X"
-    (r'\baren\'t\s+', r'\bare\s+'),  # "aren't X" vs "are X"
-    (r'\bwasn\'t\s+', r'\bwas\s+'),  # "wasn't X" vs "was X"
-    (r'\bweren\'t\s+', r'\bwere\s+'),  # "weren't X" vs "were X"
-
+    (r"\bnot\s+", r"\b"),  # "not X" vs "X"
+    (r"\bno\s+", r"\b"),  # "no X" vs "X"
+    (r"\bnever\s+", r"\b"),  # "never X" vs "X"
+    (r"\bdon\'t\s+", r"\bdo\s+"),  # "don't X" vs "do X"
+    (r"\bdoesn\'t\s+", r"\bdoes\s+"),  # "doesn't X" vs "does X"
+    (r"\bwon\'t\s+", r"\bwill\s+"),  # "won't X" vs "will X"
+    (r"\bcan\'t\s+", r"\bcan\s+"),  # "can't X" vs "can X"
+    (r"\bcannot\s+", r"\bcan\s+"),  # "cannot X" vs "can X"
+    (r"\bshouldn\'t\s+", r"\bshould\s+"),  # "shouldn't X" vs "should X"
+    (r"\bisn\'t\s+", r"\bis\s+"),  # "isn't X" vs "is X"
+    (r"\baren\'t\s+", r"\bare\s+"),  # "aren't X" vs "are X"
+    (r"\bwasn\'t\s+", r"\bwas\s+"),  # "wasn't X" vs "was X"
+    (r"\bweren\'t\s+", r"\bwere\s+"),  # "weren't X" vs "were X"
     # Antonym pairs (common in technical contexts)
-    (r'\benable\b', r'\bdisable\b'),
-    (r'\ballow\b', r'\bdeny\b'),
-    (r'\ballow\b', r'\bblock\b'),
-    (r'\baccept\b', r'\breject\b'),
-    (r'\binclude\b', r'\bexclude\b'),
-    (r'\brequire\b', r'\boptional\b'),
-    (r'\brequired\b', r'\boptional\b'),
-    (r'\btrue\b', r'\bfalse\b'),
-    (r'\byes\b', r'\bno\b'),
-    (r'\bvalid\b', r'\binvalid\b'),
-    (r'\bcorrect\b', r'\bincorrect\b'),
-    (r'\bsupported\b', r'\bunsupported\b'),
-    (r'\bsafe\b', r'\bunsafe\b'),
-    (r'\bsecure\b', r'\binsecure\b'),
-    (r'\bworking\b', r'\bbroken\b'),
-    (r'\bworks\b', r'\bfails\b'),
-    (r'\buse\b', r'\bavoid\b'),
-    (r'\brecommended\b', r'\bdeprecated\b'),
-    (r'\bpreferred\b', r'\bdiscouraged\b'),
+    (r"\benable\b", r"\bdisable\b"),
+    (r"\ballow\b", r"\bdeny\b"),
+    (r"\ballow\b", r"\bblock\b"),
+    (r"\baccept\b", r"\breject\b"),
+    (r"\binclude\b", r"\bexclude\b"),
+    (r"\brequire\b", r"\boptional\b"),
+    (r"\brequired\b", r"\boptional\b"),
+    (r"\btrue\b", r"\bfalse\b"),
+    (r"\byes\b", r"\bno\b"),
+    (r"\bvalid\b", r"\binvalid\b"),
+    (r"\bcorrect\b", r"\bincorrect\b"),
+    (r"\bsupported\b", r"\bunsupported\b"),
+    (r"\bsafe\b", r"\bunsafe\b"),
+    (r"\bsecure\b", r"\binsecure\b"),
+    (r"\bworking\b", r"\bbroken\b"),
+    (r"\bworks\b", r"\bfails\b"),
+    (r"\buse\b", r"\bavoid\b"),
+    (r"\brecommended\b", r"\bdeprecated\b"),
+    (r"\bpreferred\b", r"\bdiscouraged\b"),
 ]
 
 
@@ -76,11 +74,11 @@ class Contradiction:
     existing_content: str
     existing_memory_id: int
     similarity_score: float
-    negation_pattern: Optional[Tuple[str, str]] = None
+    negation_pattern: tuple[str, str] | None = None
     reason: str = ""
 
 
-def has_negation_mismatch(text1: str, text2: str) -> Optional[Tuple[str, str]]:
+def has_negation_mismatch(text1: str, text2: str) -> tuple[str, str] | None:
     """
     Check if two texts have negation patterns that indicate contradiction.
 
@@ -103,9 +101,9 @@ def has_negation_mismatch(text1: str, text2: str) -> Optional[Tuple[str, str]]:
 async def detect_contradictions(
     new_content: str,
     session: AsyncSession,
-    memory_id: Optional[int] = None,
+    memory_id: int | None = None,
     similarity_threshold: float = SIMILARITY_THRESHOLD,
-) -> List[Contradiction]:
+) -> list[Contradiction]:
     """
     Detect if new content contradicts existing memory versions.
 
@@ -147,7 +145,7 @@ async def detect_contradictions(
     versions = result.scalars().all()
 
     # Cache embeddings to avoid recomputing for the same content across calls
-    embedding_cache: Dict[int, Any] = {}
+    embedding_cache: dict[int, Any] = {}
 
     for version in versions:
         # Use cached embedding if available, otherwise compute and cache
@@ -187,10 +185,10 @@ async def detect_contradictions(
 
 
 async def invalidate_contradicted_facts(
-    contradictions: List[Contradiction],
+    contradictions: list[Contradiction],
     new_version_id: int,
     session: AsyncSession,
-    invalidation_time: Optional[datetime] = None,
+    invalidation_time: datetime | None = None,
 ) -> int:
     """
     Invalidate memory versions that have been contradicted.
@@ -244,10 +242,10 @@ async def check_and_invalidate_contradictions(
     new_content: str,
     new_version_id: int,
     session: AsyncSession,
-    memory_id: Optional[int] = None,
+    memory_id: int | None = None,
     similarity_threshold: float = SIMILARITY_THRESHOLD,
-    invalidation_time: Optional[datetime] = None,
-) -> Tuple[List[Contradiction], int]:
+    invalidation_time: datetime | None = None,
+) -> tuple[list[Contradiction], int]:
     """
     Combined detection and invalidation of contradictions.
 

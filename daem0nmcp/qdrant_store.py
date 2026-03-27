@@ -12,7 +12,6 @@ for semantic matching. Dimension is controlled by settings.embedding_dimension.
 
 import logging
 import os
-from typing import Optional
 
 from qdrant_client import QdrantClient
 from qdrant_client.models import (
@@ -77,16 +76,12 @@ class QdrantVectorStore:
                 self.client.create_collection(
                     collection_name=coll_name,
                     vectors_config=VectorParams(
-                        size=self.EMBEDDING_DIMENSION,
-                        distance=Distance.COSINE
-                    )
+                        size=self.EMBEDDING_DIMENSION, distance=Distance.COSINE
+                    ),
                 )
 
     def upsert_memory(
-        self,
-        memory_id: int,
-        embedding: list[float],
-        metadata: dict
+        self, memory_id: int, embedding: list[float], metadata: dict
     ) -> None:
         """
         Store or update a memory's vector embedding.
@@ -98,20 +93,16 @@ class QdrantVectorStore:
         """
         self.client.upsert(
             collection_name=self.COLLECTION_MEMORIES,
-            points=[PointStruct(
-                id=memory_id,
-                vector=embedding,
-                payload=metadata
-            )]
+            points=[PointStruct(id=memory_id, vector=embedding, payload=metadata)],
         )
 
     def search(
         self,
         query_vector: list[float],
         limit: int = 20,
-        category_filter: Optional[list[str]] = None,
-        tags_filter: Optional[list[str]] = None,
-        file_path: Optional[str] = None
+        category_filter: list[str] | None = None,
+        tags_filter: list[str] | None = None,
+        file_path: str | None = None,
     ) -> list[tuple[int, float]]:
         """
         Search for similar memories with optional metadata filtering.
@@ -134,9 +125,7 @@ class QdrantVectorStore:
                 FieldCondition(key="category", match=MatchAny(any=category_filter))
             )
         if tags_filter:
-            filters.append(
-                FieldCondition(key="tags", match=MatchAny(any=tags_filter))
-            )
+            filters.append(FieldCondition(key="tags", match=MatchAny(any=tags_filter)))
         if file_path:
             filters.append(
                 FieldCondition(key="file_path", match=MatchValue(value=file_path))
@@ -147,7 +136,7 @@ class QdrantVectorStore:
             collection_name=self.COLLECTION_MEMORIES,
             query=query_vector,
             query_filter=Filter(must=filters) if filters else None,
-            limit=limit
+            limit=limit,
         )
 
         return [(point.id, point.score) for point in response.points]
@@ -160,8 +149,7 @@ class QdrantVectorStore:
             memory_id: The memory ID to delete.
         """
         self.client.delete(
-            collection_name=self.COLLECTION_MEMORIES,
-            points_selector=[memory_id]
+            collection_name=self.COLLECTION_MEMORIES, points_selector=[memory_id]
         )
 
     def get_count(self) -> int:

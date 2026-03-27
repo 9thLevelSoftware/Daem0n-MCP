@@ -3,32 +3,36 @@
 import json
 import logging
 import subprocess
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Dict, List, Optional, Any
-from datetime import datetime, timezone, timedelta
+from typing import Any
 
 try:
-    from ..mcp_instance import mcp
+    from .. import __version__, vectors
     from ..context_manager import (
-        ProjectContext, get_project_context, _default_project_path,
-        _missing_project_path_error, _project_contexts,
+        ProjectContext,
+        _default_project_path,
+        _missing_project_path_error,
+        _project_contexts,
+        get_project_context,
     )
     from ..logging_config import with_request_id
-    from ..models import Memory, Rule, CodeEntity
-    from .. import __version__
-    from .. import vectors
+    from ..mcp_instance import mcp
+    from ..models import CodeEntity, Memory, Rule
 except ImportError:
-    from daem0nmcp.mcp_instance import mcp
+    from daem0nmcp import __version__, vectors
     from daem0nmcp.context_manager import (
-        ProjectContext, get_project_context, _default_project_path,
-        _missing_project_path_error, _project_contexts,
+        ProjectContext,
+        _default_project_path,
+        _missing_project_path_error,
+        _project_contexts,
+        get_project_context,
     )
     from daem0nmcp.logging_config import with_request_id
-    from daem0nmcp.models import Memory, Rule, CodeEntity
-    from daem0nmcp import __version__
-    from daem0nmcp import vectors
+    from daem0nmcp.mcp_instance import mcp
+    from daem0nmcp.models import CodeEntity, Memory, Rule
 
-from sqlalchemy import select, func
+from sqlalchemy import func, select
 
 from ._deprecation import add_deprecation
 
@@ -37,14 +41,31 @@ logger = logging.getLogger(__name__)
 
 # Directories to exclude when scanning project structure
 BOOTSTRAP_EXCLUDED_DIRS = {
-    'node_modules', '.git', '__pycache__', '.venv', 'venv',
-    'dist', 'build', '.next', 'target', '.idea', '.vscode',
-    '.eggs', 'eggs', '.tox', '.nox', '.mypy_cache', '.pytest_cache',
-    '.ruff_cache', 'htmlcov', '.coverage', 'site-packages'
+    "node_modules",
+    ".git",
+    "__pycache__",
+    ".venv",
+    "venv",
+    "dist",
+    "build",
+    ".next",
+    "target",
+    ".idea",
+    ".vscode",
+    ".eggs",
+    "eggs",
+    ".tox",
+    ".nox",
+    ".mypy_cache",
+    ".pytest_cache",
+    ".ruff_cache",
+    "htmlcov",
+    ".coverage",
+    "site-packages",
 }
 
 
-def _extract_project_identity(project_path: str) -> Optional[str]:
+def _extract_project_identity(project_path: str) -> str | None:
     """
     Extract project identity from manifest files.
 
@@ -64,17 +85,17 @@ def _extract_project_identity(project_path: str) -> Optional[str]:
     package_json = root / "package.json"
     if package_json.exists():
         try:
-            data = json.loads(package_json.read_text(encoding='utf-8', errors='ignore'))
+            data = json.loads(package_json.read_text(encoding="utf-8", errors="ignore"))
             parts = []
-            if data.get('name'):
+            if data.get("name"):
                 parts.append(f"Project: {data['name']}")
-            if data.get('description'):
+            if data.get("description"):
                 parts.append(f"Description: {data['description']}")
-            if data.get('scripts'):
-                scripts = ', '.join(list(data['scripts'].keys())[:5])
+            if data.get("scripts"):
+                scripts = ", ".join(list(data["scripts"].keys())[:5])
                 parts.append(f"Scripts: {scripts}")
-            deps = list(data.get('dependencies', {}).keys())[:10]
-            dev_deps = list(data.get('devDependencies', {}).keys())[:5]
+            deps = list(data.get("dependencies", {}).keys())[:10]
+            dev_deps = list(data.get("devDependencies", {}).keys())[:5]
             if deps:
                 parts.append(f"Dependencies: {', '.join(deps)}")
             if dev_deps:
@@ -88,25 +109,34 @@ def _extract_project_identity(project_path: str) -> Optional[str]:
     pyproject = root / "pyproject.toml"
     if pyproject.exists():
         try:
-            content = pyproject.read_text(encoding='utf-8', errors='ignore')
+            content = pyproject.read_text(encoding="utf-8", errors="ignore")
             parts = []
-            for line in content.split('\n'):
+            for line in content.split("\n"):
                 line = line.strip()
-                if line.startswith('name = '):
-                    project_name = line.split('=', 1)[1].strip().strip('"')
+                if line.startswith("name = "):
+                    project_name = line.split("=", 1)[1].strip().strip('"')
                     parts.append(f"Project: {project_name}")
-                elif line.startswith('description = '):
-                    description = line.split('=', 1)[1].strip().strip('"')
+                elif line.startswith("description = "):
+                    description = line.split("=", 1)[1].strip().strip('"')
                     parts.append(f"Description: {description}")
             # Extract dependencies list
-            if 'dependencies = [' in content:
-                start = content.find('dependencies = [')
-                end = content.find(']', start)
+            if "dependencies = [" in content:
+                start = content.find("dependencies = [")
+                end = content.find("]", start)
                 if end > start:
-                    deps_str = content[start:end+1]
-                    deps = [d.strip().strip('"').strip("'").split('[')[0].split('>')[0].split('<')[0].split('=')[0].strip()
-                            for d in deps_str.split('[')[1].split(']')[0].split(',')
-                            if d.strip()]
+                    deps_str = content[start : end + 1]
+                    deps = [
+                        d.strip()
+                        .strip('"')
+                        .strip("'")
+                        .split("[")[0]
+                        .split(">")[0]
+                        .split("<")[0]
+                        .split("=")[0]
+                        .strip()
+                        for d in deps_str.split("[")[1].split("]")[0].split(",")
+                        if d.strip()
+                    ]
                     deps = [d for d in deps if d]  # Remove empty strings
                     if deps:
                         parts.append(f"Dependencies: {', '.join(deps[:10])}")
@@ -119,15 +149,15 @@ def _extract_project_identity(project_path: str) -> Optional[str]:
     cargo = root / "Cargo.toml"
     if cargo.exists():
         try:
-            content = cargo.read_text(encoding='utf-8', errors='ignore')
+            content = cargo.read_text(encoding="utf-8", errors="ignore")
             parts = []
-            for line in content.split('\n'):
+            for line in content.split("\n"):
                 line = line.strip()
-                if line.startswith('name = '):
-                    project_name = line.split('=', 1)[1].strip().strip('"')
+                if line.startswith("name = "):
+                    project_name = line.split("=", 1)[1].strip().strip('"')
                     parts.append(f"Project: {project_name}")
-                elif line.startswith('description = '):
-                    description = line.split('=', 1)[1].strip().strip('"')
+                elif line.startswith("description = "):
+                    description = line.split("=", 1)[1].strip().strip('"')
                     parts.append(f"Description: {description}")
             if parts:
                 return "Tech stack (from Cargo.toml):\n" + "\n".join(parts)
@@ -138,13 +168,13 @@ def _extract_project_identity(project_path: str) -> Optional[str]:
     gomod = root / "go.mod"
     if gomod.exists():
         try:
-            content = gomod.read_text(encoding='utf-8', errors='ignore')
+            content = gomod.read_text(encoding="utf-8", errors="ignore")
             parts = []
-            for line in content.split('\n'):
+            for line in content.split("\n"):
                 line = line.strip()
-                if line.startswith('module '):
+                if line.startswith("module "):
                     parts.append(f"Module: {line.split(' ', 1)[1]}")
-                elif line.startswith('go '):
+                elif line.startswith("go "):
                     parts.append(f"Go version: {line.split(' ', 1)[1]}")
             if parts:
                 return "Tech stack (from go.mod):\n" + "\n".join(parts)
@@ -154,7 +184,7 @@ def _extract_project_identity(project_path: str) -> Optional[str]:
     return None
 
 
-def _extract_architecture(project_path: str) -> Optional[str]:
+def _extract_architecture(project_path: str) -> str | None:
     """
     Extract architecture overview from README and directory structure.
 
@@ -173,7 +203,7 @@ def _extract_architecture(project_path: str) -> Optional[str]:
         readme = root / readme_name
         if readme.exists():
             try:
-                content = readme.read_text(encoding='utf-8', errors='ignore')[:2000]
+                content = readme.read_text(encoding="utf-8", errors="ignore")[:2000]
                 if content.strip():
                     parts.append(f"README:\n{content}")
                 break
@@ -186,7 +216,7 @@ def _extract_architecture(project_path: str) -> Optional[str]:
     try:
         for item in sorted(root.iterdir()):
             name = item.name
-            if name.startswith('.') and name not in ['.github']:
+            if name.startswith(".") and name not in [".github"]:
                 continue
             if name in BOOTSTRAP_EXCLUDED_DIRS:
                 continue
@@ -198,8 +228,15 @@ def _extract_architecture(project_path: str) -> Optional[str]:
                 except PermissionError:
                     dirs.append(f"  {name}/")
             elif item.is_file() and name in [
-                'main.py', 'app.py', 'index.ts', 'index.js', 'main.rs',
-                'main.go', 'Makefile', 'Dockerfile', 'docker-compose.yml'
+                "main.py",
+                "app.py",
+                "index.ts",
+                "index.js",
+                "main.rs",
+                "main.go",
+                "Makefile",
+                "Dockerfile",
+                "docker-compose.yml",
             ]:
                 files.append(f"  {name}")
     except Exception as e:
@@ -216,7 +253,7 @@ def _extract_architecture(project_path: str) -> Optional[str]:
     return "Architecture overview:\n\n" + "\n\n".join(parts)
 
 
-def _extract_conventions(project_path: str) -> Optional[str]:
+def _extract_conventions(project_path: str) -> str | None:
     """
     Extract coding conventions from config files and docs.
 
@@ -236,7 +273,7 @@ def _extract_conventions(project_path: str) -> Optional[str]:
         contrib = root / contrib_name
         if contrib.exists():
             try:
-                content = contrib.read_text(encoding='utf-8', errors='ignore')[:1500]
+                content = contrib.read_text(encoding="utf-8", errors="ignore")[:1500]
                 if content.strip():
                     parts.append(f"Contributing guidelines:\n{content}")
                 break
@@ -271,14 +308,14 @@ def _extract_conventions(project_path: str) -> Optional[str]:
     pyproject = root / "pyproject.toml"
     if pyproject.exists():
         try:
-            content = pyproject.read_text(encoding='utf-8', errors='ignore')
-            if '[tool.black]' in content:
+            content = pyproject.read_text(encoding="utf-8", errors="ignore")
+            if "[tool.black]" in content:
                 found_configs.append("Black")
-            if '[tool.ruff]' in content:
+            if "[tool.ruff]" in content:
                 found_configs.append("Ruff")
-            if '[tool.mypy]' in content:
+            if "[tool.mypy]" in content:
                 found_configs.append("Mypy")
-            if '[tool.pytest]' in content or '[tool.pytest.ini_options]' in content:
+            if "[tool.pytest]" in content or "[tool.pytest.ini_options]" in content:
                 found_configs.append("Pytest")
         except Exception:
             pass
@@ -294,7 +331,7 @@ def _extract_conventions(project_path: str) -> Optional[str]:
     return "Coding conventions:\n\n" + "\n\n".join(parts)
 
 
-def _extract_entry_points(project_path: str) -> Optional[str]:
+def _extract_entry_points(project_path: str) -> str | None:
     """
     Find common entry point files in the project.
 
@@ -310,11 +347,26 @@ def _extract_entry_points(project_path: str) -> Optional[str]:
     """
     root = Path(project_path)
     entry_point_patterns = [
-        "main.py", "app.py", "cli.py", "__main__.py", "server.py", "api.py",
-        "wsgi.py", "asgi.py", "manage.py",
-        "index.js", "index.ts", "index.tsx", "main.js", "main.ts",
-        "server.js", "server.ts", "app.js", "app.ts",
-        "main.rs", "lib.rs",
+        "main.py",
+        "app.py",
+        "cli.py",
+        "__main__.py",
+        "server.py",
+        "api.py",
+        "wsgi.py",
+        "asgi.py",
+        "manage.py",
+        "index.js",
+        "index.ts",
+        "index.tsx",
+        "main.js",
+        "main.ts",
+        "server.js",
+        "server.ts",
+        "app.js",
+        "app.ts",
+        "main.rs",
+        "lib.rs",
         "main.go",
     ]
 
@@ -330,7 +382,7 @@ def _extract_entry_points(project_path: str) -> Optional[str]:
                 if item.is_file() and item.name in entry_point_patterns:
                     rel_path = item.relative_to(root)
                     found.append(str(rel_path))
-                elif item.is_dir() and not item.name.startswith('.'):
+                elif item.is_dir() and not item.name.startswith("."):
                     scan_dir(item, depth + 1)
         except PermissionError:
             pass
@@ -350,10 +402,12 @@ def _extract_entry_points(project_path: str) -> Optional[str]:
     if not found:
         return None
 
-    return "Entry points identified:\n" + "\n".join(f"  - {f}" for f in sorted(found)[:15])
+    return "Entry points identified:\n" + "\n".join(
+        f"  - {f}" for f in sorted(found)[:15]
+    )
 
 
-def _scan_todos_for_bootstrap(project_path: str, limit: int = 20) -> Optional[str]:
+def _scan_todos_for_bootstrap(project_path: str, limit: int = 20) -> str | None:
     """
     Scan for TODO/FIXME/HACK comments during bootstrap.
 
@@ -379,9 +433,9 @@ def _scan_todos_for_bootstrap(project_path: str, limit: int = 20) -> Optional[st
     limited = todos[:limit]
 
     # Group by type
-    by_type: Dict[str, int] = {}
+    by_type: dict[str, int] = {}
     for todo in todos:
-        todo_type = todo.get('type', 'TODO')
+        todo_type = todo.get("type", "TODO")
         by_type[todo_type] = by_type.get(todo_type, 0) + 1
 
     summary_parts = []
@@ -392,10 +446,10 @@ def _scan_todos_for_bootstrap(project_path: str, limit: int = 20) -> Optional[st
 
     # Add individual items
     for todo in limited:
-        file_path = todo.get('file', 'unknown')
-        line = todo.get('line', 0)
-        todo_type = todo.get('type', 'TODO')
-        content = todo.get('content', '')[:80]
+        file_path = todo.get("file", "unknown")
+        line = todo.get("line", 0)
+        todo_type = todo.get("type", "TODO")
+        content = todo.get("content", "")[:80]
         summary_parts.append(f"  [{todo_type}] {file_path}:{line} - {content}")
 
     if len(todos) > limit:
@@ -404,7 +458,7 @@ def _scan_todos_for_bootstrap(project_path: str, limit: int = 20) -> Optional[st
     return "Known issues from code comments:\n" + "\n".join(summary_parts)
 
 
-def _extract_project_instructions(project_path: str) -> Optional[str]:
+def _extract_project_instructions(project_path: str) -> str | None:
     """
     Extract project instructions from CLAUDE.md and AGENTS.md.
 
@@ -418,7 +472,7 @@ def _extract_project_instructions(project_path: str) -> Optional[str]:
     claude_md = root / "CLAUDE.md"
     if claude_md.exists():
         try:
-            content = claude_md.read_text(encoding='utf-8', errors='ignore')[:3000]
+            content = claude_md.read_text(encoding="utf-8", errors="ignore")[:3000]
             if content.strip():
                 parts.append(f"From CLAUDE.md:\n{content}")
         except Exception as e:
@@ -428,7 +482,7 @@ def _extract_project_instructions(project_path: str) -> Optional[str]:
     agents_md = root / "AGENTS.md"
     if agents_md.exists():
         try:
-            content = agents_md.read_text(encoding='utf-8', errors='ignore')[:2000]
+            content = agents_md.read_text(encoding="utf-8", errors="ignore")[:2000]
             if content.strip():
                 parts.append(f"From AGENTS.md:\n{content}")
         except Exception as e:
@@ -443,7 +497,7 @@ def _extract_project_instructions(project_path: str) -> Optional[str]:
 # ============================================================================
 # Helper: Git awareness
 # ============================================================================
-def _get_git_history_summary(project_path: str, limit: int = 30) -> Optional[str]:
+def _get_git_history_summary(project_path: str, limit: int = 30) -> str | None:
     """Get a summary of git history for bootstrapping context.
 
     Args:
@@ -460,7 +514,7 @@ def _get_git_history_summary(project_path: str, limit: int = 30) -> Optional[str
             capture_output=True,
             text=True,
             timeout=5,
-            cwd=project_path
+            cwd=project_path,
         )
         if result.returncode != 0:
             return None
@@ -471,7 +525,7 @@ def _get_git_history_summary(project_path: str, limit: int = 30) -> Optional[str
             capture_output=True,
             text=True,
             timeout=10,
-            cwd=project_path
+            cwd=project_path,
         )
         if result.returncode != 0 or not result.stdout.strip():
             return None
@@ -493,7 +547,9 @@ def _get_git_history_summary(project_path: str, limit: int = 30) -> Optional[str
         return None
 
 
-def _get_git_changes(since_date: Optional[datetime] = None, project_path: Optional[str] = None) -> Optional[Dict[str, Any]]:
+def _get_git_changes(
+    since_date: datetime | None = None, project_path: str | None = None
+) -> dict[str, Any] | None:
     """Get git changes since a given date.
 
     Args:
@@ -511,7 +567,7 @@ def _get_git_changes(since_date: Optional[datetime] = None, project_path: Option
             text=True,
             timeout=5,
             cwd=cwd,
-            stdin=subprocess.DEVNULL
+            stdin=subprocess.DEVNULL,
         )
         if result.returncode != 0:
             return None
@@ -525,7 +581,14 @@ def _get_git_changes(since_date: Optional[datetime] = None, project_path: Option
         else:
             cmd = ["git", "log", "--oneline", "-5"]
 
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=5, cwd=cwd, stdin=subprocess.DEVNULL)
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=5,
+            cwd=cwd,
+            stdin=subprocess.DEVNULL,
+        )
         if result.returncode == 0 and result.stdout.strip():
             git_info["recent_commits"] = result.stdout.strip().split("\n")
 
@@ -536,13 +599,14 @@ def _get_git_changes(since_date: Optional[datetime] = None, project_path: Option
             text=True,
             timeout=5,
             cwd=cwd,
-            stdin=subprocess.DEVNULL
+            stdin=subprocess.DEVNULL,
         )
         if result.returncode == 0 and result.stdout.strip():
             changes = result.stdout.strip().split("\n")
             all_changes = [
                 {"status": line[:2].strip(), "file": line[3:]}
-                for line in changes if line.strip()
+                for line in changes
+                if line.strip()
             ]
             git_info["uncommitted_changes"] = all_changes[:10]
             if len(all_changes) > 10:
@@ -555,7 +619,7 @@ def _get_git_changes(since_date: Optional[datetime] = None, project_path: Option
             text=True,
             timeout=5,
             cwd=cwd,
-            stdin=subprocess.DEVNULL
+            stdin=subprocess.DEVNULL,
         )
         if result.returncode == 0:
             git_info["branch"] = result.stdout.strip()
@@ -569,7 +633,7 @@ def _get_git_changes(since_date: Optional[datetime] = None, project_path: Option
 # ============================================================================
 # Helper: Bootstrap project context on first run
 # ============================================================================
-async def _bootstrap_project_context(ctx: ProjectContext) -> Dict[str, Any]:
+async def _bootstrap_project_context(ctx: ProjectContext) -> dict[str, Any]:
     """
     Bootstrap initial context on first run.
 
@@ -589,11 +653,7 @@ async def _bootstrap_project_context(ctx: ProjectContext) -> Dict[str, Any]:
     Returns:
         Dictionary with bootstrap results including sources status
     """
-    results = {
-        "bootstrapped": True,
-        "memories_created": 0,
-        "sources": {}
-    }
+    results = {"bootstrapped": True, "memories_created": 0, "sources": {}}
 
     # Define all extractors with their memory configs
     extractors = [
@@ -602,49 +662,49 @@ async def _bootstrap_project_context(ctx: ProjectContext) -> Dict[str, Any]:
             lambda: _extract_project_identity(ctx.project_path),
             "pattern",
             "Tech stack and dependencies from project manifest",
-            ["bootstrap", "tech-stack", "identity"]
+            ["bootstrap", "tech-stack", "identity"],
         ),
         (
             "architecture",
             lambda: _extract_architecture(ctx.project_path),
             "pattern",
             "Project structure and README overview",
-            ["bootstrap", "architecture", "structure"]
+            ["bootstrap", "architecture", "structure"],
         ),
         (
             "conventions",
             lambda: _extract_conventions(ctx.project_path),
             "pattern",
             "Coding conventions and tool configurations",
-            ["bootstrap", "conventions", "style"]
+            ["bootstrap", "conventions", "style"],
         ),
         (
             "project_instructions",
             lambda: _extract_project_instructions(ctx.project_path),
             "pattern",
             "Project-specific AI instructions from CLAUDE.md/AGENTS.md",
-            ["bootstrap", "project-config", "instructions"]
+            ["bootstrap", "project-config", "instructions"],
         ),
         (
             "git_evolution",
             lambda: _get_git_history_summary(ctx.project_path, limit=30),
             "learning",
             "Recent git history showing project evolution",
-            ["bootstrap", "git-history", "evolution"]
+            ["bootstrap", "git-history", "evolution"],
         ),
         (
             "known_issues",
             lambda: _scan_todos_for_bootstrap(ctx.project_path, limit=20),
             "warning",
             "Known issues from TODO/FIXME/HACK comments in code",
-            ["bootstrap", "tech-debt", "issues"]
+            ["bootstrap", "tech-debt", "issues"],
         ),
         (
             "entry_points",
             lambda: _extract_entry_points(ctx.project_path),
             "learning",
             "Main entry point files identified in the project",
-            ["bootstrap", "entry-points", "structure"]
+            ["bootstrap", "entry-points", "structure"],
         ),
     ]
 
@@ -658,7 +718,7 @@ async def _bootstrap_project_context(ctx: ProjectContext) -> Dict[str, Any]:
                     content=content,
                     rationale=f"Auto-ingested on first run: {rationale}",
                     tags=tags,
-                    project_path=ctx.project_path
+                    project_path=ctx.project_path,
                 )
                 results["sources"][name] = "ingested"
                 results["memories_created"] += 1
@@ -676,7 +736,8 @@ async def _bootstrap_project_context(ctx: ProjectContext) -> Dict[str, Any]:
 # Helper functions for get_briefing (extracted for maintainability)
 # ============================================================================
 
-async def _fetch_recent_context(ctx: ProjectContext) -> Dict[str, Any]:
+
+async def _fetch_recent_context(ctx: ProjectContext) -> dict[str, Any]:
     """
     Fetch recent decisions, warnings, failed approaches, and top rules.
 
@@ -692,9 +753,7 @@ async def _fetch_recent_context(ctx: ProjectContext) -> Dict[str, Any]:
     async with ctx.db_manager.get_session() as session:
         # Get most recent memory timestamp
         result = await session.execute(
-            select(Memory.created_at)
-            .order_by(Memory.created_at.desc())
-            .limit(1)
+            select(Memory.created_at).order_by(Memory.created_at.desc()).limit(1)
         )
         row = result.first()
         if row:
@@ -703,7 +762,7 @@ async def _fetch_recent_context(ctx: ProjectContext) -> Dict[str, Any]:
         # Get recent decisions - lean summary with first line only
         result = await session.execute(
             select(Memory)
-            .where(Memory.category == 'decision')
+            .where(Memory.category == "decision")
             .order_by(Memory.created_at.desc())
             .limit(5)
         )
@@ -711,34 +770,41 @@ async def _fetch_recent_context(ctx: ProjectContext) -> Dict[str, Any]:
         recent_decisions = [
             {
                 "id": m.id,
-                "summary": m.content.split('\n')[0][:120] + "..." if len(m.content.split('\n')[0]) > 120 else m.content.split('\n')[0],
-                "worked": m.worked
+                "summary": m.content.split("\n")[0][:120] + "..."
+                if len(m.content.split("\n")[0]) > 120
+                else m.content.split("\n")[0],
+                "worked": m.worked,
             }
             for m in all_decisions
         ]
 
         # Count total decisions for context
         result = await session.execute(
-            select(func.count(Memory.id)).where(Memory.category == 'decision')
+            select(func.count(Memory.id)).where(Memory.category == "decision")
         )
         total_decisions = result.scalar() or 0
 
         # Get active warnings - first line summary only
         result = await session.execute(
             select(Memory)
-            .where(Memory.category == 'warning')
+            .where(Memory.category == "warning")
             .order_by(Memory.created_at.desc())
             .limit(5)
         )
         all_warnings = result.scalars().all()
         active_warnings = [
-            {"id": m.id, "summary": m.content.split('\n')[0][:120] + "..." if len(m.content.split('\n')[0]) > 120 else m.content.split('\n')[0]}
+            {
+                "id": m.id,
+                "summary": m.content.split("\n")[0][:120] + "..."
+                if len(m.content.split("\n")[0]) > 120
+                else m.content.split("\n")[0],
+            }
             for m in all_warnings
         ]
 
         # Count total warnings
         result = await session.execute(
-            select(func.count(Memory.id)).where(Memory.category == 'warning')
+            select(func.count(Memory.id)).where(Memory.category == "warning")
         )
         total_warnings = result.scalar() or 0
 
@@ -753,8 +819,12 @@ async def _fetch_recent_context(ctx: ProjectContext) -> Dict[str, Any]:
         failed_approaches = [
             {
                 "id": m.id,
-                "summary": m.content.split('\n')[0][:100] + "..." if len(m.content.split('\n')[0]) > 100 else m.content.split('\n')[0],
-                "outcome": (m.outcome.split('\n')[0][:60] + "...") if m.outcome else None
+                "summary": m.content.split("\n")[0][:100] + "..."
+                if len(m.content.split("\n")[0]) > 100
+                else m.content.split("\n")[0],
+                "outcome": (m.outcome.split("\n")[0][:60] + "...")
+                if m.outcome
+                else None,
             }
             for m in all_failed
         ]
@@ -776,8 +846,10 @@ async def _fetch_recent_context(ctx: ProjectContext) -> Dict[str, Any]:
         top_rules = [
             {
                 "id": r.id,
-                "trigger": r.trigger.split('\n')[0][:80] + "..." if len(r.trigger.split('\n')[0]) > 80 else r.trigger.split('\n')[0],
-                "priority": r.priority
+                "trigger": r.trigger.split("\n")[0][:80] + "..."
+                if len(r.trigger.split("\n")[0]) > 80
+                else r.trigger.split("\n")[0],
+                "priority": r.priority,
             }
             for r in all_rules
         ]
@@ -791,11 +863,13 @@ async def _fetch_recent_context(ctx: ProjectContext) -> Dict[str, Any]:
         "failed_approaches": failed_approaches,
         "total_failed": total_failed,
         "top_rules": top_rules,
-        "drill_down": "Use recall(topic) or recall_for_file(file) for full memory content"
+        "drill_down": "Use recall(topic) or recall_for_file(file) for full memory content",
     }
 
 
-async def _fetch_dream_sessions(ctx: ProjectContext, limit: int = 5) -> List[Dict[str, Any]]:
+async def _fetch_dream_sessions(
+    ctx: ProjectContext, limit: int = 5
+) -> list[dict[str, Any]]:
     """
     Fetch recent dream session summaries for the briefing dashboard.
 
@@ -826,7 +900,7 @@ async def _fetch_dream_sessions(ctx: ProjectContext, limit: int = 5) -> List[Dic
             return []
 
         # Group by session ID from context dict
-        sessions: Dict[str, Dict[str, Any]] = {}
+        sessions: dict[str, dict[str, Any]] = {}
         for m in dreams:
             ctx_data = m.context or {}
             sid = ctx_data.get("dream_session_id", "unknown")
@@ -844,18 +918,26 @@ async def _fetch_dream_sessions(ctx: ProjectContext, limit: int = 5) -> List[Dic
 
             # Individual insight (not session summary)
             if "dream-summary" not in (m.tags or []):
-                sessions[sid]["insights"].append({
-                    "source_decision_id": ctx_data.get("source_decision_id"),
-                    "result": ctx_data.get("re_evaluation_result"),
-                    "summary": m.content[:100] + "..." if len(m.content) > 100 else m.content,
-                })
+                sessions[sid]["insights"].append(
+                    {
+                        "source_decision_id": ctx_data.get("source_decision_id"),
+                        "result": ctx_data.get("re_evaluation_result"),
+                        "summary": m.content[:100] + "..."
+                        if len(m.content) > 100
+                        else m.content,
+                    }
+                )
 
                 # Update counters from individual results (more accurate than summary)
                 if sessions[sid]["decisions_reviewed"] == 0:
                     sessions[sid]["decisions_reviewed"] = len(sessions[sid]["insights"])
                 if sessions[sid]["insights_generated"] == 0:
                     sessions[sid]["insights_generated"] = len(
-                        [i for i in sessions[sid]["insights"] if i["result"] != "needs_more_data"]
+                        [
+                            i
+                            for i in sessions[sid]["insights"]
+                            if i["result"] != "needs_more_data"
+                        ]
                     )
 
         return list(sessions.values())[:limit]
@@ -865,9 +947,8 @@ async def _fetch_dream_sessions(ctx: ProjectContext, limit: int = 5) -> List[Dic
 
 
 async def _prefetch_focus_areas(
-    ctx: ProjectContext,
-    focus_areas: List[str]
-) -> Dict[str, Dict[str, Any]]:
+    ctx: ProjectContext, focus_areas: list[str]
+) -> dict[str, dict[str, Any]]:
     """
     Pre-fetch memories for specified focus areas.
 
@@ -884,8 +965,10 @@ async def _prefetch_focus_areas(
 
     for area in focus_areas[:4]:  # Limit to 4 areas
         memories = await ctx.memory_manager.recall(
-            area, limit=3, project_path=ctx.project_path,
-            condensed=True  # Use condensed mode for token efficiency
+            area,
+            limit=3,
+            project_path=ctx.project_path,
+            condensed=True,  # Use condensed mode for token efficiency
         )
 
         # Extract top 2 most relevant items with first-line summaries
@@ -893,13 +976,17 @@ async def _prefetch_focus_areas(
         for cat in ["decisions", "warnings", "patterns", "learnings"]:
             for m in memories.get(cat, [])[:2]:
                 content = m.get("content", "")
-                first_line = content.split('\n')[0][:80]
-                top_items.append({
-                    "id": m.get("id"),
-                    "type": cat[:-1],  # Remove 's' (decisions -> decision)
-                    "summary": first_line + "..." if len(content.split('\n')[0]) > 80 else first_line,
-                    "relevance": m.get("relevance", 0)
-                })
+                first_line = content.split("\n")[0][:80]
+                top_items.append(
+                    {
+                        "id": m.get("id"),
+                        "type": cat[:-1],  # Remove 's' (decisions -> decision)
+                        "summary": first_line + "..."
+                        if len(content.split("\n")[0]) > 80
+                        else first_line,
+                        "relevance": m.get("relevance", 0),
+                    }
+                )
 
         # Sort by relevance and take top 3
         top_items.sort(key=lambda x: x.get("relevance", 0), reverse=True)
@@ -913,13 +1000,15 @@ async def _prefetch_focus_areas(
                 for cat in ["decisions", "patterns", "learnings"]
                 for m in memories.get(cat, [])
             ),
-            "hint": f"recall('{area}') for details" if memories.get("found", 0) > 3 else None
+            "hint": f"recall('{area}') for details"
+            if memories.get("found", 0) > 3
+            else None,
         }
 
     return focus_memories
 
 
-async def _get_linked_projects_summary(ctx: ProjectContext) -> List[Dict[str, Any]]:
+async def _get_linked_projects_summary(ctx: ProjectContext) -> list[dict[str, Any]]:
     """
     Get summary of linked projects with warning/memory counts.
 
@@ -955,7 +1044,7 @@ async def _get_linked_projects_summary(ctx: ProjectContext) -> List[Dict[str, An
             "label": link.get("label"),
             "available": False,
             "warning_count": 0,
-            "memory_count": 0
+            "memory_count": 0,
         }
 
         if linked_storage.exists():
@@ -967,10 +1056,14 @@ async def _get_linked_projects_summary(ctx: ProjectContext) -> List[Dict[str, An
                 stats = await linked_memory.get_statistics()
 
                 summary["available"] = True
-                summary["warning_count"] = stats.get("by_category", {}).get("warning", 0)
+                summary["warning_count"] = stats.get("by_category", {}).get(
+                    "warning", 0
+                )
                 summary["memory_count"] = stats.get("total_memories", 0)
             except Exception as e:
-                logger.warning(f"Could not get summary for linked project {linked_path}: {e}")
+                logger.warning(
+                    f"Could not get summary for linked project {linked_path}: {e}"
+                )
 
         summaries.append(summary)
 
@@ -978,12 +1071,12 @@ async def _get_linked_projects_summary(ctx: ProjectContext) -> List[Dict[str, An
 
 
 def _build_briefing_message(
-    stats: Dict[str, Any],
-    bootstrap_result: Optional[Dict[str, Any]],
-    failed_approaches: List[Dict[str, Any]],
-    active_warnings: List[Dict[str, Any]],
-    git_changes: Optional[Dict[str, Any]],
-    dream_sessions: Optional[List[Dict[str, Any]]] = None,
+    stats: dict[str, Any],
+    bootstrap_result: dict[str, Any] | None,
+    failed_approaches: list[dict[str, Any]],
+    active_warnings: list[dict[str, Any]],
+    git_changes: dict[str, Any] | None,
+    dream_sessions: list[dict[str, Any]] | None = None,
 ) -> str:
     """
     Build the actionable message for the briefing.
@@ -1013,13 +1106,17 @@ def _build_briefing_message(
             message_parts.append("[BOOTSTRAP] First run - no sources found.")
 
     if failed_approaches:
-        message_parts.append(f"[WARNING] {len(failed_approaches)} failed approaches to avoid!")
+        message_parts.append(
+            f"[WARNING] {len(failed_approaches)} failed approaches to avoid!"
+        )
 
     if active_warnings:
         message_parts.append(f"{len(active_warnings)} active warnings.")
 
     if git_changes and git_changes.get("uncommitted_changes"):
-        message_parts.append(f"{len(git_changes['uncommitted_changes'])} uncommitted file(s).")
+        message_parts.append(
+            f"{len(git_changes['uncommitted_changes'])} uncommitted file(s)."
+        )
 
     # Dream activity summary
     if dream_sessions:
@@ -1048,9 +1145,8 @@ def _build_briefing_message(
 @mcp.tool(version=__version__)
 @with_request_id
 async def get_briefing(
-    project_path: Optional[str] = None,
-    focus_areas: Optional[List[str]] = None
-) -> Dict[str, Any]:
+    project_path: str | None = None, focus_areas: list[str] | None = None
+) -> dict[str, Any]:
     """
     [DEPRECATED] Use commune(action='briefing') instead.
 
@@ -1071,7 +1167,7 @@ async def get_briefing(
 
     # AUTO-BOOTSTRAP: First run detection
     bootstrap_result = None
-    if stats.get('total_memories', 0) == 0:
+    if stats.get("total_memories", 0) == 0:
         bootstrap_result = await _bootstrap_project_context(ctx)
         stats = await ctx.memory_manager.get_statistics()
 
@@ -1080,8 +1176,7 @@ async def get_briefing(
 
     # Get git changes since last memory
     git_changes = _get_git_changes(
-        recent_context["last_memory_date"],
-        project_path=ctx.project_path
+        recent_context["last_memory_date"], project_path=ctx.project_path
     )
 
     # Pre-fetch memories for focus areas if specified
@@ -1144,7 +1239,7 @@ async def get_briefing(
         "linked_projects": linked_summary,
         "dream_sessions": dream_sessions,
         "active_context": active_context,
-        "message": message
+        "message": message,
     }
     return add_deprecation(result, "get_briefing", "commune(action='briefing')")
 
@@ -1155,9 +1250,8 @@ async def get_briefing(
 @mcp.tool(version=__version__)
 @with_request_id
 async def get_briefing_visual(
-    project_path: Optional[str] = None,
-    focus_areas: Optional[List[str]] = None
-) -> Dict[str, Any]:
+    project_path: str | None = None, focus_areas: list[str] | None = None
+) -> dict[str, Any]:
     """
     [DEPRECATED] Use commune(action='briefing', visual=True) instead.
 
@@ -1173,13 +1267,10 @@ async def get_briefing_visual(
     Returns:
         Dict with briefing data + ui_resource hint + text fallback
     """
-    from daem0nmcp.ui.fallback import format_with_ui_hint, format_briefing_text
+    from daem0nmcp.ui.fallback import format_briefing_text, format_with_ui_hint
 
     # Get briefing data using existing get_briefing function
-    result = await get_briefing(
-        project_path=project_path,
-        focus_areas=focus_areas
-    )
+    result = await get_briefing(project_path=project_path, focus_areas=focus_areas)
 
     # Check for error
     if "error" in result:
@@ -1190,11 +1281,11 @@ async def get_briefing_visual(
 
     # Return with UI hint
     ui_result = format_with_ui_hint(
-        data=result,
-        ui_resource="ui://daem0n/briefing",
-        text=text
+        data=result, ui_resource="ui://daem0n/briefing", text=text
     )
-    return add_deprecation(ui_result, "get_briefing_visual", "commune(action='briefing', visual=True)")
+    return add_deprecation(
+        ui_result, "get_briefing_visual", "commune(action='briefing', visual=True)"
+    )
 
 
 # ============================================================================
@@ -1202,9 +1293,7 @@ async def get_briefing_visual(
 # ============================================================================
 @mcp.tool(version=__version__)
 @with_request_id
-async def get_covenant_status(
-    project_path: Optional[str] = None
-) -> Dict[str, Any]:
+async def get_covenant_status(project_path: str | None = None) -> dict[str, Any]:
     """
     [DEPRECATED] Use commune(action='covenant') instead.
 
@@ -1238,9 +1327,18 @@ async def get_covenant_status(
         covenant_phase = "inscribe"
 
     PHASE_DISPLAY = {
-        "commune": {"label": "COMMUNE", "description": "Receive briefing from the Daem0n"},
-        "counsel": {"label": "SEEK COUNSEL", "description": "Check context before acting"},
-        "inscribe": {"label": "INSCRIBE", "description": "Record memories and decisions"},
+        "commune": {
+            "label": "COMMUNE",
+            "description": "Receive briefing from the Daem0n",
+        },
+        "counsel": {
+            "label": "SEEK COUNSEL",
+            "description": "Check context before acting",
+        },
+        "inscribe": {
+            "label": "INSCRIBE",
+            "description": "Record memories and decisions",
+        },
         "seal": {"label": "SEAL", "description": "Evaluate and record outcomes"},
     }
     phase_info = PHASE_DISPLAY.get(covenant_phase, PHASE_DISPLAY["commune"])
@@ -1258,7 +1356,9 @@ async def get_covenant_status(
         if datetime.now(timezone.utc) < expires_at:
             preflight_status = "valid"
             preflight_expires = expires_at.isoformat()
-            preflight_remaining = int((expires_at - datetime.now(timezone.utc)).total_seconds())
+            preflight_remaining = int(
+                (expires_at - datetime.now(timezone.utc)).total_seconds()
+            )
         else:
             preflight_status = "expired"
 
@@ -1293,8 +1393,8 @@ async def get_covenant_status(
 @mcp.tool(version=__version__)
 @with_request_id
 async def get_covenant_status_visual(
-    project_path: Optional[str] = None
-) -> Dict[str, Any]:
+    project_path: str | None = None,
+) -> dict[str, Any]:
     """
     Get covenant status with visual UI support.
 
@@ -1307,7 +1407,7 @@ async def get_covenant_status_visual(
     Returns:
         Dict with covenant data + ui_resource hint + text fallback
     """
-    from daem0nmcp.ui.fallback import format_with_ui_hint, format_covenant_status_text
+    from daem0nmcp.ui.fallback import format_covenant_status_text, format_with_ui_hint
 
     # Get covenant status using existing function
     result = await get_covenant_status(project_path=project_path)
@@ -1322,15 +1422,12 @@ async def get_covenant_status_visual(
     # Create UI resource URI with encoded data
     import json
     import urllib.parse
+
     data_json = json.dumps(result)
     encoded_data = urllib.parse.quote(data_json)
     ui_resource = f"ui://daem0n/covenant/{encoded_data}"
 
-    return format_with_ui_hint(
-        data=result,
-        ui_resource=ui_resource,
-        text=text
-    )
+    return format_with_ui_hint(data=result, ui_resource=ui_resource, text=text)
 
 
 # ============================================================================
@@ -1339,9 +1436,8 @@ async def get_covenant_status_visual(
 @mcp.tool(version=__version__)
 @with_request_id
 async def context_check(
-    description: str,
-    project_path: Optional[str] = None
-) -> Dict[str, Any]:
+    description: str, project_path: str | None = None
+) -> dict[str, Any]:
     """
     [DEPRECATED] Use consult(action='preflight') instead.
 
@@ -1358,7 +1454,9 @@ async def context_check(
     ctx = await get_project_context(project_path)
 
     # Get relevant memories (with defensive None check)
-    memories = await ctx.memory_manager.recall(description, limit=5, project_path=ctx.project_path)
+    memories = await ctx.memory_manager.recall(
+        description, limit=5, project_path=ctx.project_path
+    )
     if memories is None:
         memories = {}
 
@@ -1371,36 +1469,34 @@ async def context_check(
     warnings = []
 
     # From memories
-    for cat in ['warnings', 'decisions', 'patterns', 'learnings']:
+    for cat in ["warnings", "decisions", "patterns", "learnings"]:
         for mem in memories.get(cat, []):
-            if mem.get('worked') is False:
-                warnings.append({
-                    "source": "failed_decision",
-                    "content": mem['content'],
-                    "outcome": mem.get('outcome')
-                })
-            elif cat == 'warnings':
-                warnings.append({
-                    "source": "warning",
-                    "content": mem['content']
-                })
+            if mem.get("worked") is False:
+                warnings.append(
+                    {
+                        "source": "failed_decision",
+                        "content": mem["content"],
+                        "outcome": mem.get("outcome"),
+                    }
+                )
+            elif cat == "warnings":
+                warnings.append({"source": "warning", "content": mem["content"]})
 
     # From rules (defensive check for None)
-    guidance = rules.get('guidance') if rules else None
-    if guidance and guidance.get('warnings'):
-        for w in guidance['warnings']:
-            warnings.append({
-                "source": "rule",
-                "content": w
-            })
+    guidance = rules.get("guidance") if rules else None
+    if guidance and guidance.get("warnings"):
+        for w in guidance["warnings"]:
+            warnings.append({"source": "rule", "content": w})
 
-    has_concerns = len(warnings) > 0 or (rules and rules.get('has_blockers', False))
+    has_concerns = len(warnings) > 0 or (rules and rules.get("has_blockers", False))
 
     # Record this context check (Sacred Covenant: counsel sought)
-    ctx.context_checks.append({
-        "description": description,
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-    })
+    ctx.context_checks.append(
+        {
+            "description": description,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+    )
 
     # Issue preflight token as proof of consultation
     try:
@@ -1419,17 +1515,18 @@ async def context_check(
     result = {
         "description": description,
         "has_concerns": has_concerns,
-        "memories_found": memories.get('found', 0),
-        "rules_matched": rules.get('matched_rules', 0) if rules else 0,
+        "memories_found": memories.get("found", 0),
+        "rules_matched": rules.get("matched_rules", 0) if rules else 0,
         "warnings": warnings,
-        "must_do": guidance.get('must_do', []) if guidance else [],
-        "must_not": guidance.get('must_not', []) if guidance else [],
-        "ask_first": guidance.get('ask_first', []) if guidance else [],
+        "must_do": guidance.get("must_do", []) if guidance else [],
+        "must_not": guidance.get("must_not", []) if guidance else [],
+        "ask_first": guidance.get("ask_first", []) if guidance else [],
         "preflight_token": token.serialize(),
         "message": (
-            "\u26a0\ufe0f Review warnings before proceeding" if has_concerns else
-            "\u2713 No concerns found, but always use good judgment"
-        )
+            "\u26a0\ufe0f Review warnings before proceeding"
+            if has_concerns
+            else "\u2713 No concerns found, but always use good judgment"
+        ),
     }
     return add_deprecation(result, "context_check", "consult(action='preflight')")
 
@@ -1440,10 +1537,10 @@ async def context_check(
 @mcp.tool(version=__version__)
 @with_request_id
 async def check_for_updates(
-    since: Optional[str] = None,
+    since: str | None = None,
     interval_seconds: int = 10,
-    project_path: Optional[str] = None,
-) -> Dict[str, Any]:
+    project_path: str | None = None,
+) -> dict[str, Any]:
     """
     Check if daemon knowledge has changed since the given timestamp.
 
@@ -1483,9 +1580,7 @@ async def check_for_updates(
 # ============================================================================
 @mcp.tool(version=__version__)
 @with_request_id
-async def health(
-    project_path: Optional[str] = None
-) -> Dict[str, Any]:
+async def health(project_path: str | None = None) -> dict[str, Any]:
     """
     [DEPRECATED] Use commune(action='health') instead.
 
@@ -1514,8 +1609,9 @@ async def health(
         last_indexed = result.scalar()
 
         result = await session.execute(
-            select(CodeEntity.entity_type, func.count(CodeEntity.id))
-            .group_by(CodeEntity.entity_type)
+            select(CodeEntity.entity_type, func.count(CodeEntity.id)).group_by(
+                CodeEntity.entity_type
+            )
         )
         entities_by_type = {row[0]: row[1] for row in result.all()}
 

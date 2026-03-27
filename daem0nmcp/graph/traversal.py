@@ -2,7 +2,7 @@
 
 import logging
 from collections import defaultdict
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set
+from typing import TYPE_CHECKING, Any, Optional
 
 import networkx as nx
 
@@ -17,7 +17,7 @@ async def trace_causal_chain(
     start_memory_id: int,
     end_memory_id: int,
     max_depth: int = 5,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """
     Find paths between two memories showing causal relationships.
 
@@ -44,9 +44,7 @@ async def trace_causal_chain(
 
     try:
         # Find all simple paths up to max_depth
-        paths = list(
-            nx.all_simple_paths(graph, start_node, end_node, cutoff=max_depth)
-        )
+        paths = list(nx.all_simple_paths(graph, start_node, end_node, cutoff=max_depth))
     except nx.NetworkXNoPath:
         paths = []
 
@@ -69,19 +67,23 @@ async def trace_causal_chain(
             target = path[i + 1]
             edge_data = graph.get_edge_data(source, target, default={})
 
-            path_details.append({
-                "from": source,
-                "to": target,
-                "relationship": edge_data.get("relationship", "related_to"),
-                "description": edge_data.get("description"),
-                "confidence": edge_data.get("confidence", 1.0),
-            })
+            path_details.append(
+                {
+                    "from": source,
+                    "to": target,
+                    "relationship": edge_data.get("relationship", "related_to"),
+                    "description": edge_data.get("description"),
+                    "confidence": edge_data.get("confidence", 1.0),
+                }
+            )
 
-        formatted_paths.append({
-            "length": len(path) - 1,
-            "nodes": path,
-            "edges": path_details,
-        })
+        formatted_paths.append(
+            {
+                "length": len(path) - 1,
+                "nodes": path,
+                "edges": path_details,
+            }
+        )
 
     # Sort by path length (shortest first)
     formatted_paths.sort(key=lambda p: p["length"])
@@ -97,10 +99,10 @@ async def trace_causal_chain(
 async def find_related_memories(
     graph: nx.DiGraph,
     memory_id: int,
-    relationship_types: Optional[List[str]] = None,
+    relationship_types: list[str] | None = None,
     direction: str = "both",
     max_depth: int = 2,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """
     Find memories related to a given memory by traversing edges.
 
@@ -123,8 +125,8 @@ async def find_related_memories(
             "related": {},
         }
 
-    related: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
-    visited: Set[str] = {start_node}
+    related: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    visited: set[str] = {start_node}
 
     def get_neighbors_with_edges(node: str, depth: int) -> None:
         """Recursively get neighbors with edge info."""
@@ -132,7 +134,7 @@ async def find_related_memories(
             return
 
         # Get edges based on direction
-        edges: List[tuple] = []
+        edges: list[tuple] = []
         if direction in ("outgoing", "both"):
             for target in graph.successors(node):
                 if target.startswith("memory:"):
@@ -158,13 +160,15 @@ async def find_related_memories(
             visited.add(neighbor)
             mem_id = int(neighbor.split(":")[1])
 
-            related[rel_type].append({
-                "memory_id": mem_id,
-                "direction": dir_type,
-                "confidence": edge_data.get("confidence", 1.0),
-                "description": edge_data.get("description"),
-                "depth": depth,
-            })
+            related[rel_type].append(
+                {
+                    "memory_id": mem_id,
+                    "direction": dir_type,
+                    "confidence": edge_data.get("confidence", 1.0),
+                    "description": edge_data.get("description"),
+                    "depth": depth,
+                }
+            )
 
             # Continue traversal
             get_neighbors_with_edges(neighbor, depth + 1)
@@ -183,7 +187,7 @@ async def trace_knowledge_evolution(
     graph: nx.DiGraph,
     entity_id: int,
     db_manager: Optional["DatabaseManager"] = None,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """
     Trace how knowledge about an entity has evolved over time.
 
@@ -239,16 +243,18 @@ async def trace_knowledge_evolution(
                 content_preview = mem.content
                 if len(content_preview) > 200:
                     content_preview = content_preview[:200] + "..."
-                evolution.append({
-                    "memory_id": mem.id,
-                    "category": mem.category,
-                    "content_preview": content_preview,
-                    "created_at": (
-                        mem.created_at.isoformat() if mem.created_at else None
-                    ),
-                    "outcome": mem.outcome,
-                    "worked": mem.worked,
-                })
+                evolution.append(
+                    {
+                        "memory_id": mem.id,
+                        "category": mem.category,
+                        "content_preview": content_preview,
+                        "created_at": (
+                            mem.created_at.isoformat() if mem.created_at else None
+                        ),
+                        "outcome": mem.outcome,
+                        "worked": mem.worked,
+                    }
+                )
 
             # Track supersession chains
             superseded = []
@@ -257,10 +263,12 @@ async def trace_knowledge_evolution(
                     if target.startswith("memory:"):
                         edge_data = graph.get_edge_data(mem_node, target, default={})
                         if edge_data.get("relationship") == "supersedes":
-                            superseded.append({
-                                "old_memory_id": int(mem_node.split(":")[1]),
-                                "new_memory_id": int(target.split(":")[1]),
-                            })
+                            superseded.append(
+                                {
+                                    "old_memory_id": int(mem_node.split(":")[1]),
+                                    "new_memory_id": int(target.split(":")[1]),
+                                }
+                            )
 
             return {
                 "found": True,
@@ -279,7 +287,7 @@ async def trace_knowledge_evolution(
         }
 
 
-def get_graph_metrics(graph: nx.DiGraph) -> Dict[str, Any]:
+def get_graph_metrics(graph: nx.DiGraph) -> dict[str, Any]:
     """Get metrics about the knowledge graph structure."""
     if graph.number_of_nodes() == 0:
         return {
@@ -294,7 +302,7 @@ def get_graph_metrics(graph: nx.DiGraph) -> Dict[str, Any]:
     entity_nodes = sum(1 for n in graph.nodes() if n.startswith("entity:"))
 
     # Count relationship types
-    rel_counts: Dict[str, int] = defaultdict(int)
+    rel_counts: dict[str, int] = defaultdict(int)
     for _, _, data in graph.edges(data=True):
         rel_counts[data.get("relationship", "unknown")] += 1
 

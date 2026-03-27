@@ -1,8 +1,9 @@
 """Tests for FTS5 full-text search virtual table infrastructure."""
 
-import pytest
-import tempfile
 import shutil
+import tempfile
+
+import pytest
 from sqlalchemy import text
 
 
@@ -30,17 +31,17 @@ class TestFTS5Search:
         await memory.remember(
             category="decision",
             content="Use PostgreSQL for the database",
-            project_path=temp_storage
+            project_path=temp_storage,
         )
         await memory.remember(
             category="decision",
             content="Implement caching with Redis",
-            project_path=temp_storage
+            project_path=temp_storage,
         )
         await memory.remember(
             category="learning",
             content="SQLite FTS5 provides fast full-text search",
-            project_path=temp_storage
+            project_path=temp_storage,
         )
 
         yield db, memory, temp_storage
@@ -53,7 +54,9 @@ class TestFTS5Search:
 
         async with db.get_session() as session:
             result = await session.execute(
-                text("SELECT name FROM sqlite_master WHERE type='table' AND name='memories_fts'")
+                text(
+                    "SELECT name FROM sqlite_master WHERE type='table' AND name='memories_fts'"
+                )
             )
             row = result.first()
             assert row is not None, "FTS5 table 'memories_fts' should exist"
@@ -63,7 +66,7 @@ class TestFTS5Search:
         """FTS5 sync triggers should exist."""
         db, memory, tmpdir = db_with_memories
 
-        expected_triggers = ['memories_ai', 'memories_ad', 'memories_au']
+        expected_triggers = ["memories_ai", "memories_ad", "memories_au"]
 
         async with db.get_session() as session:
             result = await session.execute(
@@ -72,17 +75,16 @@ class TestFTS5Search:
             triggers = [row[0] for row in result.fetchall()]
 
             for trigger_name in expected_triggers:
-                assert trigger_name in triggers, f"Trigger '{trigger_name}' should exist"
+                assert trigger_name in triggers, (
+                    f"Trigger '{trigger_name}' should exist"
+                )
 
     @pytest.mark.asyncio
     async def test_fts5_search_returns_results(self, db_with_memories):
         """Search should return relevant results using FTS5."""
         db, memory, tmpdir = db_with_memories
 
-        results = await memory.fts_search(
-            query="database",
-            limit=10
-        )
+        results = await memory.fts_search(query="database", limit=10)
 
         assert len(results) >= 1
         assert any("PostgreSQL" in r.get("content", "") for r in results)
@@ -96,13 +98,10 @@ class TestFTS5Search:
         await memory.remember(
             category="learning",
             content="Database performance tuning for database queries and database indexing",
-            project_path=tmpdir
+            project_path=tmpdir,
         )
 
-        results = await memory.fts_search(
-            query="database",
-            limit=10
-        )
+        results = await memory.fts_search(query="database", limit=10)
 
         # Results should be returned (BM25 ranking is internal to FTS5)
         assert len(results) >= 2
@@ -121,14 +120,16 @@ class TestFTS5Search:
         result = await memory.remember(
             category="decision",
             content="Test memory for FTS sync verification",
-            project_path=temp_storage
+            project_path=temp_storage,
         )
         memory_id = result.get("id")
 
         # Verify FTS5 index contains the memory
         async with db.get_session() as session:
             fts_result = await session.execute(
-                text("SELECT rowid FROM memories_fts WHERE memories_fts MATCH 'verification'")
+                text(
+                    "SELECT rowid FROM memories_fts WHERE memories_fts MATCH 'verification'"
+                )
             )
             rows = fts_result.fetchall()
             assert len(rows) >= 1, "FTS5 index should contain newly inserted memory"
@@ -151,24 +152,27 @@ class TestFTS5Search:
         result = await memory.remember(
             category="decision",
             content="Original content for update test",
-            project_path=temp_storage
+            project_path=temp_storage,
         )
         memory_id = result.get("id")
 
         # Update the memory content directly
         async with db.get_session() as session:
             from sqlalchemy import update
+
             await session.execute(
-                update(Memory).where(Memory.id == memory_id).values(
-                    content="Modified content with unique banana term"
-                )
+                update(Memory)
+                .where(Memory.id == memory_id)
+                .values(content="Modified content with unique banana term")
             )
 
         # Verify FTS5 index reflects the update
         async with db.get_session() as session:
             # Old content should not be found
             old_result = await session.execute(
-                text("SELECT rowid FROM memories_fts WHERE memories_fts MATCH 'Original'")
+                text(
+                    "SELECT rowid FROM memories_fts WHERE memories_fts MATCH 'Original'"
+                )
             )
             old_rows = old_result.fetchall()
             matching_ids = [row[0] for row in old_rows]
@@ -179,7 +183,9 @@ class TestFTS5Search:
                 text("SELECT rowid FROM memories_fts WHERE memories_fts MATCH 'banana'")
             )
             new_rows = new_result.fetchall()
-            assert memory_id in [row[0] for row in new_rows], "FTS5 should find new content"
+            assert memory_id in [row[0] for row in new_rows], (
+                "FTS5 should find new content"
+            )
 
         await db.close()
 
@@ -198,10 +204,12 @@ class TestFTS5Search:
             create_sql = row[0]
 
             # Verify contentless FTS5 configuration
-            assert "content='memories'" in create_sql or "content=memories" in create_sql, \
-                "FTS5 should reference memories table"
-            assert "content_rowid='id'" in create_sql or "content_rowid=id" in create_sql, \
-                "FTS5 should use id as rowid"
+            assert (
+                "content='memories'" in create_sql or "content=memories" in create_sql
+            ), "FTS5 should reference memories table"
+            assert (
+                "content_rowid='id'" in create_sql or "content_rowid=id" in create_sql
+            ), "FTS5 should use id as rowid"
 
     @pytest.mark.asyncio
     async def test_fts5_search_with_highlighting(self, db_with_memories):
@@ -213,17 +221,17 @@ class TestFTS5Search:
             highlight=True,
             highlight_start="<mark>",
             highlight_end="</mark>",
-            limit=10
+            limit=10,
         )
 
         assert len(results) >= 1
         # When highlighting is enabled, content_excerpt should contain markers
         highlighted_result = next(
-            (r for r in results if "PostgreSQL" in r.get("content", "")),
-            None
+            (r for r in results if "PostgreSQL" in r.get("content", "")), None
         )
         assert highlighted_result is not None
         if "content_excerpt" in highlighted_result:
             # Excerpt should contain highlight markers around search term
-            assert "<mark>" in highlighted_result.get("content_excerpt", "") or \
-                   "PostgreSQL" in highlighted_result.get("content_excerpt", "")
+            assert "<mark>" in highlighted_result.get(
+                "content_excerpt", ""
+            ) or "PostgreSQL" in highlighted_result.get("content_excerpt", "")

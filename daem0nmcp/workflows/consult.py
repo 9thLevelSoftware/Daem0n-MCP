@@ -12,20 +12,22 @@ Actions:
 - compress: Compress context for token reduction
 """
 
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from .errors import InvalidActionError, MissingParamError
 
-VALID_ACTIONS = frozenset({
-    "preflight",
-    "recall",
-    "recall_file",
-    "recall_entity",
-    "recall_hierarchical",
-    "search",
-    "check_rules",
-    "compress",
-})
+VALID_ACTIONS = frozenset(
+    {
+        "preflight",
+        "recall",
+        "recall_file",
+        "recall_entity",
+        "recall_hierarchical",
+        "search",
+        "check_rules",
+        "compress",
+    }
+)
 
 
 async def dispatch(
@@ -33,37 +35,37 @@ async def dispatch(
     project_path: str,
     *,
     # preflight params
-    description: Optional[str] = None,
+    description: str | None = None,
     # recall params
-    topic: Optional[str] = None,
-    categories: Optional[List[str]] = None,
-    tags: Optional[List[str]] = None,
-    file_path: Optional[str] = None,
+    topic: str | None = None,
+    categories: list[str] | None = None,
+    tags: list[str] | None = None,
+    file_path: str | None = None,
     offset: int = 0,
     limit: int = 10,
-    since: Optional[str] = None,
-    until: Optional[str] = None,
+    since: str | None = None,
+    until: str | None = None,
     include_linked: bool = False,
     visual: bool = False,
     condensed: bool = False,
     # recall_entity params
-    entity_name: Optional[str] = None,
-    entity_type: Optional[str] = None,
+    entity_name: str | None = None,
+    entity_type: str | None = None,
     # recall_hierarchical params
     include_members: bool = False,
     # search params
-    query: Optional[str] = None,
+    query: str | None = None,
     include_meta: bool = False,
     highlight: bool = False,
     highlight_start: str = "<b>",
     highlight_end: str = "</b>",
     # check_rules params
-    action_desc: Optional[str] = None,
-    context: Optional[Dict[str, Any]] = None,
+    action_desc: str | None = None,
+    context: dict[str, Any] | None = None,
     # compress params
-    compress_text: Optional[str] = None,
-    rate: Optional[float] = None,
-    content_type: Optional[str] = None,
+    compress_text: str | None = None,
+    rate: float | None = None,
+    content_type: str | None = None,
     preserve_code: bool = True,
     **kwargs,
 ) -> Any:
@@ -80,8 +82,18 @@ async def dispatch(
         if not topic:
             raise MissingParamError("topic", action)
         return await _do_recall(
-            project_path, topic, categories, tags, file_path,
-            offset, limit, since, until, include_linked, visual, condensed,
+            project_path,
+            topic,
+            categories,
+            tags,
+            file_path,
+            offset,
+            limit,
+            since,
+            until,
+            include_linked,
+            visual,
+            condensed,
         )
 
     elif action == "recall_file":
@@ -92,9 +104,7 @@ async def dispatch(
     elif action == "recall_entity":
         if not entity_name:
             raise MissingParamError("entity_name", action)
-        return await _do_recall_entity(
-            project_path, entity_name, entity_type
-        )
+        return await _do_recall_entity(project_path, entity_name, entity_type)
 
     elif action == "recall_hierarchical":
         if not topic:
@@ -107,8 +117,14 @@ async def dispatch(
         if not query:
             raise MissingParamError("query", action)
         return await _do_search(
-            project_path, query, limit, offset, include_meta,
-            highlight, highlight_start, highlight_end,
+            project_path,
+            query,
+            limit,
+            offset,
+            include_meta,
+            highlight,
+            highlight_start,
+            highlight_end,
         )
 
     elif action == "check_rules":
@@ -119,34 +135,28 @@ async def dispatch(
     elif action == "compress":
         if compress_text is None:
             raise MissingParamError("compress_text", action)
-        return await _do_compress(
-            compress_text, rate, content_type, preserve_code
-        )
+        return await _do_compress(compress_text, rate, content_type, preserve_code)
 
     raise InvalidActionError(action, sorted(VALID_ACTIONS))
 
 
-async def _do_preflight(
-    project_path: str, description: str
-) -> Dict[str, Any]:
+async def _do_preflight(project_path: str, description: str) -> dict[str, Any]:
     """Pre-flight check combining recall + check_rules."""
     from ..server import context_check
 
-    return await context_check(
-        description=description, project_path=project_path
-    )
+    return await context_check(description=description, project_path=project_path)
 
 
 async def _do_recall(
     project_path: str,
     topic: str,
-    categories: Optional[List[str]],
-    tags: Optional[List[str]],
-    file_path: Optional[str],
+    categories: list[str] | None,
+    tags: list[str] | None,
+    file_path: str | None,
     offset: int,
     limit: int,
-    since: Optional[str],
-    until: Optional[str],
+    since: str | None,
+    until: str | None,
     include_linked: bool,
     visual: bool,
     condensed: bool,
@@ -182,7 +192,7 @@ async def _do_recall(
 
 async def _do_recall_file(
     project_path: str, file_path: str, limit: int
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Get all memories for a specific file."""
     from ..server import recall_for_file
 
@@ -194,8 +204,8 @@ async def _do_recall_file(
 async def _do_recall_entity(
     project_path: str,
     entity_name: str,
-    entity_type: Optional[str],
-) -> Dict[str, Any]:
+    entity_type: str | None,
+) -> dict[str, Any]:
     """Get all memories mentioning a specific entity."""
     from ..server import recall_by_entity
 
@@ -211,7 +221,7 @@ async def _do_recall_hierarchical(
     topic: str,
     include_members: bool,
     limit: int,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """GraphRAG-style layered recall."""
     from ..server import recall_hierarchical
 
@@ -251,8 +261,8 @@ async def _do_search(
 async def _do_check_rules(
     project_path: str,
     action_desc: str,
-    context: Optional[Dict[str, Any]],
-) -> Dict[str, Any]:
+    context: dict[str, Any] | None,
+) -> dict[str, Any]:
     """Check if an action matches any rules."""
     from ..server import check_rules
 
@@ -263,8 +273,8 @@ async def _do_check_rules(
 
 async def _do_compress(
     context: str,
-    rate: Optional[float],
-    content_type: Optional[str],
+    rate: float | None,
+    content_type: str | None,
     preserve_code: bool,
 ) -> str:
     """Compress context for token reduction."""

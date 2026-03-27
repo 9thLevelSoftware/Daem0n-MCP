@@ -1,9 +1,10 @@
 """Tests for the memory management system."""
 
-import pytest
-from pathlib import Path
-import tempfile
 import shutil
+import tempfile
+from pathlib import Path
+
+import pytest
 
 from daem0nmcp.database import DatabaseManager
 from daem0nmcp.memory import MemoryManager, extract_keywords
@@ -70,7 +71,7 @@ class TestMemoryManager:
             category="decision",
             content="Use PostgreSQL instead of MySQL",
             rationale="Better JSON support and performance",
-            tags=["database", "architecture"]
+            tags=["database", "architecture"],
         )
 
         assert "id" in result
@@ -85,7 +86,7 @@ class TestMemoryManager:
             category="warning",
             content="Don't use synchronous database calls in handlers",
             rationale="Caused performance issues",
-            context={"file": "handlers.py"}
+            context={"file": "handlers.py"},
         )
 
         assert result["category"] == "warning"
@@ -95,8 +96,7 @@ class TestMemoryManager:
     async def test_remember_invalid_category(self, memory_manager):
         """Test that invalid categories are rejected."""
         result = await memory_manager.remember(
-            category="invalid",
-            content="This should fail"
+            category="invalid", content="This should fail"
         )
 
         assert "error" in result
@@ -108,17 +108,17 @@ class TestMemoryManager:
         await memory_manager.remember(
             category="decision",
             content="Use JWT for authentication",
-            tags=["auth", "security"]
+            tags=["auth", "security"],
         )
         await memory_manager.remember(
             category="pattern",
             content="Always validate input on auth endpoints",
-            tags=["auth", "validation"]
+            tags=["auth", "validation"],
         )
         await memory_manager.remember(
             category="warning",
             content="Session tokens had security issues",
-            tags=["auth"]
+            tags=["auth"],
         )
 
         # Recall by topic - semantic search should find these
@@ -126,21 +126,19 @@ class TestMemoryManager:
 
         assert result["found"] > 0
         # Should find auth-related memories
-        total = len(result["decisions"]) + len(result["patterns"]) + len(result["warnings"])
+        total = (
+            len(result["decisions"]) + len(result["patterns"]) + len(result["warnings"])
+        )
         assert total >= 1
 
     @pytest.mark.asyncio
     async def test_recall_by_category(self, memory_manager):
         """Test filtering recall by category."""
         await memory_manager.remember(
-            category="decision",
-            content="Use Redis for caching",
-            tags=["cache"]
+            category="decision", content="Use Redis for caching", tags=["cache"]
         )
         await memory_manager.remember(
-            category="warning",
-            content="Cache invalidation is tricky",
-            tags=["cache"]
+            category="warning", content="Cache invalidation is tricky", tags=["cache"]
         )
 
         # Only get warnings (but warnings are always included anyway)
@@ -154,15 +152,14 @@ class TestMemoryManager:
         """Test recording outcomes."""
         # Create a memory
         memory = await memory_manager.remember(
-            category="decision",
-            content="Use microservices architecture"
+            category="decision", content="Use microservices architecture"
         )
 
         # Record outcome
         result = await memory_manager.record_outcome(
             memory_id=memory["id"],
             outcome="Worked well, improved scalability",
-            worked=True
+            worked=True,
         )
 
         assert result["worked"]
@@ -172,14 +169,11 @@ class TestMemoryManager:
     async def test_record_outcome_failure(self, memory_manager):
         """Test recording failed outcomes with suggestions."""
         memory = await memory_manager.remember(
-            category="decision",
-            content="Use complex caching strategy"
+            category="decision", content="Use complex caching strategy"
         )
 
         result = await memory_manager.record_outcome(
-            memory_id=memory["id"],
-            outcome="Caused stale data bugs",
-            worked=False
+            memory_id=memory["id"], outcome="Caused stale data bugs", worked=False
         )
 
         assert not result["worked"]
@@ -190,9 +184,7 @@ class TestMemoryManager:
     async def test_record_outcome_invalid_id(self, memory_manager):
         """Test recording outcome for non-existent memory."""
         result = await memory_manager.record_outcome(
-            memory_id=99999,
-            outcome="Should fail",
-            worked=True
+            memory_id=99999, outcome="Should fail", worked=True
         )
 
         assert "error" in result
@@ -201,12 +193,10 @@ class TestMemoryManager:
     async def test_search(self, memory_manager):
         """Test semantic search."""
         await memory_manager.remember(
-            category="learning",
-            content="GraphQL is better for complex queries"
+            category="learning", content="GraphQL is better for complex queries"
         )
         await memory_manager.remember(
-            category="learning",
-            content="REST is simpler for basic CRUD"
+            category="learning", content="REST is simpler for basic CRUD"
         )
 
         results = await memory_manager.search("GraphQL complex")
@@ -232,19 +222,15 @@ class TestMemoryManager:
         """Test that conflicts are detected when storing similar memories."""
         # Store a memory that failed
         mem1 = await memory_manager.remember(
-            category="decision",
-            content="Use session tokens for authentication"
+            category="decision", content="Use session tokens for authentication"
         )
         await memory_manager.record_outcome(
-            memory_id=mem1["id"],
-            outcome="Had security vulnerabilities",
-            worked=False
+            memory_id=mem1["id"], outcome="Had security vulnerabilities", worked=False
         )
 
         # Try to store a similar decision
         result = await memory_manager.remember(
-            category="decision",
-            content="Use session-based authentication tokens"
+            category="decision", content="Use session-based authentication tokens"
         )
 
         # May or may not detect conflict depending on similarity score
@@ -258,23 +244,23 @@ class TestMemoryManager:
         mem1 = await memory_manager.remember(
             category="decision",
             content="Use JWT for API authentication",
-            tags=["auth", "jwt", "api"]
+            tags=["auth", "jwt", "api"],
         )
         await memory_manager.remember(
             category="pattern",
             content="Always validate JWT tokens before processing",
-            tags=["auth", "jwt", "validation"]
+            tags=["auth", "jwt", "validation"],
         )
         await memory_manager.remember(
             category="warning",
             content="JWT secret key must be kept secure",
-            tags=["auth", "jwt", "security"]
+            tags=["auth", "jwt", "security"],
         )
         # Unrelated memory
         await memory_manager.remember(
             category="decision",
             content="Use PostgreSQL for database",
-            tags=["database"]
+            tags=["database"],
         )
 
         # Find memories related to the first one
@@ -291,7 +277,7 @@ class TestMemoryManager:
         await memory_manager.remember(
             category="decision",
             content="Use rate limiting on all API endpoints",
-            tags=["api", "security"]
+            tags=["api", "security"],
         )
 
         result = await memory_manager.recall("API rate limiting")
@@ -309,29 +295,25 @@ class TestMemoryManager:
         """Test that failed decisions get boosted in recall."""
         # Store a successful and failed decision about same topic
         success = await memory_manager.remember(
-            category="decision",
-            content="Use caching for API responses"
+            category="decision", content="Use caching for API responses"
         )
         await memory_manager.record_outcome(
-            success["id"],
-            outcome="Works great",
-            worked=True
+            success["id"], outcome="Works great", worked=True
         )
 
         failure = await memory_manager.remember(
-            category="decision",
-            content="Use aggressive caching everywhere"
+            category="decision", content="Use aggressive caching everywhere"
         )
         await memory_manager.record_outcome(
-            failure["id"],
-            outcome="Caused stale data issues",
-            worked=False
+            failure["id"], outcome="Caused stale data issues", worked=False
         )
 
         result = await memory_manager.recall("caching")
 
         # Failed decisions should have warning annotation
-        failed_mems = [m for m in result.get("decisions", []) if m.get("worked") is False]
+        failed_mems = [
+            m for m in result.get("decisions", []) if m.get("worked") is False
+        ]
         if failed_mems:
             assert any("_warning" in m for m in failed_mems)
 
@@ -341,19 +323,19 @@ class TestMemoryManager:
         await memory_manager.remember(
             category="decision",
             content="Use Redis for caching",
-            tags=["cache", "performance"]
+            tags=["cache", "performance"],
         )
         await memory_manager.remember(
-            category="decision",
-            content="Use Redis for sessions",
-            tags=["auth"]
+            category="decision", content="Use Redis for sessions", tags=["auth"]
         )
 
         result = await memory_manager.recall("Redis", tags=["cache"])
 
         # Should only find the caching decision
         assert result["found"] == 1
-        all_tags = [tag for m in result.get("decisions", []) for tag in m.get("tags", [])]
+        all_tags = [
+            tag for m in result.get("decisions", []) for tag in m.get("tags", [])
+        ]
         assert "cache" in all_tags
         # Ensure sessions tag (from other memory) is not included
         assert "auth" not in all_tags
@@ -364,19 +346,23 @@ class TestMemoryManager:
         await memory_manager.remember(
             category="warning",
             content="Don't use sync calls here",
-            file_path="api/handlers.py"
+            file_path="api/handlers.py",
         )
         await memory_manager.remember(
             category="warning",
             content="Watch for race conditions",
-            file_path="worker/tasks.py"
+            file_path="worker/tasks.py",
         )
 
         result = await memory_manager.recall("calls", file_path="api/handlers.py")
 
         # Should only find the handlers warning
         assert result["found"] == 1
-        all_content = [m.get("content") for cat in ["warnings", "decisions"] for m in result.get(cat, [])]
+        all_content = [
+            m.get("content")
+            for cat in ["warnings", "decisions"]
+            for m in result.get(cat, [])
+        ]
         assert len(all_content) == 1
         assert "sync calls" in all_content[0]
         # Ensure tasks.py memory is not included
@@ -389,24 +375,26 @@ class TestMemoryManager:
             category="decision",
             content="Cache user sessions in Redis",
             tags=["cache", "auth"],
-            file_path="api/handlers.py"
+            file_path="api/handlers.py",
         )
         await memory_manager.remember(
             category="decision",
             content="Cache API responses",
             tags=["cache"],
-            file_path="api/middleware.py"
+            file_path="api/middleware.py",
         )
 
         result = await memory_manager.recall(
-            "cache",
-            tags=["auth"],
-            file_path="api/handlers.py"
+            "cache", tags=["auth"], file_path="api/handlers.py"
         )
 
         # Should only find the first memory (both filters match)
         assert result["found"] == 1
-        all_content = [m["content"] for cat in ["decisions", "warnings", "patterns", "learnings"] for m in result.get(cat, [])]
+        all_content = [
+            m["content"]
+            for cat in ["decisions", "warnings", "patterns", "learnings"]
+            for m in result.get(cat, [])
+        ]
         assert any("sessions" in c for c in all_content)
         # Ensure the other memory is not included
         assert not any("responses" in c for c in all_content)
@@ -419,7 +407,7 @@ class TestMemoryManager:
             await memory_manager.remember(
                 category="decision",
                 content=f"Decision number {i} about testing",
-                tags=["test"]
+                tags=["test"],
             )
 
         # Get first page
@@ -453,7 +441,7 @@ class TestMemoryManager:
             await memory_manager.remember(
                 category="decision",
                 content=f"Pagination test decision number {i} about testing pagination feature",
-                tags=["pagination"]
+                tags=["pagination"],
             )
 
         # Get with small limit to test pagination
@@ -468,7 +456,9 @@ class TestMemoryManager:
         # If we found results, verify has_more logic
         if result["total_count"] > 0:
             # If total_count > offset + found, has_more should be True
-            expected_has_more = result["offset"] + result["found"] < result["total_count"]
+            expected_has_more = (
+                result["offset"] + result["found"] < result["total_count"]
+            )
             assert result["has_more"] == expected_has_more
 
     @pytest.mark.asyncio
@@ -479,7 +469,7 @@ class TestMemoryManager:
             await memory_manager.remember(
                 category="decision",
                 content=f"Edge case decision {i} about pagination",
-                tags=["edge"]
+                tags=["edge"],
             )
 
         # Request with offset beyond total results
@@ -495,23 +485,22 @@ class TestMemoryManager:
     @pytest.mark.asyncio
     async def test_recall_date_filter_since(self, memory_manager):
         """Test recall with since date filter."""
-        from datetime import datetime, timezone, timedelta
+        from datetime import datetime, timedelta, timezone
 
         # Create memories at different times (simulated by creating and then filtering)
         await memory_manager.remember(
-            category="decision",
-            content="Old decision about API design",
-            tags=["api"]
+            category="decision", content="Old decision about API design", tags=["api"]
         )
 
         # Wait a tiny bit and create another
         import asyncio
+
         await asyncio.sleep(0.01)
 
         await memory_manager.remember(
             category="decision",
             content="Recent decision about API endpoints",
-            tags=["api"]
+            tags=["api"],
         )
 
         # Get cutoff time between the two memories
@@ -528,13 +517,13 @@ class TestMemoryManager:
     @pytest.mark.asyncio
     async def test_recall_date_filter_until(self, memory_manager):
         """Test recall with until date filter."""
-        from datetime import datetime, timezone, timedelta
+        from datetime import datetime, timedelta, timezone
 
         # Create a memory
         await memory_manager.remember(
             category="decision",
             content="Decision about database choice",
-            tags=["database"]
+            tags=["database"],
         )
 
         # Set until to future - should find the memory
@@ -552,15 +541,13 @@ class TestMemoryManager:
     @pytest.mark.asyncio
     async def test_recall_date_range_filter(self, memory_manager):
         """Test recall with both since and until date filters."""
-        from datetime import datetime, timezone, timedelta
+        from datetime import datetime, timedelta, timezone
 
         now = datetime.now(timezone.utc)
 
         # Create memory
         await memory_manager.remember(
-            category="decision",
-            content="Decision in time range",
-            tags=["time"]
+            category="decision", content="Decision in time range", tags=["time"]
         )
 
         # Query with range that includes the memory
@@ -574,7 +561,9 @@ class TestMemoryManager:
         old_since = now - timedelta(days=10)
         old_until = now - timedelta(days=9)
 
-        result_old = await memory_manager.recall("time", since=old_since, until=old_until)
+        result_old = await memory_manager.recall(
+            "time", since=old_since, until=old_until
+        )
         assert result_old["found"] == 0
 
 
@@ -665,7 +654,9 @@ class TestPathNormalization:
         assert relative is None
 
     @pytest.mark.asyncio
-    async def test_remember_with_file_path_normalization(self, memory_manager, temp_storage):
+    async def test_remember_with_file_path_normalization(
+        self, memory_manager, temp_storage
+    ):
         """Test that remember() stores both absolute and relative paths."""
         project_path = temp_storage
         file_path = "src/test.py"
@@ -674,7 +665,7 @@ class TestPathNormalization:
             category="decision",
             content="Test decision",
             file_path=file_path,
-            project_path=project_path
+            project_path=project_path,
         )
 
         # Check that the memory was created
@@ -682,13 +673,12 @@ class TestPathNormalization:
         memory_id = result["id"]
 
         # Fetch the memory from database to verify paths were stored
-        from daem0nmcp.models import Memory
         from sqlalchemy import select
 
+        from daem0nmcp.models import Memory
+
         async with memory_manager.db.get_session() as session:
-            result = await session.execute(
-                select(Memory).where(Memory.id == memory_id)
-            )
+            result = await session.execute(select(Memory).where(Memory.id == memory_id))
             memory = result.scalar_one()
 
             # Should have stored absolute path
@@ -708,7 +698,7 @@ class TestPathNormalization:
         result = await memory_manager.remember(
             category="decision",
             content="Test decision",
-            file_path=file_path
+            file_path=file_path,
             # No project_path provided
         )
 
@@ -729,18 +719,20 @@ class TestCompactMemories:
                 content=f"Learning {i}: Some insight about topic {i}",
                 rationale=f"Discovered during session {i}",
                 tags=["session", "compaction-test"],
-                project_path="/test/project"
+                project_path="/test/project",
             )
             memories.append(mem)
         return memories
 
     @pytest.mark.asyncio
-    async def test_compact_creates_summary_memory(self, memory_manager, memories_to_compact):
+    async def test_compact_creates_summary_memory(
+        self, memory_manager, memories_to_compact
+    ):
         """Compaction creates a new summary memory."""
         result = await memory_manager.compact_memories(
             summary="Summary of 5 learnings about various topics discovered during the testing session.",
             limit=5,
-            dry_run=False  # Explicitly set to False for compaction test
+            dry_run=False,  # Explicitly set to False for compaction test
         )
 
         assert result["status"] == "compacted"
@@ -749,12 +741,12 @@ class TestCompactMemories:
         assert result["category"] == "learning"
 
     @pytest.mark.asyncio
-    async def test_compact_rejects_short_summary(self, memory_manager, memories_to_compact):
+    async def test_compact_rejects_short_summary(
+        self, memory_manager, memories_to_compact
+    ):
         """Summary must be at least 50 characters."""
         result = await memory_manager.compact_memories(
-            summary="Too short",
-            limit=5,
-            dry_run=False
+            summary="Too short", limit=5, dry_run=False
         )
 
         assert "error" in result
@@ -763,10 +755,7 @@ class TestCompactMemories:
     @pytest.mark.asyncio
     async def test_compact_rejects_zero_limit(self, memory_manager):
         """Limit must be greater than 0."""
-        result = await memory_manager.compact_memories(
-            summary="A" * 60,
-            limit=0
-        )
+        result = await memory_manager.compact_memories(summary="A" * 60, limit=0)
 
         assert "error" in result
         assert "greater than 0" in result["error"]
@@ -774,10 +763,7 @@ class TestCompactMemories:
     @pytest.mark.asyncio
     async def test_compact_rejects_empty_summary(self, memory_manager):
         """Empty summary is rejected."""
-        result = await memory_manager.compact_memories(
-            summary="   ",
-            limit=5
-        )
+        result = await memory_manager.compact_memories(summary="   ", limit=5)
 
         assert "error" in result
 
@@ -785,9 +771,7 @@ class TestCompactMemories:
     async def test_compact_skipped_when_no_candidates(self, memory_manager):
         """Returns skipped status when no eligible memories exist."""
         result = await memory_manager.compact_memories(
-            summary="A" * 60,
-            limit=10,
-            dry_run=False
+            summary="A" * 60, limit=10, dry_run=False
         )
 
         assert result["status"] == "skipped"
@@ -801,20 +785,20 @@ class TestCompactMemories:
             category="learning",
             content="Learning about authentication flows",
             tags=["auth"],
-            project_path="/test"
+            project_path="/test",
         )
         await memory_manager.remember(
             category="learning",
             content="Learning about database optimization",
             tags=["database"],
-            project_path="/test"
+            project_path="/test",
         )
 
         result = await memory_manager.compact_memories(
             summary="Summary of authentication learnings covering various auth flows and patterns.",
             limit=10,
             topic="auth",
-            dry_run=True
+            dry_run=True,
         )
 
         assert result["status"] == "dry_run"
@@ -823,13 +807,12 @@ class TestCompactMemories:
         assert all("auth" in str(c).lower() for c in result["candidates"])
 
     @pytest.mark.asyncio
-    async def test_compact_topic_mismatch_returns_skipped(self, memory_manager, memories_to_compact):
+    async def test_compact_topic_mismatch_returns_skipped(
+        self, memory_manager, memories_to_compact
+    ):
         """Topic that matches nothing returns skipped with topic_mismatch reason."""
         result = await memory_manager.compact_memories(
-            summary="A" * 60,
-            limit=10,
-            topic="nonexistent-topic-xyz",
-            dry_run=False
+            summary="A" * 60, limit=10, topic="nonexistent-topic-xyz", dry_run=False
         )
 
         assert result["status"] == "skipped"
@@ -842,32 +825,32 @@ class TestCompactMemories:
         pending = await memory_manager.remember(
             category="decision",
             content="Use Redis for caching - awaiting outcome",
-            project_path="/test"
+            project_path="/test",
         )
 
         # Create a decision WITH outcome (resolved)
         resolved = await memory_manager.remember(
             category="decision",
             content="Use PostgreSQL for database - outcome recorded",
-            project_path="/test"
+            project_path="/test",
         )
         await memory_manager.record_outcome(
             memory_id=resolved["id"],
             outcome="Worked well for our use case",
-            worked=True
+            worked=True,
         )
 
         # Create a learning (always eligible)
         learning = await memory_manager.remember(
             category="learning",
             content="Learned about connection pooling",
-            project_path="/test"
+            project_path="/test",
         )
 
         result = await memory_manager.compact_memories(
             summary="Summary covering database decisions and connection pooling learnings in detail.",
             limit=10,
-            dry_run=True
+            dry_run=True,
         )
 
         candidate_ids = result["candidate_ids"]
@@ -880,7 +863,9 @@ class TestCompactMemories:
         assert learning["id"] in candidate_ids
 
     @pytest.mark.asyncio
-    async def test_dry_run_does_not_modify_state(self, memory_manager, memories_to_compact):
+    async def test_dry_run_does_not_modify_state(
+        self, memory_manager, memories_to_compact
+    ):
         """Dry run returns preview without modifying anything."""
         original_ids = [m["id"] for m in memories_to_compact]
 
@@ -888,7 +873,7 @@ class TestCompactMemories:
         result = await memory_manager.compact_memories(
             summary="Summary of learnings covering insights about various topics discovered during sessions.",
             limit=5,
-            dry_run=True
+            dry_run=True,
         )
 
         assert result["status"] == "dry_run"
@@ -899,14 +884,16 @@ class TestCompactMemories:
         found_ids = [m["id"] for m in recall_result.get("learnings", [])]
 
         for orig_id in original_ids:
-            assert orig_id in found_ids, f"Memory {orig_id} should still be visible after dry_run"
+            assert orig_id in found_ids, (
+                f"Memory {orig_id} should still be visible after dry_run"
+            )
 
     @pytest.mark.asyncio
     async def test_dry_run_is_default(self, memory_manager, memories_to_compact):
         """Dry run is the default behavior."""
         result = await memory_manager.compact_memories(
             summary="Summary of learnings covering insights about various topics discovered during sessions.",
-            limit=5
+            limit=5,
             # Note: dry_run not specified, should default to True
         )
 
@@ -922,7 +909,11 @@ class TestRememberBatch:
         memories = [
             {"category": "pattern", "content": "Use TypeScript for all new code"},
             {"category": "warning", "content": "Don't use var, use const/let"},
-            {"category": "decision", "content": "Chose React over Vue", "rationale": "Team expertise"}
+            {
+                "category": "decision",
+                "content": "Chose React over Vue",
+                "rationale": "Team expertise",
+            },
         ]
 
         result = await memory_manager.remember_batch(memories)
@@ -936,8 +927,16 @@ class TestRememberBatch:
     async def test_batch_with_tags(self, memory_manager):
         """Test batch with tags on memories."""
         memories = [
-            {"category": "pattern", "content": "API responses use JSON", "tags": ["api", "json"]},
-            {"category": "warning", "content": "Avoid XML parsing", "tags": ["api", "xml"]}
+            {
+                "category": "pattern",
+                "content": "API responses use JSON",
+                "tags": ["api", "json"],
+            },
+            {
+                "category": "warning",
+                "content": "Avoid XML parsing",
+                "tags": ["api", "xml"],
+            },
         ]
 
         result = await memory_manager.remember_batch(memories)
@@ -963,7 +962,7 @@ class TestRememberBatch:
         """Test that invalid categories are rejected in batch."""
         memories = [
             {"category": "invalid", "content": "This should fail"},
-            {"category": "pattern", "content": "This should succeed"}
+            {"category": "pattern", "content": "This should succeed"},
         ]
 
         result = await memory_manager.remember_batch(memories)
@@ -980,7 +979,7 @@ class TestRememberBatch:
         memories = [
             {"category": "pattern"},  # No content
             {"category": "pattern", "content": ""},  # Empty content
-            {"category": "pattern", "content": "Valid content"}
+            {"category": "pattern", "content": "Valid content"},
         ]
 
         result = await memory_manager.remember_batch(memories)
@@ -994,7 +993,7 @@ class TestRememberBatch:
         """Test batch with all invalid memories."""
         memories = [
             {"category": "invalid", "content": "Bad category"},
-            {"category": "pattern"}  # Missing content
+            {"category": "pattern"},  # Missing content
         ]
 
         result = await memory_manager.remember_batch(memories)
@@ -1009,7 +1008,7 @@ class TestRememberBatch:
         memories = [
             {"category": "learning", "content": "Learned about async patterns"},
             {"category": "learning", "content": "Learned about error handling"},
-            {"category": "learning", "content": "Learned about testing"}
+            {"category": "learning", "content": "Learned about testing"},
         ]
 
         result = await memory_manager.remember_batch(memories)
@@ -1026,11 +1025,21 @@ class TestRememberBatch:
     async def test_batch_with_file_paths(self, memory_manager, temp_storage):
         """Test batch with file path associations."""
         memories = [
-            {"category": "warning", "content": "Don't modify this file", "file_path": "src/core.py"},
-            {"category": "pattern", "content": "Follow this pattern", "file_path": "src/utils.py"}
+            {
+                "category": "warning",
+                "content": "Don't modify this file",
+                "file_path": "src/core.py",
+            },
+            {
+                "category": "pattern",
+                "content": "Follow this pattern",
+                "file_path": "src/utils.py",
+            },
         ]
 
-        result = await memory_manager.remember_batch(memories, project_path=temp_storage)
+        result = await memory_manager.remember_batch(
+            memories, project_path=temp_storage
+        )
 
         assert result["created_count"] == 2
 
@@ -1041,7 +1050,7 @@ class TestRememberBatch:
             {
                 "category": "decision",
                 "content": "Use Redis for caching",
-                "rationale": "Better performance than memcached"
+                "rationale": "Better performance than memcached",
             }
         ]
 
@@ -1083,6 +1092,7 @@ class TestTTLCache:
     def test_cache_ttl_expiration(self):
         """Test that entries expire after TTL."""
         import time
+
         from daem0nmcp.cache import TTLCache
 
         cache = TTLCache(ttl=0.1, maxsize=100)  # 100ms TTL
@@ -1225,7 +1235,7 @@ class TestRecallCaching:
         # Create a memory
         await memory_manager.remember(
             category="decision",
-            content="Cache test decision for recall caching verification"
+            content="Cache test decision for recall caching verification",
         )
 
         # Clear cache after remember (which clears it)
@@ -1256,8 +1266,7 @@ class TestRecallCaching:
 
         # Create initial memory and recall it
         await memory_manager.remember(
-            category="pattern",
-            content="Initial pattern for invalidation test"
+            category="pattern", content="Initial pattern for invalidation test"
         )
         get_recall_cache().clear()  # Clear after the remember
 
@@ -1266,8 +1275,7 @@ class TestRecallCaching:
 
         # Add a new memory - should clear cache
         await memory_manager.remember(
-            category="pattern",
-            content="New pattern for invalidation test"
+            category="pattern", content="New pattern for invalidation test"
         )
 
         # Cache should be empty now
@@ -1280,8 +1288,7 @@ class TestRecallCaching:
 
         # Create memory
         result = await memory_manager.remember(
-            category="decision",
-            content="Decision for outcome cache test"
+            category="decision", content="Decision for outcome cache test"
         )
         memory_id = result["id"]
 
@@ -1306,7 +1313,7 @@ class TestFTSHighlighting:
         # Create a memory with searchable content
         await memory_manager.remember(
             category="decision",
-            content="Use PostgreSQL database for production environment"
+            content="Use PostgreSQL database for production environment",
         )
 
         # Search without highlighting
@@ -1325,7 +1332,7 @@ class TestFTSHighlighting:
         # Create a memory with searchable content
         await memory_manager.remember(
             category="pattern",
-            content="Always validate user input before processing to prevent security vulnerabilities"
+            content="Always validate user input before processing to prevent security vulnerabilities",
         )
 
         # Search with highlighting
@@ -1350,16 +1357,12 @@ class TestFTSHighlighting:
         """Test FTS search with custom highlight markers."""
         # Create a memory
         await memory_manager.remember(
-            category="warning",
-            content="Never store passwords in plain text format"
+            category="warning", content="Never store passwords in plain text format"
         )
 
         # Search with custom markers
         results = await memory_manager.fts_search(
-            "passwords",
-            highlight=True,
-            highlight_start="[[",
-            highlight_end="]]"
+            "passwords", highlight=True, highlight_start="[[", highlight_end="]]"
         )
 
         # Should find the memory
@@ -1381,7 +1384,7 @@ class TestFTSHighlighting:
         for i in range(5):
             await memory_manager.remember(
                 category="learning",
-                content=f"Learning about FTS search feature number {i}"
+                content=f"Learning about FTS search feature number {i}",
             )
 
         # Search with limit

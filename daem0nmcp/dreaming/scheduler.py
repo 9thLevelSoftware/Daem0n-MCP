@@ -9,7 +9,8 @@ cooperatively via asyncio.Event when the user returns.
 import asyncio
 import logging
 import time
-from typing import TYPE_CHECKING, Awaitable, Callable, Optional
+from collections.abc import Awaitable, Callable
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     pass  # Future type imports for dream strategies
@@ -49,12 +50,10 @@ class IdleDreamScheduler:
         self._last_tool_call: float = time.monotonic()
         self._user_active: asyncio.Event = asyncio.Event()
         self._user_active.set()  # User starts as active
-        self._monitor_task: Optional[asyncio.Task] = None
+        self._monitor_task: asyncio.Task | None = None
         self._running: bool = False
         self._is_dreaming: bool = False
-        self._dream_callback: Optional[
-            Callable[["IdleDreamScheduler"], Awaitable[None]]
-        ] = None
+        self._dream_callback: Callable[[IdleDreamScheduler], Awaitable[None]] | None = None
 
     def set_dream_callback(
         self,
@@ -151,9 +150,7 @@ class IdleDreamScheduler:
                         logger.debug("Idle timeout reached, starting dream session")
                         await self._dream_callback(self)
                     else:
-                        logger.debug(
-                            "No dream callback set, skipping dream session"
-                        )
+                        logger.debug("No dream callback set, skipping dream session")
                 except Exception as e:
                     logger.error("Dream session error: %s", e, exc_info=True)
                 finally:

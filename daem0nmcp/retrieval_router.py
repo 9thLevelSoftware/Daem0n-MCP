@@ -22,17 +22,17 @@ Safety guarantees:
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, List, Optional, Tuple, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
+from . import vectors
 from .config import settings
 from .query_classifier import ExemplarQueryClassifier
 from .recall_planner import QueryComplexity
-from . import vectors
 
 if TYPE_CHECKING:
-    from .memory import MemoryManager
-    from .graph.knowledge_graph import KnowledgeGraph
     from .communities import CommunityManager
+    from .graph.knowledge_graph import KnowledgeGraph
+    from .memory import MemoryManager
 
 logger = logging.getLogger(__name__)
 
@@ -49,10 +49,10 @@ class RetrievalRouter:
 
     def __init__(
         self,
-        memory_manager: "MemoryManager",
-        knowledge_graph: Optional["KnowledgeGraph"] = None,
-        community_manager: Optional["CommunityManager"] = None,
-        classifier: Optional[ExemplarQueryClassifier] = None,
+        memory_manager: MemoryManager,
+        knowledge_graph: KnowledgeGraph | None = None,
+        community_manager: CommunityManager | None = None,
+        classifier: ExemplarQueryClassifier | None = None,
     ) -> None:
         self._mm = memory_manager
         self._kg = knowledge_graph
@@ -70,7 +70,7 @@ class RetrievalRouter:
         query: str,
         top_k: int = 10,
         **kwargs: Any,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """Route *query* to the optimal retrieval strategy.
 
         Returns a dict with:
@@ -105,7 +105,7 @@ class RetrievalRouter:
                 "classification": None,
                 "community_context": None,
             }
-        classification_info: Dict[str, Any] = {
+        classification_info: dict[str, Any] = {
             "level": level.value,
             "confidence": confidence,
             "scores": scores,
@@ -146,8 +146,8 @@ class RetrievalRouter:
             }
 
         strategy_used = "hybrid"
-        results: List[Tuple[int, float]] = []
-        community_context: Optional[List[Any]] = None
+        results: list[tuple[int, float]] = []
+        community_context: list[Any] | None = None
 
         if level == QueryComplexity.SIMPLE:
             results = self._vector_only_search(query, top_k, **kwargs)
@@ -177,9 +177,9 @@ class RetrievalRouter:
         self,
         query: str,
         top_k: int = 10,
-        result_text: Optional[str] = None,
+        result_text: str | None = None,
         **kwargs: Any,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """Route query and optionally JIT-compress assembled result text.
 
         Calls :meth:`route_search` for classification and retrieval, then
@@ -214,7 +214,9 @@ class RetrievalRouter:
                         "original_tokens": compression_result["original_tokens"],
                         "compressed_tokens": compression_result["compressed_tokens"],
                         "compression_rate": compression_result["compression_rate"],
-                        "threshold_triggered": compression_result["threshold_triggered"],
+                        "threshold_triggered": compression_result[
+                            "threshold_triggered"
+                        ],
                         "content_type": compression_result.get("content_type"),
                     }
                     result["compressed_text"] = compression_result["text"]
@@ -238,7 +240,7 @@ class RetrievalRouter:
         query: str,
         top_k: int,
         **kwargs: Any,
-    ) -> List[Tuple[int, float]]:
+    ) -> list[tuple[int, float]]:
         """Fast path: Qdrant vector search only, no BM25/fusion overhead."""
         try:
             qdrant = getattr(self._mm, "_qdrant", None)
@@ -281,7 +283,7 @@ class RetrievalRouter:
         query: str,
         top_k: int,
         **kwargs: Any,
-    ) -> List[Tuple[int, float]]:
+    ) -> list[tuple[int, float]]:
         """Baseline: BM25 + vector hybrid search via MemoryManager."""
         return self._mm._hybrid_search(query, top_k=top_k)
 
@@ -294,7 +296,7 @@ class RetrievalRouter:
         query: str,
         top_k: int,
         **kwargs: Any,
-    ) -> Tuple[List[Tuple[int, float]], Optional[List[Any]]]:
+    ) -> tuple[list[tuple[int, float]], list[Any] | None]:
         """Rich path: hybrid seeds + graph expansion + community summaries.
 
         Returns (results, community_context).  Any failure falls back to
@@ -306,7 +308,7 @@ class RetrievalRouter:
         # Step 2: graph expansion (if KnowledgeGraph available)
         expanded_results = list(seeds)  # copy
         try:
-            kg = getattr(self._mm, '_knowledge_graph', None) or self._kg
+            kg = getattr(self._mm, "_knowledge_graph", None) or self._kg
             if kg is not None:
                 await kg.ensure_loaded()
 
@@ -336,7 +338,7 @@ class RetrievalRouter:
                                     # Score boost: closer = higher, depth
                                     # discount = seed_score * 0.8^depth
                                     depth = entry.get("depth", 1)
-                                    boost = seed_score * (0.8 ** depth)
+                                    boost = seed_score * (0.8**depth)
                                     expanded_results.append((rid, boost))
 
                     # Re-sort by score descending
@@ -354,7 +356,7 @@ class RetrievalRouter:
             expanded_results = list(seeds)
 
         # Step 3: community summaries (if community_manager available)
-        community_context: Optional[List[Any]] = None
+        community_context: list[Any] | None = None
         try:
             if self._cm is not None:
                 # Get communities for project (best-effort)
@@ -369,7 +371,8 @@ class RetrievalRouter:
                         community_context = [
                             {
                                 "name": c.get("name") or getattr(c, "name", ""),
-                                "summary": c.get("summary") or getattr(c, "summary", ""),
+                                "summary": c.get("summary")
+                                or getattr(c, "summary", ""),
                             }
                             for c in communities[:5]
                         ]

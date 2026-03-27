@@ -7,16 +7,17 @@ Tests verification of claims against stored knowledge:
 - Summary aggregation
 """
 
-import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
 
 from daem0nmcp.reflexion.claims import Claim, ClaimType, VerificationLevel
 from daem0nmcp.reflexion.verification import (
+    VerificationEvidence,
+    VerificationResult,
+    summarize_verification,
     verify_claim,
     verify_claims,
-    summarize_verification,
-    VerificationResult,
-    VerificationEvidence,
 )
 
 
@@ -78,7 +79,9 @@ class TestVerifyClaim:
     """Tests for verify_claim function."""
 
     @pytest.mark.asyncio
-    async def test_verify_against_memory_found(self, mock_memory_manager, memory_reference_claim):
+    async def test_verify_against_memory_found(
+        self, mock_memory_manager, memory_reference_claim
+    ):
         """Claim should be verified when supporting memory exists."""
         mock_memory_manager.recall.return_value = {
             "memories": [
@@ -89,10 +92,16 @@ class TestVerifyClaim:
             ]
         }
 
-        with patch("daem0nmcp.reflexion.verification.encode_query") as mock_encode, \
-             patch("daem0nmcp.reflexion.verification.encode_document") as mock_encode_doc:
+        with (
+            patch("daem0nmcp.reflexion.verification.encode_query") as mock_encode,
+            patch(
+                "daem0nmcp.reflexion.verification.encode_document"
+            ) as mock_encode_doc,
+        ):
             with patch("daem0nmcp.reflexion.verification.decode") as mock_decode:
-                with patch("daem0nmcp.reflexion.verification.cosine_similarity") as mock_sim:
+                with patch(
+                    "daem0nmcp.reflexion.verification.cosine_similarity"
+                ) as mock_sim:
                     # Mock embedding operations
                     mock_encode.return_value = b"fake_embedding"
                     mock_encode_doc.return_value = b"fake_embedding"
@@ -110,7 +119,9 @@ class TestVerifyClaim:
         assert result.evidence[0].source == "memory"
 
     @pytest.mark.asyncio
-    async def test_verify_no_evidence_unverified(self, mock_memory_manager, memory_reference_claim):
+    async def test_verify_no_evidence_unverified(
+        self, mock_memory_manager, memory_reference_claim
+    ):
         """Claim should be unverified when no evidence found."""
         mock_memory_manager.recall.return_value = {"memories": []}
 
@@ -142,10 +153,16 @@ class TestVerifyClaim:
             ]
         }
 
-        with patch("daem0nmcp.reflexion.verification.encode_query") as mock_encode, \
-             patch("daem0nmcp.reflexion.verification.encode_document") as mock_encode_doc:
+        with (
+            patch("daem0nmcp.reflexion.verification.encode_query") as mock_encode,
+            patch(
+                "daem0nmcp.reflexion.verification.encode_document"
+            ) as mock_encode_doc,
+        ):
             with patch("daem0nmcp.reflexion.verification.decode") as mock_decode:
-                with patch("daem0nmcp.reflexion.verification.cosine_similarity") as mock_sim:
+                with patch(
+                    "daem0nmcp.reflexion.verification.cosine_similarity"
+                ) as mock_sim:
                     mock_encode.return_value = b"fake_embedding"
                     mock_encode_doc.return_value = b"fake_embedding"
                     mock_decode.return_value = [0.1] * 256
@@ -161,7 +178,9 @@ class TestVerifyClaim:
         assert "negation" in result.conflict_reason.lower()
 
     @pytest.mark.asyncio
-    async def test_verify_with_knowledge_graph(self, mock_memory_manager, mock_knowledge_graph, memory_reference_claim):
+    async def test_verify_with_knowledge_graph(
+        self, mock_memory_manager, mock_knowledge_graph, memory_reference_claim
+    ):
         """Verification should check GraphRAG entities."""
         mock_memory_manager.recall.return_value = {"memories": []}
 
@@ -182,7 +201,9 @@ class TestVerifyClaim:
         assert any(e.source == "entity" for e in result.evidence)
 
     @pytest.mark.asyncio
-    async def test_verify_skip_level_auto_verified(self, mock_memory_manager, skip_level_claim):
+    async def test_verify_skip_level_auto_verified(
+        self, mock_memory_manager, skip_level_claim
+    ):
         """Skip-level claims should be auto-verified without checking."""
         result = await verify_claim(
             claim=skip_level_claim,
@@ -195,7 +216,9 @@ class TestVerifyClaim:
         mock_memory_manager.recall.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_verify_with_as_of_time(self, mock_memory_manager, memory_reference_claim):
+    async def test_verify_with_as_of_time(
+        self, mock_memory_manager, memory_reference_claim
+    ):
         """Bi-temporal verification passes as_of_time to recall."""
         mock_memory_manager.recall.return_value = {"memories": []}
 
@@ -209,11 +232,14 @@ class TestVerifyClaim:
         mock_memory_manager.recall.assert_called_once()
         call_kwargs = mock_memory_manager.recall.call_args.kwargs
         from datetime import datetime, timezone
+
         expected_dt = datetime(2025, 1, 1, 0, 0, tzinfo=timezone.utc)
         assert call_kwargs.get("as_of_time") == expected_dt
 
     @pytest.mark.asyncio
-    async def test_verify_low_similarity_not_evidence(self, mock_memory_manager, memory_reference_claim):
+    async def test_verify_low_similarity_not_evidence(
+        self, mock_memory_manager, memory_reference_claim
+    ):
         """Low similarity memories should not count as evidence."""
         mock_memory_manager.recall.return_value = {
             "memories": [
@@ -224,10 +250,16 @@ class TestVerifyClaim:
             ]
         }
 
-        with patch("daem0nmcp.reflexion.verification.encode_query") as mock_encode, \
-             patch("daem0nmcp.reflexion.verification.encode_document") as mock_encode_doc:
+        with (
+            patch("daem0nmcp.reflexion.verification.encode_query") as mock_encode,
+            patch(
+                "daem0nmcp.reflexion.verification.encode_document"
+            ) as mock_encode_doc,
+        ):
             with patch("daem0nmcp.reflexion.verification.decode") as mock_decode:
-                with patch("daem0nmcp.reflexion.verification.cosine_similarity") as mock_sim:
+                with patch(
+                    "daem0nmcp.reflexion.verification.cosine_similarity"
+                ) as mock_sim:
                     mock_encode.return_value = b"fake_embedding"
                     mock_encode_doc.return_value = b"fake_embedding"
                     mock_decode.return_value = [0.1] * 256
@@ -331,7 +363,9 @@ class TestSummarizeVerification:
             VerificationResult("claim1", "memory_reference", "verified", 0.9, []),
             VerificationResult("claim2", "factual_assertion", "verified", 0.8, []),
             VerificationResult("claim3", "memory_reference", "unverified", 0.3, []),
-            VerificationResult("claim4", "memory_reference", "conflict", 0.9, [], "negation"),
+            VerificationResult(
+                "claim4", "memory_reference", "conflict", 0.9, [], "negation"
+            ),
         ]
 
         summary = summarize_verification(results)
@@ -369,8 +403,17 @@ class TestSummarizeVerification:
     def test_summarize_all_conflicts(self):
         """All conflict claims should list all conflicts."""
         results = [
-            VerificationResult("claim1", "memory_reference", "conflict", 0.9, [], "negation detected"),
-            VerificationResult("claim2", "outcome_reference", "conflict", 0.85, [], "contradictory outcome"),
+            VerificationResult(
+                "claim1", "memory_reference", "conflict", 0.9, [], "negation detected"
+            ),
+            VerificationResult(
+                "claim2",
+                "outcome_reference",
+                "conflict",
+                0.85,
+                [],
+                "contradictory outcome",
+            ),
         ]
 
         summary = summarize_verification(results)
@@ -449,7 +492,9 @@ class TestVerificationIntegration:
     """Integration tests for the verification system."""
 
     @pytest.mark.asyncio
-    async def test_memory_and_graph_verification(self, mock_memory_manager, mock_knowledge_graph):
+    async def test_memory_and_graph_verification(
+        self, mock_memory_manager, mock_knowledge_graph
+    ):
         """Both memory and graph verification should contribute evidence."""
         claim = Claim(
             text="We decided to use SQLite for storage",
@@ -461,9 +506,7 @@ class TestVerificationIntegration:
 
         # Mock memory with high similarity
         mock_memory_manager.recall.return_value = {
-            "memories": [
-                {"id": 1, "content": "SQLite was chosen for local storage."}
-            ]
+            "memories": [{"id": 1, "content": "SQLite was chosen for local storage."}]
         }
 
         # Mock entity in graph
@@ -473,10 +516,16 @@ class TestVerificationIntegration:
         )
         mock_knowledge_graph._graph.predecessors = MagicMock(return_value=["memory:1"])
 
-        with patch("daem0nmcp.reflexion.verification.encode_query") as mock_encode, \
-             patch("daem0nmcp.reflexion.verification.encode_document") as mock_encode_doc:
+        with (
+            patch("daem0nmcp.reflexion.verification.encode_query") as mock_encode,
+            patch(
+                "daem0nmcp.reflexion.verification.encode_document"
+            ) as mock_encode_doc,
+        ):
             with patch("daem0nmcp.reflexion.verification.decode") as mock_decode:
-                with patch("daem0nmcp.reflexion.verification.cosine_similarity") as mock_sim:
+                with patch(
+                    "daem0nmcp.reflexion.verification.cosine_similarity"
+                ) as mock_sim:
                     mock_encode.return_value = b"embedding"
                     mock_encode_doc.return_value = b"embedding"
                     mock_decode.return_value = [0.1] * 256

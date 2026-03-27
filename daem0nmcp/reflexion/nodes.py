@@ -19,15 +19,16 @@ in the persistence module (03-05). The integration happens there.
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, Any, Callable, Dict, Optional
+from collections.abc import Callable
+from typing import TYPE_CHECKING, Any
 
-from .state import ReflexionState
 from .claims import extract_claims
-from .verification import verify_claims, summarize_verification
+from .state import ReflexionState
+from .verification import summarize_verification, verify_claims
 
 if TYPE_CHECKING:
-    from ..memory import MemoryManager
     from ..graph import KnowledgeGraph
+    from ..memory import MemoryManager
 
 logger = logging.getLogger(__name__)
 
@@ -38,8 +39,8 @@ WARNING_ITERATION = 2  # Log warning at this iteration
 
 
 def create_actor_node(
-    llm_func: Optional[Callable[[str], str]] = None,
-) -> Callable[[ReflexionState], Dict[str, Any]]:
+    llm_func: Callable[[str], str] | None = None,
+) -> Callable[[ReflexionState], dict[str, Any]]:
     """
     Create an Actor node function.
 
@@ -55,7 +56,7 @@ def create_actor_node(
         Node function that updates draft in state
     """
 
-    def actor_node(state: ReflexionState) -> Dict[str, Any]:
+    def actor_node(state: ReflexionState) -> dict[str, Any]:
         """Generate or revise draft based on current state."""
         query = state.get("query", "")
         iteration = state.get("iteration", 0) + 1  # Increment at start
@@ -120,10 +121,10 @@ Provide an improved response addressing the critique."""
 
 
 def create_evaluator_node(
-    memory_manager: "MemoryManager",
-    knowledge_graph: Optional["KnowledgeGraph"] = None,
-    sandbox_executor: Optional[Any] = None,
-) -> Callable[[ReflexionState], Dict[str, Any]]:
+    memory_manager: MemoryManager,
+    knowledge_graph: KnowledgeGraph | None = None,
+    sandbox_executor: Any | None = None,
+) -> Callable[[ReflexionState], dict[str, Any]]:
     """
     Create an Evaluator node function.
 
@@ -145,7 +146,7 @@ def create_evaluator_node(
         Node function that updates critique, quality_score, claims, verification_results, should_continue
     """
 
-    async def evaluator_node(state: ReflexionState) -> Dict[str, Any]:
+    async def evaluator_node(state: ReflexionState) -> dict[str, Any]:
         """Critique the draft and score quality."""
         draft = state.get("draft", "")
         iteration = state.get("iteration", 1)
@@ -250,12 +251,23 @@ def create_evaluator_node(
                 logger.debug("Code assertion failure: -0.15 quality penalty")
                 # Add to critique
                 if code_result.error_message:
-                    critique = critique + f" | CODE VERIFICATION FAILED: {code_result.error_message}"
+                    critique = (
+                        critique
+                        + f" | CODE VERIFICATION FAILED: {code_result.error_message}"
+                    )
             # SYNTAX_ERROR, IMPORT_ERROR, TIMEOUT, SANDBOX_ERROR -> no score impact
             # (infrastructure issues should not affect quality assessment)
 
         quality_score = max(
-            0.0, min(1.0, base_score - conflict_penalty - unverified_penalty + code_bonus - code_penalty)
+            0.0,
+            min(
+                1.0,
+                base_score
+                - conflict_penalty
+                - unverified_penalty
+                + code_bonus
+                - code_penalty,
+            ),
         )
 
         # Decide whether to continue
@@ -309,7 +321,7 @@ def create_evaluator_node(
     return evaluator_node
 
 
-def create_reflector_node() -> Callable[[ReflexionState], Dict[str, Any]]:
+def create_reflector_node() -> Callable[[ReflexionState], dict[str, Any]]:
     """
     Create a Reflector node function.
 
@@ -320,7 +332,7 @@ def create_reflector_node() -> Callable[[ReflexionState], Dict[str, Any]]:
         Node function that refines critique into revision instructions
     """
 
-    def reflector_node(state: ReflexionState) -> Dict[str, Any]:
+    def reflector_node(state: ReflexionState) -> dict[str, Any]:
         """Synthesize critique into revision instructions."""
         critique = state.get("critique", "")
         iteration = state.get("iteration", 1)
@@ -362,12 +374,12 @@ Focus on addressing the most critical issues first."""
 
 
 # Convenience exports for node functions
-def actor_node(state: ReflexionState) -> Dict[str, Any]:
+def actor_node(state: ReflexionState) -> dict[str, Any]:
     """Default actor node without LLM (for testing)."""
     return create_actor_node()(state)
 
 
-def reflector_node(state: ReflexionState) -> Dict[str, Any]:
+def reflector_node(state: ReflexionState) -> dict[str, Any]:
     """Default reflector node."""
     return create_reflector_node()(state)
 

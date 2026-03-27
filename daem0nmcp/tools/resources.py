@@ -1,26 +1,27 @@
 """MCP Resources: warnings, failed, rules, context, triggered context."""
 
-import os
 import json
 import logging
-from typing import Optional
+import os
 
 try:
-    from ..mcp_instance import mcp
     from ..context_manager import (
-        get_project_context, _default_project_path,
+        _default_project_path,
+        get_project_context,
     )
     from ..database import DatabaseManager
+    from ..mcp_instance import mcp
     from ..models import Memory, Rule
 except ImportError:
-    from daem0nmcp.mcp_instance import mcp
     from daem0nmcp.context_manager import (
-        get_project_context, _default_project_path,
+        _default_project_path,
+        get_project_context,
     )
     from daem0nmcp.database import DatabaseManager
+    from daem0nmcp.mcp_instance import mcp
     from daem0nmcp.models import Memory, Rule
 
-from sqlalchemy import select, or_
+from sqlalchemy import or_, select
 
 logger = logging.getLogger(__name__)
 
@@ -29,7 +30,10 @@ logger = logging.getLogger(__name__)
 # Resource implementations (testable functions)
 # ============================================================================
 
-async def _warnings_resource_impl(project_path: str, db_manager: DatabaseManager) -> str:
+
+async def _warnings_resource_impl(
+    project_path: str, db_manager: DatabaseManager
+) -> str:
     """
     Implementation: Get active warnings for a project.
 
@@ -43,10 +47,13 @@ async def _warnings_resource_impl(project_path: str, db_manager: DatabaseManager
     try:
         async with db_manager.get_session() as session:
             result = await session.execute(
-                select(Memory).where(
+                select(Memory)
+                .where(
                     Memory.category == "warning",
-                    or_(Memory.archived == False, Memory.archived.is_(None))  # noqa: E712,
-                ).order_by(Memory.created_at.desc()).limit(10)
+                    or_(Memory.archived == False, Memory.archived.is_(None)),  # noqa: E712,
+                )
+                .order_by(Memory.created_at.desc())
+                .limit(10)
             )
             warnings = result.scalars().all()
 
@@ -82,10 +89,13 @@ async def _failed_resource_impl(project_path: str, db_manager: DatabaseManager) 
     try:
         async with db_manager.get_session() as session:
             result = await session.execute(
-                select(Memory).where(
+                select(Memory)
+                .where(
                     Memory.worked == False,  # noqa: E712
-                    or_(Memory.archived == False, Memory.archived.is_(None))  # noqa: E712,
-                ).order_by(Memory.created_at.desc()).limit(10)
+                    or_(Memory.archived == False, Memory.archived.is_(None)),  # noqa: E712,
+                )
+                .order_by(Memory.created_at.desc())
+                .limit(10)
             )
             failed = result.scalars().all()
 
@@ -121,7 +131,8 @@ async def _rules_resource_impl(project_path: str, db_manager: DatabaseManager) -
     try:
         async with db_manager.get_session() as session:
             result = await session.execute(
-                select(Rule).where(Rule.enabled == True)  # noqa: E712
+                select(Rule)
+                .where(Rule.enabled == True)  # noqa: E712
                 .order_by(Rule.priority.desc())
                 .limit(5)
             )
@@ -190,6 +201,7 @@ async def _context_resource_impl(project_path: str, db_manager: DatabaseManager)
 # MCP Resource registrations
 # ============================================================================
 
+
 @mcp.resource("daem0n://warnings/{project_path}")
 async def warnings_resource(project_path: str) -> str:
     """
@@ -253,8 +265,7 @@ async def context_resource(project_path: str) -> str:
 
 
 async def get_triggered_context_resource(
-    file_path: str,
-    project_path: Optional[str] = None
+    file_path: str, project_path: str | None = None
 ) -> str:
     """
     MCP Resource implementation for dynamic context injection based on file path.
@@ -281,42 +292,42 @@ async def get_triggered_context_resource(
         tm = ContextTriggerManager(ctx.db_manager)
 
         result = await tm.get_triggered_context(
-            project_path=project_path,
-            file_path=file_path
+            project_path=project_path, file_path=file_path
         )
 
         if not result["triggers"]:
-            return json.dumps({
-                "file": file_path,
-                "triggers_matched": 0,
-                "context": [],
-                "message": "No triggers matched for this file"
-            })
+            return json.dumps(
+                {
+                    "file": file_path,
+                    "triggers_matched": 0,
+                    "context": [],
+                    "message": "No triggers matched for this file",
+                }
+            )
 
         # Format for easy reading
         output = {
             "file": file_path,
             "triggers_matched": len(result["triggers"]),
             "topics_recalled": result.get("topics_recalled", []),
-            "context": []
+            "context": [],
         }
 
         # Include memory context for each topic
         for topic, recall_result in result.get("memories", {}).items():
-            topic_context = {
-                "topic": topic,
-                "memories": []
-            }
+            topic_context = {"topic": topic, "memories": []}
 
             # Extract memories from the recall result
             for category in ["decision", "pattern", "warning", "learning"]:
                 category_memories = recall_result.get(category, [])
                 for m in category_memories:
-                    topic_context["memories"].append({
-                        "category": category,
-                        "content": m.get("content", ""),
-                        "worked": m.get("worked")
-                    })
+                    topic_context["memories"].append(
+                        {
+                            "category": category,
+                            "content": m.get("content", ""),
+                            "worked": m.get("worked"),
+                        }
+                    )
 
             output["context"].append(topic_context)
 
@@ -324,10 +335,7 @@ async def get_triggered_context_resource(
 
     except Exception as e:
         logger.error(f"Error in get_triggered_context_resource: {e}")
-        return json.dumps({
-            "file": file_path,
-            "error": str(e)
-        })
+        return json.dumps({"file": file_path, "error": str(e)})
 
 
 @mcp.resource("daem0n://triggered/{file_path}")

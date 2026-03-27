@@ -14,22 +14,47 @@ class TestDeprecatedToolsRemovedFromMCP:
     @pytest.mark.asyncio
     async def test_workflow_tools_exposed(self):
         from daem0nmcp.server import mcp
+
         tools = {t.name for t in await mcp.list_tools()}
-        for wf in ("commune", "consult", "inscribe", "reflect",
-                    "understand", "govern", "explore", "maintain"):
+        for wf in (
+            "commune",
+            "consult",
+            "inscribe",
+            "reflect",
+            "understand",
+            "govern",
+            "explore",
+            "maintain",
+        ):
             assert wf in tools, f"Workflow tool '{wf}' missing from MCP registry"
 
     @pytest.mark.asyncio
     async def test_deprecated_tools_not_in_mcp(self):
         from daem0nmcp.server import mcp
+
         tools = {t.name for t in await mcp.list_tools()}
-        deprecated = ["get_briefing", "remember", "recall", "context_check", "record_outcome"]
+        deprecated = [
+            "get_briefing",
+            "remember",
+            "recall",
+            "context_check",
+            "record_outcome",
+        ]
         for name in deprecated:
-            assert name not in tools, f"Deprecated tool '{name}' should not be in MCP registry"
+            assert name not in tools, (
+                f"Deprecated tool '{name}' should not be in MCP registry"
+            )
 
     def test_deprecated_functions_still_importable(self):
         """Old functions remain importable for workflow dispatchers."""
-        from daem0nmcp.server import get_briefing, remember, recall, context_check, record_outcome
+        from daem0nmcp.server import (
+            context_check,
+            get_briefing,
+            recall,
+            record_outcome,
+            remember,
+        )
+
         assert callable(get_briefing)
         assert callable(remember)
         assert callable(recall)

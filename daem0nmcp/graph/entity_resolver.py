@@ -1,10 +1,9 @@
 """Entity resolution and canonicalization for knowledge graph."""
 
-import re
 import logging
-from typing import Dict, Tuple
+import re
 
-from sqlalchemy import select, func
+from sqlalchemy import func, select
 
 from ..database import DatabaseManager
 from ..models import ExtractedEntity
@@ -22,7 +21,9 @@ class EntityResolver:
 
     def __init__(self, db: DatabaseManager):
         self.db = db
-        self._canonical_cache: Dict[str, int] = {}  # "project:type:normalized_name" -> entity_id
+        self._canonical_cache: dict[
+            str, int
+        ] = {}  # "project:type:normalized_name" -> entity_id
         self._loaded_projects: set = set()  # Track which projects have been loaded
 
     def normalize(self, name: str, entity_type: str) -> str:
@@ -45,7 +46,7 @@ class EntityResolver:
 
         if entity_type == "function":
             # Convert camelCase to snake_case, then lowercase
-            normalized = re.sub(r'([a-z])([A-Z])', r'\1_\2', normalized)
+            normalized = re.sub(r"([a-z])([A-Z])", r"\1_\2", normalized)
             normalized = normalized.lower()
         elif entity_type == "class":
             # Just lowercase for matching
@@ -57,9 +58,7 @@ class EntityResolver:
             if normalized.startswith("./"):
                 normalized = normalized[2:]
             normalized = normalized.lower()
-        elif entity_type == "module":
-            normalized = normalized.lower()
-        elif entity_type == "variable":
+        elif entity_type == "module" or entity_type == "variable":
             normalized = normalized.lower()
         elif entity_type == "concept":
             # Strip quotes and lowercase
@@ -70,7 +69,9 @@ class EntityResolver:
 
         return normalized
 
-    def _cache_key(self, project_path: str, entity_type: str, normalized_name: str) -> str:
+    def _cache_key(
+        self, project_path: str, entity_type: str, normalized_name: str
+    ) -> str:
         """Generate cache key from project, type, and normalized name."""
         return f"{project_path}:{entity_type}:{normalized_name}"
 
@@ -90,7 +91,9 @@ class EntityResolver:
             count = 0
             for entity in entities:
                 # Use qualified_name if set, otherwise normalize the name
-                normalized = entity.qualified_name or self.normalize(entity.name, entity.entity_type)
+                normalized = entity.qualified_name or self.normalize(
+                    entity.name, entity.entity_type
+                )
                 key = self._cache_key(project_path, entity.entity_type, normalized)
                 self._canonical_cache[key] = entity.id
                 count += 1
@@ -99,12 +102,8 @@ class EntityResolver:
         logger.debug(f"Loaded {count} entities for {project_path} into resolver cache")
 
     async def resolve(
-        self,
-        name: str,
-        entity_type: str,
-        project_path: str,
-        session=None
-    ) -> Tuple[int, bool]:
+        self, name: str, entity_type: str, project_path: str, session=None
+    ) -> tuple[int, bool]:
         """
         Resolve entity to canonical ID.
 
@@ -131,7 +130,7 @@ class EntityResolver:
                 select(ExtractedEntity).where(
                     ExtractedEntity.project_path == project_path,
                     ExtractedEntity.entity_type == entity_type,
-                    func.lower(ExtractedEntity.name) == normalized
+                    func.lower(ExtractedEntity.name) == normalized,
                 )
             )
             existing = result.scalar_one_or_none()
@@ -145,7 +144,7 @@ class EntityResolver:
                 select(ExtractedEntity).where(
                     ExtractedEntity.project_path == project_path,
                     ExtractedEntity.entity_type == entity_type,
-                    ExtractedEntity.qualified_name == normalized
+                    ExtractedEntity.qualified_name == normalized,
                 )
             )
             existing = result.scalar_one_or_none()
@@ -160,13 +159,15 @@ class EntityResolver:
                 entity_type=entity_type,
                 name=name,  # Preserve original name
                 qualified_name=normalized,  # Store normalized for matching
-                mention_count=1
+                mention_count=1,
             )
             sess.add(new_entity)
             await sess.flush()
 
             self._canonical_cache[cache_key] = new_entity.id
-            logger.debug(f"Created new entity: {entity_type}:{name} (normalized: {normalized})")
+            logger.debug(
+                f"Created new entity: {entity_type}:{name} (normalized: {normalized})"
+            )
             return new_entity.id, True
 
         if session:

@@ -1,9 +1,10 @@
 """Tests for knowledge evolution tracking."""
 
-import pytest
-import tempfile
 import shutil
-from datetime import datetime, timezone, timedelta
+import tempfile
+from datetime import datetime, timedelta, timezone
+
+import pytest
 
 from daem0nmcp.models import ExtractedEntity, MemoryEntityRef, MemoryVersion
 
@@ -386,9 +387,7 @@ class TestGetMemoryEvolution:
             session.add(version)
             await session.commit()
 
-        result = await memory_manager.get_memory_evolution(
-            entity_name="PaymentService"
-        )
+        result = await memory_manager.get_memory_evolution(entity_name="PaymentService")
 
         assert result["found"] is True
         assert result["entity"]["name"] == "PaymentService"
@@ -415,8 +414,7 @@ class TestGetMemoryEvolution:
 
         # Should find the module, not the class
         result = await memory_manager.get_memory_evolution(
-            entity_name="Config",
-            entity_type="module"
+            entity_name="Config", entity_type="module"
         )
 
         assert result["found"] is True
@@ -482,15 +480,13 @@ class TestGetMemoryEvolution:
 
         # With invalidated
         result_all = await memory_manager.get_memory_evolution(
-            entity_name="cache_strategy",
-            include_invalidated=True
+            entity_name="cache_strategy", include_invalidated=True
         )
         assert result_all["total_versions"] == 2
 
         # Without invalidated
         result_current = await memory_manager.get_memory_evolution(
-            entity_name="cache_strategy",
-            include_invalidated=False
+            entity_name="cache_strategy", include_invalidated=False
         )
         assert result_current["total_versions"] == 1
 

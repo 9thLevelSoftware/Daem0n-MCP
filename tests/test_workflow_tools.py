@@ -10,6 +10,7 @@ class TestWorkflowToolsRegistered:
     async def tool_names(self):
         """Get all registered tool names from the MCP server."""
         from daem0nmcp.server import mcp
+
         tools = await mcp.list_tools()
         return {t.name for t in tools}
 
@@ -40,8 +41,14 @@ class TestWorkflowToolsRegistered:
     async def test_all_eight_workflow_tools_registered(self, tool_names):
         """All 8 workflow tools should be present."""
         expected = {
-            "commune", "consult", "inscribe", "reflect",
-            "understand", "govern", "explore", "maintain",
+            "commune",
+            "consult",
+            "inscribe",
+            "reflect",
+            "understand",
+            "govern",
+            "explore",
+            "maintain",
         }
         missing = expected - tool_names
         assert not missing, f"Missing workflow tools: {missing}"

@@ -13,21 +13,23 @@ Actions:
 - ingest: Fetch external docs from URL and store as learnings
 """
 
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from .errors import InvalidActionError, MissingParamError
 
-VALID_ACTIONS = frozenset({
-    "remember",
-    "remember_batch",
-    "link",
-    "unlink",
-    "pin",
-    "activate",
-    "deactivate",
-    "clear_active",
-    "ingest",
-})
+VALID_ACTIONS = frozenset(
+    {
+        "remember",
+        "remember_batch",
+        "link",
+        "unlink",
+        "pin",
+        "activate",
+        "deactivate",
+        "clear_active",
+        "ingest",
+    }
+)
 
 
 async def dispatch(
@@ -35,32 +37,32 @@ async def dispatch(
     project_path: str,
     *,
     # remember params
-    category: Optional[str] = None,
-    content: Optional[str] = None,
-    rationale: Optional[str] = None,
-    context: Optional[Dict[str, Any]] = None,
-    tags: Optional[List[str]] = None,
-    file_path: Optional[str] = None,
-    happened_at: Optional[str] = None,
+    category: str | None = None,
+    content: str | None = None,
+    rationale: str | None = None,
+    context: dict[str, Any] | None = None,
+    tags: list[str] | None = None,
+    file_path: str | None = None,
+    happened_at: str | None = None,
     # remember_batch params
-    memories: Optional[List[Dict[str, Any]]] = None,
+    memories: list[dict[str, Any]] | None = None,
     # link/unlink params
-    source_id: Optional[int] = None,
-    target_id: Optional[int] = None,
-    relationship: Optional[str] = None,
-    description: Optional[str] = None,
+    source_id: int | None = None,
+    target_id: int | None = None,
+    relationship: str | None = None,
+    description: str | None = None,
     # pin/activate/deactivate params
-    memory_id: Optional[int] = None,
+    memory_id: int | None = None,
     pinned: bool = True,
     # activate params
-    reason: Optional[str] = None,
+    reason: str | None = None,
     priority: int = 0,
-    expires_in_hours: Optional[int] = None,
+    expires_in_hours: int | None = None,
     # ingest params
-    url: Optional[str] = None,
-    topic: Optional[str] = None,
+    url: str | None = None,
+    topic: str | None = None,
     chunk_size: int = 2000,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Dispatch action to appropriate handler."""
     if action not in VALID_ACTIONS:
         raise InvalidActionError(action, sorted(VALID_ACTIONS))
@@ -89,9 +91,16 @@ async def dispatch(
         if not content:
             raise MissingParamError("content", action)
         return await _do_remember(
-            project_path, category, content, rationale,
-            context, tags, file_path, happened_at,
-            source_client=source_client, source_model=source_model,
+            project_path,
+            category,
+            content,
+            rationale,
+            context,
+            tags,
+            file_path,
+            happened_at,
+            source_client=source_client,
+            source_model=source_model,
         )
 
     elif action == "remember_batch":
@@ -115,9 +124,7 @@ async def dispatch(
             raise MissingParamError("source_id", action)
         if target_id is None:
             raise MissingParamError("target_id", action)
-        return await _do_unlink(
-            project_path, source_id, target_id, relationship
-        )
+        return await _do_unlink(project_path, source_id, target_id, relationship)
 
     elif action == "pin":
         if memory_id is None:
@@ -153,16 +160,17 @@ async def _do_remember(
     project_path: str,
     category: str,
     content: str,
-    rationale: Optional[str],
-    context: Optional[Dict[str, Any]],
-    tags: Optional[List[str]],
-    file_path: Optional[str],
-    happened_at: Optional[str],
-    source_client: Optional[str] = None,
-    source_model: Optional[str] = None,
-) -> Dict[str, Any]:
+    rationale: str | None,
+    context: dict[str, Any] | None,
+    tags: list[str] | None,
+    file_path: str | None,
+    happened_at: str | None,
+    source_client: str | None = None,
+    source_model: str | None = None,
+) -> dict[str, Any]:
     """Store a single memory with optional provenance tracking."""
     from datetime import datetime
+
     from ..context_manager import get_project_context
 
     ctx = await get_project_context(project_path)
@@ -171,9 +179,11 @@ async def _do_remember(
     happened_at_dt = None
     if happened_at:
         try:
-            happened_at_dt = datetime.fromisoformat(happened_at.replace('Z', '+00:00'))
+            happened_at_dt = datetime.fromisoformat(happened_at.replace("Z", "+00:00"))
         except ValueError:
-            return {"error": f"Invalid 'happened_at' date format: {happened_at}. Use ISO format (e.g., '2025-01-01T00:00:00Z')"}
+            return {
+                "error": f"Invalid 'happened_at' date format: {happened_at}. Use ISO format (e.g., '2025-01-01T00:00:00Z')"
+            }
 
     return await ctx.memory_manager.remember(
         category=category,
@@ -190,14 +200,12 @@ async def _do_remember(
 
 
 async def _do_remember_batch(
-    project_path: str, memories: List[Dict[str, Any]]
-) -> Dict[str, Any]:
+    project_path: str, memories: list[dict[str, Any]]
+) -> dict[str, Any]:
     """Store multiple memories atomically."""
     from ..server import remember_batch
 
-    return await remember_batch(
-        memories=memories, project_path=project_path
-    )
+    return await remember_batch(memories=memories, project_path=project_path)
 
 
 async def _do_link(
@@ -205,8 +213,8 @@ async def _do_link(
     source_id: int,
     target_id: int,
     relationship: str,
-    description: Optional[str],
-) -> Dict[str, Any]:
+    description: str | None,
+) -> dict[str, Any]:
     """Create relationship between memories."""
     from ..server import link_memories
 
@@ -223,8 +231,8 @@ async def _do_unlink(
     project_path: str,
     source_id: int,
     target_id: int,
-    relationship: Optional[str],
-) -> Dict[str, Any]:
+    relationship: str | None,
+) -> dict[str, Any]:
     """Remove relationship between memories."""
     from ..server import unlink_memories
 
@@ -236,9 +244,7 @@ async def _do_unlink(
     )
 
 
-async def _do_pin(
-    project_path: str, memory_id: int, pinned: bool
-) -> Dict[str, Any]:
+async def _do_pin(project_path: str, memory_id: int, pinned: bool) -> dict[str, Any]:
     """Pin/unpin a memory."""
     from ..server import pin_memory
 
@@ -250,10 +256,10 @@ async def _do_pin(
 async def _do_activate(
     project_path: str,
     memory_id: int,
-    reason: Optional[str],
+    reason: str | None,
     priority: int,
-    expires_in_hours: Optional[int],
-) -> Dict[str, Any]:
+    expires_in_hours: int | None,
+) -> dict[str, Any]:
     """Add memory to always-hot working context."""
     from ..server import set_active_context
 
@@ -266,9 +272,7 @@ async def _do_activate(
     )
 
 
-async def _do_deactivate(
-    project_path: str, memory_id: int
-) -> Dict[str, Any]:
+async def _do_deactivate(project_path: str, memory_id: int) -> dict[str, Any]:
     """Remove memory from active context."""
     from ..server import remove_from_active_context
 
@@ -277,7 +281,7 @@ async def _do_deactivate(
     )
 
 
-async def _do_clear_active(project_path: str) -> Dict[str, Any]:
+async def _do_clear_active(project_path: str) -> dict[str, Any]:
     """Clear all active context memories."""
     from ..server import clear_active_context
 
@@ -286,11 +290,13 @@ async def _do_clear_active(project_path: str) -> Dict[str, Any]:
 
 async def _do_ingest(
     project_path: str, url: str, topic: str, chunk_size: int
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Fetch external docs from URL and store as learnings."""
     from ..server import ingest_doc
 
     return await ingest_doc(
-        url=url, topic=topic, chunk_size=chunk_size,
+        url=url,
+        topic=topic,
+        chunk_size=chunk_size,
         project_path=project_path,
     )

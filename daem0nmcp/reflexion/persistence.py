@@ -13,7 +13,7 @@ Reflections enable "Have I seen this error before?" queries.
 import hashlib
 import logging
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Dict, List, Optional
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from ..memory import MemoryManager
@@ -59,7 +59,7 @@ async def persist_reflection(
     memory_manager: "MemoryManager",
     changed_behavior: bool,
     similarity_threshold: float = 0.85,
-) -> Optional[int]:
+) -> int | None:
     """
     Store a reflection as a memory if it changed behavior.
 
@@ -137,8 +137,8 @@ async def retrieve_similar_reflections(
     error_signature: str,
     memory_manager: "MemoryManager",
     limit: int = 5,
-    error_type: Optional[str] = None,
-) -> List[Dict[str, Any]]:
+    error_type: str | None = None,
+) -> list[dict[str, Any]]:
     """
     Retrieve past reflections similar to the given error signature.
 
@@ -197,13 +197,13 @@ async def has_seen_error_before(
 
 def create_reflection_from_evaluation(
     critique: str,
-    verification_results: List[Dict[str, Any]],
+    verification_results: list[dict[str, Any]],
     query: str,
     context: str,
     iteration: int,
     quality_before: float,
     quality_after: float,
-) -> Optional[Reflection]:
+) -> Reflection | None:
     """
     Create a Reflection from evaluation results.
 

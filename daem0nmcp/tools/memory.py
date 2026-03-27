@@ -1,33 +1,37 @@
 """Memory tools: remember, recall, remember_batch, recall_visual, etc."""
 
 import logging
-from typing import Dict, List, Optional, Any, Union
 from datetime import datetime, timezone
+from typing import Any
 
 try:
-    from ..mcp_instance import mcp
     from .. import __version__
     from ..context_manager import (
-        get_project_context, _default_project_path,
-        _missing_project_path_error, _check_covenant_counsel,
         _check_covenant_communion,
+        _check_covenant_counsel,
+        _default_project_path,
+        _missing_project_path_error,
+        get_project_context,
     )
     from ..logging_config import with_request_id
+    from ..mcp_instance import mcp
     from ..models import Memory
 except ImportError:
-    from daem0nmcp.mcp_instance import mcp
     from daem0nmcp import __version__
     from daem0nmcp.context_manager import (
-        get_project_context, _default_project_path,
-        _missing_project_path_error, _check_covenant_counsel,
         _check_covenant_communion,
+        _check_covenant_counsel,
+        _default_project_path,
+        _missing_project_path_error,
+        get_project_context,
     )
     from daem0nmcp.logging_config import with_request_id
+    from daem0nmcp.mcp_instance import mcp
     from daem0nmcp.models import Memory
 
-from ._deprecation import add_deprecation
-
 from sqlalchemy import select
+
+from ._deprecation import add_deprecation
 
 logger = logging.getLogger(__name__)
 
@@ -40,13 +44,13 @@ logger = logging.getLogger(__name__)
 async def remember(
     category: str,
     content: str,
-    rationale: Optional[str] = None,
-    context: Optional[Dict[str, Any]] = None,
-    tags: Optional[List[str]] = None,
-    file_path: Optional[str] = None,
-    project_path: Optional[str] = None,
-    happened_at: Optional[str] = None
-) -> Dict[str, Any]:
+    rationale: str | None = None,
+    context: dict[str, Any] | None = None,
+    tags: list[str] | None = None,
+    file_path: str | None = None,
+    project_path: str | None = None,
+    happened_at: str | None = None,
+) -> dict[str, Any]:
     """
     [DEPRECATED] Use inscribe(action='remember') instead.
 
@@ -79,9 +83,11 @@ async def remember(
     happened_at_dt = None
     if happened_at:
         try:
-            happened_at_dt = datetime.fromisoformat(happened_at.replace('Z', '+00:00'))
+            happened_at_dt = datetime.fromisoformat(happened_at.replace("Z", "+00:00"))
         except ValueError:
-            return {"error": f"Invalid 'happened_at' date format: {happened_at}. Use ISO format (e.g., '2025-01-01T00:00:00Z')"}
+            return {
+                "error": f"Invalid 'happened_at' date format: {happened_at}. Use ISO format (e.g., '2025-01-01T00:00:00Z')"
+            }
 
     ctx = await get_project_context(project_path)
     result = await ctx.memory_manager.remember(
@@ -92,7 +98,7 @@ async def remember(
         tags=tags,
         file_path=file_path,
         project_path=ctx.project_path,
-        happened_at=happened_at_dt
+        happened_at=happened_at_dt,
     )
 
     return add_deprecation(result, "remember", "inscribe(action='remember')")
@@ -104,9 +110,8 @@ async def remember(
 @mcp.tool(version=__version__)
 @with_request_id
 async def remember_batch(
-    memories: List[Dict[str, Any]],
-    project_path: Optional[str] = None
-) -> Dict[str, Any]:
+    memories: list[dict[str, Any]], project_path: str | None = None
+) -> dict[str, Any]:
     """
     [DEPRECATED] Use inscribe(action='remember_batch') instead.
 
@@ -126,21 +131,21 @@ async def remember_batch(
             "error_count": 0,
             "ids": [],
             "errors": [],
-            "message": "No memories provided"
+            "message": "No memories provided",
         }
 
     ctx = await get_project_context(project_path)
     result = await ctx.memory_manager.remember_batch(
-        memories=memories,
-        project_path=ctx.project_path
+        memories=memories, project_path=ctx.project_path
     )
 
-    result["message"] = (
-        f"Stored {result['created_count']} memories"
-        + (f" with {result['error_count']} error(s)" if result['error_count'] else "")
+    result["message"] = f"Stored {result['created_count']} memories" + (
+        f" with {result['error_count']} error(s)" if result["error_count"] else ""
     )
 
-    return add_deprecation(result, "remember_batch", "inscribe(action='remember_batch')")
+    return add_deprecation(
+        result, "remember_batch", "inscribe(action='remember_batch')"
+    )
 
 
 # ============================================================================
@@ -150,18 +155,18 @@ async def remember_batch(
 @with_request_id
 async def recall(
     topic: str,
-    categories: Optional[List[str]] = None,
-    tags: Optional[List[str]] = None,
-    file_path: Optional[str] = None,
+    categories: list[str] | None = None,
+    tags: list[str] | None = None,
+    file_path: str | None = None,
     offset: int = 0,
     limit: int = 10,
-    since: Optional[str] = None,
-    until: Optional[str] = None,
-    project_path: Optional[str] = None,
+    since: str | None = None,
+    until: str | None = None,
+    project_path: str | None = None,
     include_linked: bool = False,
     condensed: bool = False,
-    as_of_time: Optional[str] = None
-) -> Dict[str, Any]:
+    as_of_time: str | None = None,
+) -> dict[str, Any]:
     """
     [DEPRECATED] Use consult(action='recall') instead.
 
@@ -198,21 +203,27 @@ async def recall(
 
     if since:
         try:
-            since_dt = datetime.fromisoformat(since.replace('Z', '+00:00'))
+            since_dt = datetime.fromisoformat(since.replace("Z", "+00:00"))
         except ValueError:
-            return {"error": f"Invalid 'since' date format: {since}. Use ISO format (e.g., '2025-01-01T00:00:00Z')"}
+            return {
+                "error": f"Invalid 'since' date format: {since}. Use ISO format (e.g., '2025-01-01T00:00:00Z')"
+            }
 
     if until:
         try:
-            until_dt = datetime.fromisoformat(until.replace('Z', '+00:00'))
+            until_dt = datetime.fromisoformat(until.replace("Z", "+00:00"))
         except ValueError:
-            return {"error": f"Invalid 'until' date format: {until}. Use ISO format (e.g., '2025-12-31T23:59:59Z')"}
+            return {
+                "error": f"Invalid 'until' date format: {until}. Use ISO format (e.g., '2025-12-31T23:59:59Z')"
+            }
 
     if as_of_time:
         try:
-            as_of_time_dt = datetime.fromisoformat(as_of_time.replace('Z', '+00:00'))
+            as_of_time_dt = datetime.fromisoformat(as_of_time.replace("Z", "+00:00"))
         except ValueError:
-            return {"error": f"Invalid 'as_of_time' date format: {as_of_time}. Use ISO format (e.g., '2025-12-01T00:00:00Z')"}
+            return {
+                "error": f"Invalid 'as_of_time' date format: {as_of_time}. Use ISO format (e.g., '2025-12-01T00:00:00Z')"
+            }
 
     ctx = await get_project_context(project_path)
     result = await ctx.memory_manager.recall(
@@ -227,7 +238,7 @@ async def recall(
         project_path=ctx.project_path,
         include_linked=include_linked,
         condensed=condensed,
-        as_of_time=as_of_time_dt
+        as_of_time=as_of_time_dt,
     )
     return add_deprecation(result, "recall", "consult(action='recall')")
 
@@ -239,18 +250,18 @@ async def recall(
 @with_request_id
 async def recall_visual(
     topic: str,
-    categories: Optional[List[str]] = None,
-    tags: Optional[List[str]] = None,
-    file_path: Optional[str] = None,
+    categories: list[str] | None = None,
+    tags: list[str] | None = None,
+    file_path: str | None = None,
     offset: int = 0,
     limit: int = 10,
-    since: Optional[str] = None,
-    until: Optional[str] = None,
+    since: str | None = None,
+    until: str | None = None,
     include_linked: bool = False,
     condensed: bool = False,
-    as_of_time: Optional[str] = None,
-    project_path: Optional[str] = None,
-) -> Dict[str, Any]:
+    as_of_time: str | None = None,
+    project_path: str | None = None,
+) -> dict[str, Any]:
     """
     [DEPRECATED] Use consult(action='recall', visual=True) instead.
 
@@ -276,7 +287,7 @@ async def recall_visual(
     Returns:
         Dict with recall results + ui_resource hint + text fallback
     """
-    from daem0nmcp.ui.fallback import format_with_ui_hint, format_search_results
+    from daem0nmcp.ui.fallback import format_search_results, format_with_ui_hint
 
     # Require project_path for multi-project support
     if not project_path and not _default_project_path:
@@ -312,29 +323,31 @@ async def recall_visual(
 
     # Flatten results for text formatting
     all_results = []
-    for cat in ['decisions', 'patterns', 'warnings', 'learnings']:
+    for cat in ["decisions", "patterns", "warnings", "learnings"]:
         for r in result.get(cat, []):
-            all_results.append({
-                'id': r.get('id'),
-                'category': cat.rstrip('s'),  # decisions -> decision
-                'content': r.get('content', ''),
-                'score': r.get('relevance', 0),
-            })
+            all_results.append(
+                {
+                    "id": r.get("id"),
+                    "category": cat.rstrip("s"),  # decisions -> decision
+                    "content": r.get("content", ""),
+                    "score": r.get("relevance", 0),
+                }
+            )
 
     # Generate text fallback
     text = format_search_results(
         query=topic,
         results=all_results,
-        total_count=result.get('total_count', len(all_results))
+        total_count=result.get("total_count", len(all_results)),
     )
 
     # Return with UI hint
     ui_result = format_with_ui_hint(
-        data=result,
-        ui_resource="ui://daem0n/search",
-        text=text
+        data=result, ui_resource="ui://daem0n/search", text=text
     )
-    return add_deprecation(ui_result, "recall_visual", "consult(action='recall', visual=True)")
+    return add_deprecation(
+        ui_result, "recall_visual", "consult(action='recall', visual=True)"
+    )
 
 
 # ============================================================================
@@ -343,11 +356,8 @@ async def recall_visual(
 @mcp.tool(version=__version__)
 @with_request_id
 async def record_outcome(
-    memory_id: int,
-    outcome: str,
-    worked: bool,
-    project_path: Optional[str] = None
-) -> Dict[str, Any]:
+    memory_id: int, outcome: str, worked: bool, project_path: str | None = None
+) -> dict[str, Any]:
     """
     [DEPRECATED] Use reflect(action='outcome') instead.
 
@@ -369,7 +379,7 @@ async def record_outcome(
         memory_id=memory_id,
         outcome=outcome,
         worked=worked,
-        project_path=effective_project_path
+        project_path=effective_project_path,
     )
 
     return add_deprecation(result, "record_outcome", "reflect(action='outcome')")
@@ -381,10 +391,8 @@ async def record_outcome(
 @mcp.tool(version=__version__)
 @with_request_id
 async def recall_for_file(
-    file_path: str,
-    limit: int = 10,
-    project_path: Optional[str] = None
-) -> Dict[str, Any]:
+    file_path: str, limit: int = 10, project_path: str | None = None
+) -> dict[str, Any]:
     """
     Get all memories associated with a specific file.
 
@@ -398,7 +406,9 @@ async def recall_for_file(
         return _missing_project_path_error()
 
     ctx = await get_project_context(project_path)
-    return await ctx.memory_manager.recall_for_file(file_path=file_path, limit=limit, project_path=ctx.project_path)
+    return await ctx.memory_manager.recall_for_file(
+        file_path=file_path, limit=limit, project_path=ctx.project_path
+    )
 
 
 # ============================================================================
@@ -408,9 +418,9 @@ async def recall_for_file(
 @with_request_id
 async def recall_by_entity(
     entity_name: str,
-    entity_type: Optional[str] = None,
-    project_path: Optional[str] = None
-) -> Dict[str, Any]:
+    entity_type: str | None = None,
+    project_path: str | None = None,
+) -> dict[str, Any]:
     """
     Get all memories mentioning a specific entity (class/function/file).
 
@@ -432,9 +442,7 @@ async def recall_by_entity(
 
     entity_manager = EntityManager(ctx.db_manager)
     return await entity_manager.get_memories_for_entity(
-        entity_name=entity_name,
-        project_path=ctx.project_path,
-        entity_type=entity_type
+        entity_name=entity_name, project_path=ctx.project_path, entity_type=entity_type
     )
 
 
@@ -447,8 +455,8 @@ async def recall_hierarchical(
     topic: str,
     include_members: bool = False,
     limit: int = 10,
-    project_path: Optional[str] = None
-) -> Dict[str, Any]:
+    project_path: str | None = None,
+) -> dict[str, Any]:
     """
     GraphRAG-style layered recall: community summaries first, then individual memories.
 
@@ -467,7 +475,7 @@ async def recall_hierarchical(
         topic=topic,
         project_path=project_path or _default_project_path,
         include_members=include_members,
-        limit=limit
+        limit=limit,
     )
 
 
@@ -484,8 +492,8 @@ async def search_memories(
     highlight: bool = False,
     highlight_start: str = "<b>",
     highlight_end: str = "</b>",
-    project_path: Optional[str] = None
-) -> Union[List[Dict[str, Any]], Dict[str, Any]]:
+    project_path: str | None = None,
+) -> list[dict[str, Any]] | dict[str, Any]:
     """
     [DEPRECATED] Use consult(action='search') instead.
 
@@ -516,13 +524,13 @@ async def search_memories(
             limit=raw_limit,
             highlight=True,
             highlight_start=highlight_start,
-            highlight_end=highlight_end
+            highlight_end=highlight_end,
         )
     else:
         results = await ctx.memory_manager.search(query=query, limit=raw_limit)
 
     has_more = len(results) > offset + limit
-    paginated = results[offset:offset + limit]
+    paginated = results[offset : offset + limit]
 
     if include_meta:
         result = {
@@ -531,14 +539,15 @@ async def search_memories(
             "limit": limit,
             "has_more": has_more,
             "highlight": highlight,
-            "results": paginated
+            "results": paginated,
         }
         return add_deprecation(result, "search_memories", "consult(action='search')")
 
     # List return path: wrap in dict to include deprecation field
     return add_deprecation(
         {"results": paginated, "query": query},
-        "search_memories", "consult(action='search')"
+        "search_memories",
+        "consult(action='search')",
     )
 
 
@@ -548,10 +557,8 @@ async def search_memories(
 @mcp.tool(version=__version__)
 @with_request_id
 async def find_related(
-    memory_id: int,
-    limit: int = 5,
-    project_path: Optional[str] = None
-) -> List[Dict[str, Any]]:
+    memory_id: int, limit: int = 5, project_path: str | None = None
+) -> list[dict[str, Any]]:
     """
     Find memories semantically related to a specific memory.
 
@@ -575,11 +582,11 @@ async def find_related(
 @with_request_id
 async def get_related_memories(
     memory_id: int,
-    relationship_types: Optional[List[str]] = None,
+    relationship_types: list[str] | None = None,
     direction: str = "both",
     max_depth: int = 2,
-    project_path: Optional[str] = None
-) -> Dict[str, Any]:
+    project_path: str | None = None,
+) -> dict[str, Any]:
     """
     Find memories related to a given memory via graph traversal. Answers: "What depends on this decision?"
 
@@ -600,7 +607,7 @@ async def get_related_memories(
         memory_id=memory_id,
         relationship_types=relationship_types,
         direction=direction,
-        max_depth=max_depth
+        max_depth=max_depth,
     )
 
 
@@ -610,10 +617,8 @@ async def get_related_memories(
 @mcp.tool(version=__version__)
 @with_request_id
 async def get_memory_versions(
-    memory_id: int,
-    limit: int = 50,
-    project_path: Optional[str] = None
-) -> Dict[str, Any]:
+    memory_id: int, limit: int = 50, project_path: str | None = None
+) -> dict[str, Any]:
     """
     Get version history showing how a memory evolved over time.
 
@@ -631,17 +636,15 @@ async def get_memory_versions(
     return {
         "memory_id": memory_id,
         "version_count": len(versions),
-        "versions": versions
+        "versions": versions,
     }
 
 
 @mcp.tool(version=__version__)
 @with_request_id
 async def get_memory_at_time(
-    memory_id: int,
-    timestamp: str,
-    project_path: Optional[str] = None
-) -> Dict[str, Any]:
+    memory_id: int, timestamp: str, project_path: str | None = None
+) -> dict[str, Any]:
     """
     Get memory state at a specific point in time.
 
@@ -654,7 +657,7 @@ async def get_memory_at_time(
         return _missing_project_path_error()
 
     try:
-        point_in_time = datetime.fromisoformat(timestamp.replace('Z', '+00:00'))
+        point_in_time = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
     except ValueError as e:
         return {"error": f"Invalid timestamp format: {e}"}
 
@@ -664,7 +667,7 @@ async def get_memory_at_time(
     if historical is None:
         return {
             "error": "NOT_FOUND",
-            "message": f"Memory {memory_id} did not exist at {timestamp}"
+            "message": f"Memory {memory_id} did not exist at {timestamp}",
         }
 
     return historical
@@ -678,10 +681,10 @@ async def get_memory_at_time(
 async def compact_memories(
     summary: str,
     limit: int = 10,
-    topic: Optional[str] = None,
+    topic: str | None = None,
     dry_run: bool = True,
-    project_path: Optional[str] = None
-) -> Dict[str, Any]:
+    project_path: str | None = None,
+) -> dict[str, Any]:
     """
     Consolidate recent episodic memories into a summary. Originals archived with graph links.
 
@@ -698,10 +701,7 @@ async def compact_memories(
     ctx = await get_project_context(project_path)
 
     return await ctx.memory_manager.compact_memories(
-        summary=summary,
-        limit=limit,
-        topic=topic,
-        dry_run=dry_run
+        summary=summary, limit=limit, topic=topic, dry_run=dry_run
     )
 
 
@@ -713,8 +713,8 @@ async def compact_memories(
 async def cleanup_memories(
     dry_run: bool = True,
     merge_duplicates: bool = True,
-    project_path: Optional[str] = None
-) -> Dict[str, Any]:
+    project_path: str | None = None,
+) -> dict[str, Any]:
     """
     Merge duplicate memories (same category + content + file_path). Keeps newest.
 
@@ -736,8 +736,8 @@ async def cleanup_memories(
         groups = {}
         for mem in all_memories:
             # Normalize content for comparison (lowercase, collapse whitespace)
-            normalized = ' '.join(mem.content.lower().split())
-            key = (mem.category, normalized, mem.file_path or '')
+            normalized = " ".join(mem.content.lower().split())
+            key = (mem.category, normalized, mem.file_path or "")
 
             if key not in groups:
                 groups[key] = []
@@ -755,20 +755,23 @@ async def cleanup_memories(
                     {
                         "content": mems[0].content[:50],
                         "count": len(mems),
-                        "ids": [m.id for m in mems]
+                        "ids": [m.id for m in mems],
                     }
                     for mems in list(duplicates.values())[:5]
-                ]
+                ],
             }
 
         # Merge duplicates: keep newest, preserve outcomes
         merged = 0
         if merge_duplicates:
             for key, mems in duplicates.items():
-                def _to_naive(dt_value: Optional[datetime]) -> datetime:
+
+                def _to_naive(dt_value: datetime | None) -> datetime:
                     if not dt_value:
                         return datetime.min
-                    return dt_value.replace(tzinfo=None) if dt_value.tzinfo else dt_value
+                    return (
+                        dt_value.replace(tzinfo=None) if dt_value.tzinfo else dt_value
+                    )
 
                 def _outcome_timestamp(mem: Memory) -> datetime:
                     return _to_naive(mem.updated_at or mem.created_at)
@@ -781,7 +784,9 @@ async def cleanup_memories(
                 outcome_source = None
                 for candidate in mems:
                     if candidate.outcome:
-                        if outcome_source is None or _outcome_timestamp(candidate) > _outcome_timestamp(outcome_source):
+                        if outcome_source is None or _outcome_timestamp(
+                            candidate
+                        ) > _outcome_timestamp(outcome_source):
                             outcome_source = candidate
 
                 if outcome_source:
@@ -821,7 +826,7 @@ async def cleanup_memories(
     return {
         "merged": merged,
         "duplicate_groups": len(duplicates),
-        "message": f"Merged {merged} duplicate memories"
+        "message": f"Merged {merged} duplicate memories",
     }
 
 
@@ -831,10 +836,8 @@ async def cleanup_memories(
 @mcp.tool(version=__version__)
 @with_request_id
 async def archive_memory(
-    memory_id: int,
-    archived: bool = True,
-    project_path: Optional[str] = None
-) -> Dict[str, Any]:
+    memory_id: int, archived: bool = True, project_path: str | None = None
+) -> dict[str, Any]:
     """
     Archive/unarchive a memory. Archived = hidden from recall but preserved.
 
@@ -849,9 +852,7 @@ async def archive_memory(
     ctx = await get_project_context(project_path)
 
     async with ctx.db_manager.get_session() as session:
-        result = await session.execute(
-            select(Memory).where(Memory.id == memory_id)
-        )
+        result = await session.execute(select(Memory).where(Memory.id == memory_id))
         memory = result.scalar_one_or_none()
 
         if not memory:
@@ -863,7 +864,7 @@ async def archive_memory(
             "id": memory_id,
             "archived": archived,
             "content": memory.content[:100],
-            "message": f"Memory {'archived' if archived else 'restored'}"
+            "message": f"Memory {'archived' if archived else 'restored'}",
         }
 
 
@@ -873,10 +874,8 @@ async def archive_memory(
 @mcp.tool(version=__version__)
 @with_request_id
 async def pin_memory(
-    memory_id: int,
-    pinned: bool = True,
-    project_path: Optional[str] = None
-) -> Dict[str, Any]:
+    memory_id: int, pinned: bool = True, project_path: str | None = None
+) -> dict[str, Any]:
     """
     Pin/unpin a memory. Pinned: never pruned, boosted in recall, permanent.
 
@@ -891,9 +890,7 @@ async def pin_memory(
     ctx = await get_project_context(project_path)
 
     async with ctx.db_manager.get_session() as session:
-        result = await session.execute(
-            select(Memory).where(Memory.id == memory_id)
-        )
+        result = await session.execute(select(Memory).where(Memory.id == memory_id))
         memory = result.scalar_one_or_none()
 
         if not memory:
@@ -906,5 +903,5 @@ async def pin_memory(
             "id": memory_id,
             "pinned": pinned,
             "content": memory.content[:100],
-            "message": f"Memory {'pinned' if pinned else 'unpinned'}"
+            "message": f"Memory {'pinned' if pinned else 'unpinned'}",
         }

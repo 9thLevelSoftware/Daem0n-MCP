@@ -23,7 +23,6 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from enum import Enum
-from typing import Optional
 
 from ..agency.sandbox import SandboxExecutor, StructuredExecutionResult
 
@@ -41,6 +40,7 @@ class CodeFailureType(str, Enum):
     - TIMEOUT: Infrastructure issue, fall back to text-only
     - SANDBOX_ERROR: Infrastructure issue, fall back to text-only
     """
+
     SUCCESS = "SUCCESS"
     SYNTAX_ERROR = "SYNTAX_ERROR"
     IMPORT_ERROR = "IMPORT_ERROR"
@@ -66,10 +66,11 @@ class CodeExecutionResult:
     This is the structured result returned to the Evaluator node,
     containing both the execution output and the failure classification.
     """
+
     failure_type: CodeFailureType
     output: str = ""
-    error_message: Optional[str] = None
-    error_traceback: Optional[str] = None
+    error_message: str | None = None
+    error_traceback: str | None = None
     execution_time_ms: int = 0
     assertions_passed: bool = False
 
@@ -128,7 +129,11 @@ def classify_failure(result: StructuredExecutionResult) -> CodeFailureType:
         return CodeFailureType.SYNTAX_ERROR
 
     # Import/module errors -- code uses unavailable packages
-    if "import" in error_name or "module" in error_name or "modulenotfound" in error_name:
+    if (
+        "import" in error_name
+        or "module" in error_name
+        or "modulenotfound" in error_name
+    ):
         return CodeFailureType.IMPORT_ERROR
 
     # Assertion errors -- claim verification failed (the claim is wrong)
@@ -168,7 +173,9 @@ async def execute_verification_code(
     """
     # Check sandbox availability first
     if not executor.available:
-        logger.info("Sandbox unavailable, returning SANDBOX_ERROR for graceful fallback")
+        logger.info(
+            "Sandbox unavailable, returning SANDBOX_ERROR for graceful fallback"
+        )
         return CodeExecutionResult(
             failure_type=CodeFailureType.SANDBOX_ERROR,
             error_message="Sandbox not available (E2B_API_KEY not set or e2b-code-interpreter not installed)",
@@ -189,7 +196,11 @@ async def execute_verification_code(
     # Build error message
     error_message = None
     if not result.success:
-        error_message = f"{result.error_name}: {result.error_value}" if result.error_name else result.error_value
+        error_message = (
+            f"{result.error_name}: {result.error_value}"
+            if result.error_name
+            else result.error_value
+        )
 
     logger.info(
         f"Verification code execution: {failure_type.value}, "

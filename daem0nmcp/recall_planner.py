@@ -10,45 +10,46 @@ Classifies query complexity and plans which memory levels to access:
 Reduces context by ~50% for simple queries.
 """
 
+import re
 from dataclasses import dataclass
 from enum import Enum
-from typing import Optional
-import re
 
 
 class QueryComplexity(Enum):
     """Query complexity levels."""
-    SIMPLE = "simple"      # Single concept, short queries
-    MEDIUM = "medium"      # Multi-concept, moderate queries
-    COMPLEX = "complex"    # Temporal, causal, or detailed queries
+
+    SIMPLE = "simple"  # Single concept, short queries
+    MEDIUM = "medium"  # Multi-concept, moderate queries
+    COMPLEX = "complex"  # Temporal, causal, or detailed queries
 
 
 @dataclass
 class RecallPlan:
     """Plan for memory retrieval based on query complexity."""
+
     complexity: QueryComplexity
     use_communities: bool  # Use community summaries
     use_raw_memories: bool  # Access raw memory level
-    max_communities: int   # Max community summaries to return
+    max_communities: int  # Max community summaries to return
     max_raw_memories: int  # Max raw memories to return
     filter_threshold: float  # Similarity threshold for filtering
     # Phase 4: Compression parameters
-    compress: bool = False           # Whether to compress retrieved context
-    compression_rate: float = 0.33   # Target compression rate (0.33 = 3x)
+    compress: bool = False  # Whether to compress retrieved context
+    compression_rate: float = 0.33  # Target compression rate (0.33 = 3x)
 
 
 # Patterns indicating complex queries
 COMPLEX_PATTERNS = [
-    r'\b(trace|flow|chain|sequence|history|timeline)\b',
-    r'\b(when|what time|last week|yesterday|before|after)\b',
-    r'\b(why did|how did|what led to|what caused)\b',
-    r'\b(all|every|complete|full)\b.*\b(decision|memory|pattern)\b',
+    r"\b(trace|flow|chain|sequence|history|timeline)\b",
+    r"\b(when|what time|last week|yesterday|before|after)\b",
+    r"\b(why did|how did|what led to|what caused)\b",
+    r"\b(all|every|complete|full)\b.*\b(decision|memory|pattern)\b",
 ]
 
 # Patterns indicating simple queries
 SIMPLE_PATTERNS = [
-    r'^(what is|define|explain)\s+\w+\??$',
-    r'^\w+\??$',  # Single word
+    r"^(what is|define|explain)\s+\w+\??$",
+    r"^\w+\??$",  # Single word
 ]
 
 
@@ -102,7 +103,7 @@ class RecallPlanner:
         medium_max_communities: int = 5,
         medium_max_raw: int = 10,
         complex_max_communities: int = 10,
-        complex_max_raw: int = 20
+        complex_max_raw: int = 20,
     ):
         self.simple_max_communities = simple_max_communities
         self.simple_max_raw = simple_max_raw
@@ -112,9 +113,7 @@ class RecallPlanner:
         self.complex_max_raw = complex_max_raw
 
     def plan_recall(
-        self,
-        query: str,
-        complexity: Optional[QueryComplexity] = None
+        self, query: str, complexity: QueryComplexity | None = None
     ) -> RecallPlan:
         """
         Create a recall plan for the given query.

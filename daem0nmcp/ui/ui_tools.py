@@ -3,8 +3,9 @@ UI-related tools for MCP Apps integration.
 
 Provides tools for real-time update detection and UI refresh coordination.
 """
+
 from datetime import datetime, timezone
-from typing import Any, Dict, Optional
+from typing import Any
 
 from ..database import DatabaseManager
 
@@ -13,9 +14,9 @@ __all__ = ["check_for_updates"]
 
 async def check_for_updates(
     db: DatabaseManager,
-    since: Optional[str] = None,
+    since: str | None = None,
     interval_seconds: int = 10,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """
     Check if database has changes since the given timestamp.
 
@@ -50,10 +51,10 @@ async def check_for_updates(
     interval_seconds = max(5, min(60, interval_seconds))
 
     # Parse since timestamp if provided
-    since_dt: Optional[datetime] = None
+    since_dt: datetime | None = None
     if since:
         try:
-            since_dt = datetime.fromisoformat(since.replace('Z', '+00:00'))
+            since_dt = datetime.fromisoformat(since.replace("Z", "+00:00"))
         except ValueError:
             # Invalid timestamp treated as None (check everything)
             since_dt = None

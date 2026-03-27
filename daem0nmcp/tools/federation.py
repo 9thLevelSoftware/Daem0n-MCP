@@ -1,24 +1,26 @@
 """Multi-project federation tools: link_projects, unlink_projects, etc."""
 
 import logging
-from typing import Dict, Optional, Any
+from typing import Any
 
 try:
-    from ..mcp_instance import mcp
     from .. import __version__
     from ..context_manager import (
-        get_project_context, _default_project_path,
+        _default_project_path,
         _missing_project_path_error,
+        get_project_context,
     )
     from ..logging_config import with_request_id
+    from ..mcp_instance import mcp
 except ImportError:
-    from daem0nmcp.mcp_instance import mcp
     from daem0nmcp import __version__
     from daem0nmcp.context_manager import (
-        get_project_context, _default_project_path,
+        _default_project_path,
         _missing_project_path_error,
+        get_project_context,
     )
     from daem0nmcp.logging_config import with_request_id
+    from daem0nmcp.mcp_instance import mcp
 
 logger = logging.getLogger(__name__)
 
@@ -28,9 +30,9 @@ logger = logging.getLogger(__name__)
 async def link_projects(
     linked_path: str,
     relationship: str = "related",
-    label: Optional[str] = None,
-    project_path: Optional[str] = None
-) -> Dict[str, Any]:
+    label: str | None = None,
+    project_path: str | None = None,
+) -> dict[str, Any]:
     """
     Link to another project for cross-project memory reading (write isolation preserved).
 
@@ -55,16 +57,15 @@ async def link_projects(
         source_path=ctx.project_path,
         linked_path=linked_path,
         relationship=relationship,
-        label=label
+        label=label,
     )
 
 
 @mcp.tool(version=__version__)
 @with_request_id
 async def unlink_projects(
-    linked_path: str,
-    project_path: Optional[str] = None
-) -> Dict[str, Any]:
+    linked_path: str, project_path: str | None = None
+) -> dict[str, Any]:
     """
     Remove project link.
 
@@ -84,16 +85,13 @@ async def unlink_projects(
 
     link_mgr = LinkManager(ctx.db_manager)
     return await link_mgr.unlink_projects(
-        source_path=ctx.project_path,
-        linked_path=linked_path
+        source_path=ctx.project_path, linked_path=linked_path
     )
 
 
 @mcp.tool(version=__version__)
 @with_request_id
-async def list_linked_projects(
-    project_path: Optional[str] = None
-) -> Dict[str, Any]:
+async def list_linked_projects(project_path: str | None = None) -> dict[str, Any]:
     """
     List all linked projects.
 
@@ -118,9 +116,8 @@ async def list_linked_projects(
 @mcp.tool(version=__version__)
 @with_request_id
 async def consolidate_linked_databases(
-    archive_sources: bool = False,
-    project_path: Optional[str] = None
-) -> Dict[str, Any]:
+    archive_sources: bool = False, project_path: str | None = None
+) -> dict[str, Any]:
     """
     Merge memories from all linked projects into this one. For monorepo transitions.
 
@@ -140,6 +137,5 @@ async def consolidate_linked_databases(
 
     link_mgr = LinkManager(ctx.db_manager)
     return await link_mgr.consolidate_linked_databases(
-        target_path=ctx.project_path,
-        archive_sources=archive_sources
+        target_path=ctx.project_path, archive_sources=archive_sources
     )

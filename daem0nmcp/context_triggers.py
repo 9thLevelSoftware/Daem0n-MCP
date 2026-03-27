@@ -9,9 +9,9 @@ import fnmatch
 import logging
 import re
 from datetime import datetime, timezone
-from typing import Dict, Any, Optional, List
+from typing import Any
 
-from sqlalchemy import select, delete
+from sqlalchemy import delete, select
 
 from .database import DatabaseManager
 from .models import ContextTrigger
@@ -44,9 +44,9 @@ class ContextTriggerManager:
         trigger_type: str,
         pattern: str,
         recall_topic: str,
-        recall_categories: Optional[List[str]] = None,
-        priority: int = 0
-    ) -> Dict[str, Any]:
+        recall_categories: list[str] | None = None,
+        priority: int = 0,
+    ) -> dict[str, Any]:
         """
         Create a new context trigger.
 
@@ -65,7 +65,7 @@ class ContextTriggerManager:
         if trigger_type not in VALID_TRIGGER_TYPES:
             return {
                 "error": f"Invalid trigger_type '{trigger_type}'. "
-                         f"Valid types: {', '.join(sorted(VALID_TRIGGER_TYPES))}"
+                f"Valid types: {', '.join(sorted(VALID_TRIGGER_TYPES))}"
             }
 
         # Validate pattern
@@ -88,7 +88,7 @@ class ContextTriggerManager:
                 recall_categories=recall_categories or [],
                 priority=priority,
                 is_active=True,
-                trigger_count=0
+                trigger_count=0,
             )
             session.add(trigger)
             await session.flush()
@@ -103,14 +103,12 @@ class ContextTriggerManager:
                 "trigger_id": trigger.id,
                 "trigger_type": trigger_type,
                 "pattern": pattern,
-                "recall_topic": recall_topic
+                "recall_topic": recall_topic,
             }
 
     async def remove_trigger(
-        self,
-        trigger_id: int,
-        project_path: str
-    ) -> Dict[str, Any]:
+        self, trigger_id: int, project_path: str
+    ) -> dict[str, Any]:
         """
         Remove a trigger.
 
@@ -125,28 +123,20 @@ class ContextTriggerManager:
             result = await session.execute(
                 delete(ContextTrigger).where(
                     ContextTrigger.id == trigger_id,
-                    ContextTrigger.project_path == project_path
+                    ContextTrigger.project_path == project_path,
                 )
             )
 
             if result.rowcount == 0:
-                return {
-                    "status": "not_found",
-                    "trigger_id": trigger_id
-                }
+                return {"status": "not_found", "trigger_id": trigger_id}
 
             logger.info(f"Removed trigger {trigger_id}")
 
-            return {
-                "status": "removed",
-                "trigger_id": trigger_id
-            }
+            return {"status": "removed", "trigger_id": trigger_id}
 
     async def list_triggers(
-        self,
-        project_path: str,
-        active_only: bool = True
-    ) -> List[Dict[str, Any]]:
+        self, project_path: str, active_only: bool = True
+    ) -> list[dict[str, Any]]:
         """
         List all triggers for a project.
 
@@ -180,8 +170,10 @@ class ContextTriggerManager:
                     "priority": t.priority,
                     "is_active": t.is_active,
                     "trigger_count": t.trigger_count,
-                    "last_triggered": t.last_triggered.isoformat() if t.last_triggered else None,
-                    "created_at": t.created_at.isoformat() if t.created_at else None
+                    "last_triggered": t.last_triggered.isoformat()
+                    if t.last_triggered
+                    else None,
+                    "created_at": t.created_at.isoformat() if t.created_at else None,
                 }
                 for t in triggers
             ]
@@ -208,9 +200,7 @@ class ContextTriggerManager:
         return fnmatch.fnmatch(file_path, pattern)
 
     def _match_glob_recursive(
-        self,
-        pattern_parts: List[str],
-        path_parts: List[str]
+        self, pattern_parts: list[str], path_parts: list[str]
     ) -> bool:
         """
         Recursively match glob pattern with ** support.
@@ -239,7 +229,7 @@ class ContextTriggerManager:
 
         return False
 
-    def _matches_regex(self, pattern: str, values: List[str]) -> bool:
+    def _matches_regex(self, pattern: str, values: list[str]) -> bool:
         """
         Check if any value matches the regex pattern.
         """
@@ -252,10 +242,10 @@ class ContextTriggerManager:
     async def check_triggers(
         self,
         project_path: str,
-        file_path: Optional[str] = None,
-        tags: Optional[List[str]] = None,
-        entities: Optional[List[str]] = None
-    ) -> List[Dict[str, Any]]:
+        file_path: str | None = None,
+        tags: list[str] | None = None,
+        entities: list[str] | None = None,
+    ) -> list[dict[str, Any]]:
         """
         Check which triggers match the given context.
 
@@ -289,14 +279,16 @@ class ContextTriggerManager:
                     matched = True
 
             if matched:
-                matches.append({
-                    "trigger_id": trigger["id"],
-                    "trigger_type": trigger["trigger_type"],
-                    "pattern": trigger["pattern"],
-                    "recall_topic": trigger["recall_topic"],
-                    "recall_categories": trigger["recall_categories"],
-                    "priority": trigger["priority"]
-                })
+                matches.append(
+                    {
+                        "trigger_id": trigger["id"],
+                        "trigger_type": trigger["trigger_type"],
+                        "pattern": trigger["pattern"],
+                        "recall_topic": trigger["recall_topic"],
+                        "recall_categories": trigger["recall_categories"],
+                        "priority": trigger["priority"],
+                    }
+                )
                 matched_ids.append(trigger["id"])
 
         # Update trigger stats
@@ -305,7 +297,7 @@ class ContextTriggerManager:
 
         return matches
 
-    async def _update_trigger_stats(self, trigger_ids: List[int]) -> None:
+    async def _update_trigger_stats(self, trigger_ids: list[int]) -> None:
         """Update trigger_count and last_triggered for matched triggers."""
         now = datetime.now(timezone.utc)
 
@@ -314,19 +306,18 @@ class ContextTriggerManager:
                 ContextTrigger.__table__.update()
                 .where(ContextTrigger.id.in_(trigger_ids))
                 .values(
-                    trigger_count=ContextTrigger.trigger_count + 1,
-                    last_triggered=now
+                    trigger_count=ContextTrigger.trigger_count + 1, last_triggered=now
                 )
             )
 
     async def get_triggered_context(
         self,
         project_path: str,
-        file_path: Optional[str] = None,
-        tags: Optional[List[str]] = None,
-        entities: Optional[List[str]] = None,
-        limit: int = 5
-    ) -> Dict[str, Any]:
+        file_path: str | None = None,
+        tags: list[str] | None = None,
+        entities: list[str] | None = None,
+        limit: int = 5,
+    ) -> dict[str, Any]:
         """
         Check triggers and recall memories for matching triggers.
 
@@ -349,10 +340,7 @@ class ContextTriggerManager:
 
         # Check which triggers match
         matches = await self.check_triggers(
-            project_path=project_path,
-            file_path=file_path,
-            tags=tags,
-            entities=entities
+            project_path=project_path, file_path=file_path, tags=tags, entities=entities
         )
 
         if not matches:
@@ -360,14 +348,14 @@ class ContextTriggerManager:
                 "triggers": [],
                 "memories": {},
                 "total_triggers": 0,
-                "message": "No triggers matched the current context"
+                "message": "No triggers matched the current context",
             }
 
         # Get memory manager for recall
         memory_mgr = MemoryManager(self.db)
 
         # Recall memories for each trigger
-        memories_by_topic: Dict[str, Dict[str, Any]] = {}
+        memories_by_topic: dict[str, dict[str, Any]] = {}
 
         for match in matches:
             topic = match["recall_topic"]
@@ -379,9 +367,11 @@ class ContextTriggerManager:
             # Recall memories for this topic
             recall_result = await memory_mgr.recall(
                 topic=topic,
-                categories=match["recall_categories"] if match["recall_categories"] else None,
+                categories=match["recall_categories"]
+                if match["recall_categories"]
+                else None,
                 limit=limit,
-                project_path=project_path
+                project_path=project_path,
             )
 
             memories_by_topic[topic] = recall_result
@@ -391,5 +381,5 @@ class ContextTriggerManager:
             "memories": memories_by_topic,
             "total_triggers": len(matches),
             "topics_recalled": list(memories_by_topic.keys()),
-            "message": f"Matched {len(matches)} trigger(s), recalled {len(memories_by_topic)} topic(s)"
+            "message": f"Matched {len(matches)} trigger(s), recalled {len(memories_by_topic)} topic(s)",
         }

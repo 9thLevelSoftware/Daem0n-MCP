@@ -15,7 +15,7 @@ exist (pre-v4.0 memories).
 
 import logging
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Any, Dict, List
+from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import select
 
@@ -38,19 +38,23 @@ logger = logging.getLogger(__name__)
 _RECALL_CATEGORIES = ("decisions", "patterns", "warnings", "learnings")
 
 
-def _extract_memories_from_recall(recall_result: Dict[str, Any]) -> List[Dict[str, Any]]:
+def _extract_memories_from_recall(
+    recall_result: dict[str, Any],
+) -> list[dict[str, Any]]:
     """Flatten the categorized recall result into a single memory list.
 
     Handles both the standard category-keyed dict (``decisions``,
     ``patterns``, ``warnings``, ``learnings``) and any future
     ``categorized_memories`` or ``memories`` wrapper key.
     """
-    memories: List[Dict[str, Any]] = []
+    memories: list[dict[str, Any]] = []
 
     # Check for a top-level wrapper key first
     if "memories" in recall_result and isinstance(recall_result["memories"], list):
         return recall_result["memories"]
-    if "categorized_memories" in recall_result and isinstance(recall_result["categorized_memories"], dict):
+    if "categorized_memories" in recall_result and isinstance(
+        recall_result["categorized_memories"], dict
+    ):
         for cat_list in recall_result["categorized_memories"].values():
             if isinstance(cat_list, list):
                 memories.extend(cat_list)
@@ -70,9 +74,9 @@ def _extract_memories_from_recall(recall_result: Dict[str, Any]) -> List[Dict[st
 
 
 def _build_context_dict(
-    memories: List[Dict[str, Any]],
+    memories: list[dict[str, Any]],
     recall_time: str,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Build a context summary dict from a flat list of memory dicts."""
     return {
         "memory_count": len(memories),
@@ -136,9 +140,7 @@ async def run_simulation(
                 "invalidated_count": 0,
                 "changed_count": 0,
             },
-            counterfactual_assessment=(
-                f"The daemon's scrying was disrupted: {exc}"
-            ),
+            counterfactual_assessment=(f"The daemon's scrying was disrupted: {exc}"),
             confidence=0.0,
         )
 
@@ -154,9 +156,7 @@ async def _run_simulation_inner(
     # 1. Look up the decision memory
     # ------------------------------------------------------------------
     async with ctx.db_manager.get_session() as session:
-        result = await session.execute(
-            select(Memory).where(Memory.id == decision_id)
-        )
+        result = await session.execute(select(Memory).where(Memory.id == decision_id))
         decision = result.scalar_one_or_none()
 
     if not decision:
@@ -201,9 +201,7 @@ async def _run_simulation_inner(
         project_path=ctx.project_path,
     )
     historical_memories = _extract_memories_from_recall(historical_recall)
-    historical_context = _build_context_dict(
-        historical_memories, decision_time_iso
-    )
+    historical_context = _build_context_dict(historical_memories, decision_time_iso)
 
     # ------------------------------------------------------------------
     # 4. Get current context (what is known NOW)
@@ -219,11 +217,15 @@ async def _run_simulation_inner(
     # ------------------------------------------------------------------
     # 5. Compute structured knowledge diff
     # ------------------------------------------------------------------
-    historical_ids = {m.get("id") for m in historical_memories if m.get("id") is not None}
+    historical_ids = {
+        m.get("id") for m in historical_memories if m.get("id") is not None
+    }
     current_ids = {m.get("id") for m in current_memories if m.get("id") is not None}
 
     # Index memories by ID for easy lookup
-    historical_by_id = {m["id"]: m for m in historical_memories if m.get("id") is not None}
+    historical_by_id = {
+        m["id"]: m for m in historical_memories if m.get("id") is not None
+    }
     current_by_id = {m["id"]: m for m in current_memories if m.get("id") is not None}
 
     # New evidence: memories present now but not at decision time
@@ -250,17 +252,19 @@ async def _run_simulation_inner(
 
     # Outcome changes: overlapping memories whose worked status changed
     overlap_ids = historical_ids & current_ids
-    outcome_changes: List[Dict[str, Any]] = []
+    outcome_changes: list[dict[str, Any]] = []
     for mid in sorted(overlap_ids):
         old_worked = historical_by_id[mid].get("worked")
         new_worked = current_by_id[mid].get("worked")
         if old_worked != new_worked:
-            outcome_changes.append({
-                "id": mid,
-                "content": (current_by_id[mid].get("content") or "")[:100],
-                "old_worked": old_worked,
-                "new_worked": new_worked,
-            })
+            outcome_changes.append(
+                {
+                    "id": mid,
+                    "content": (current_by_id[mid].get("content") or "")[:100],
+                    "old_worked": old_worked,
+                    "new_worked": new_worked,
+                }
+            )
 
     new_count = len(new_evidence)
     invalidated_count = len(invalidated_evidence)

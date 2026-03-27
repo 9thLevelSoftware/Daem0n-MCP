@@ -2,29 +2,31 @@
 
 import base64
 import logging
-from typing import Dict, List, Optional, Any
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timedelta, timezone
+from typing import Any
 
 try:
-    from ..mcp_instance import mcp
+    from .. import __version__
     from ..context_manager import (
-        get_project_context, _default_project_path,
+        _default_project_path,
         _missing_project_path_error,
+        get_project_context,
     )
     from ..logging_config import with_request_id
+    from ..mcp_instance import mcp
     from ..models import Memory, Rule
-    from .. import __version__
 except ImportError:
-    from daem0nmcp.mcp_instance import mcp
+    from daem0nmcp import __version__
     from daem0nmcp.context_manager import (
-        get_project_context, _default_project_path,
+        _default_project_path,
         _missing_project_path_error,
+        get_project_context,
     )
     from daem0nmcp.logging_config import with_request_id
+    from daem0nmcp.mcp_instance import mcp
     from daem0nmcp.models import Memory, Rule
-    from daem0nmcp import __version__
 
-from sqlalchemy import select, delete, or_
+from sqlalchemy import delete, or_, select
 
 from ._deprecation import add_deprecation
 
@@ -36,9 +38,7 @@ logger = logging.getLogger(__name__)
 # ============================================================================
 @mcp.tool(version=__version__)
 @with_request_id
-async def rebuild_index(
-    project_path: Optional[str] = None
-) -> Dict[str, Any]:
+async def rebuild_index(project_path: str | None = None) -> dict[str, Any]:
     """
     Force rebuild of TF-IDF/vector indexes. Use if search seems stale.
 
@@ -57,16 +57,15 @@ async def rebuild_index(
         "status": "rebuilt",
         "memories": memory_stats,
         "rules": rules_stats,
-        "message": f"Rebuilt indexes: {memory_stats['memories_indexed']} memories, {rules_stats['rules_indexed']} rules"
+        "message": f"Rebuilt indexes: {memory_stats['memories_indexed']} memories, {rules_stats['rules_indexed']} rules",
     }
 
 
 @mcp.tool(version=__version__)
 @with_request_id
 async def export_data(
-    project_path: Optional[str] = None,
-    include_vectors: bool = False
-) -> Dict[str, Any]:
+    project_path: str | None = None, include_vectors: bool = False
+) -> dict[str, Any]:
     """
     [DEPRECATED] Use maintain(action='export') instead.
 
@@ -105,8 +104,9 @@ async def export_data(
                 # Optionally include vectors (base64 encoded)
                 "vector_embedding": (
                     base64.b64encode(m.vector_embedding).decode()
-                    if include_vectors and m.vector_embedding else None
-                )
+                    if include_vectors and m.vector_embedding
+                    else None
+                ),
             }
             for m in result.scalars().all()
         ]
@@ -124,7 +124,7 @@ async def export_data(
                 "warnings": r.warnings,
                 "priority": r.priority,
                 "enabled": r.enabled,
-                "created_at": r.created_at.isoformat() if r.created_at else None
+                "created_at": r.created_at.isoformat() if r.created_at else None,
             }
             for r in result.scalars().all()
         ]
@@ -134,7 +134,7 @@ async def export_data(
         "exported_at": datetime.now(timezone.utc).isoformat(),
         "project_path": ctx.project_path,
         "memories": memories,
-        "rules": rules
+        "rules": rules,
     }
     return add_deprecation(result, "export_data", "maintain(action='export')")
 
@@ -142,10 +142,8 @@ async def export_data(
 @mcp.tool(version=__version__)
 @with_request_id
 async def import_data(
-    data: Dict[str, Any],
-    project_path: Optional[str] = None,
-    merge: bool = True
-) -> Dict[str, Any]:
+    data: dict[str, Any], project_path: str | None = None, merge: bool = True
+) -> dict[str, Any]:
     """
     [DEPRECATED] Use maintain(action='import_data') instead.
 
@@ -164,11 +162,11 @@ async def import_data(
 
     ctx = await get_project_context(project_path)
 
-    def _parse_datetime(value: Optional[str]) -> Optional[datetime]:
+    def _parse_datetime(value: str | None) -> datetime | None:
         if not value:
             return None
         try:
-            parsed = datetime.fromisoformat(value.replace('Z', '+00:00'))
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
         except ValueError:
             return None
         if parsed.tzinfo:
@@ -202,7 +200,9 @@ async def import_data(
             file_path_abs = mem_data.get("file_path")
             file_path_rel = mem_data.get("file_path_relative")
             if file_path_abs and ctx.project_path:
-                file_path_abs, file_path_rel = _normalize_file_path(file_path_abs, ctx.project_path)
+                file_path_abs, file_path_rel = _normalize_file_path(
+                    file_path_abs, ctx.project_path
+                )
 
             memory = Memory(
                 category=mem_data["category"],
@@ -220,7 +220,7 @@ async def import_data(
                 archived=mem_data.get("archived", False),
                 created_at=_parse_datetime(mem_data.get("created_at")),
                 updated_at=_parse_datetime(mem_data.get("updated_at")),
-                vector_embedding=vector_bytes
+                vector_embedding=vector_bytes,
             )
             session.add(memory)
             memories_imported += 1
@@ -235,7 +235,7 @@ async def import_data(
                 ask_first=rule_data.get("ask_first", []),
                 warnings=rule_data.get("warnings", []),
                 priority=rule_data.get("priority", 0),
-                enabled=rule_data.get("enabled", True)
+                enabled=rule_data.get("enabled", True),
             )
             session.add(rule)
             rules_imported += 1
@@ -248,7 +248,7 @@ async def import_data(
         "status": "imported",
         "memories_imported": memories_imported,
         "rules_imported": rules_imported,
-        "message": f"Imported {memories_imported} memories and {rules_imported} rules"
+        "message": f"Imported {memories_imported} memories and {rules_imported} rules",
     }
     return add_deprecation(result, "import_data", "maintain(action='import_data')")
 
@@ -257,12 +257,12 @@ async def import_data(
 @with_request_id
 async def prune_memories(
     older_than_days: int = 90,
-    categories: Optional[List[str]] = None,
+    categories: list[str] | None = None,
     min_recall_count: int = 5,
     protect_successful: bool = True,
     dry_run: bool = True,
-    project_path: Optional[str] = None
-) -> Dict[str, Any]:
+    project_path: str | None = None,
+) -> dict[str, Any]:
     """
     [DEPRECATED] Use maintain(action='prune') instead.
 
@@ -295,7 +295,9 @@ async def prune_memories(
             Memory.pinned == False,  # noqa: E712
             Memory.outcome.is_(None),  # Don't prune memories with outcomes
             or_(Memory.archived == False, Memory.archived.is_(None)),  # noqa: E712
-            or_(Memory.recall_count < min_recall_count, Memory.recall_count.is_(None))  # Saliency protection
+            or_(
+                Memory.recall_count < min_recall_count, Memory.recall_count.is_(None)
+            ),  # Saliency protection
         )
 
         # Optionally protect successful decisions
@@ -306,23 +308,27 @@ async def prune_memories(
         to_prune = result.scalars().all()
 
         if dry_run:
-            return add_deprecation({
-                "dry_run": True,
-                "would_prune": len(to_prune),
-                "categories": categories,
-                "older_than_days": older_than_days,
-                "min_recall_count": min_recall_count,
-                "protect_successful": protect_successful,
-                "samples": [
-                    {
-                        "id": m.id,
-                        "content": m.content[:50],
-                        "recall_count": getattr(m, 'recall_count', 0) or 0,
-                        "created_at": m.created_at.isoformat()
-                    }
-                    for m in to_prune[:5]
-                ]
-            }, "prune_memories", "maintain(action='prune')")
+            return add_deprecation(
+                {
+                    "dry_run": True,
+                    "would_prune": len(to_prune),
+                    "categories": categories,
+                    "older_than_days": older_than_days,
+                    "min_recall_count": min_recall_count,
+                    "protect_successful": protect_successful,
+                    "samples": [
+                        {
+                            "id": m.id,
+                            "content": m.content[:50],
+                            "recall_count": getattr(m, "recall_count", 0) or 0,
+                            "created_at": m.created_at.isoformat(),
+                        }
+                        for m in to_prune[:5]
+                    ],
+                },
+                "prune_memories",
+                "maintain(action='prune')",
+            )
 
         # Actually delete
         for memory in to_prune:
@@ -331,10 +337,14 @@ async def prune_memories(
     # Rebuild index to remove pruned documents
     await ctx.memory_manager.rebuild_index()
 
-    return add_deprecation({
-        "pruned": len(to_prune),
-        "categories": categories,
-        "older_than_days": older_than_days,
-        "min_recall_count": min_recall_count,
-        "message": f"Pruned {len(to_prune)} old memories (protected: pinned, outcomes, recall_count>={min_recall_count}, successful)"
-    }, "prune_memories", "maintain(action='prune')")
+    return add_deprecation(
+        {
+            "pruned": len(to_prune),
+            "categories": categories,
+            "older_than_days": older_than_days,
+            "min_recall_count": min_recall_count,
+            "message": f"Pruned {len(to_prune)} old memories (protected: pinned, outcomes, recall_count>={min_recall_count}, successful)",
+        },
+        "prune_memories",
+        "maintain(action='prune')",
+    )

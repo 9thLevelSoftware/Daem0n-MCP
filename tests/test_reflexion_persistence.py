@@ -1,15 +1,16 @@
 """Tests for reflection persistence in Metacognitive Architecture."""
 
-import pytest
 from unittest.mock import AsyncMock
+
+import pytest
 
 from daem0nmcp.reflexion.persistence import (
     Reflection,
     compute_error_signature,
+    create_reflection_from_evaluation,
+    has_seen_error_before,
     persist_reflection,
     retrieve_similar_reflections,
-    has_seen_error_before,
-    create_reflection_from_evaluation,
 )
 
 
@@ -367,9 +368,7 @@ class TestCreateReflectionFromEvaluation:
 
     def test_no_reflection_when_insignificant(self):
         """Should return None when nothing significant to learn."""
-        verification_results = [
-            {"status": "verified", "claim_text": "Python is used"}
-        ]
+        verification_results = [{"status": "verified", "claim_text": "Python is used"}]
 
         reflection = create_reflection_from_evaluation(
             critique="No issues found",
@@ -441,7 +440,11 @@ class TestCreateReflectionFromEvaluation:
         """Conflicts should be prioritized over unverified claims."""
         verification_results = [
             {"status": "unverified", "claim_text": "Unverified claim"},
-            {"status": "conflict", "claim_text": "Conflict claim", "conflict_reason": "Reason"},
+            {
+                "status": "conflict",
+                "claim_text": "Conflict claim",
+                "conflict_reason": "Reason",
+            },
         ]
 
         reflection = create_reflection_from_evaluation(

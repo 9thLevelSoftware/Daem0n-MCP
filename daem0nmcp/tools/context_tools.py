@@ -1,25 +1,27 @@
 """Active context and trigger tools."""
 
 import logging
-from typing import Dict, List, Optional, Any
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timedelta, timezone
+from typing import Any
 
 try:
-    from ..mcp_instance import mcp
     from .. import __version__
     from ..context_manager import (
-        get_project_context, _default_project_path,
+        _default_project_path,
         _missing_project_path_error,
+        get_project_context,
     )
     from ..logging_config import with_request_id
+    from ..mcp_instance import mcp
 except ImportError:
-    from daem0nmcp.mcp_instance import mcp
     from daem0nmcp import __version__
     from daem0nmcp.context_manager import (
-        get_project_context, _default_project_path,
+        _default_project_path,
         _missing_project_path_error,
+        get_project_context,
     )
     from daem0nmcp.logging_config import with_request_id
+    from daem0nmcp.mcp_instance import mcp
 
 logger = logging.getLogger(__name__)
 
@@ -28,11 +30,11 @@ logger = logging.getLogger(__name__)
 @with_request_id
 async def set_active_context(
     memory_id: int,
-    reason: Optional[str] = None,
+    reason: str | None = None,
     priority: int = 0,
-    expires_in_hours: Optional[int] = None,
-    project_path: Optional[str] = None
-) -> Dict[str, Any]:
+    expires_in_hours: int | None = None,
+    project_path: str | None = None,
+) -> dict[str, Any]:
     """
     Add memory to always-hot working context. Auto-included in briefings.
 
@@ -63,15 +65,13 @@ async def set_active_context(
         memory_id=memory_id,
         reason=reason,
         priority=priority,
-        expires_at=expires_at
+        expires_at=expires_at,
     )
 
 
 @mcp.tool(version=__version__)
 @with_request_id
-async def get_active_context(
-    project_path: Optional[str] = None
-) -> Dict[str, Any]:
+async def get_active_context(project_path: str | None = None) -> dict[str, Any]:
     """
     Get all always-hot memories ordered by priority.
 
@@ -95,9 +95,8 @@ async def get_active_context(
 @mcp.tool(version=__version__)
 @with_request_id
 async def remove_from_active_context(
-    memory_id: int,
-    project_path: Optional[str] = None
-) -> Dict[str, Any]:
+    memory_id: int, project_path: str | None = None
+) -> dict[str, Any]:
     """
     Remove memory from active context.
 
@@ -121,9 +120,7 @@ async def remove_from_active_context(
 
 @mcp.tool(version=__version__)
 @with_request_id
-async def clear_active_context(
-    project_path: Optional[str] = None
-) -> Dict[str, Any]:
+async def clear_active_context(project_path: str | None = None) -> dict[str, Any]:
     """
     Clear all active context memories. Use when switching focus.
 
@@ -153,10 +150,10 @@ async def add_context_trigger(
     trigger_type: str,
     pattern: str,
     recall_topic: str,
-    recall_categories: Optional[List[str]] = None,
+    recall_categories: list[str] | None = None,
     priority: int = 0,
-    project_path: Optional[str] = None
-) -> Dict[str, Any]:
+    project_path: str | None = None,
+) -> dict[str, Any]:
     """
     Create auto-recall trigger. Types: file_pattern (glob), tag_match (regex), entity_match (regex).
 
@@ -187,16 +184,15 @@ async def add_context_trigger(
         pattern=pattern,
         recall_topic=recall_topic,
         recall_categories=recall_categories,
-        priority=priority
+        priority=priority,
     )
 
 
 @mcp.tool(version=__version__)
 @with_request_id
 async def list_context_triggers(
-    active_only: bool = True,
-    project_path: Optional[str] = None
-) -> Dict[str, Any]:
+    active_only: bool = True, project_path: str | None = None
+) -> dict[str, Any]:
     """
     List all configured context triggers.
 
@@ -218,23 +214,17 @@ async def list_context_triggers(
     tm = ContextTriggerManager(ctx.db_manager)
 
     triggers = await tm.list_triggers(
-        project_path=project_path,
-        active_only=active_only
+        project_path=project_path, active_only=active_only
     )
 
-    return {
-        "triggers": triggers,
-        "count": len(triggers),
-        "active_only": active_only
-    }
+    return {"triggers": triggers, "count": len(triggers), "active_only": active_only}
 
 
 @mcp.tool(version=__version__)
 @with_request_id
 async def remove_context_trigger(
-    trigger_id: int,
-    project_path: Optional[str] = None
-) -> Dict[str, Any]:
+    trigger_id: int, project_path: str | None = None
+) -> dict[str, Any]:
     """
     Remove a context trigger.
 
@@ -255,21 +245,18 @@ async def remove_context_trigger(
     ctx = await get_project_context(project_path)
     tm = ContextTriggerManager(ctx.db_manager)
 
-    return await tm.remove_trigger(
-        trigger_id=trigger_id,
-        project_path=project_path
-    )
+    return await tm.remove_trigger(trigger_id=trigger_id, project_path=project_path)
 
 
 @mcp.tool(version=__version__)
 @with_request_id
 async def check_context_triggers(
-    file_path: Optional[str] = None,
-    tags: Optional[List[str]] = None,
-    entities: Optional[List[str]] = None,
+    file_path: str | None = None,
+    tags: list[str] | None = None,
+    entities: list[str] | None = None,
     limit: int = 5,
-    project_path: Optional[str] = None
-) -> Dict[str, Any]:
+    project_path: str | None = None,
+) -> dict[str, Any]:
     """
     Check which triggers match context and get auto-recalled memories.
 
@@ -298,5 +285,5 @@ async def check_context_triggers(
         file_path=file_path,
         tags=tags,
         entities=entities,
-        limit=limit
+        limit=limit,
     )

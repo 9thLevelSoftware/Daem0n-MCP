@@ -15,32 +15,32 @@ This module does NOT import from mcp_instance, server, or any tools module.
 It sits between the MCP instance and the tool implementations in the DAG.
 """
 
-import os
 import asyncio
 import contextlib
 import logging
+import os
 import time
-from pathlib import Path
-from typing import Dict, List, Optional, Any, Tuple
-from datetime import datetime, timezone
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
 
 try:
     from .config import settings
+    from .covenant import set_context_callback
     from .database import DatabaseManager
+    from .logging_config import request_id_var, set_release_callback
     from .memory import MemoryManager
     from .rules import RulesEngine
     from .rwlock import RWLock
-    from .logging_config import request_id_var, set_release_callback
-    from .covenant import set_context_callback
 except ImportError:
     from daem0nmcp.config import settings
+    from daem0nmcp.covenant import set_context_callback
     from daem0nmcp.database import DatabaseManager
+    from daem0nmcp.logging_config import request_id_var, set_release_callback
     from daem0nmcp.memory import MemoryManager
     from daem0nmcp.rules import RulesEngine
     from daem0nmcp.rwlock import RWLock
-    from daem0nmcp.logging_config import request_id_var, set_release_callback
-    from daem0nmcp.covenant import set_context_callback
 
 logger = logging.getLogger(__name__)
 
@@ -51,6 +51,7 @@ logger = logging.getLogger(__name__)
 @dataclass
 class ProjectContext:
     """Holds all managers for a specific project."""
+
     project_path: str
     storage_path: str
     db_manager: DatabaseManager
@@ -62,27 +63,31 @@ class ProjectContext:
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     # Covenant state tracking
     briefed: bool = False  # True after get_briefing called
-    context_checks: List[Dict[str, Any]] = field(default_factory=list)  # Timestamped context checks
+    context_checks: list[dict[str, Any]] = field(
+        default_factory=list
+    )  # Timestamped context checks
 
 
 # Cache of project contexts by normalized path
-_project_contexts: Dict[str, ProjectContext] = {}
-_context_locks: Dict[str, asyncio.Lock] = {}
-_contexts_lock = RWLock()  # RWLock for context access: multiple readers, exclusive writers
-_task_contexts: Dict[asyncio.Task, Dict[str, int]] = {}
+_project_contexts: dict[str, ProjectContext] = {}
+_context_locks: dict[str, asyncio.Lock] = {}
+_contexts_lock = (
+    RWLock()
+)  # RWLock for context access: multiple readers, exclusive writers
+_task_contexts: dict[asyncio.Task, dict[str, int]] = {}
 _task_contexts_lock = asyncio.Lock()
 _last_eviction: float = 0.0
 _EVICTION_INTERVAL_SECONDS: float = 60.0
 
 # Default project path (ONLY used if DAEM0NMCP_PROJECT_ROOT is explicitly set)
-_default_project_path: Optional[str] = os.environ.get('DAEM0NMCP_PROJECT_ROOT')
+_default_project_path: str | None = os.environ.get("DAEM0NMCP_PROJECT_ROOT")
 
 # Configuration constants (read from settings)
 MAX_PROJECT_CONTEXTS = settings.max_project_contexts
 CONTEXT_TTL_SECONDS = settings.context_ttl_seconds
 
 
-def _get_context_for_covenant(project_path: str) -> Optional[ProjectContext]:
+def _get_context_for_covenant(project_path: str) -> ProjectContext | None:
     """
     Get a project context for covenant enforcement.
 
@@ -99,7 +104,9 @@ def _get_context_for_covenant(project_path: str) -> Optional[ProjectContext]:
 set_context_callback(_get_context_for_covenant)
 
 
-def _get_context_state_for_middleware(project_path: Optional[str]) -> Optional[Dict[str, Any]]:
+def _get_context_state_for_middleware(
+    project_path: str | None,
+) -> dict[str, Any] | None:
     """
     Get covenant state for middleware enforcement.
 
@@ -125,7 +132,7 @@ def _get_context_state_for_middleware(project_path: Optional[str]) -> Optional[D
     }
 
 
-def _missing_project_path_error() -> Dict[str, Any]:
+def _missing_project_path_error() -> dict[str, Any]:
     """Return an error dict when project_path is not provided."""
     return {
         "error": "MISSING_PROJECT_PATH",
@@ -135,11 +142,11 @@ def _missing_project_path_error() -> Dict[str, Any]:
             "Pass your current working directory as project_path. "
             "Example: project_path='C:/Users/you/projects/myapp' or project_path='/home/you/projects/myapp'"
         ),
-        "hint": "Run 'pwd' in bash to get your current directory, or check your Claude Code session header."
+        "hint": "Run 'pwd' in bash to get your current directory, or check your Claude Code session header.",
     }
 
 
-def _check_covenant_communion(project_path: str) -> Optional[Dict[str, Any]]:
+def _check_covenant_communion(project_path: str) -> dict[str, Any] | None:
     """
     Check if communion (get_briefing) was performed for this project.
 
@@ -160,7 +167,9 @@ def _check_covenant_communion(project_path: str) -> Optional[Dict[str, Any]]:
     return None
 
 
-def _check_covenant_counsel(tool_name: str, project_path: str) -> Optional[Dict[str, Any]]:
+def _check_covenant_counsel(
+    tool_name: str, project_path: str
+) -> dict[str, Any] | None:
     """
     Check if counsel (context_check) was sought for this project.
 
@@ -174,7 +183,7 @@ def _check_covenant_counsel(tool_name: str, project_path: str) -> Optional[Dict[
     Returns:
         Violation dict if counsel required, None if counsel is fresh
     """
-    from .covenant import CovenantViolation, COUNSEL_TTL_SECONDS
+    from .covenant import COUNSEL_TTL_SECONDS, CovenantViolation
 
     # First check communion
     communion_violation = _check_covenant_communion(project_path)
@@ -209,7 +218,9 @@ def _check_covenant_counsel(tool_name: str, project_path: str) -> Optional[Dict[
         return CovenantViolation.counsel_required(tool_name, project_path)
 
     if most_recent_age > COUNSEL_TTL_SECONDS:
-        return CovenantViolation.counsel_expired(tool_name, project_path, int(most_recent_age))
+        return CovenantViolation.counsel_expired(
+            tool_name, project_path, int(most_recent_age)
+        )
 
     return None  # Counsel is fresh
 
@@ -226,7 +237,9 @@ def _get_storage_for_project(project_path: str) -> str:
     return str(Path(project_path) / ".daem0nmcp" / "storage")
 
 
-def _resolve_within_project(project_root: str, target_path: Optional[str]) -> Tuple[Optional[Path], Optional[str]]:
+def _resolve_within_project(
+    project_root: str, target_path: str | None
+) -> tuple[Path | None, str | None]:
     """
     Resolve a path and ensure it stays within the project root.
 
@@ -244,7 +257,9 @@ def _resolve_within_project(project_root: str, target_path: Optional[str]) -> Tu
         resolved = candidate.resolve()
     except OSError as e:
         # Handle invalid paths (too long, invalid characters, permission issues, etc.)
-        logger.warning(f"Path resolution failed for '{project_root}' / '{target_path}': {e}")
+        logger.warning(
+            f"Path resolution failed for '{project_root}' / '{target_path}': {e}"
+        )
         return None, f"Invalid path: {e}"
 
     try:
@@ -292,7 +307,7 @@ async def _track_task_context(ctx: ProjectContext) -> None:
         counts[ctx.project_path] = counts.get(ctx.project_path, 0) + 1
 
         if not getattr(task, "_daem0n_ctx_tracked", False):
-            setattr(task, "_daem0n_ctx_tracked", True)
+            task._daem0n_ctx_tracked = True
             task.add_done_callback(_schedule_task_release)
 
     async with ctx.lock:
@@ -319,7 +334,7 @@ def _maybe_schedule_eviction(now: float) -> None:
 set_release_callback(_release_current_task_contexts)
 
 
-async def get_project_context(project_path: Optional[str] = None) -> ProjectContext:
+async def get_project_context(project_path: str | None = None) -> ProjectContext:
     """
     Get or create a ProjectContext for the given project path.
     Thread-safe with RWLock for concurrent access to prevent race conditions.
@@ -344,7 +359,9 @@ async def get_project_context(project_path: Optional[str] = None) -> ProjectCont
 
     # Normalize for consistent caching - validate project_path is not None
     if not project_path:
-        raise ValueError("project_path is required when DAEM0NMCP_PROJECT_ROOT is not set")
+        raise ValueError(
+            "project_path is required when DAEM0NMCP_PROJECT_ROOT is not set"
+        )
     normalized = _normalize_path(project_path)
 
     # Fast path with read lock: context exists and is initialized
@@ -405,7 +422,7 @@ async def get_project_context(project_path: Optional[str] = None) -> ProjectCont
             memory_manager=mem_mgr,
             rules_engine=rules_eng,
             initialized=False,
-            last_accessed=time.time()
+            last_accessed=time.time(),
         )
 
         # Initialize database
@@ -415,7 +432,9 @@ async def get_project_context(project_path: Optional[str] = None) -> ProjectCont
         # Store in cache under write lock
         async with _contexts_lock.write():
             _project_contexts[normalized] = ctx
-        logger.info(f"Created project context for: {normalized} (storage: {storage_path})")
+        logger.info(
+            f"Created project context for: {normalized} (storage: {storage_path})"
+        )
 
         _maybe_schedule_eviction(time.time())
         await _track_task_context(ctx)

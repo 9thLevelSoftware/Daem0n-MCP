@@ -22,23 +22,26 @@ Requirements validated:
 from __future__ import annotations
 
 from unittest.mock import AsyncMock, MagicMock, patch
+
 import pytest
 
+from daem0nmcp.compression.jit import JITCompressor
 from daem0nmcp.recall_planner import QueryComplexity
 from daem0nmcp.retrieval_router import RetrievalRouter
-from daem0nmcp.compression.jit import JITCompressor
-
 
 # ---------------------------------------------------------------------------
 # Shared helpers
 # ---------------------------------------------------------------------------
+
 
 def _make_mock_mm(hybrid_results=None, qdrant=None):
     """Return a mock MemoryManager with _hybrid_search and optional _qdrant."""
     mm = MagicMock()
     mm._hybrid_search.return_value = hybrid_results or [(1, 0.9), (2, 0.7)]
     mm._qdrant = qdrant
-    mm._knowledge_graph = None  # Prevent MagicMock auto-attribute from shadowing router's self._kg
+    mm._knowledge_graph = (
+        None  # Prevent MagicMock auto-attribute from shadowing router's self._kg
+    )
     mm.db = MagicMock()
     mm.db.storage_path = "/tmp/test"
     return mm
@@ -74,7 +77,9 @@ def _make_mock_adaptive(token_count_fn=None):
     mock_adaptive = MagicMock()
 
     if token_count_fn is None:
-        def token_count_fn(text): return len(text) // 4
+
+        def token_count_fn(text):
+            return len(text) // 4
 
     mock_adaptive.compressor.count_tokens.side_effect = token_count_fn
 
@@ -83,7 +88,7 @@ def _make_mock_adaptive(token_count_fn=None):
         rate = rate_override or 0.33
         compressed = max(1, int(original * rate))
         return {
-            "compressed_prompt": text[:int(len(text) * rate)],
+            "compressed_prompt": text[: int(len(text) * rate)],
             "original_tokens": original,
             "compressed_tokens": compressed,
             "ratio": original / max(compressed, 1),
@@ -109,6 +114,7 @@ def _settings_context(enabled=False, shadow=False, confidence=0.25, depth=2):
 # Validates ZOOM-01, ZOOM-02
 # ---------------------------------------------------------------------------
 
+
 class TestFullPipelineSimpleQuery:
     """Simple query: classify -> vector_only -> retrieve -> no compression."""
 
@@ -116,14 +122,24 @@ class TestFullPipelineSimpleQuery:
     async def test_full_pipeline_simple_query(self):
         """Simple query is classified, routed to vector_only, no compression metadata."""
         qdrant = MagicMock()
-        qdrant.search.return_value = [(5, 0.88), (6, 0.75), (7, 0.60), (8, 0.50), (9, 0.45)]
+        qdrant.search.return_value = [
+            (5, 0.88),
+            (6, 0.75),
+            (7, 0.60),
+            (8, 0.50),
+            (9, 0.45),
+        ]
         mm = _make_mock_mm(qdrant=qdrant)
         clf = _make_mock_classifier(QueryComplexity.SIMPLE, 0.9)
 
         router = RetrievalRouter(memory_manager=mm, classifier=clf)
 
-        with patch("daem0nmcp.retrieval_router.settings", _settings_context(enabled=True)), \
-             patch("daem0nmcp.retrieval_router.vectors") as mock_vectors:
+        with (
+            patch(
+                "daem0nmcp.retrieval_router.settings", _settings_context(enabled=True)
+            ),
+            patch("daem0nmcp.retrieval_router.vectors") as mock_vectors,
+        ):
             mock_vectors.encode.return_value = b"\x00" * 16
             mock_vectors.decode.return_value = [0.1, 0.2, 0.3]
 
@@ -143,6 +159,7 @@ class TestFullPipelineSimpleQuery:
 # Validates ZOOM-01, ZOOM-02, ZOOM-05, COMP-01, COMP-03
 # ---------------------------------------------------------------------------
 
+
 class TestFullPipelineComplexQueryWithCompression:
     """Complex query: classify -> graphrag -> retrieve -> JIT compress."""
 
@@ -153,33 +170,37 @@ class TestFullPipelineComplexQueryWithCompression:
         clf = _make_mock_classifier(QueryComplexity.COMPLEX, 0.85)
         kg = _make_mock_kg(node_count=50)
 
-        router = RetrievalRouter(
-            memory_manager=mm, knowledge_graph=kg, classifier=clf
-        )
+        router = RetrievalRouter(memory_manager=mm, knowledge_graph=kg, classifier=clf)
 
         mock_adaptive = _make_mock_adaptive()
         jit = JITCompressor(adaptive_compressor=mock_adaptive)
 
         # Large text that exceeds hard threshold (>8K tokens = >32K chars at 4:1)
-        large_text = "Memory content about complex architecture decisions. " * 700  # ~35K chars = ~8750 tokens
+        large_text = (
+            "Memory content about complex architecture decisions. " * 700
+        )  # ~35K chars = ~8750 tokens
 
-        with patch("daem0nmcp.retrieval_router.settings", _settings_context(enabled=True)), \
-             patch(
-                 "daem0nmcp.graph.traversal.find_related_memories",
-                 new_callable=AsyncMock,
-                 return_value={
-                     "found": True,
-                     "source_memory_id": 1,
-                     "total_related": 2,
-                     "by_relationship": {
-                         "led_to": [
-                             {"memory_id": 99, "depth": 1, "confidence": 0.9},
-                             {"memory_id": 100, "depth": 2, "confidence": 0.7},
-                         ]
-                     },
-                 },
-             ), \
-             patch("daem0nmcp.compression.jit.get_jit_compressor", return_value=jit):
+        with (
+            patch(
+                "daem0nmcp.retrieval_router.settings", _settings_context(enabled=True)
+            ),
+            patch(
+                "daem0nmcp.graph.traversal.find_related_memories",
+                new_callable=AsyncMock,
+                return_value={
+                    "found": True,
+                    "source_memory_id": 1,
+                    "total_related": 2,
+                    "by_relationship": {
+                        "led_to": [
+                            {"memory_id": 99, "depth": 1, "confidence": 0.9},
+                            {"memory_id": 100, "depth": 2, "confidence": 0.7},
+                        ]
+                    },
+                },
+            ),
+            patch("daem0nmcp.compression.jit.get_jit_compressor", return_value=jit),
+        ):
             result = await router.route_and_compress(
                 "trace the complete causal chain of auth decisions",
                 top_k=10,
@@ -194,7 +215,10 @@ class TestFullPipelineComplexQueryWithCompression:
         # Compression metadata present
         assert result["compression_metadata"] is not None
         assert result["compression_metadata"]["threshold_triggered"] == "hard"
-        assert result["compression_metadata"]["original_tokens"] > result["compression_metadata"]["compressed_tokens"]
+        assert (
+            result["compression_metadata"]["original_tokens"]
+            > result["compression_metadata"]["compressed_tokens"]
+        )
         assert "compressed_text" in result
 
 
@@ -202,6 +226,7 @@ class TestFullPipelineComplexQueryWithCompression:
 # Test 3: Shadow mode
 # Validates ZOOM-04, COMP-01
 # ---------------------------------------------------------------------------
+
 
 class TestFullPipelineShadowMode:
     """Shadow mode: classify and log, but always use hybrid; JIT still fires."""
@@ -220,10 +245,16 @@ class TestFullPipelineShadowMode:
         # Text above soft threshold
         medium_text = "Some long result content. " * 500  # ~12.5K chars = ~3125 tokens
         # Actually need >4K tokens = >16K chars
-        medium_text = "Some long result content for JIT. " * 1300  # ~44K chars = ~11K tokens
+        medium_text = (
+            "Some long result content for JIT. " * 1300
+        )  # ~44K chars = ~11K tokens
 
-        with patch("daem0nmcp.retrieval_router.settings", _settings_context(shadow=True)), \
-             patch("daem0nmcp.compression.jit.get_jit_compressor", return_value=jit):
+        with (
+            patch(
+                "daem0nmcp.retrieval_router.settings", _settings_context(shadow=True)
+            ),
+            patch("daem0nmcp.compression.jit.get_jit_compressor", return_value=jit),
+        ):
             result = await router.route_and_compress(
                 "complex query about architecture",
                 top_k=10,
@@ -237,13 +268,18 @@ class TestFullPipelineShadowMode:
         assert result["shadow_classification"]["level"] == "complex"
         # JIT compression fires on the result text regardless of routing mode
         assert result["compression_metadata"] is not None
-        assert result["compression_metadata"]["threshold_triggered"] in ("soft", "hard", "emergency")
+        assert result["compression_metadata"]["threshold_triggered"] in (
+            "soft",
+            "hard",
+            "emergency",
+        )
 
 
 # ---------------------------------------------------------------------------
 # Test 4: Compression metadata in recall output
 # Validates COMP-01, COMP-03
 # ---------------------------------------------------------------------------
+
 
 class TestCompressionMetadataInRecallOutput:
     """Compression metadata surfaces in recall() output when JIT fires."""
@@ -256,7 +292,10 @@ class TestCompressionMetadataInRecallOutput:
 
         # Simulate what recall() does: assemble content from categories
         # Each memory has ~800 chars = ~200 tokens; 30 memories = ~6000 tokens (soft tier)
-        memory_content = "This is a substantial memory about authentication patterns and decisions. " * 11
+        memory_content = (
+            "This is a substantial memory about authentication patterns and decisions. "
+            * 11
+        )
         memories = [{"content": memory_content, "id": i} for i in range(30)]
 
         all_content = "\n\n".join(m["content"] for m in memories)
@@ -280,6 +319,7 @@ class TestCompressionMetadataInRecallOutput:
 # Test 5: No compression for small results
 # Validates COMP-01 (threshold boundary)
 # ---------------------------------------------------------------------------
+
 
 class TestNoCompressionForSmallResults:
     """Small result sets do not trigger compression or add metadata."""
@@ -310,8 +350,12 @@ class TestNoCompressionForSmallResults:
         mock_adaptive = _make_mock_adaptive()
         jit = JITCompressor(adaptive_compressor=mock_adaptive)
 
-        with patch("daem0nmcp.retrieval_router.settings", _settings_context(enabled=True)), \
-             patch("daem0nmcp.compression.jit.get_jit_compressor", return_value=jit):
+        with (
+            patch(
+                "daem0nmcp.retrieval_router.settings", _settings_context(enabled=True)
+            ),
+            patch("daem0nmcp.compression.jit.get_jit_compressor", return_value=jit),
+        ):
             result = await router.route_and_compress(
                 "find patterns", top_k=5, result_text="Short text"
             )
@@ -324,6 +368,7 @@ class TestNoCompressionForSmallResults:
 # Validates ZOOM-05
 # ---------------------------------------------------------------------------
 
+
 class TestGraphRAGExpansionIncreasesResults:
     """GraphRAG expansion adds related memory IDs from graph traversal."""
 
@@ -334,31 +379,33 @@ class TestGraphRAGExpansionIncreasesResults:
         clf = _make_mock_classifier(QueryComplexity.COMPLEX, 0.85)
         kg = _make_mock_kg(node_count=100)
 
-        router = RetrievalRouter(
-            memory_manager=mm, knowledge_graph=kg, classifier=clf
-        )
+        router = RetrievalRouter(memory_manager=mm, knowledge_graph=kg, classifier=clf)
 
-        with patch("daem0nmcp.retrieval_router.settings", _settings_context(enabled=True)), \
-             patch(
-                 "daem0nmcp.graph.traversal.find_related_memories",
-                 new_callable=AsyncMock,
-                 return_value={
-                     "found": True,
-                     "source_memory_id": 1,
-                     "total_related": 5,
-                     "by_relationship": {
-                         "led_to": [
-                             {"memory_id": 50, "depth": 1, "confidence": 0.9},
-                             {"memory_id": 51, "depth": 1, "confidence": 0.8},
-                         ],
-                         "depends_on": [
-                             {"memory_id": 60, "depth": 1, "confidence": 0.7},
-                             {"memory_id": 61, "depth": 2, "confidence": 0.5},
-                             {"memory_id": 62, "depth": 2, "confidence": 0.4},
-                         ],
-                     },
-                 },
-             ):
+        with (
+            patch(
+                "daem0nmcp.retrieval_router.settings", _settings_context(enabled=True)
+            ),
+            patch(
+                "daem0nmcp.graph.traversal.find_related_memories",
+                new_callable=AsyncMock,
+                return_value={
+                    "found": True,
+                    "source_memory_id": 1,
+                    "total_related": 5,
+                    "by_relationship": {
+                        "led_to": [
+                            {"memory_id": 50, "depth": 1, "confidence": 0.9},
+                            {"memory_id": 51, "depth": 1, "confidence": 0.8},
+                        ],
+                        "depends_on": [
+                            {"memory_id": 60, "depth": 1, "confidence": 0.7},
+                            {"memory_id": 61, "depth": 2, "confidence": 0.5},
+                            {"memory_id": 62, "depth": 2, "confidence": 0.4},
+                        ],
+                    },
+                },
+            ),
+        ):
             result = await router.route_search("trace causal chain of auth")
 
         assert result["strategy_used"] == "graphrag"
@@ -382,6 +429,7 @@ class TestGraphRAGExpansionIncreasesResults:
 # Validates ZOOM-03 (low-confidence fallback extends to error fallback)
 # ---------------------------------------------------------------------------
 
+
 class TestPipelineResilienceClassifierFailure:
     """Classifier exceptions fall back to hybrid search, no crash."""
 
@@ -394,7 +442,9 @@ class TestPipelineResilienceClassifierFailure:
 
         router = RetrievalRouter(memory_manager=mm, classifier=clf)
 
-        with patch("daem0nmcp.retrieval_router.settings", _settings_context(enabled=True)):
+        with patch(
+            "daem0nmcp.retrieval_router.settings", _settings_context(enabled=True)
+        ):
             # The router catches classifier errors and falls back to hybrid
             result = await router.route_search("query that breaks classifier")
 
@@ -421,7 +471,9 @@ class TestPipelineResilienceClassifierFailure:
         clf.classify.side_effect = RuntimeError("Broken")
 
         router = RetrievalRouter(memory_manager=mm, classifier=clf)
-        with patch("daem0nmcp.retrieval_router.settings", _settings_context(enabled=True)):
+        with patch(
+            "daem0nmcp.retrieval_router.settings", _settings_context(enabled=True)
+        ):
             result = await router.route_search("broken query")
 
         # Router caught the classifier error and fell back to hybrid
@@ -434,6 +486,7 @@ class TestPipelineResilienceClassifierFailure:
 # Test 8: Pipeline resilience - JIT compression failure
 # Validates COMP-01 (compression is enhancement, not gate)
 # ---------------------------------------------------------------------------
+
 
 class TestPipelineResilienceJITFailure:
     """JIT compression failures return results without metadata, no crash."""
@@ -450,8 +503,14 @@ class TestPipelineResilienceJITFailure:
         broken_jit = MagicMock()
         broken_jit.compress_if_needed.side_effect = RuntimeError("LLMLingua not loaded")
 
-        with patch("daem0nmcp.retrieval_router.settings", _settings_context(enabled=True)), \
-             patch("daem0nmcp.compression.jit.get_jit_compressor", return_value=broken_jit):
+        with (
+            patch(
+                "daem0nmcp.retrieval_router.settings", _settings_context(enabled=True)
+            ),
+            patch(
+                "daem0nmcp.compression.jit.get_jit_compressor", return_value=broken_jit
+            ),
+        ):
             result = await router.route_and_compress(
                 "some query", top_k=10, result_text="x" * 50000
             )
@@ -468,6 +527,7 @@ class TestPipelineResilienceJITFailure:
 # Validates backward compatibility
 # ---------------------------------------------------------------------------
 
+
 class TestExistingRecallBehaviorPreserved:
     """With auto_zoom fully disabled, no extra keys appear in results."""
 
@@ -479,7 +539,10 @@ class TestExistingRecallBehaviorPreserved:
 
         router = RetrievalRouter(memory_manager=mm, classifier=clf)
 
-        with patch("daem0nmcp.retrieval_router.settings", _settings_context(enabled=False, shadow=False)):
+        with patch(
+            "daem0nmcp.retrieval_router.settings",
+            _settings_context(enabled=False, shadow=False),
+        ):
             result = await router.route_search("anything")
 
         # No classification performed
@@ -501,8 +564,13 @@ class TestExistingRecallBehaviorPreserved:
         mock_adaptive = _make_mock_adaptive()
         jit = JITCompressor(adaptive_compressor=mock_adaptive)
 
-        with patch("daem0nmcp.retrieval_router.settings", _settings_context(enabled=False, shadow=False)), \
-             patch("daem0nmcp.compression.jit.get_jit_compressor", return_value=jit):
+        with (
+            patch(
+                "daem0nmcp.retrieval_router.settings",
+                _settings_context(enabled=False, shadow=False),
+            ),
+            patch("daem0nmcp.compression.jit.get_jit_compressor", return_value=jit),
+        ):
             result = await router.route_and_compress(
                 "query", top_k=5, result_text="Short text"
             )
@@ -517,6 +585,7 @@ class TestExistingRecallBehaviorPreserved:
 # Test 10: Concurrent classify and compress (no shared mutable state)
 # Validates pipeline safety under sequential calls
 # ---------------------------------------------------------------------------
+
 
 class TestConcurrentClassifyAndCompress:
     """Multiple sequential pipeline calls produce correct, independent results."""
@@ -536,9 +605,13 @@ class TestConcurrentClassifyAndCompress:
         clf1 = _make_mock_classifier(QueryComplexity.SIMPLE, 0.9)
         router1 = RetrievalRouter(memory_manager=mm, classifier=clf1)
 
-        with patch("daem0nmcp.retrieval_router.settings", _settings_context(enabled=True)), \
-             patch("daem0nmcp.retrieval_router.vectors") as mock_vectors, \
-             patch("daem0nmcp.compression.jit.get_jit_compressor", return_value=jit):
+        with (
+            patch(
+                "daem0nmcp.retrieval_router.settings", _settings_context(enabled=True)
+            ),
+            patch("daem0nmcp.retrieval_router.vectors") as mock_vectors,
+            patch("daem0nmcp.compression.jit.get_jit_compressor", return_value=jit),
+        ):
             mock_vectors.encode.return_value = b"\x00" * 16
             mock_vectors.decode.return_value = [0.1, 0.2, 0.3]
 
@@ -551,11 +624,15 @@ class TestConcurrentClassifyAndCompress:
         clf2 = _make_mock_classifier(QueryComplexity.MEDIUM, 0.7)
         router2 = RetrievalRouter(memory_manager=mm, classifier=clf2)
 
-        with patch("daem0nmcp.retrieval_router.settings", _settings_context(enabled=True)), \
-             patch("daem0nmcp.compression.jit.get_jit_compressor", return_value=jit):
+        with (
+            patch(
+                "daem0nmcp.retrieval_router.settings", _settings_context(enabled=True)
+            ),
+            patch("daem0nmcp.compression.jit.get_jit_compressor", return_value=jit),
+        ):
             result2 = await router2.route_and_compress(
                 "how does X relate to Y",
-                result_text="x" * 40000  # ~10K tokens = hard threshold
+                result_text="x" * 40000,  # ~10K tokens = hard threshold
             )
 
         assert result2["strategy_used"] == "hybrid"
@@ -565,22 +642,28 @@ class TestConcurrentClassifyAndCompress:
         # Call 3: Complex query with small text
         clf3 = _make_mock_classifier(QueryComplexity.COMPLEX, 0.85)
         kg = _make_mock_kg(node_count=50)
-        router3 = RetrievalRouter(memory_manager=mm, knowledge_graph=kg, classifier=clf3)
+        router3 = RetrievalRouter(
+            memory_manager=mm, knowledge_graph=kg, classifier=clf3
+        )
 
-        with patch("daem0nmcp.retrieval_router.settings", _settings_context(enabled=True)), \
-             patch(
-                 "daem0nmcp.graph.traversal.find_related_memories",
-                 new_callable=AsyncMock,
-                 return_value={
-                     "found": True,
-                     "source_memory_id": 1,
-                     "total_related": 1,
-                     "by_relationship": {
-                         "led_to": [{"memory_id": 99, "depth": 1, "confidence": 0.9}]
-                     },
-                 },
-             ), \
-             patch("daem0nmcp.compression.jit.get_jit_compressor", return_value=jit):
+        with (
+            patch(
+                "daem0nmcp.retrieval_router.settings", _settings_context(enabled=True)
+            ),
+            patch(
+                "daem0nmcp.graph.traversal.find_related_memories",
+                new_callable=AsyncMock,
+                return_value={
+                    "found": True,
+                    "source_memory_id": 1,
+                    "total_related": 1,
+                    "by_relationship": {
+                        "led_to": [{"memory_id": 99, "depth": 1, "confidence": 0.9}]
+                    },
+                },
+            ),
+            patch("daem0nmcp.compression.jit.get_jit_compressor", return_value=jit),
+        ):
             result3 = await router3.route_and_compress(
                 "trace causal chain", result_text="short"
             )
@@ -598,6 +681,7 @@ class TestConcurrentClassifyAndCompress:
 # Test 11: All requirements smoke test
 # Validates ZOOM-01 through ZOOM-05, COMP-01 through COMP-04
 # ---------------------------------------------------------------------------
+
 
 class TestAllRequirementsSmoke:
     """Smoke test exercising all 9 Phase 15 requirements in sequence."""
@@ -618,7 +702,9 @@ class TestAllRequirementsSmoke:
         clf = _make_mock_classifier(QueryComplexity.MEDIUM, 0.7)
         router = RetrievalRouter(memory_manager=mm, classifier=clf)
 
-        with patch("daem0nmcp.retrieval_router.settings", _settings_context(enabled=True)):
+        with patch(
+            "daem0nmcp.retrieval_router.settings", _settings_context(enabled=True)
+        ):
             result = await router.route_search("test query")
         assert result["classification"] is not None  # ZOOM-01
         assert result["classification"]["level"] in ("simple", "medium", "complex")
@@ -627,8 +713,12 @@ class TestAllRequirementsSmoke:
         clf_simple = _make_mock_classifier(QueryComplexity.SIMPLE, 0.9)
         router_simple = RetrievalRouter(memory_manager=mm, classifier=clf_simple)
 
-        with patch("daem0nmcp.retrieval_router.settings", _settings_context(enabled=True)), \
-             patch("daem0nmcp.retrieval_router.vectors") as mv:
+        with (
+            patch(
+                "daem0nmcp.retrieval_router.settings", _settings_context(enabled=True)
+            ),
+            patch("daem0nmcp.retrieval_router.vectors") as mv,
+        ):
             mv.encode.return_value = b"\x00" * 16
             mv.decode.return_value = [0.1]
             result = await router_simple.route_search("what is X")
@@ -638,7 +728,9 @@ class TestAllRequirementsSmoke:
         clf_low = _make_mock_classifier(QueryComplexity.SIMPLE, 0.1)
         router_low = RetrievalRouter(memory_manager=mm, classifier=clf_low)
 
-        with patch("daem0nmcp.retrieval_router.settings", _settings_context(enabled=True)):
+        with patch(
+            "daem0nmcp.retrieval_router.settings", _settings_context(enabled=True)
+        ):
             result = await router_low.route_search("ambiguous query")
         assert result["strategy_used"] == "hybrid"  # ZOOM-03
 
@@ -646,7 +738,9 @@ class TestAllRequirementsSmoke:
         clf_shadow = _make_mock_classifier(QueryComplexity.COMPLEX, 0.9)
         router_shadow = RetrievalRouter(memory_manager=mm, classifier=clf_shadow)
 
-        with patch("daem0nmcp.retrieval_router.settings", _settings_context(shadow=True)):
+        with patch(
+            "daem0nmcp.retrieval_router.settings", _settings_context(shadow=True)
+        ):
             result = await router_shadow.route_search("complex query")
         assert result["strategy_used"] == "hybrid"
         assert result["shadow_classification"] is not None  # ZOOM-04
@@ -657,45 +751,61 @@ class TestAllRequirementsSmoke:
             memory_manager=mm, knowledge_graph=kg, classifier=clf_complex
         )
 
-        with patch("daem0nmcp.retrieval_router.settings", _settings_context(enabled=True)), \
-             patch(
-                 "daem0nmcp.graph.traversal.find_related_memories",
-                 new_callable=AsyncMock,
-                 return_value={
-                     "found": True,
-                     "source_memory_id": 1,
-                     "total_related": 1,
-                     "by_relationship": {
-                         "led_to": [{"memory_id": 99, "depth": 1, "confidence": 0.9}]
-                     },
-                 },
-             ):
+        with (
+            patch(
+                "daem0nmcp.retrieval_router.settings", _settings_context(enabled=True)
+            ),
+            patch(
+                "daem0nmcp.graph.traversal.find_related_memories",
+                new_callable=AsyncMock,
+                return_value={
+                    "found": True,
+                    "source_memory_id": 1,
+                    "total_related": 1,
+                    "by_relationship": {
+                        "led_to": [{"memory_id": 99, "depth": 1, "confidence": 0.9}]
+                    },
+                },
+            ),
+        ):
             result = await router_complex.route_search("trace causal chain")
         assert result["strategy_used"] == "graphrag"  # ZOOM-05
         result_ids = [r[0] for r in result["results"]]
         assert 99 in result_ids  # Graph expansion added results
 
         # --- COMP-01: JIT fires at tiered thresholds ---
-        soft_text = "x" * 20000   # ~5K tokens -> soft
-        hard_text = "x" * 40000   # ~10K tokens -> hard
+        soft_text = "x" * 20000  # ~5K tokens -> soft
+        hard_text = "x" * 40000  # ~10K tokens -> hard
         emerg_text = "x" * 80000  # ~20K tokens -> emergency
 
-        assert jit.compress_if_needed(soft_text)["threshold_triggered"] == "soft"     # COMP-01
-        assert jit.compress_if_needed(hard_text)["threshold_triggered"] == "hard"     # COMP-01
-        assert jit.compress_if_needed(emerg_text)["threshold_triggered"] == "emergency"  # COMP-01
+        assert (
+            jit.compress_if_needed(soft_text)["threshold_triggered"] == "soft"
+        )  # COMP-01
+        assert (
+            jit.compress_if_needed(hard_text)["threshold_triggered"] == "hard"
+        )  # COMP-01
+        assert (
+            jit.compress_if_needed(emerg_text)["threshold_triggered"] == "emergency"
+        )  # COMP-01
 
         # --- COMP-02: Dynamic rates with sqrt dampening ---
         soft_result = jit.compress_if_needed(soft_text)
         hard_result = jit.compress_if_needed(hard_text)
         # Hard tier achieves higher compression ratio (more aggressive = higher ratio)
         # compression_rate = original_tokens / compressed_tokens (rounded)
-        assert hard_result["compression_rate"] > soft_result["compression_rate"]  # COMP-02
+        assert (
+            hard_result["compression_rate"] > soft_result["compression_rate"]
+        )  # COMP-02
 
         # --- COMP-03: Compression metadata in output ---
         router_comp = RetrievalRouter(memory_manager=mm, classifier=clf)
 
-        with patch("daem0nmcp.retrieval_router.settings", _settings_context(enabled=True)), \
-             patch("daem0nmcp.compression.jit.get_jit_compressor", return_value=jit):
+        with (
+            patch(
+                "daem0nmcp.retrieval_router.settings", _settings_context(enabled=True)
+            ),
+            patch("daem0nmcp.compression.jit.get_jit_compressor", return_value=jit),
+        ):
             result = await router_comp.route_and_compress(
                 "query", result_text=hard_text
             )
@@ -717,10 +827,9 @@ class TestAllRequirementsSmoke:
         mock_adaptive.compress.assert_called()
         # Verify force tokens were passed to the compressor
         last_call = mock_adaptive.compress.call_args
-        passed_tokens = (
-            last_call.kwargs.get("additional_force_tokens")
-            or last_call[1].get("additional_force_tokens")
-        )
+        passed_tokens = last_call.kwargs.get("additional_force_tokens") or last_call[
+            1
+        ].get("additional_force_tokens")
         assert "my_function" in passed_tokens  # COMP-04
 
 
@@ -728,6 +837,7 @@ class TestAllRequirementsSmoke:
 # Test: route_and_compress without result_text
 # Validates that route_and_compress works when no text is provided
 # ---------------------------------------------------------------------------
+
 
 class TestRouteAndCompressNoText:
     """route_and_compress with no result_text skips compression entirely."""
@@ -740,7 +850,9 @@ class TestRouteAndCompressNoText:
 
         router = RetrievalRouter(memory_manager=mm, classifier=clf)
 
-        with patch("daem0nmcp.retrieval_router.settings", _settings_context(enabled=True)):
+        with patch(
+            "daem0nmcp.retrieval_router.settings", _settings_context(enabled=True)
+        ):
             result = await router.route_and_compress("query", top_k=5)
 
         assert result["results"] == [(1, 0.9)]
@@ -753,6 +865,7 @@ class TestRouteAndCompressNoText:
 # Test: JIT compression metadata structure validation
 # Validates COMP-03 (metadata has all required keys)
 # ---------------------------------------------------------------------------
+
 
 class TestCompressionMetadataStructure:
     """Validate exact structure of compression_metadata dict."""
@@ -770,8 +883,12 @@ class TestCompressionMetadataStructure:
 
         large_text = "x" * 20000  # ~5K tokens = soft threshold
 
-        with patch("daem0nmcp.retrieval_router.settings", _settings_context(enabled=True)), \
-             patch("daem0nmcp.compression.jit.get_jit_compressor", return_value=jit):
+        with (
+            patch(
+                "daem0nmcp.retrieval_router.settings", _settings_context(enabled=True)
+            ),
+            patch("daem0nmcp.compression.jit.get_jit_compressor", return_value=jit),
+        ):
             result = await router.route_and_compress(
                 "query", top_k=5, result_text=large_text
             )

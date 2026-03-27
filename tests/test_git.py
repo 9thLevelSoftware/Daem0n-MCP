@@ -1,9 +1,10 @@
 """Tests for git integration."""
 
-import pytest
-import tempfile
 import subprocess
+import tempfile
 from pathlib import Path
+
+import pytest
 
 
 class TestGitContext:
@@ -13,27 +14,41 @@ class TestGitContext:
     def git_repo(self):
         """Create a temporary git repository."""
         temp_dir = tempfile.mkdtemp()
-        subprocess.run(["git", "init"], cwd=temp_dir, capture_output=True, stdin=subprocess.DEVNULL)
+        subprocess.run(
+            ["git", "init"], cwd=temp_dir, capture_output=True, stdin=subprocess.DEVNULL
+        )
         subprocess.run(
             ["git", "config", "user.email", "test@test.com"],
-            cwd=temp_dir, capture_output=True, stdin=subprocess.DEVNULL
+            cwd=temp_dir,
+            capture_output=True,
+            stdin=subprocess.DEVNULL,
         )
         subprocess.run(
             ["git", "config", "user.name", "Test"],
-            cwd=temp_dir, capture_output=True, stdin=subprocess.DEVNULL
+            cwd=temp_dir,
+            capture_output=True,
+            stdin=subprocess.DEVNULL,
         )
 
         # Create initial commit
         Path(temp_dir, "README.md").write_text("# Test")
-        subprocess.run(["git", "add", "."], cwd=temp_dir, capture_output=True, stdin=subprocess.DEVNULL)
+        subprocess.run(
+            ["git", "add", "."],
+            cwd=temp_dir,
+            capture_output=True,
+            stdin=subprocess.DEVNULL,
+        )
         subprocess.run(
             ["git", "commit", "-m", "Initial commit"],
-            cwd=temp_dir, capture_output=True, stdin=subprocess.DEVNULL
+            cwd=temp_dir,
+            capture_output=True,
+            stdin=subprocess.DEVNULL,
         )
 
         yield temp_dir
 
         import shutil
+
         shutil.rmtree(temp_dir, ignore_errors=True)
 
     def test_get_git_changes_with_project_path(self, git_repo):

@@ -13,7 +13,6 @@ import pytest
 
 from daem0nmcp.query_classifier import ExemplarQueryClassifier, QueryComplexity
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------

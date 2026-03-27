@@ -9,17 +9,16 @@ This module provides:
 
 import logging
 import struct
-from typing import Dict, List, Optional, Tuple
 
-from sentence_transformers import SentenceTransformer
 import numpy as np
+from sentence_transformers import SentenceTransformer
 
 from .config import settings
 
 logger = logging.getLogger(__name__)
 
 # Global model instance (lazy loaded, shared across all contexts)
-_model: Optional[SentenceTransformer] = None
+_model: SentenceTransformer | None = None
 
 
 def is_available() -> bool:
@@ -42,7 +41,9 @@ def _get_model() -> SentenceTransformer:
                 settings.embedding_model,
                 truncate_dim=settings.embedding_dimension,
                 backend=backend,
-                model_kwargs={"file_name": "onnx/model_quantized.onnx"} if backend == "onnx" else {},
+                model_kwargs={"file_name": "onnx/model_quantized.onnx"}
+                if backend == "onnx"
+                else {},
             )
         except Exception:
             logger.warning(
@@ -62,7 +63,7 @@ def get_dimension() -> int:
     return settings.embedding_dimension
 
 
-def encode(text: str, *, prefix: str = "document") -> Optional[bytes]:
+def encode(text: str, *, prefix: str = "document") -> bytes | None:
     """
     Encode text to a vector embedding with the specified prefix.
 
@@ -83,26 +84,26 @@ def encode(text: str, *, prefix: str = "document") -> Optional[bytes]:
     return struct.pack(f"{len(embedding)}f", *embedding)
 
 
-def encode_query(text: str) -> Optional[bytes]:
+def encode_query(text: str) -> bytes | None:
     """Encode text as a search query (uses query prefix)."""
     return encode(text, prefix="query")
 
 
-def encode_document(text: str) -> Optional[bytes]:
+def encode_document(text: str) -> bytes | None:
     """Encode text as a document for storage (uses document prefix)."""
     return encode(text, prefix="document")
 
 
-def decode(data: bytes) -> Optional[List[float]]:
+def decode(data: bytes) -> list[float] | None:
     """Decode vector bytes back to a list of floats."""
     if not data:
         return None
 
     num_floats = len(data) // 4  # 4 bytes per float
-    return list(struct.unpack(f'{num_floats}f', data))
+    return list(struct.unpack(f"{num_floats}f", data))
 
 
-def cosine_similarity(vec1: List[float], vec2: List[float]) -> float:
+def cosine_similarity(vec1: list[float], vec2: list[float]) -> float:
     """Compute cosine similarity between two vectors."""
     a = np.array(vec1)
     b = np.array(vec2)
@@ -125,7 +126,7 @@ class VectorIndex:
     """
 
     def __init__(self):
-        self.vectors: Dict[int, List[float]] = {}
+        self.vectors: dict[int, list[float]] = {}
 
     def add(self, doc_id: int, text: str) -> bool:
         """Add a document to the index (encodes as document)."""
@@ -147,7 +148,9 @@ class VectorIndex:
         """Remove a document from the index."""
         self.vectors.pop(doc_id, None)
 
-    def search(self, query: str, top_k: int = 10, threshold: float = 0.3) -> List[Tuple[int, float]]:
+    def search(
+        self, query: str, top_k: int = 10, threshold: float = 0.3
+    ) -> list[tuple[int, float]]:
         """
         Search for similar documents.
 
@@ -191,7 +194,7 @@ class HybridSearch:
     Uses TF-IDF as primary with vector boosting for enhanced semantic matching.
     """
 
-    def __init__(self, tfidf_index, vector_index: Optional[VectorIndex] = None):
+    def __init__(self, tfidf_index, vector_index: VectorIndex | None = None):
         self.tfidf = tfidf_index
         self.vectors = vector_index or VectorIndex()
         self.vector_weight = settings.hybrid_vector_weight
@@ -201,8 +204,8 @@ class HybridSearch:
         query: str,
         top_k: int = 10,
         tfidf_threshold: float = 0.1,
-        vector_threshold: float = 0.3
-    ) -> List[Tuple[int, float]]:
+        vector_threshold: float = 0.3,
+    ) -> list[tuple[int, float]]:
         """
         Hybrid search combining TF-IDF and vector similarity.
 
@@ -210,12 +213,16 @@ class HybridSearch:
         Falls back to TF-IDF only if vector index is empty.
         """
         # Get TF-IDF results
-        tfidf_results = self.tfidf.search(query, top_k=top_k * 2, threshold=tfidf_threshold)
+        tfidf_results = self.tfidf.search(
+            query, top_k=top_k * 2, threshold=tfidf_threshold
+        )
         tfidf_scores = {doc_id: score for doc_id, score in tfidf_results}
 
         # If vectors available, get vector results
         if len(self.vectors) > 0:
-            vector_results = self.vectors.search(query, top_k=top_k * 2, threshold=vector_threshold)
+            vector_results = self.vectors.search(
+                query, top_k=top_k * 2, threshold=vector_threshold
+            )
             vector_scores = {doc_id: score for doc_id, score in vector_results}
 
             # Combine scores
@@ -228,9 +235,8 @@ class HybridSearch:
 
                 # Weighted combination
                 final_score = (
-                    (1 - self.vector_weight) * tfidf_score +
-                    self.vector_weight * vector_score
-                )
+                    1 - self.vector_weight
+                ) * tfidf_score + self.vector_weight * vector_score
 
                 combined.append((doc_id, final_score))
 
@@ -242,7 +248,7 @@ class HybridSearch:
 
 
 # Global vector index instance
-_global_vector_index: Optional[VectorIndex] = None
+_global_vector_index: VectorIndex | None = None
 
 
 def get_vector_index() -> VectorIndex:

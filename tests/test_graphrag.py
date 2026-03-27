@@ -9,15 +9,16 @@ Tests verify all Phase 1 success criteria:
 - GRAPH-06: Community summarization
 """
 
-import pytest
-import tempfile
 import shutil
+import tempfile
 
-from daem0nmcp.database import DatabaseManager
-from daem0nmcp.memory import MemoryManager
+import pytest
+
 from daem0nmcp.communities import CommunityManager
+from daem0nmcp.database import DatabaseManager
 from daem0nmcp.entity_manager import EntityManager
 from daem0nmcp.graph import KnowledgeGraph
+from daem0nmcp.memory import MemoryManager
 
 
 @pytest.fixture
@@ -62,6 +63,7 @@ async def community_manager(db_manager):
 async def covenant_compliant_project(temp_storage):
     """Create a project that passes covenant checks."""
     from daem0nmcp import server
+
     server._project_contexts.clear()
     await server.get_briefing(project_path=temp_storage)
     yield temp_storage
@@ -70,6 +72,7 @@ async def covenant_compliant_project(temp_storage):
 # =============================================================================
 # GRAPH-01: Entity extraction during remember
 # =============================================================================
+
 
 class TestEntityExtractionDuringRemember:
     """GRAPH-01: Entity extraction should happen during remember()."""
@@ -83,7 +86,7 @@ class TestEntityExtractionDuringRemember:
             category="decision",
             content="The UserAuthService class handles authentication using JWT tokens",
             rationale="Centralize auth logic in one service",
-            project_path=temp_storage
+            project_path=temp_storage,
         )
 
         # Check entities were extracted
@@ -94,8 +97,10 @@ class TestEntityExtractionDuringRemember:
 
         # Verify entity types are reasonable
         entity_names = [e["name"] for e in entities]
-        assert any("Auth" in name or "Service" in name or "JWT" in name
-                  for name in entity_names), f"Expected auth-related entity, got: {entity_names}"
+        assert any(
+            "Auth" in name or "Service" in name or "JWT" in name
+            for name in entity_names
+        ), f"Expected auth-related entity, got: {entity_names}"
 
     @pytest.mark.asyncio
     async def test_remember_invalidates_graph_cache(self, memory_manager, temp_storage):
@@ -108,17 +113,19 @@ class TestEntityExtractionDuringRemember:
         await memory_manager.remember(
             category="decision",
             content="Use PostgreSQL for the database backend",
-            project_path=temp_storage
+            project_path=temp_storage,
         )
 
         # Graph should be invalidated (not automatically reloaded)
-        assert not memory_manager._knowledge_graph._loaded, \
+        assert not memory_manager._knowledge_graph._loaded, (
             "Knowledge graph should be invalidated after remember()"
+        )
 
 
 # =============================================================================
 # GRAPH-02: NetworkX graph construction
 # =============================================================================
+
 
 class TestNetworkXGraphConstruction:
     """GRAPH-02: NetworkX graph should be constructed from SQLite."""
@@ -133,18 +140,16 @@ class TestNetworkXGraphConstruction:
         mem1 = await memory_manager.remember(
             category="decision",
             content="Use the AuthHandler class for authentication",
-            project_path=temp_storage
+            project_path=temp_storage,
         )
         mem2 = await memory_manager.remember(
             category="pattern",
             content="AuthHandler should validate tokens",
-            project_path=temp_storage
+            project_path=temp_storage,
         )
 
         # Link memories
-        await memory_manager.link_memories(
-            mem1["id"], mem2["id"], "led_to"
-        )
+        await memory_manager.link_memories(mem1["id"], mem2["id"], "led_to")
 
         # Load knowledge graph
         kg = KnowledgeGraph(db_manager)
@@ -165,7 +170,7 @@ class TestNetworkXGraphConstruction:
         await memory_manager.remember(
             category="decision",
             content="The PaymentProcessor handles Stripe integration",
-            project_path=temp_storage
+            project_path=temp_storage,
         )
 
         # Force graph reload
@@ -199,6 +204,7 @@ class TestNetworkXGraphConstruction:
 # GRAPH-03: Leiden community detection
 # =============================================================================
 
+
 class TestLeidenCommunityDetection:
     """GRAPH-03: Leiden algorithm should detect communities from graph."""
 
@@ -212,32 +218,31 @@ class TestLeidenCommunityDetection:
             category="decision",
             content="Use JWT for authentication",
             tags=["auth", "jwt"],
-            project_path=temp_storage
+            project_path=temp_storage,
         )
         await memory_manager.remember(
             category="pattern",
             content="Validate JWT tokens on every request",
             tags=["auth", "jwt", "validation"],
-            project_path=temp_storage
+            project_path=temp_storage,
         )
         await memory_manager.remember(
             category="decision",
             content="Use Redis for caching",
             tags=["cache", "redis"],
-            project_path=temp_storage
+            project_path=temp_storage,
         )
         await memory_manager.remember(
             category="pattern",
             content="Cache invalidation strategy with Redis",
             tags=["cache", "redis"],
-            project_path=temp_storage
+            project_path=temp_storage,
         )
 
         # Detect communities using Leiden
         graph = await memory_manager.get_knowledge_graph()
         communities = await community_manager.detect_communities_from_graph(
-            project_path=temp_storage,
-            knowledge_graph=graph
+            project_path=temp_storage, knowledge_graph=graph
         )
 
         # Should detect at least some grouping
@@ -254,39 +259,39 @@ class TestLeidenCommunityDetection:
             category="decision",
             content="First decision about architecture",
             tags=["architecture"],
-            project_path=temp_storage
+            project_path=temp_storage,
         )
         await memory_manager.remember(
             category="decision",
             content="Second decision about architecture",
             tags=["architecture"],
-            project_path=temp_storage
+            project_path=temp_storage,
         )
 
         graph = await memory_manager.get_knowledge_graph()
 
         # Run twice
         communities1 = await community_manager.detect_communities_from_graph(
-            project_path=temp_storage,
-            knowledge_graph=graph
+            project_path=temp_storage, knowledge_graph=graph
         )
 
         # Force graph reload
         await graph.reload_from_db()
 
         communities2 = await community_manager.detect_communities_from_graph(
-            project_path=temp_storage,
-            knowledge_graph=graph
+            project_path=temp_storage, knowledge_graph=graph
         )
 
         # Results should be identical (deterministic)
-        assert len(communities1) == len(communities2), \
+        assert len(communities1) == len(communities2), (
             "Deterministic Leiden should produce same community count"
+        )
 
 
 # =============================================================================
 # GRAPH-04: Multi-hop queries
 # =============================================================================
+
 
 class TestMultiHopQueries:
     """GRAPH-04: Multi-hop traversal should work via trace_chain and trace_evolution."""
@@ -297,17 +302,17 @@ class TestMultiHopQueries:
         mem_a = await memory_manager.remember(
             category="decision",
             content="Initial architecture decision using microservices",
-            project_path=temp_storage
+            project_path=temp_storage,
         )
         mem_b = await memory_manager.remember(
             category="pattern",
             content="Service mesh pattern for microservices",
-            project_path=temp_storage
+            project_path=temp_storage,
         )
         mem_c = await memory_manager.remember(
             category="learning",
             content="Service mesh improved observability",
-            project_path=temp_storage
+            project_path=temp_storage,
         )
 
         await memory_manager.link_memories(mem_a["id"], mem_b["id"], "led_to")
@@ -321,10 +326,7 @@ class TestMultiHopQueries:
         a_id, b_id, c_id = chain_of_memories
 
         graph = await memory_manager.get_knowledge_graph()
-        result = await graph.trace_chain(
-            start_memory_id=a_id,
-            end_memory_id=c_id
-        )
+        result = await graph.trace_chain(start_memory_id=a_id, end_memory_id=c_id)
 
         assert result["found"], "Should find path between A and C"
         assert len(result["paths"]) >= 1, "Should have at least one path"
@@ -335,10 +337,7 @@ class TestMultiHopQueries:
         a_id, b_id, c_id = chain_of_memories
 
         graph = await memory_manager.get_knowledge_graph()
-        result = await graph.get_related(
-            memory_id=a_id,
-            direction="both"
-        )
+        result = await graph.get_related(memory_id=a_id, direction="both")
 
         assert result["found"], "Should find related memories"
         assert result["total_related"] >= 1, "Should have at least one related memory"
@@ -350,22 +349,21 @@ class TestMultiHopQueries:
         await memory_manager.remember(
             category="decision",
             content="Use the AuthService class for authentication",
-            project_path=temp_storage
+            project_path=temp_storage,
         )
         await memory_manager.remember(
             category="pattern",
             content="AuthService should use JWT tokens",
-            project_path=temp_storage
+            project_path=temp_storage,
         )
 
         # Get an entity ID
         from sqlalchemy import select
+
         from daem0nmcp.models import ExtractedEntity
 
         async with memory_manager.db.get_session() as session:
-            result = await session.execute(
-                select(ExtractedEntity).limit(1)
-            )
+            result = await session.execute(select(ExtractedEntity).limit(1))
             entity = result.scalar_one_or_none()
 
         if entity:
@@ -378,6 +376,7 @@ class TestMultiHopQueries:
 # =============================================================================
 # GRAPH-05: recall_hierarchical uses Leiden
 # =============================================================================
+
 
 class TestRecallHierarchicalLeiden:
     """GRAPH-05: recall_hierarchical should use Leiden communities."""
@@ -392,27 +391,25 @@ class TestRecallHierarchicalLeiden:
             category="decision",
             content="Use JWT for auth",
             tags=["auth", "jwt"],
-            project_path=temp_storage
+            project_path=temp_storage,
         )
         await memory_manager.remember(
             category="pattern",
             content="Validate JWT expiry",
             tags=["auth", "jwt", "validation"],
-            project_path=temp_storage
+            project_path=temp_storage,
         )
 
         # Detect and save communities
         graph = await memory_manager.get_knowledge_graph()
         communities = await community_manager.detect_communities_from_graph(
-            project_path=temp_storage,
-            knowledge_graph=graph
+            project_path=temp_storage, knowledge_graph=graph
         )
         await community_manager.save_communities(temp_storage, communities)
 
         # Hierarchical recall
         result = await memory_manager.recall_hierarchical(
-            topic="auth",
-            project_path=temp_storage
+            topic="auth", project_path=temp_storage
         )
 
         assert "communities" in result, "Should return communities"
@@ -429,27 +426,25 @@ class TestRecallHierarchicalLeiden:
             category="decision",
             content="JWT authentication implementation",
             tags=["authentication", "jwt"],
-            project_path=temp_storage
+            project_path=temp_storage,
         )
         await memory_manager.remember(
             category="pattern",
             content="Token validation pattern",
             tags=["authentication", "validation"],
-            project_path=temp_storage
+            project_path=temp_storage,
         )
 
         # Save communities
         communities = await community_manager.detect_communities(
-            project_path=temp_storage,
-            min_community_size=2
+            project_path=temp_storage, min_community_size=2
         )
         if communities:
             await community_manager.save_communities(temp_storage, communities)
 
         # Search with related term
         result = await memory_manager.recall_hierarchical(
-            topic="authentication",
-            project_path=temp_storage
+            topic="authentication", project_path=temp_storage
         )
 
         # Should find auth-related communities
@@ -465,19 +460,20 @@ class TestRecallHierarchicalLeiden:
     ):
         """Should suggest rebuild_communities when no communities exist."""
         result = await memory_manager.recall_hierarchical(
-            topic="anything",
-            project_path=temp_storage
+            topic="anything", project_path=temp_storage
         )
 
         # Should have hint to run rebuild_communities
         if not result["communities"]:
-            assert "community_hint" in result, \
+            assert "community_hint" in result, (
                 "Should suggest running rebuild_communities"
+            )
 
 
 # =============================================================================
 # GRAPH-06: Community summarization
 # =============================================================================
+
 
 class TestCommunitySummarization:
     """GRAPH-06: Communities should have extractive summaries."""
@@ -491,19 +487,18 @@ class TestCommunitySummarization:
             category="decision",
             content="Use PostgreSQL for relational data",
             tags=["database", "postgres"],
-            project_path=temp_storage
+            project_path=temp_storage,
         )
         await memory_manager.remember(
             category="pattern",
             content="Connection pooling for PostgreSQL",
             tags=["database", "postgres", "performance"],
-            project_path=temp_storage
+            project_path=temp_storage,
         )
 
         # Detect and save
         communities = await community_manager.detect_communities(
-            project_path=temp_storage,
-            min_community_size=2
+            project_path=temp_storage, min_community_size=2
         )
 
         if communities:
@@ -525,19 +520,18 @@ class TestCommunitySummarization:
             category="decision",
             content="Use Redis for caching",
             tags=["cache", "redis"],
-            project_path=temp_storage
+            project_path=temp_storage,
         )
         await memory_manager.remember(
             category="pattern",
             content="Cache invalidation with Redis TTL",
             tags=["cache", "redis"],
-            project_path=temp_storage
+            project_path=temp_storage,
         )
 
         # Save communities
         communities = await community_manager.detect_communities(
-            project_path=temp_storage,
-            min_community_size=2
+            project_path=temp_storage, min_community_size=2
         )
         if communities:
             await community_manager.save_communities(temp_storage, communities)
@@ -555,6 +549,7 @@ class TestCommunitySummarization:
 # MCP Tool Integration Tests
 # =============================================================================
 
+
 class TestMCPGraphRAGTools:
     """Test MCP tools expose GraphRAG functionality."""
 
@@ -570,24 +565,22 @@ class TestMCPGraphRAGTools:
         mem1 = await ctx.memory_manager.remember(
             category="decision",
             content="Base decision",
-            project_path=covenant_compliant_project
+            project_path=covenant_compliant_project,
         )
         mem2 = await ctx.memory_manager.remember(
             category="pattern",
             content="Derived pattern",
-            project_path=covenant_compliant_project
+            project_path=covenant_compliant_project,
         )
 
         # Link them
-        await ctx.memory_manager.link_memories(
-            mem1["id"], mem2["id"], "led_to"
-        )
+        await ctx.memory_manager.link_memories(mem1["id"], mem2["id"], "led_to")
 
         # Use MCP tool
         result = await server.trace_causal_path(
             start_memory_id=mem1["id"],
             end_memory_id=mem2["id"],
-            project_path=covenant_compliant_project
+            project_path=covenant_compliant_project,
         )
 
         assert "found" in result or "paths" in result
@@ -604,12 +597,10 @@ class TestMCPGraphRAGTools:
         await ctx.memory_manager.remember(
             category="decision",
             content="Test decision",
-            project_path=covenant_compliant_project
+            project_path=covenant_compliant_project,
         )
 
-        result = await server.get_graph_stats(
-            project_path=covenant_compliant_project
-        )
+        result = await server.get_graph_stats(project_path=covenant_compliant_project)
 
         assert "nodes" in result, "Should return node count"
         assert "edges" in result, "Should return edge count"
@@ -625,18 +616,19 @@ class TestMCPGraphRAGTools:
         mem = await ctx.memory_manager.remember(
             category="decision",
             content="Test memory for relations",
-            project_path=covenant_compliant_project
+            project_path=covenant_compliant_project,
         )
 
         result = await server.get_related_memories(
-            memory_id=mem["id"],
-            project_path=covenant_compliant_project
+            memory_id=mem["id"], project_path=covenant_compliant_project
         )
 
         assert "found" in result or "error" in result
 
     @pytest.mark.asyncio
-    async def test_mcp_rebuild_communities_uses_leiden(self, covenant_compliant_project):
+    async def test_mcp_rebuild_communities_uses_leiden(
+        self, covenant_compliant_project
+    ):
         """rebuild_communities MCP tool should use Leiden algorithm."""
         from daem0nmcp import server
         from daem0nmcp.communities import CommunityManager
@@ -648,13 +640,13 @@ class TestMCPGraphRAGTools:
             category="decision",
             content="Use Docker for containerization",
             tags=["docker", "deployment"],
-            project_path=covenant_compliant_project
+            project_path=covenant_compliant_project,
         )
         await ctx.memory_manager.remember(
             category="pattern",
             content="Docker compose for local development",
             tags=["docker", "development"],
-            project_path=covenant_compliant_project
+            project_path=covenant_compliant_project,
         )
 
         result = await server.rebuild_communities(
@@ -674,21 +666,23 @@ class TestMCPGraphRAGTools:
             # Critical: Verify Leiden algorithm was used by checking for leiden_community_id
             # Leiden-based communities store the algorithm's partition ID
             for community in communities:
-                assert "leiden_community_id" in community or hasattr(community, "leiden_community_id"), \
+                assert "leiden_community_id" in community or hasattr(
+                    community, "leiden_community_id"
+                ), (
                     f"Community should have leiden_community_id field (Leiden algorithm marker): {community}"
+                )
 
 
 # =============================================================================
 # Knowledge Graph Cache Invalidation Tests
 # =============================================================================
 
+
 class TestGraphCacheInvalidation:
     """Test knowledge graph cache is properly invalidated."""
 
     @pytest.mark.asyncio
-    async def test_graph_invalidated_on_new_memory(
-        self, memory_manager, temp_storage
-    ):
+    async def test_graph_invalidated_on_new_memory(self, memory_manager, temp_storage):
         """Graph cache should invalidate when new memory is created."""
         # Load graph
         graph = await memory_manager.get_knowledge_graph()
@@ -696,18 +690,14 @@ class TestGraphCacheInvalidation:
 
         # Add memory
         await memory_manager.remember(
-            category="decision",
-            content="New decision",
-            project_path=temp_storage
+            category="decision", content="New decision", project_path=temp_storage
         )
 
         # Cache should be invalidated
         assert not memory_manager._knowledge_graph._loaded
 
     @pytest.mark.asyncio
-    async def test_graph_reloads_after_invalidation(
-        self, memory_manager, temp_storage
-    ):
+    async def test_graph_reloads_after_invalidation(self, memory_manager, temp_storage):
         """Graph should reload when accessed after invalidation."""
         # Initial load
         graph = await memory_manager.get_knowledge_graph()
@@ -717,7 +707,7 @@ class TestGraphCacheInvalidation:
         await memory_manager.remember(
             category="decision",
             content="Another decision with EntityName",
-            project_path=temp_storage
+            project_path=temp_storage,
         )
 
         # Access graph again (should reload)
