@@ -184,7 +184,7 @@ class TestUninstall:
         data = json.loads(fake_settings.read_text())
         hooks = data.get("hooks", {})
         # All events should be empty (only had Daem0n entries)
-        for event, entries in hooks.items():
+        for _event, entries in hooks.items():
             for entry in entries:
                 assert not _is_daem0n_entry(entry)
 

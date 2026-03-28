@@ -12,15 +12,6 @@
       "environment": {
         "PYTHONUNBUFFERED": "1"
       }
-    },
-    "opencode-teams": {
-      "type": "local",
-      "command": [
-        "uv",
-        "run",
-        "opencode-teams"
-      ],
-      "enabled": true
     }
   }
 }

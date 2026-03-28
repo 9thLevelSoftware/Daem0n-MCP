@@ -640,12 +640,11 @@ def detect_conflict(
                     "Very similar memory already exists - consider updating instead"
                 )
 
-            if conflict_info["conflict_type"] is None:
-                if _has_negation(new_content) != _has_negation(mem.get("content", "")):
-                    conflict_info["conflict_type"] = "polarity_conflict"
-                    conflict_info["warning"] = (
-                        "Potential contradiction detected (negation mismatch)"
-                    )
+            if conflict_info["conflict_type"] is None and _has_negation(new_content) != _has_negation(mem.get("content", "")):
+                conflict_info["conflict_type"] = "polarity_conflict"
+                conflict_info["warning"] = (
+                    "Potential contradiction detected (negation mismatch)"
+                )
 
             if conflict_info["conflict_type"]:
                 conflicts.append(conflict_info)

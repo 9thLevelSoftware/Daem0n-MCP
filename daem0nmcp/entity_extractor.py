@@ -76,7 +76,7 @@ class EntityExtractor:
     - variable: Variable references
     """
 
-    def __init__(self, custom_patterns: dict[str, re.Pattern] = None):
+    def __init__(self, custom_patterns: dict[str, re.Pattern] | None = None):
         self.patterns = {**PATTERNS}
         if custom_patterns:
             self.patterns.update(custom_patterns)
@@ -100,10 +100,7 @@ class EntityExtractor:
         for entity_type, pattern in self.patterns.items():
             for match in pattern.finditer(text):
                 # Get the captured group or full match
-                if match.groups():
-                    name = match.group(1)
-                else:
-                    name = match.group(0)
+                name = match.group(1) if match.groups() else match.group(0)
 
                 # Clean up
                 name = name.strip()

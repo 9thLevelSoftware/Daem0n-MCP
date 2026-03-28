@@ -193,6 +193,8 @@ class JITCompressor:
         self._ensure_initialized()
 
         # Count tokens using tiktoken cl100k_base (same counter as thresholds)
+        if self._compressor is None:
+            raise RuntimeError("JITCompressor: AdaptiveCompressor not initialized")
         token_count = self._compressor.compressor.count_tokens(text)
 
         # Skip if already compressed or below threshold
@@ -207,9 +209,20 @@ class JITCompressor:
 
         # Determine tier and compute dynamic rate
         tier = self._determine_tier(token_count)
+        if tier is None:
+            # Below soft threshold, no compression needed
+            return {
+                "text": text,
+                "original_tokens": token_count,
+                "compressed_tokens": token_count,
+                "compression_rate": 1.0,
+                "threshold_triggered": None,
+            }
         rate = self._compute_dynamic_rate(token_count, tier)
 
         # Compress using AdaptiveCompressor (content-aware, code-preserving)
+        if self._compressor is None:
+            raise RuntimeError("JITCompressor: AdaptiveCompressor not initialized")
         result = self._compressor.compress(
             text,
             rate_override=rate,

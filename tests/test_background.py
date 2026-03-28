@@ -78,7 +78,7 @@ class TestBackgroundTasks:
         task_id = await manager.create_task(failing_task(), "failing_task")
 
         # Wait for task to fail
-        with pytest.raises(Exception):
+        with pytest.raises(ValueError):
             await manager.wait_for(task_id, timeout=1.0)
 
         status = manager.get_status(task_id)

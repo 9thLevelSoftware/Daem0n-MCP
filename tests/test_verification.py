@@ -97,21 +97,21 @@ class TestVerifyClaim:
             patch(
                 "daem0nmcp.reflexion.verification.encode_document"
             ) as mock_encode_doc,
+            patch("daem0nmcp.reflexion.verification.decode") as mock_decode,
+            patch(
+                "daem0nmcp.reflexion.verification.cosine_similarity"
+            ) as mock_sim,
         ):
-            with patch("daem0nmcp.reflexion.verification.decode") as mock_decode:
-                with patch(
-                    "daem0nmcp.reflexion.verification.cosine_similarity"
-                ) as mock_sim:
-                    # Mock embedding operations
-                    mock_encode.return_value = b"fake_embedding"
-                    mock_encode_doc.return_value = b"fake_embedding"
-                    mock_decode.return_value = [0.1] * 256
-                    mock_sim.return_value = 0.85  # High similarity
+            # Mock embedding operations
+            mock_encode.return_value = b"fake_embedding"
+            mock_encode_doc.return_value = b"fake_embedding"
+            mock_decode.return_value = [0.1] * 256
+            mock_sim.return_value = 0.85  # High similarity
 
-                    result = await verify_claim(
-                        claim=memory_reference_claim,
-                        memory_manager=mock_memory_manager,
-                    )
+            result = await verify_claim(
+                claim=memory_reference_claim,
+                memory_manager=mock_memory_manager,
+            )
 
         assert result.status == "verified"
         assert result.confidence > 0.7
@@ -158,20 +158,20 @@ class TestVerifyClaim:
             patch(
                 "daem0nmcp.reflexion.verification.encode_document"
             ) as mock_encode_doc,
+            patch("daem0nmcp.reflexion.verification.decode") as mock_decode,
+            patch(
+                "daem0nmcp.reflexion.verification.cosine_similarity"
+            ) as mock_sim,
         ):
-            with patch("daem0nmcp.reflexion.verification.decode") as mock_decode:
-                with patch(
-                    "daem0nmcp.reflexion.verification.cosine_similarity"
-                ) as mock_sim:
-                    mock_encode.return_value = b"fake_embedding"
-                    mock_encode_doc.return_value = b"fake_embedding"
-                    mock_decode.return_value = [0.1] * 256
-                    mock_sim.return_value = 0.8  # High similarity
+            mock_encode.return_value = b"fake_embedding"
+            mock_encode_doc.return_value = b"fake_embedding"
+            mock_decode.return_value = [0.1] * 256
+            mock_sim.return_value = 0.8  # High similarity
 
-                    result = await verify_claim(
-                        claim=claim,
-                        memory_manager=mock_memory_manager,
-                    )
+            result = await verify_claim(
+                claim=claim,
+                memory_manager=mock_memory_manager,
+            )
 
         assert result.status == "conflict"
         assert result.conflict_reason is not None
@@ -255,20 +255,20 @@ class TestVerifyClaim:
             patch(
                 "daem0nmcp.reflexion.verification.encode_document"
             ) as mock_encode_doc,
+            patch("daem0nmcp.reflexion.verification.decode") as mock_decode,
+            patch(
+                "daem0nmcp.reflexion.verification.cosine_similarity"
+            ) as mock_sim,
         ):
-            with patch("daem0nmcp.reflexion.verification.decode") as mock_decode:
-                with patch(
-                    "daem0nmcp.reflexion.verification.cosine_similarity"
-                ) as mock_sim:
-                    mock_encode.return_value = b"fake_embedding"
-                    mock_encode_doc.return_value = b"fake_embedding"
-                    mock_decode.return_value = [0.1] * 256
-                    mock_sim.return_value = 0.3  # Low similarity
+            mock_encode.return_value = b"fake_embedding"
+            mock_encode_doc.return_value = b"fake_embedding"
+            mock_decode.return_value = [0.1] * 256
+            mock_sim.return_value = 0.3  # Low similarity
 
-                    result = await verify_claim(
-                        claim=memory_reference_claim,
-                        memory_manager=mock_memory_manager,
-                    )
+            result = await verify_claim(
+                claim=memory_reference_claim,
+                memory_manager=mock_memory_manager,
+            )
 
         # Should be unverified because similarity is below threshold
         assert result.status == "unverified"
@@ -521,21 +521,21 @@ class TestVerificationIntegration:
             patch(
                 "daem0nmcp.reflexion.verification.encode_document"
             ) as mock_encode_doc,
+            patch("daem0nmcp.reflexion.verification.decode") as mock_decode,
+            patch(
+                "daem0nmcp.reflexion.verification.cosine_similarity"
+            ) as mock_sim,
         ):
-            with patch("daem0nmcp.reflexion.verification.decode") as mock_decode:
-                with patch(
-                    "daem0nmcp.reflexion.verification.cosine_similarity"
-                ) as mock_sim:
-                    mock_encode.return_value = b"embedding"
-                    mock_encode_doc.return_value = b"embedding"
-                    mock_decode.return_value = [0.1] * 256
-                    mock_sim.return_value = 0.85
+            mock_encode.return_value = b"embedding"
+            mock_encode_doc.return_value = b"embedding"
+            mock_decode.return_value = [0.1] * 256
+            mock_sim.return_value = 0.85
 
-                    result = await verify_claim(
-                        claim=claim,
-                        memory_manager=mock_memory_manager,
-                        knowledge_graph=mock_knowledge_graph,
-                    )
+            result = await verify_claim(
+                claim=claim,
+                memory_manager=mock_memory_manager,
+                knowledge_graph=mock_knowledge_graph,
+            )
 
         assert result.status == "verified"
         # Should have evidence from both sources

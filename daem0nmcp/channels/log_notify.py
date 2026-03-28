@@ -5,9 +5,11 @@ This channel writes structured notifications to a log file that can be
 read by external tools, scripts, or editor integrations.
 """
 
+import contextlib
 import json
 import logging
 from pathlib import Path
+from typing import Any
 
 from daem0nmcp.watcher import WatcherNotification
 
@@ -101,10 +103,10 @@ class LogFileChannel:
         except Exception as e:
             logger.error(f"Failed to write to log file: {e}")
 
-    def _build_entry(self, notification: WatcherNotification) -> dict:
+    def _build_entry(self, notification: WatcherNotification) -> dict[str, Any]:
         """Build a log entry dictionary."""
         # Count by category
-        categories = {}
+        categories: dict[str, int] = {}
         for mem in notification.memories:
             cat = mem.get("category", "unknown")
             categories[cat] = categories.get(cat, 0) + 1
@@ -180,7 +182,7 @@ class LogFileChannel:
         Returns:
             List of log entry dictionaries, most recent first
         """
-        entries = []
+        entries: list[dict[str, Any]] = []
 
         if not self._log_path.exists():
             return entries
@@ -193,10 +195,8 @@ class LogFileChannel:
             for line in reversed(lines[-count:]):
                 line = line.strip()
                 if line:
-                    try:
+                    with contextlib.suppress(json.JSONDecodeError):
                         entries.append(json.loads(line))
-                    except json.JSONDecodeError:
-                        pass
 
         except Exception as e:
             logger.error(f"Failed to read log file: {e}")

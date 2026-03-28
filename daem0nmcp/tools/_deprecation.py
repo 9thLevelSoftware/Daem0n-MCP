@@ -12,7 +12,7 @@ logger = logging.getLogger(__name__)
 _in_workflow = contextvars.ContextVar("_in_workflow", default=False)
 
 
-class workflow_call:
+class WorkflowCall:
     """Context manager that suppresses deprecation noise during workflow dispatch."""
 
     def __enter__(self):

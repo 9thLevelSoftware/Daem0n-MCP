@@ -20,6 +20,7 @@ Usage:
 """
 
 import asyncio
+import contextlib
 import fnmatch
 import logging
 from abc import abstractmethod
@@ -252,9 +253,8 @@ class _FileChangeHandler(FileSystemEventHandler):
                     return True
 
         # Check extension filter if specified
-        if self._config.watch_extensions:
-            if path.suffix.lower() not in self._config.watch_extensions:
-                return True
+        if self._config.watch_extensions and path.suffix.lower() not in self._config.watch_extensions:
+            return True
 
         return False
 
@@ -435,10 +435,8 @@ class FileWatcher:
         # Cancel the processing task
         if self._process_task:
             self._process_task.cancel()
-            try:
+            with contextlib.suppress(asyncio.CancelledError):
                 await self._process_task
-            except asyncio.CancelledError:
-                pass
             self._process_task = None
 
         # Clear the queue
@@ -463,6 +461,10 @@ class FileWatcher:
             try:
                 # Wait for next event with timeout
                 try:
+                    if self._event_queue is None:
+                        # Queue not initialized, wait and retry
+                        await asyncio.sleep(0.1)
+                        continue
                     file_path = await asyncio.wait_for(
                         self._event_queue.get(), timeout=1.0
                     )

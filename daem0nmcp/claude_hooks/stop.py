@@ -6,6 +6,7 @@ conversation transcript, extracts decisions via regex, auto-remembers
 them, and reminds about recording outcomes. Never blocks.
 """
 
+import contextlib
 import json
 import os
 import re
@@ -97,10 +98,8 @@ def _load_state() -> dict:
 
 
 def _save_state(state: dict) -> None:
-    try:
+    with contextlib.suppress(OSError):
         _state_file().write_text(json.dumps(state), encoding="utf-8")
-    except OSError:
-        pass
 
 
 # ─── transcript reading ───────────────────────────────────────────
@@ -241,9 +240,8 @@ async def analyse_and_remember(
     current_turn = len(messages)
 
     # Anti-loop check
-    if state.get("last_reminder_turn", -1) >= current_turn - 2:
-        if state.get("reminder_count", 0) >= 2:
-            return StopResult(message="")
+    if state.get("last_reminder_turn", -1) >= current_turn - 2 and state.get("reminder_count", 0) >= 2:
+        return StopResult(message="")
 
     recent_content = _get_recent_assistant_content(messages)
     recent_tools = _get_recent_tool_calls(messages)

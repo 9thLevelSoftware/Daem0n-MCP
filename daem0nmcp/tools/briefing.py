@@ -1326,7 +1326,7 @@ async def get_covenant_status(project_path: str | None = None) -> dict[str, Any]
     else:
         covenant_phase = "inscribe"
 
-    PHASE_DISPLAY = {
+    phase_display = {
         "commune": {
             "label": "COMMUNE",
             "description": "Receive briefing from the Daem0n",
@@ -1341,7 +1341,7 @@ async def get_covenant_status(project_path: str | None = None) -> dict[str, Any]
         },
         "seal": {"label": "SEAL", "description": "Evaluate and record outcomes"},
     }
-    phase_info = PHASE_DISPLAY.get(covenant_phase, PHASE_DISPLAY["commune"])
+    phase_info = phase_display.get(covenant_phase, phase_display["commune"])
 
     # Check preflight token status
     preflight_status = "none"

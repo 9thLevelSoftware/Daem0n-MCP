@@ -5,7 +5,6 @@ BM25 Index - Okapi BM25 for keyword-based retrieval.
 Replaces TF-IDF for better term frequency saturation and document length normalization.
 """
 
-
 from rank_bm25 import BM25Okapi
 
 from .similarity import tokenize

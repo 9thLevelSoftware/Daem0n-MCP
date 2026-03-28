@@ -764,7 +764,7 @@ async def cleanup_memories(
         # Merge duplicates: keep newest, preserve outcomes
         merged = 0
         if merge_duplicates:
-            for key, mems in duplicates.items():
+            for _key, mems in duplicates.items():
 
                 def _to_naive(dt_value: datetime | None) -> datetime:
                     if not dt_value:
@@ -783,11 +783,10 @@ async def cleanup_memories(
                 # Pick the most recent outcome across duplicates (if any)
                 outcome_source = None
                 for candidate in mems:
-                    if candidate.outcome:
-                        if outcome_source is None or _outcome_timestamp(
-                            candidate
-                        ) > _outcome_timestamp(outcome_source):
-                            outcome_source = candidate
+                    if candidate.outcome and (outcome_source is None or _outcome_timestamp(
+                        candidate
+                    ) > _outcome_timestamp(outcome_source)):
+                        outcome_source = candidate
 
                 if outcome_source:
                     keeper.outcome = outcome_source.outcome

@@ -87,6 +87,9 @@ class SystemNotifyChannel:
             logger.debug("System notifications not available, skipping")
             return
 
+        if self._notification is None:
+            return
+
         try:
             # Build notification title
             title = f"{self._app_name}: {notification.file_path.name}"

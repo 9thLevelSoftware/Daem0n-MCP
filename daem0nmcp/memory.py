@@ -142,35 +142,30 @@ def _infer_tags(
     # Bugfix patterns - use word boundaries to avoid false positives
     # e.g., "prefix" contains "fix" but shouldn't trigger bugfix
     bugfix_pattern = r"\b(fix|bug|error|issue|broken|crash|failure)\b"
-    if re.search(bugfix_pattern, content_lower):
-        if "bugfix" not in existing:
-            inferred.append("bugfix")
+    if re.search(bugfix_pattern, content_lower) and "bugfix" not in existing:
+        inferred.append("bugfix")
 
     # Tech debt patterns - use word boundaries
     debt_pattern = (
         r"\b(todo|hack|workaround|temporary|quick\s*fix|tech\s*debt|refactor\s*later)\b"
     )
-    if re.search(debt_pattern, content_lower):
-        if "tech-debt" not in existing:
-            inferred.append("tech-debt")
+    if re.search(debt_pattern, content_lower) and "tech-debt" not in existing:
+        inferred.append("tech-debt")
 
     # Performance patterns - use word boundaries
     # e.g., "breakfast" contains "fast" but shouldn't trigger perf
     perf_pattern = r"\b(perf|performance|slow|fast|optim|speed|latency|cache|caching)\b"
-    if re.search(perf_pattern, content_lower):
-        if "perf" not in existing:
-            inferred.append("perf")
+    if re.search(perf_pattern, content_lower) and "perf" not in existing:
+        inferred.append("perf")
 
     # Warning category auto-tag
-    if category == "warning":
-        if "warning" not in existing:
-            inferred.append("warning")
+    if category == "warning" and "warning" not in existing:
+        inferred.append("warning")
 
     # Explicit warning mentions in non-warning categories - use word boundaries
     warning_pattern = r"\b(warn|avoid)\b|don\'t"
-    if category != "warning" and re.search(warning_pattern, content_lower):
-        if "warning" not in existing:
-            inferred.append("warning")
+    if category != "warning" and re.search(warning_pattern, content_lower) and "warning" not in existing:
+        inferred.append("warning")
 
     return inferred
 
@@ -363,10 +358,12 @@ class MemoryManager:
         vector_weight = settings.hybrid_vector_weight
 
         # Get TF-IDF results
+        if self._index is None:
+            raise RuntimeError("MemoryManager: TF-IDF index not initialized")
         tfidf_results = self._index.search(
             query, top_k=top_k * 2, threshold=tfidf_threshold
         )
-        tfidf_scores = {doc_id: score for doc_id, score in tfidf_results}
+        tfidf_scores = dict(tfidf_results)
 
         # If Qdrant is available, get vector results
         if self._qdrant and self._qdrant.get_count() > 0:
@@ -1115,7 +1112,7 @@ class MemoryManager:
 
         # Get full memory objects (may be empty if include_linked is True but no local results)
         memory_ids = [doc_id for doc_id, _ in search_results] if search_results else []
-        {doc_id: score for doc_id, score in search_results} if search_results else {}
+        dict(search_results) if search_results else {}
 
         async with self.db.get_session() as session:
             # Build query with date filters at database level for performance
@@ -2013,9 +2010,8 @@ class MemoryManager:
             # Filter: decisions must have outcome recorded
             candidates = []
             for mem in all_candidates:
-                if mem.category == "decision":
-                    if mem.outcome is None and mem.worked is None:
-                        continue  # Skip pending decisions
+                if mem.category == "decision" and mem.outcome is None and mem.worked is None:
+                    continue  # Skip pending decisions
                 candidates.append(mem)
 
             # Apply topic filter if provided

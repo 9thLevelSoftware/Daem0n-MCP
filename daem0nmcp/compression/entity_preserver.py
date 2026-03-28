@@ -114,7 +114,7 @@ class CodeEntityPreserver:
         r"\benum\s+(\w+)",  # TS/Java enum
     ]
 
-    def __init__(self, additional_structural: list[str] = None):
+    def __init__(self, additional_structural: list[str] | None = None):
         """
         Initialize preserver with optional additional structural tokens.
 

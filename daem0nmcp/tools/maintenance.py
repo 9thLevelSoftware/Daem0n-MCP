@@ -1,6 +1,7 @@
 """Data management tools: export_data, import_data, prune_memories, rebuild_index."""
 
 import base64
+import contextlib
 import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -186,10 +187,8 @@ async def import_data(
             # Decode vector if present
             vector_bytes = None
             if mem_data.get("vector_embedding"):
-                try:
+                with contextlib.suppress(Exception):
                     vector_bytes = base64.b64decode(mem_data["vector_embedding"])
-                except Exception:
-                    pass
 
             # Normalize file_path if present and project_path is available
             try:

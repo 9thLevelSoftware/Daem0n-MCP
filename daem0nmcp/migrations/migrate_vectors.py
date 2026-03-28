@@ -142,10 +142,7 @@ async def run_migration(project_path: str | None = None) -> dict:
         Migration result dictionary.
     """
     # Resolve project path
-    if project_path:
-        project_dir = Path(project_path).resolve()
-    else:
-        project_dir = Path.cwd()
+    project_dir = Path(project_path).resolve() if project_path else Path.cwd()
 
     logger.info(f"Running vector migration for project: {project_dir}")
 

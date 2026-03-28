@@ -2,6 +2,7 @@
 """Daem0nMCP Server -- Composition root, re-exports, lifecycle, and entry point."""
 
 import atexit  # noqa: E401
+import contextlib
 import logging
 
 # --- Core imports and context manager re-exports ---
@@ -35,21 +36,11 @@ _CM_SYMBOLS = (  # context_manager symbols to re-export for backward compat
 try:
     from . import __version__, vectors  # noqa: F401
     from . import context_manager as _cm
-    from .agency import (
-        CapabilityManager,
-        CapabilityScope,
-        SandboxExecutor,
-        check_capability,
-    )  # noqa: F401
+    from .agency import check_capability  # noqa: F401
     from .config import settings
     from .covenant import set_context_callback  # noqa: F401
     from .database import DatabaseManager
-    from .logging_config import (
-        StructuredFormatter,
-        request_id_var,
-        set_release_callback,
-        with_request_id,
-    )  # noqa: F401
+    from .logging_config import with_request_id  # noqa: F401
     from .mcp_instance import mcp  # noqa: F401
     from .memory import MemoryManager
     from .models import CodeEntity, Memory, Rule  # noqa: F401
@@ -90,10 +81,10 @@ from .tools.agency_tools import (
 )
 from .tools.briefing import (
     get_covenant_status,  # noqa: F401
-    )
+)
 from .tools.code_tools import (
     analyze_impact,  # noqa: F401
-    )
+)
 from .tools.cognitive_tools import (  # noqa: F401
     debate_internal,
     evolve_rule,
@@ -101,14 +92,14 @@ from .tools.cognitive_tools import (  # noqa: F401
 )
 from .tools.context_tools import (
     get_active_context,  # noqa: F401
-    )
+)
 from .tools.entity_tools import backfill_entities, list_entities  # noqa: F401
 from .tools.federation import (
     unlink_projects,  # noqa: F401
 )
 from .tools.graph_tools import (
     get_graph,  # noqa: F401
-    )
+)
 from .tools.maintenance import (  # noqa: F401
     export_data,
     import_data,
@@ -117,16 +108,16 @@ from .tools.maintenance import (  # noqa: F401
 )
 from .tools.memory import (
     recall_visual,  # noqa: F401
-    )
+)
 from .tools.resources import (
     _failed_resource_impl,  # noqa: F401
-    )
+)
 from .tools.rules import add_rule, check_rules, list_rules, update_rule  # noqa: F401
 from .tools.temporal import trace_causal_path, trace_evolution  # noqa: F401
 from .tools.verification import verify_facts  # noqa: F401
 from .tools.workflows import (
     reflect,  # noqa: F401
-    )
+)
 
 # --- Remove deprecated individual tools from MCP registry ---
 # Workflow tools (commune, consult, inscribe, reflect, understand, govern,
@@ -215,10 +206,8 @@ _DEPRECATED_TOOLS = [
     "backfill_entities",
 ]
 for _tool_name in _DEPRECATED_TOOLS:
-    try:
+    with contextlib.suppress(Exception):
         mcp.remove_tool(_tool_name)
-    except Exception:
-        pass  # Tool may not exist if module import was skipped
 del _DEPRECATED_TOOLS, _tool_name
 
 try:
@@ -359,10 +348,8 @@ if settings.dream_enabled:
 # --- Cleanup & lifecycle ---
 async def _cleanup_all_contexts():
     for ctx in _cm._project_contexts.values():
-        try:
+        with contextlib.suppress(Exception):
             await ctx.db_manager.close()
-        except Exception:
-            pass
 
 
 def cleanup():

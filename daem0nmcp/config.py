@@ -69,9 +69,7 @@ class Settings(BaseSettings):
     qdrant_path: str | None = (
         None  # Path for local Qdrant storage, auto-detect if not set
     )
-    qdrant_url: str | None = (
-        None  # Optional remote Qdrant URL (overrides local path)
-    )
+    qdrant_url: str | None = None  # Optional remote Qdrant URL (overrides local path)
     qdrant_api_key: str | None = None  # API key for remote Qdrant (if using cloud)
 
     # File Watcher (Phase 1: Proactive Layer)

@@ -87,7 +87,7 @@ class ToolSearchIndex:
 
         # Map back to tools
         matched_tools = []
-        for doc_id, score in results:
+        for doc_id, _score in results:
             for name, tool in self._tools.items():
                 if (hash(name) & 0x7FFFFFFF) == doc_id:
                     if category is None or tool.category == category:

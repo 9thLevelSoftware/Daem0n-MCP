@@ -876,15 +876,18 @@ class TestCommunityRefreshNotStale:
         session = _make_session()
 
         strategy = CommunityRefresh(staleness_threshold=10)
-        with patch.object(
-            strategy, "_check_staleness", new_callable=AsyncMock, return_value=False
-        ), patch(
-            "daem0nmcp.dreaming.strategies.CommunityRefresh.execute.__module__",
-            create=True,
-        ):
+        with (
+            patch.object(
+                strategy, "_check_staleness", new_callable=AsyncMock, return_value=False
+            ),
+            patch(
+                "daem0nmcp.dreaming.strategies.CommunityRefresh.execute.__module__",
+                create=True,
+            ),
             # Patch leidenalg import
-            with patch.dict("sys.modules", {"leidenalg": MagicMock()}):
-                result = await strategy.execute(session, ctx, scheduler)
+            patch.dict("sys.modules", {"leidenalg": MagicMock()}),
+        ):
+            result = await strategy.execute(session, ctx, scheduler)
 
         assert result.insights_generated == 0
         assert "CommunityRefresh" in result.strategies_run
@@ -910,14 +913,17 @@ class TestCommunityRefreshStale:
         mock_communities_module.CommunityManager = mock_cm_class
 
         strategy = CommunityRefresh(staleness_threshold=10)
-        with patch.object(
-            strategy, "_check_staleness", new_callable=AsyncMock, return_value=True
-        ), patch.dict(
-            "sys.modules",
-            {
-                "leidenalg": MagicMock(),
-                "daem0nmcp.communities": mock_communities_module,
-            },
+        with (
+            patch.object(
+                strategy, "_check_staleness", new_callable=AsyncMock, return_value=True
+            ),
+            patch.dict(
+                "sys.modules",
+                {
+                    "leidenalg": MagicMock(),
+                    "daem0nmcp.communities": mock_communities_module,
+                },
+            ),
         ):
             result = await strategy.execute(session, ctx, scheduler)
 
@@ -946,14 +952,17 @@ class TestCommunityRefreshNoCommunities:
         strategy = CommunityRefresh(staleness_threshold=5)
 
         # Mock _check_staleness to return True (no communities, enough memories)
-        with patch.object(
-            strategy, "_check_staleness", new_callable=AsyncMock, return_value=True
-        ), patch.dict(
-            "sys.modules",
-            {
-                "leidenalg": MagicMock(),
-                "daem0nmcp.communities": mock_communities_module,
-            },
+        with (
+            patch.object(
+                strategy, "_check_staleness", new_callable=AsyncMock, return_value=True
+            ),
+            patch.dict(
+                "sys.modules",
+                {
+                    "leidenalg": MagicMock(),
+                    "daem0nmcp.communities": mock_communities_module,
+                },
+            ),
         ):
             await strategy.execute(session, ctx, scheduler)
 
@@ -997,9 +1006,12 @@ class TestCommunityRefreshYield:
         session = _make_session()
 
         strategy = CommunityRefresh(staleness_threshold=10)
-        with patch.object(
-            strategy, "_check_staleness", new_callable=AsyncMock, return_value=True
-        ), patch.dict("sys.modules", {"leidenalg": MagicMock()}):
+        with (
+            patch.object(
+                strategy, "_check_staleness", new_callable=AsyncMock, return_value=True
+            ),
+            patch.dict("sys.modules", {"leidenalg": MagicMock()}),
+        ):
             result = await strategy.execute(session, ctx, scheduler)
 
         assert result.interrupted is True
@@ -1026,14 +1038,17 @@ class TestCommunityRefreshInvalidatesCache:
         mock_communities_module.CommunityManager = mock_cm_class
 
         strategy = CommunityRefresh(staleness_threshold=10)
-        with patch.object(
-            strategy, "_check_staleness", new_callable=AsyncMock, return_value=True
-        ), patch.dict(
-            "sys.modules",
-            {
-                "leidenalg": MagicMock(),
-                "daem0nmcp.communities": mock_communities_module,
-            },
+        with (
+            patch.object(
+                strategy, "_check_staleness", new_callable=AsyncMock, return_value=True
+            ),
+            patch.dict(
+                "sys.modules",
+                {
+                    "leidenalg": MagicMock(),
+                    "daem0nmcp.communities": mock_communities_module,
+                },
+            ),
         ):
             await strategy.execute(session, ctx, scheduler)
 

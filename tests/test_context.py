@@ -164,15 +164,14 @@ class TestPathResolution:
 
         _project_contexts.clear()
 
-        with tempfile.TemporaryDirectory() as dir1:
-            with tempfile.TemporaryDirectory() as dir2:
-                ctx1 = await get_project_context(dir1)
-                ctx2 = await get_project_context(dir2)
+        with tempfile.TemporaryDirectory() as dir1, tempfile.TemporaryDirectory() as dir2:
+            ctx1 = await get_project_context(dir1)
+            ctx2 = await get_project_context(dir2)
 
-                assert ctx1 is not ctx2
-                assert ctx1.project_path != ctx2.project_path
-                assert len(_project_contexts) == 2
+            assert ctx1 is not ctx2
+            assert ctx1.project_path != ctx2.project_path
+            assert len(_project_contexts) == 2
 
-                # Clean up database connections
-                await ctx1.db_manager.close()
-                await ctx2.db_manager.close()
+            # Clean up database connections
+            await ctx1.db_manager.close()
+            await ctx2.db_manager.close()

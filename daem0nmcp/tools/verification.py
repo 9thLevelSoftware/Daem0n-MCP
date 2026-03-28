@@ -1,5 +1,6 @@
 """Fact verification tools: verify_facts + _build_verification_message helper."""
 
+import contextlib
 import logging
 from typing import Any
 
@@ -135,10 +136,8 @@ async def verify_facts(
 
         # Get knowledge graph if available
         knowledge_graph = None
-        try:
+        with contextlib.suppress(Exception):
             knowledge_graph = await ctx.memory_manager.get_knowledge_graph()
-        except Exception:
-            pass  # GraphRAG optional
 
         # Verify claims
         verification_results = await verify_claims(

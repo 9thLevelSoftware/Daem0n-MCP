@@ -6,7 +6,6 @@ RRF formula: score(d) = Σ 1 / (k + rank(d))
 where k is a constant (typically 60) and rank starts at 1.
 """
 
-
 from .bm25_index import BM25Index
 from .vectors import VectorIndex
 
@@ -32,7 +31,7 @@ def reciprocal_rank_fusion(
                 rrf_scores[doc_id] = 0.0
             rrf_scores[doc_id] += 1.0 / (k + rank)
 
-    fused = [(doc_id, score) for doc_id, score in rrf_scores.items()]
+    fused = list(rrf_scores.items())
     fused.sort(key=lambda x: x[1], reverse=True)
     return fused
 

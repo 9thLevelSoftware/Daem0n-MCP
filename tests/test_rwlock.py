@@ -114,10 +114,8 @@ class TestRWLock:
         """Same task can acquire read lock multiple times."""
         lock = RWLock()
 
-        async with lock.read():
-            # This should work - nested read acquisition
-            async with lock.read():
-                pass
+        async with lock.read(), lock.read():
+            pass
 
     @pytest.mark.asyncio
     async def test_exception_in_read_releases_lock(self):

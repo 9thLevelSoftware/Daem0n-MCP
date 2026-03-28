@@ -195,7 +195,7 @@ class RulesEngine:
 
         # Get full rule objects
         rule_ids = [rule_id for rule_id, _ in matches]
-        score_map = {rule_id: score for rule_id, score in matches}
+        score_map = dict(matches)
 
         async with self.db.get_session() as session:
             result = await session.execute(
@@ -226,7 +226,7 @@ class RulesEngine:
         combined = {"must_do": [], "must_not": [], "ask_first": [], "warnings": []}
 
         matched_details = []
-        for rule_id, score, rule in sorted_matches:
+        for _rule_id, _score, rule in sorted_matches:
             combined["must_do"].extend(rule.must_do)
             combined["must_not"].extend(rule.must_not)
             combined["ask_first"].extend(rule.ask_first)
@@ -385,7 +385,7 @@ class RulesEngine:
             return []
 
         rule_ids = [rule_id for rule_id, _ in matches]
-        score_map = {rule_id: score for rule_id, score in matches}
+        score_map = dict(matches)
 
         async with self.db.get_session() as session:
             result = await session.execute(select(Rule).where(Rule.id.in_(rule_ids)))

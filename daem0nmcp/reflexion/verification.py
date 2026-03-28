@@ -11,6 +11,7 @@ Per CONTEXT.md: Verification failures surface as "[unverified]" markers, not har
 
 from __future__ import annotations
 
+import contextlib
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -207,14 +208,12 @@ async def verify_claim(
                     has_support = True
                     # Extract entity ID safely
                     entity_id = None
-                    try:
+                    with contextlib.suppress(ValueError, IndexError):
                         entity_id = (
                             int(entity_node.split(":")[1])
                             if ":" in entity_node
                             else None
                         )
-                    except (ValueError, IndexError):
-                        pass  # entity_id stays None if parsing fails - expected for malformed nodes
 
                     evidence_list.append(
                         VerificationEvidence(

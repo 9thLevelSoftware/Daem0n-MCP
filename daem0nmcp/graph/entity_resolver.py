@@ -176,7 +176,7 @@ class EntityResolver:
             async with self.db.get_session() as sess:
                 return await do_resolve(sess)
 
-    def clear_cache(self, project_path: str = None):
+    def clear_cache(self, project_path: str | None = None):
         """Clear the resolver cache (call after major changes).
 
         Args:

@@ -1,6 +1,7 @@
 """Tests for IdleDreamScheduler -- idle detection, debounce, yield, lifecycle."""
 
 import asyncio
+import contextlib
 
 import pytest
 
@@ -117,10 +118,8 @@ class TestCooperativeYielding:
         async def long_dream(sched):
             dream_started.set()
             # Simulate a long dream that checks for yield
-            try:
+            with contextlib.suppress(asyncio.CancelledError):
                 await asyncio.sleep(10)
-            except asyncio.CancelledError:
-                pass
 
         scheduler = IdleDreamScheduler(idle_timeout=0.1)
         scheduler.set_dream_callback(long_dream)
@@ -217,10 +216,8 @@ class TestErrorResilience:
         async def blocking_dream(sched):
             dream_started.set()
             # Simulate a dream that blocks for a while
-            try:
+            with contextlib.suppress(asyncio.CancelledError):
                 await asyncio.sleep(10)
-            except asyncio.CancelledError:
-                pass
 
         scheduler = IdleDreamScheduler(idle_timeout=0.1)
         scheduler.set_dream_callback(blocking_dream)

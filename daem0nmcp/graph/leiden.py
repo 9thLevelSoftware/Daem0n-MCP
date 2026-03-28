@@ -44,10 +44,7 @@ def run_leiden_on_networkx(
         return {}
 
     # Convert to undirected for community detection
-    if nx_graph.is_directed():
-        undirected = nx_graph.to_undirected()
-    else:
-        undirected = nx_graph
+    undirected = nx_graph.to_undirected() if nx_graph.is_directed() else nx_graph
 
     # Convert NetworkX to igraph
     # Note: ig.Graph.from_networkx preserves node attributes

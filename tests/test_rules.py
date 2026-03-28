@@ -251,7 +251,7 @@ class TestRulesEngine:
         # At least one should match due to semantic similarity
         # (security, auth/authentication)
         total_matches = result1["matched_rules"] + result2["matched_rules"]
-        assert total_matches >= 1 or True  # May not match, but feature exists
+        assert total_matches >= 1  # May not match, but feature exists
 
 
 class TestRulesCaching:

@@ -94,20 +94,20 @@ class TestClaimExtractionToVerification:
             patch(
                 "daem0nmcp.reflexion.verification.encode_document"
             ) as mock_encode_doc,
+            patch("daem0nmcp.reflexion.verification.decode") as mock_decode,
+            patch(
+                "daem0nmcp.reflexion.verification.cosine_similarity"
+            ) as mock_sim,
         ):
-            with patch("daem0nmcp.reflexion.verification.decode") as mock_decode:
-                with patch(
-                    "daem0nmcp.reflexion.verification.cosine_similarity"
-                ) as mock_sim:
-                    mock_encode.return_value = b"embedding"
-                    mock_encode_doc.return_value = b"embedding"
-                    mock_decode.return_value = [0.1] * 256
-                    mock_sim.return_value = 0.85
+            mock_encode.return_value = b"embedding"
+            mock_encode_doc.return_value = b"embedding"
+            mock_decode.return_value = [0.1] * 256
+            mock_sim.return_value = 0.85
 
-                    results = await verify_claims(
-                        claims=claims,
-                        memory_manager=mock_memory_manager,
-                    )
+            results = await verify_claims(
+                claims=claims,
+                memory_manager=mock_memory_manager,
+            )
 
         # Should have verification results
         assert len(results) == len(claims)
@@ -151,20 +151,20 @@ class TestClaimExtractionToVerification:
             patch(
                 "daem0nmcp.reflexion.verification.encode_document"
             ) as mock_encode_doc,
+            patch("daem0nmcp.reflexion.verification.decode") as mock_decode,
+            patch(
+                "daem0nmcp.reflexion.verification.cosine_similarity"
+            ) as mock_sim,
         ):
-            with patch("daem0nmcp.reflexion.verification.decode") as mock_decode:
-                with patch(
-                    "daem0nmcp.reflexion.verification.cosine_similarity"
-                ) as mock_sim:
-                    mock_encode.return_value = b"embedding"
-                    mock_encode_doc.return_value = b"embedding"
-                    mock_decode.return_value = [0.1] * 256
-                    mock_sim.return_value = 0.85
+            mock_encode.return_value = b"embedding"
+            mock_encode_doc.return_value = b"embedding"
+            mock_decode.return_value = [0.1] * 256
+            mock_sim.return_value = 0.85
 
-                    results = await verify_claims(
-                        claims=claims,
-                        memory_manager=mock_memory_manager,
-                    )
+            results = await verify_claims(
+                claims=claims,
+                memory_manager=mock_memory_manager,
+            )
 
         summary = summarize_verification(results)
 
@@ -203,21 +203,23 @@ class TestFullReflexionLoop:
             "context_filter": None,
         }
 
-        with patch("daem0nmcp.reflexion.nodes.verify_claims") as mock_verify:
-            with patch(
+        with (
+            patch("daem0nmcp.reflexion.nodes.verify_claims") as mock_verify,
+            patch(
                 "daem0nmcp.reflexion.nodes.summarize_verification"
-            ) as mock_summary:
-                # High quality on first try -> should exit early
-                mock_verify.return_value = []
-                mock_summary.return_value = {
-                    "verified_count": 0,
-                    "unverified_count": 0,
-                    "conflict_count": 0,
-                    "overall_confidence": 0.9,
-                    "conflicts": [],
-                }
+            ) as mock_summary,
+        ):
+            # High quality on first try -> should exit early
+            mock_verify.return_value = []
+            mock_summary.return_value = {
+                "verified_count": 0,
+                "unverified_count": 0,
+                "conflict_count": 0,
+                "overall_confidence": 0.9,
+                "conflicts": [],
+            }
 
-                result = await app.ainvoke(initial_state)
+            result = await app.ainvoke(initial_state)
 
         # Should have a draft
         assert result["draft"]
@@ -255,21 +257,23 @@ class TestFullReflexionLoop:
             "context_filter": None,
         }
 
-        with patch("daem0nmcp.reflexion.nodes.verify_claims") as mock_verify:
-            with patch(
+        with (
+            patch("daem0nmcp.reflexion.nodes.verify_claims") as mock_verify,
+            patch(
                 "daem0nmcp.reflexion.nodes.summarize_verification"
-            ) as mock_summary:
-                # Always return low quality -> should hit max iterations
-                mock_verify.return_value = []
-                mock_summary.return_value = {
-                    "verified_count": 0,
-                    "unverified_count": 2,
-                    "conflict_count": 0,
-                    "overall_confidence": 0.3,
-                    "conflicts": [],
-                }
+            ) as mock_summary,
+        ):
+            # Always return low quality -> should hit max iterations
+            mock_verify.return_value = []
+            mock_summary.return_value = {
+                "verified_count": 0,
+                "unverified_count": 2,
+                "conflict_count": 0,
+                "overall_confidence": 0.3,
+                "conflicts": [],
+            }
 
-                result = await app.ainvoke(initial_state)
+            result = await app.ainvoke(initial_state)
 
         # Should have hit max iterations
         assert result["iteration"] <= MAX_ITERATIONS
@@ -281,24 +285,26 @@ class TestFullReflexionLoop:
         self, mock_memory_manager, mock_knowledge_graph
     ):
         """Test run_reflexion convenience function."""
-        with patch("daem0nmcp.reflexion.nodes.verify_claims") as mock_verify:
-            with patch(
+        with (
+            patch("daem0nmcp.reflexion.nodes.verify_claims") as mock_verify,
+            patch(
                 "daem0nmcp.reflexion.nodes.summarize_verification"
-            ) as mock_summary:
-                mock_verify.return_value = []
-                mock_summary.return_value = {
-                    "verified_count": 0,
-                    "unverified_count": 0,
-                    "conflict_count": 0,
-                    "overall_confidence": 0.95,
-                    "conflicts": [],
-                }
+            ) as mock_summary,
+        ):
+            mock_verify.return_value = []
+            mock_summary.return_value = {
+                "verified_count": 0,
+                "unverified_count": 0,
+                "conflict_count": 0,
+                "overall_confidence": 0.95,
+                "conflicts": [],
+            }
 
-                result = await run_reflexion(
-                    query="What is the best approach?",
-                    memory_manager=mock_memory_manager,
-                    knowledge_graph=mock_knowledge_graph,
-                )
+            result = await run_reflexion(
+                query="What is the best approach?",
+                memory_manager=mock_memory_manager,
+                knowledge_graph=mock_knowledge_graph,
+            )
 
         # Should return a valid state
         assert "draft" in result
@@ -547,20 +553,20 @@ class TestVerifyFactsToolIntegration:
             patch(
                 "daem0nmcp.reflexion.verification.encode_document"
             ) as mock_encode_doc,
+            patch("daem0nmcp.reflexion.verification.decode") as mock_decode,
+            patch(
+                "daem0nmcp.reflexion.verification.cosine_similarity"
+            ) as mock_sim,
         ):
-            with patch("daem0nmcp.reflexion.verification.decode") as mock_decode:
-                with patch(
-                    "daem0nmcp.reflexion.verification.cosine_similarity"
-                ) as mock_sim:
-                    mock_encode.return_value = b"embedding"
-                    mock_encode_doc.return_value = b"embedding"
-                    mock_decode.return_value = [0.1] * 256
-                    mock_sim.return_value = 0.75
+            mock_encode.return_value = b"embedding"
+            mock_encode_doc.return_value = b"embedding"
+            mock_decode.return_value = [0.1] * 256
+            mock_sim.return_value = 0.75
 
-                    results = await verify_claims(
-                        claims=claims,
-                        memory_manager=mock_memory_manager,
-                    )
+            results = await verify_claims(
+                claims=claims,
+                memory_manager=mock_memory_manager,
+            )
 
         assert len(results) == len(claims)
 

@@ -216,14 +216,14 @@ class HybridSearch:
         tfidf_results = self.tfidf.search(
             query, top_k=top_k * 2, threshold=tfidf_threshold
         )
-        tfidf_scores = {doc_id: score for doc_id, score in tfidf_results}
+        tfidf_scores = dict(tfidf_results)
 
         # If vectors available, get vector results
         if len(self.vectors) > 0:
             vector_results = self.vectors.search(
                 query, top_k=top_k * 2, threshold=vector_threshold
             )
-            vector_scores = {doc_id: score for doc_id, score in vector_results}
+            vector_scores = dict(vector_results)
 
             # Combine scores
             all_docs = set(tfidf_scores.keys()) | set(vector_scores.keys())

@@ -5,6 +5,7 @@ This channel writes notification state to a JSON file that editors
 can poll periodically to show inline annotations or notifications.
 """
 
+import contextlib
 import json
 import logging
 from datetime import datetime, timezone
@@ -268,12 +269,10 @@ class EditorPollChannel:
             self._files = state.get("files", {})
             updated_at = state.get("updated_at")
             if updated_at:
-                try:
+                with contextlib.suppress(ValueError, TypeError):
                     self._last_updated = datetime.fromisoformat(
                         updated_at.replace("Z", "+00:00")
                     )
-                except (ValueError, TypeError):
-                    pass
 
             project_path = state.get("project_path")
             if project_path:

@@ -20,7 +20,7 @@ except ImportError:
     from daem0nmcp.logging_config import with_request_id
     from daem0nmcp.mcp_instance import mcp
 
-from ._deprecation import workflow_call
+from ._deprecation import WorkflowCall
 
 # Import workflow error types
 try:
@@ -64,7 +64,7 @@ async def commune(
             from ..workflows import commune as commune_mod
         except ImportError:
             from daem0nmcp.workflows import commune as commune_mod
-        with workflow_call():
+        with WorkflowCall():
             return await commune_mod.dispatch(
                 action=action,
                 project_path=pp,
@@ -141,7 +141,7 @@ async def consult(
             from ..workflows import consult as consult_mod
         except ImportError:
             from daem0nmcp.workflows import consult as consult_mod
-        with workflow_call():
+        with WorkflowCall():
             return await consult_mod.dispatch(
                 action=action,
                 project_path=pp,
@@ -228,7 +228,7 @@ async def inscribe(
             from ..workflows import inscribe as inscribe_mod
         except ImportError:
             from daem0nmcp.workflows import inscribe as inscribe_mod
-        with workflow_call():
+        with WorkflowCall():
             return await inscribe_mod.dispatch(
                 action=action,
                 project_path=pp,
@@ -292,7 +292,7 @@ async def reflect(
             from ..workflows import reflect as reflect_mod
         except ImportError:
             from daem0nmcp.workflows import reflect as reflect_mod
-        with workflow_call():
+        with WorkflowCall():
             return await reflect_mod.dispatch(
                 action=action,
                 project_path=pp,
@@ -346,7 +346,7 @@ async def understand(
             from ..workflows import understand as understand_mod
         except ImportError:
             from daem0nmcp.workflows import understand as understand_mod
-        with workflow_call():
+        with WorkflowCall():
             return await understand_mod.dispatch(
                 action=action,
                 project_path=pp,
@@ -411,7 +411,7 @@ async def govern(
             from ..workflows import govern as govern_mod
         except ImportError:
             from daem0nmcp.workflows import govern as govern_mod
-        with workflow_call():
+        with WorkflowCall():
             return await govern_mod.dispatch(
                 action=action,
                 project_path=pp,
@@ -495,7 +495,7 @@ async def explore(
             from ..workflows import explore as explore_mod
         except ImportError:
             from daem0nmcp.workflows import explore as explore_mod
-        with workflow_call():
+        with WorkflowCall():
             return await explore_mod.dispatch(
                 action=action,
                 project_path=pp,
@@ -580,7 +580,7 @@ async def maintain(
             from ..workflows import maintain as maintain_mod
         except ImportError:
             from daem0nmcp.workflows import maintain as maintain_mod
-        with workflow_call():
+        with WorkflowCall():
             return await maintain_mod.dispatch(
                 action=action,
                 project_path=pp,

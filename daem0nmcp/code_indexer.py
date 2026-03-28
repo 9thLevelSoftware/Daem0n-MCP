@@ -291,7 +291,7 @@ class TreeSitterIndexer:
             return []
 
         imports = []
-        for pattern_index, captures_dict in matches:
+        for _pattern_index, captures_dict in matches:
             for capture_name, nodes in captures_dict.items():
                 if capture_name in ("import.name", "import.module", "import.source"):
                     for node in nodes:
@@ -388,7 +388,7 @@ class TreeSitterIndexer:
         # Process matches - each match is (pattern_index, captures_dict)
         processed_defs = set()
 
-        for pattern_index, captures_dict in matches:
+        for _pattern_index, captures_dict in matches:
             # Find the definition capture (ends with .def)
             def_capture = None
             def_nodes = []
@@ -514,7 +514,7 @@ class TreeSitterIndexer:
     def _extract_go_comment(self, node, source: bytes) -> str | None:
         """Extract Go comment preceding a definition."""
         prev = node.prev_sibling
-        comments = []
+        comments: list[str] = []
         while prev and prev.type == "comment":
             text = source[prev.start_byte : prev.end_byte].decode(
                 "utf-8", errors="replace"
@@ -609,7 +609,7 @@ class TreeSitterIndexer:
           - Nested class: module.Outer.Inner.method
           - Top-level function: module.function_name
         """
-        parts = []
+        parts: list[str] = []
 
         # Walk up the tree collecting scope names
         current = node.parent
@@ -636,13 +636,12 @@ class TreeSitterIndexer:
             elif lang == "rust":
                 if current.type in ("impl_item", "function_item"):
                     scope_name = self._extract_name_from_node(current, source)
-            elif lang in ("kotlin", "java"):
-                if current.type in (
-                    "class_declaration",
-                    "object_declaration",
-                    "function_declaration",
-                ):
-                    scope_name = self._extract_name_from_node(current, source)
+            elif lang in ("kotlin", "java") and current.type in (
+                "class_declaration",
+                "object_declaration",
+                "function_declaration",
+            ):
+                scope_name = self._extract_name_from_node(current, source)
 
             if scope_name:
                 parts.insert(0, scope_name)
@@ -1244,9 +1243,7 @@ class CodeIndexManager:
 
         return {"changed": True, "entities_count": len(entities)}
 
-    async def _get_stored_hash(
-        self, project_path: str, file_path: str
-    ) -> str | None:
+    async def _get_stored_hash(self, project_path: str, file_path: str) -> str | None:
         """Get stored content hash for a file."""
         from sqlalchemy import and_, select
 

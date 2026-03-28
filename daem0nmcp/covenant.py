@@ -451,10 +451,10 @@ class CovenantEnforcer:
             return CovenantViolation.counsel_required(tool_name, project_path)
 
         # Check if the most recent counsel is still fresh
-        if most_recent_age > ttl_seconds:
+        if most_recent_age is None or most_recent_age > ttl_seconds:
             logger.info(f"Counsel expired ({most_recent_age:.0f}s old) for {tool_name}")
             return CovenantViolation.counsel_expired(
-                tool_name, project_path, int(most_recent_age)
+                tool_name, project_path, int(most_recent_age) if most_recent_age else 0
             )
 
         return None  # Counsel is fresh

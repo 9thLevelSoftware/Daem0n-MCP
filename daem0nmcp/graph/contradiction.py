@@ -15,7 +15,6 @@ Links:
 import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -122,7 +121,7 @@ async def detect_contradictions(
     Returns:
         List of Contradiction objects for detected conflicts
     """
-    contradictions = []
+    contradictions: list[Contradiction] = []
 
     # Encode the new content
     new_embedding_bytes = encode_document(new_content)
@@ -145,7 +144,7 @@ async def detect_contradictions(
     versions = result.scalars().all()
 
     # Cache embeddings to avoid recomputing for the same content across calls
-    embedding_cache: dict[int, Any] = {}
+    embedding_cache: dict[int, list[float]] = {}
 
     for version in versions:
         # Use cached embedding if available, otherwise compute and cache

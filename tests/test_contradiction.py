@@ -465,7 +465,7 @@ async def test_check_and_invalidate_combined(db_manager):
         # The test validates the function runs without error and returns correct types
         assert isinstance(contradictions, list)
         assert isinstance(invalidated, int)
-        assert invalidated == len([c for c in contradictions])
+        assert invalidated == len(list(contradictions))
 
 
 class TestNegationPatternCoverage:

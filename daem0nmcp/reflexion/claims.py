@@ -215,10 +215,9 @@ def _extract_subject_predicate(
         "return_value",
         "property",
         "requirement",
-    ):
+    ) and len(groups) >= 2:
         # Two-group patterns: subject verb predicate
-        if len(groups) >= 2:
-            return groups[0].strip(), groups[1].strip()
+        return groups[0].strip(), groups[1].strip()
 
     if pattern_type in (
         "decision",
@@ -231,20 +230,17 @@ def _extract_subject_predicate(
         "last_time",
         "before",
         "user_statement",
-    ):
+    ) and groups:
         # Single-group patterns: full claim is the subject
-        if groups:
-            return groups[0].strip(), None
+        return groups[0].strip(), None
 
-    if pattern_type == "outcome":
+    if pattern_type == "outcome" and groups:
         # Outcome patterns: the outcome word is the predicate
-        if groups:
-            return match.group(0).strip(), groups[0].strip()
+        return match.group(0).strip(), groups[0].strip()
 
-    if pattern_type == "outcome_subject":
+    if pattern_type == "outcome_subject" and len(groups) >= 2:
         # "the X failed" patterns: X is subject, outcome is predicate
-        if len(groups) >= 2:
-            return groups[0].strip(), groups[1].strip()
+        return groups[0].strip(), groups[1].strip()
 
     return None, None
 

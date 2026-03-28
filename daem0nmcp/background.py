@@ -1,6 +1,7 @@
 """Background task management for long-running operations."""
 
 import asyncio
+import contextlib
 import uuid
 from collections.abc import Awaitable
 from datetime import datetime, timezone
@@ -146,10 +147,8 @@ class BackgroundTaskManager:
             return False
 
         task["_task"].cancel()
-        try:
+        with contextlib.suppress(asyncio.CancelledError):
             await task["_task"]
-        except asyncio.CancelledError:
-            pass
         return True
 
     def list_tasks(self, project_path: str | None = None) -> list:

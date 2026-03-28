@@ -1,7 +1,6 @@
 """Unified error handling for workflow tools."""
 
 
-
 class WorkflowError(Exception):
     """Base class for workflow errors."""
 

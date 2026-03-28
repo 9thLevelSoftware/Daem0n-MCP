@@ -15,7 +15,7 @@ by the individual cognitive modules (simulate.py, evolve.py, debate.py).
 """
 
 from dataclasses import asdict, dataclass
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 __all__ = [
     "SimulationResult",

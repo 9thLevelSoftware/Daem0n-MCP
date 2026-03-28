@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from daem0nmcp.server import (
+from daem0nmcp.tools.briefing import (
     _extract_architecture,
     _extract_conventions,
     _extract_entry_points,

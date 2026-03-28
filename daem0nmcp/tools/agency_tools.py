@@ -58,8 +58,8 @@ def _resolve_public_ips(hostname: str) -> set[str]:
 
     try:
         addr_infos = socket.getaddrinfo(hostname, None, proto=socket.IPPROTO_TCP)
-    except socket.gaierror:
-        raise ValueError("Host could not be resolved")
+    except socket.gaierror as err:
+        raise ValueError("Host could not be resolved") from err
 
     if not addr_infos:
         raise ValueError("Host could not be resolved")
@@ -144,13 +144,16 @@ async def _fetch_and_extract(
     response = None
     try:
         limits = httpx.Limits(max_connections=1, max_keepalive_connections=0)
-        async with httpx.AsyncClient(
-            timeout=float(INGEST_TIMEOUT),
-            follow_redirects=False,
-            trust_env=False,
-            limits=limits,
-            headers={"Accept-Encoding": "identity"},
-        ) as client, client.stream("GET", url) as response:
+        async with (
+            httpx.AsyncClient(
+                timeout=float(INGEST_TIMEOUT),
+                follow_redirects=False,
+                trust_env=False,
+                limits=limits,
+                headers={"Accept-Encoding": "identity"},
+            ) as client,
+            client.stream("GET", url) as response,
+        ):
             response.raise_for_status()
 
             # Check content length header first

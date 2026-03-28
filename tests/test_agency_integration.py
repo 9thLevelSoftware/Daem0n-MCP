@@ -29,7 +29,7 @@ from daem0nmcp.agency import (
 # ============================================================================
 
 
-class TestAgency03_SandboxedExecution:
+class TestAgency03SandboxedExecution:
     """
     AGENCY-03: execute_python tool provides sandboxed code execution.
 
@@ -103,7 +103,7 @@ class TestAgency03_SandboxedExecution:
 # ============================================================================
 
 
-class TestAgency04_SandboxIsolation:
+class TestAgency04SandboxIsolation:
     """
     AGENCY-04: Sandbox isolation via rootless container or Wasm (E2B).
 
@@ -199,7 +199,7 @@ class TestAgency04_SandboxIsolation:
 # ============================================================================
 
 
-class TestAgency05_CapabilityScopedAccess:
+class TestAgency05CapabilityScopedAccess:
     """
     AGENCY-05: Capability-scoped access enforces least-privilege.
 

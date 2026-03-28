@@ -65,10 +65,7 @@ def _is_significant(file_path: str, change_content: str) -> bool:
         if pattern.lower() in change_lower:
             return True
 
-    if len(change_content) > 500:
-        return True
-
-    return False
+    return len(change_content) > 500
 
 
 def main() -> None:

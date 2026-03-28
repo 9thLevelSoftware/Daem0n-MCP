@@ -6,7 +6,7 @@ import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
-from daem0nmcp.server import TODO_PATTERN, _scan_for_todos
+from daem0nmcp.tools.code_tools import TODO_PATTERN, _scan_for_todos
 
 
 class TestTodoPattern:

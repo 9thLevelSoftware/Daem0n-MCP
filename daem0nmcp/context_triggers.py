@@ -266,17 +266,14 @@ class ContextTriggerManager:
         for trigger in triggers:
             matched = False
 
-            if trigger["trigger_type"] == "file_pattern" and file_path:
-                if self._matches_file_pattern(trigger["pattern"], file_path):
-                    matched = True
+            if trigger["trigger_type"] == "file_pattern" and file_path and self._matches_file_pattern(trigger["pattern"], file_path):
+                matched = True
 
-            elif trigger["trigger_type"] == "tag_match" and tags:
-                if self._matches_regex(trigger["pattern"], tags):
-                    matched = True
+            elif trigger["trigger_type"] == "tag_match" and tags and self._matches_regex(trigger["pattern"], tags):
+                matched = True
 
-            elif trigger["trigger_type"] == "entity_match" and entities:
-                if self._matches_regex(trigger["pattern"], entities):
-                    matched = True
+            elif trigger["trigger_type"] == "entity_match" and entities and self._matches_regex(trigger["pattern"], entities):
+                matched = True
 
             if matched:
                 matches.append(

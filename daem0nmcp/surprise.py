@@ -7,7 +7,6 @@ High surprise = novel, important information to prioritize.
 Low surprise = routine, can be deprioritized.
 """
 
-
 import numpy as np
 
 

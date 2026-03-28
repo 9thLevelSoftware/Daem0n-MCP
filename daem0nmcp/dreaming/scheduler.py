@@ -7,6 +7,7 @@ cooperatively via asyncio.Event when the user returns.
 """
 
 import asyncio
+import contextlib
 import logging
 import time
 from collections.abc import Awaitable, Callable
@@ -53,7 +54,9 @@ class IdleDreamScheduler:
         self._monitor_task: asyncio.Task | None = None
         self._running: bool = False
         self._is_dreaming: bool = False
-        self._dream_callback: Callable[[IdleDreamScheduler], Awaitable[None]] | None = None
+        self._dream_callback: Callable[[IdleDreamScheduler], Awaitable[None]] | None = (
+            None
+        )
 
     def set_dream_callback(
         self,
@@ -117,10 +120,8 @@ class IdleDreamScheduler:
 
         if self._monitor_task is not None:
             self._monitor_task.cancel()
-            try:
+            with contextlib.suppress(asyncio.CancelledError):
                 await self._monitor_task
-            except asyncio.CancelledError:
-                pass
             self._monitor_task = None
 
         logger.info("IdleDreamScheduler stopped")

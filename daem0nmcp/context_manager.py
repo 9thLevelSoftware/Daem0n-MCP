@@ -167,9 +167,7 @@ def _check_covenant_communion(project_path: str) -> dict[str, Any] | None:
     return None
 
 
-def _check_covenant_counsel(
-    tool_name: str, project_path: str
-) -> dict[str, Any] | None:
+def _check_covenant_counsel(tool_name: str, project_path: str) -> dict[str, Any] | None:
     """
     Check if counsel (context_check) was sought for this project.
 

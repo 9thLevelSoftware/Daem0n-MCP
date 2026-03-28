@@ -331,13 +331,13 @@ async def _do_purge_dream_spam(project_path: str, dry_run: bool) -> dict[str, An
                 summary_by_day[day_key].append(mem)
 
         # For each decision, keep only the most recent re-evaluation
-        for decision_id, mems in reeval_by_decision.items():
+        for _decision_id, mems in reeval_by_decision.items():
             # Already sorted desc by created_at from query
             if len(mems) > 1:
                 reeval_to_delete.extend(m.id for m in mems[1:])
 
         # For each day, keep only the most recent summary
-        for day, mems in summary_by_day.items():
+        for _day, mems in summary_by_day.items():
             if len(mems) > 1:
                 summary_to_delete.extend(m.id for m in mems[1:])
 

@@ -331,12 +331,11 @@ class CovenantTransform:
         state = get_state(project_path)
 
         # Step 3: Check communion requirement
-        if tool_name in self.communion_required_tools:
-            if state is None or not state.get("briefed", False):
-                logger.info(
-                    f"Communion required for tool '{tool_name}' on project '{project_path}'"
-                )
-                return CovenantViolation.communion_required(project_path or "unknown")
+        if tool_name in self.communion_required_tools and (state is None or not state.get("briefed", False)):
+            logger.info(
+                f"Communion required for tool '{tool_name}' on project '{project_path}'"
+            )
+            return CovenantViolation.communion_required(project_path or "unknown")
 
         # Step 4: Check counsel requirement
         if tool_name in self.counsel_required_tools:
@@ -479,7 +478,8 @@ class CovenantMiddleware(Middleware if _FASTMCP_MIDDLEWARE_AVAILABLE else object
         exempt_tools: set[str] | None = None,
         communion_required_tools: set[str] | None = None,
         counsel_required_tools: set[str] | None = None,
-        dream_scheduler: Any | None = None,  # IdleDreamScheduler, typed as Any to avoid circular import
+        dream_scheduler: Any
+        | None = None,  # IdleDreamScheduler, typed as Any to avoid circular import
     ):
         """
         Initialize the CovenantMiddleware.
