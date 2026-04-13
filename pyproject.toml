@@ -45,7 +45,7 @@ dependencies = [
     # BM25 for hybrid retrieval
     "rank-bm25>=0.2.2",
     # Phase 1: GraphRAG
-    "networkx>=3.0",
+    "networkx>=3.4.2",
     "leidenalg>=0.10.0",
     "python-igraph>=0.11.0",
     # Phase 3: Metacognitive Architecture (Reflexion)
