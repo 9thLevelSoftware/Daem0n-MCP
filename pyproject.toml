@@ -34,7 +34,7 @@ dependencies = [
     # Vector embeddings
     "sentence-transformers>=3.0.0",
     "onnxruntime>=1.24.1",
-    "numpy>=1.24.0",
+    "numpy>=2.2.6",
     # Vector database
     "qdrant-client>=1.7.0",
     # Phase 1: File watching + notifications
