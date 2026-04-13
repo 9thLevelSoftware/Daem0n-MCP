@@ -53,7 +53,7 @@ dependencies = [
     "langgraph-checkpoint-sqlite>=3.0.3",
     # Phase 4: Context Engineering
     "llmlingua>=0.2.2",
-    "tiktoken>=0.5.0",
+    "tiktoken>=0.12.0",
     # Phase 5: Dynamic Agency
     "e2b-code-interpreter>=1.0.0",
 ]
