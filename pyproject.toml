@@ -68,7 +68,7 @@ dev = [
 tracing = [
     "opentelemetry-api>=1.20.0",
     "opentelemetry-sdk>=1.20.0",
-    "opentelemetry-exporter-otlp>=1.20.0",
+    "opentelemetry-exporter-otlp>=1.41.0",
 ]
 
 [project.scripts]
