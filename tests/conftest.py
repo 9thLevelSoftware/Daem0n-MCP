@@ -34,32 +34,11 @@ def _safe_mkdtemp(
     return str(path)
 
 
-class _SafeTemporaryDirectory:
-    def __init__(
-        self,
-        suffix: str | None = None,
-        prefix: str | None = None,
-        dir: str | None = None,
-    ):
-        self.name = _safe_mkdtemp(suffix=suffix, prefix=prefix, dir=dir)
-
-    def __enter__(self) -> str:
-        return self.name
-
-    def cleanup(self) -> None:
-        shutil.rmtree(self.name, ignore_errors=True)
-
-    def __exit__(self, exc_type, exc, tb) -> None:
-        self.cleanup()
-
-    def __del__(self) -> None:
-        self.cleanup()
-
-
 # Override tempfile helpers to avoid restricted temp directories on Windows.
+# Keep the standard TemporaryDirectory implementation: dependencies use its
+# keyword options, and its cleanup failures must remain observable.
 tempfile.tempdir = str(SAFE_TMP_ROOT)
 tempfile.mkdtemp = _safe_mkdtemp  # type: ignore[assignment]
-tempfile.TemporaryDirectory = _SafeTemporaryDirectory  # type: ignore[assignment]
 os.environ["GIT_CEILING_DIRECTORIES"] = str(SAFE_TMP_ROOT)
 
 

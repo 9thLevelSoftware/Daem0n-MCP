@@ -17,12 +17,13 @@ from daem0nmcp.retrieval.specialized_contract import (
     specialized_projection_contract,
 )
 
-
 WORKSPACE_ID = "ws_0123456789abcdef01234567"
 OTHER_WORKSPACE_ID = "ws_76543210fedcba9876543210"
 ROOT_HASH = "a" * 64
 OTHER_ROOT_HASH = "b" * 64
 T0_US = 1_767_225_600_000_000
+
+
 def _record_id(digit: str) -> str:
     return "mem_" + digit * 64
 
@@ -344,16 +345,18 @@ class TemporalProviderTests(_SpecializedDatabaseTestCase):
             10,
         )
 
-        self.assertEqual((_record_id("1"),), tuple(
-            item.evidence.record_id for item in before_retraction.candidates
-        ))
+        self.assertEqual(
+            (_record_id("1"),),
+            tuple(item.evidence.record_id for item in before_retraction.candidates),
+        )
         self.assertEqual(
             _fact_id("1"),
             before_retraction.candidates[0].evidence.version_id,
         )
-        self.assertEqual((_record_id("1"),), tuple(
-            item.evidence.record_id for item in after_retraction.candidates
-        ))
+        self.assertEqual(
+            (_record_id("1"),),
+            tuple(item.evidence.record_id for item in after_retraction.candidates),
+        )
         self.assertEqual(
             _fact_id("2"),
             after_retraction.candidates[0].evidence.version_id,
@@ -372,18 +375,15 @@ class TemporalProviderTests(_SpecializedDatabaseTestCase):
             self._query(include_invalidated=True, **query_values), 10
         )
 
-        self.assertEqual((_record_id("2"),), tuple(
-            item.evidence.record_id for item in excluded.candidates
-        ))
-        by_record = {
-            item.evidence.record_id: item for item in included.candidates
-        }
+        self.assertEqual(
+            (_record_id("2"),),
+            tuple(item.evidence.record_id for item in excluded.candidates),
+        )
+        by_record = {item.evidence.record_id: item for item in included.candidates}
         superseded = by_record[_record_id("1")]
         self.assertEqual(_fact_id("1"), superseded.evidence.version_id)
         self.assertIn("SUPERSEDED", superseded.policy_notes)
-        self.assertIn(
-            f"SUPERSEDED_BY:{_fact_id('2')}", superseded.policy_notes
-        )
+        self.assertIn(f"SUPERSEDED_BY:{_fact_id('2')}", superseded.policy_notes)
 
     async def test_invalidation_opt_in_includes_closed_transaction_history(
         self,
@@ -399,15 +399,11 @@ class TemporalProviderTests(_SpecializedDatabaseTestCase):
             10,
         )
 
-        by_version = {
-            item.evidence.version_id: item for item in result.candidates
-        }
+        by_version = {item.evidence.version_id: item for item in result.candidates}
         self.assertIn(_fact_id("1"), by_version)
         self.assertIn(_fact_id("2"), by_version)
         closed = by_version[_fact_id("1")]
-        self.assertIn(
-            f"SUPERSEDED_BY:{_fact_id('2')}", closed.policy_notes
-        )
+        self.assertIn(f"SUPERSEDED_BY:{_fact_id('2')}", closed.policy_notes)
         self.assertNotIn("SUPERSEDED", by_version[_fact_id("2")].policy_notes)
 
     async def test_implicit_snapshot_is_captured_once_for_both_axes(self) -> None:
@@ -422,14 +418,15 @@ class TemporalProviderTests(_SpecializedDatabaseTestCase):
                 raise RuntimeError("snapshot was recaptured")
             return T0_US + 300
 
-        result = await TemporalProvider(
-            self.connection, clock_us=one_snapshot
-        ).search(self._query(), 10)
+        result = await TemporalProvider(self.connection, clock_us=one_snapshot).search(
+            self._query(), 10
+        )
 
         self.assertEqual("ready", result.status)
-        self.assertEqual((_record_id("1"),), tuple(
-            item.evidence.record_id for item in result.candidates
-        ))
+        self.assertEqual(
+            (_record_id("1"),),
+            tuple(item.evidence.record_id for item in result.candidates),
+        )
 
     async def test_as_of_queries_supply_candidates_without_text_overlap(
         self,
@@ -445,9 +442,10 @@ class TemporalProviderTests(_SpecializedDatabaseTestCase):
             10,
         )
 
-        self.assertEqual((_record_id("1"),), tuple(
-            item.evidence.record_id for item in result.candidates
-        ))
+        self.assertEqual(
+            (_record_id("1"),),
+            tuple(item.evidence.record_id for item in result.candidates),
+        )
 
     async def test_candidate_uses_active_content_authority_without_text(self) -> None:
         from daem0nmcp.retrieval.specialized import TemporalProvider
@@ -485,13 +483,9 @@ class TemporalProviderTests(_SpecializedDatabaseTestCase):
     async def test_builder_contract_mismatch_is_stale(self) -> None:
         from daem0nmcp.retrieval.specialized import TemporalProvider
 
-        self._tamper_manifest_detail(
-            "temporal", "builder_contract_hash", _hash("0")
-        )
+        self._tamper_manifest_detail("temporal", "builder_contract_hash", _hash("0"))
 
-        result = await TemporalProvider(self.connection).search(
-            self._query(), 10
-        )
+        result = await TemporalProvider(self.connection).search(self._query(), 10)
 
         self.assertEqual("unavailable", result.status)
         self.assertEqual("TEMPORAL_STALE", result.reason)
@@ -517,9 +511,7 @@ class TemporalProviderTests(_SpecializedDatabaseTestCase):
             ),
         )
         self.connection.commit()
-        result = await TemporalProvider(self.connection).search(
-            self._query(), 10
-        )
+        result = await TemporalProvider(self.connection).search(self._query(), 10)
 
         self.assertEqual("unavailable", result.status)
         self.assertEqual("TEMPORAL_STALE", result.reason)
@@ -529,9 +521,7 @@ class TemporalProviderTests(_SpecializedDatabaseTestCase):
 class ProcedureProviderTests(_SpecializedDatabaseTestCase):
     def setUp(self) -> None:
         super().setUp()
-        self.fts_table = (
-            "retrieval_procedure_fts_0123456789abcdef01234567_g4"
-        )
+        self.fts_table = "retrieval_procedure_fts_0123456789abcdef01234567_g4"
         self.connection.execute(
             f'CREATE VIRTUAL TABLE "{self.fts_table}" USING fts5('
             "record_id UNINDEXED,ordinal UNINDEXED,step_hash UNINDEXED,"
@@ -621,16 +611,15 @@ class ProcedureProviderTests(_SpecializedDatabaseTestCase):
             self._query(text="how deploy credential"), 10
         )
 
-        self.assertEqual((_record_id("3"),), tuple(
-            item.evidence.record_id for item in result.candidates
-        ))
-        candidate = result.candidates[0]
-        self.assertIn(
-            f"PROCEDURE_STEP:0:{_hash('d')}", candidate.policy_notes
+        self.assertEqual(
+            (_record_id("3"),),
+            tuple(item.evidence.record_id for item in result.candidates),
         )
-        self.assertNotIn(_record_id("5"), {
-            item.evidence.record_id for item in result.candidates
-        })
+        candidate = result.candidates[0]
+        self.assertIn(f"PROCEDURE_STEP:0:{_hash('d')}", candidate.policy_notes)
+        self.assertNotIn(
+            _record_id("5"), {item.evidence.record_id for item in result.candidates}
+        )
         self.assertEqual(4, result.manifest_generation)
 
     async def test_emits_step_identity_but_never_step_text(self) -> None:
@@ -698,9 +687,10 @@ class ProcedureProviderTests(_SpecializedDatabaseTestCase):
             self._query(text="déployer"), 10
         )
 
-        self.assertEqual((_record_id("5"),), tuple(
-            item.evidence.record_id for item in result.candidates
-        ))
+        self.assertEqual(
+            (_record_id("5"),),
+            tuple(item.evidence.record_id for item in result.candidates),
+        )
 
     async def test_manifest_row_count_mismatch_is_stale(self) -> None:
         from daem0nmcp.retrieval.specialized import ProcedureProvider
@@ -722,9 +712,7 @@ class ProcedureProviderTests(_SpecializedDatabaseTestCase):
     async def test_builder_contract_mismatch_is_stale(self) -> None:
         from daem0nmcp.retrieval.specialized import ProcedureProvider
 
-        self._tamper_manifest_detail(
-            "procedure", "builder_contract_hash", _hash("0")
-        )
+        self._tamper_manifest_detail("procedure", "builder_contract_hash", _hash("0"))
 
         result = await ProcedureProvider(self.connection).search(
             self._query(text="credential"), 10
@@ -765,9 +753,7 @@ class ProcedureProviderTests(_SpecializedDatabaseTestCase):
             row_count=1,
             workspace_id=OTHER_WORKSPACE_ID,
         )
-        other_fts_table = (
-            "retrieval_procedure_fts_76543210fedcba9876543210_g4"
-        )
+        other_fts_table = "retrieval_procedure_fts_76543210fedcba9876543210_g4"
         self.connection.execute(
             f'CREATE VIRTUAL TABLE "{other_fts_table}" USING fts5('
             "record_id UNINDEXED,ordinal UNINDEXED,step_hash UNINDEXED,"
@@ -802,9 +788,10 @@ class ProcedureProviderTests(_SpecializedDatabaseTestCase):
             self._query(text="deploy credential"), 10
         )
 
-        self.assertEqual((_record_id("3"),), tuple(
-            item.evidence.record_id for item in result.candidates
-        ))
+        self.assertEqual(
+            (_record_id("3"),),
+            tuple(item.evidence.record_id for item in result.candidates),
+        )
 
 
 class OutcomeProviderTests(_SpecializedDatabaseTestCase):
@@ -865,9 +852,7 @@ class OutcomeProviderTests(_SpecializedDatabaseTestCase):
             self._query(text="failed"), 10
         )
 
-        by_record = {
-            item.evidence.record_id: item for item in result.candidates
-        }
+        by_record = {item.evidence.record_id: item for item in result.candidates}
         failed = by_record[_record_id("7")]
         self.assertEqual(_event_id("7"), failed.evidence.event_id)
         self.assertEqual(_hash("7"), failed.evidence.content_hash)
@@ -881,9 +866,10 @@ class OutcomeProviderTests(_SpecializedDatabaseTestCase):
             self._query(text="term absent from every successful outcome"), 10
         )
 
-        self.assertEqual((_record_id("7"),), tuple(
-            item.evidence.record_id for item in result.candidates
-        ))
+        self.assertEqual(
+            (_record_id("7"),),
+            tuple(item.evidence.record_id for item in result.candidates),
+        )
         self.assertEqual(("OUTCOME_FAILED",), result.candidates[0].policy_notes)
         self.assertIsNone(result.candidates[0].raw_score)
 
@@ -900,9 +886,10 @@ class OutcomeProviderTests(_SpecializedDatabaseTestCase):
             10,
         )
 
-        self.assertEqual((_record_id("7"),), tuple(
-            item.evidence.record_id for item in result.candidates
-        ))
+        self.assertEqual(
+            (_record_id("7"),),
+            tuple(item.evidence.record_id for item in result.candidates),
+        )
 
     async def test_missing_active_projection_is_unavailable(self) -> None:
         from daem0nmcp.retrieval.specialized import OutcomeProvider
@@ -923,9 +910,7 @@ class OutcomeProviderTests(_SpecializedDatabaseTestCase):
     async def test_builder_contract_mismatch_is_stale(self) -> None:
         from daem0nmcp.retrieval.specialized import OutcomeProvider
 
-        self._tamper_manifest_detail(
-            "outcome", "builder_contract_hash", _hash("0")
-        )
+        self._tamper_manifest_detail("outcome", "builder_contract_hash", _hash("0"))
 
         result = await OutcomeProvider(self.connection).search(
             self._query(text="outcome"), 10
@@ -1006,9 +991,7 @@ class GraphProviderTests(_SpecializedDatabaseTestCase):
         with self.assertRaises(ValueError):
             await provider.search(self._graph_query(), 10, seeds=())
         with self.assertRaises(ValueError):
-            await provider.search(
-                self._graph_query(), 10, seeds=(_seed("8", "graph"),)
-            )
+            await provider.search(self._graph_query(), 10, seeds=(_seed("8", "graph"),))
 
     async def test_traversal_is_seeded_bounded_and_carries_complete_paths(self) -> None:
         from daem0nmcp.retrieval.specialized import GraphProvider
@@ -1082,8 +1065,7 @@ class GraphProviderTests(_SpecializedDatabaseTestCase):
         ).search(self._graph_query(), 20, seeds=(_seed("8"),))
 
         by_record = {
-            candidate.evidence.record_id: candidate
-            for candidate in result.candidates
+            candidate.evidence.record_id: candidate for candidate in result.candidates
         }
         self.assertEqual(
             (_fact_id("7"),),
@@ -1104,9 +1086,10 @@ class GraphProviderTests(_SpecializedDatabaseTestCase):
             self.connection, max_depth=2, max_branching=1
         ).search(self._graph_query(), 10, seeds=(_seed("8"),))
 
-        self.assertEqual((_record_id("9"),), tuple(
-            item.evidence.record_id for item in depth_one.candidates
-        ))
+        self.assertEqual(
+            (_record_id("9"),),
+            tuple(item.evidence.record_id for item in depth_one.candidates),
+        )
         self.assertEqual(
             (_record_id("9"), _record_id("c")),
             tuple(item.evidence.record_id for item in depth_two.candidates),
@@ -1134,9 +1117,7 @@ class GraphProviderTests(_SpecializedDatabaseTestCase):
         )
         for seed in invalid_seeds:
             with self.subTest(seed=seed):
-                result = await provider.search(
-                    self._graph_query(), 10, seeds=(seed,)
-                )
+                result = await provider.search(self._graph_query(), 10, seeds=(seed,))
                 self.assertEqual("degraded", result.status)
                 self.assertEqual("GRAPH_SEEDS_STALE", result.reason)
                 self.assertEqual((), result.candidates)
@@ -1169,9 +1150,7 @@ class GraphProviderTests(_SpecializedDatabaseTestCase):
     async def test_builder_contract_mismatch_is_stale(self) -> None:
         from daem0nmcp.retrieval.specialized import GraphProvider
 
-        self._tamper_manifest_detail(
-            "graph", "builder_contract_hash", _hash("0")
-        )
+        self._tamper_manifest_detail("graph", "builder_contract_hash", _hash("0"))
 
         result = await GraphProvider(self.connection).search(
             self._graph_query(), 10, seeds=(_seed("8"),)
@@ -1238,9 +1217,7 @@ class SpecializedProviderAsyncBoundaryTests(_SpecializedDatabaseTestCase):
         )
         loop = asyncio.get_running_loop()
         started = loop.time()
-        task = asyncio.create_task(
-            provider.search(self._query(text="workflow"), 10)
-        )
+        task = asyncio.create_task(provider.search(self._query(text="workflow"), 10))
         await asyncio.sleep(0.025)
 
         self.assertLess(loop.time() - started, 0.12)

@@ -67,7 +67,9 @@ class SearchUIContractTests(unittest.TestCase):
         self.assertEqual(model["total_count"], 8)
         self.assertTrue(model["has_more"])
         self.assertNotIn('data-memory-id="123"', document)
-        self.assertNotIn("Use Python 3.11", document.replace(parser_value(document), ""))
+        self.assertNotIn(
+            "Use Python 3.11", document.replace(parser_value(document), "")
+        )
 
     def test_missing_fields_produce_a_bounded_empty_view_model(self):
         model = app_data(_build_search_ui({"topic": "minimal"}))

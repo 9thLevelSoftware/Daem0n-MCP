@@ -15,13 +15,13 @@ from typing import Any
 
 from ..event_store import canonical_json_bytes
 
-
 _JOB_TYPE = "retrieval.projection_rebuild"
 _PROJECTIONS = frozenset(
     {"lexical", "dense", "graph", "temporal", "procedure", "outcome"}
 )
 _WORKER = re.compile(r"^[A-Za-z0-9._:-]{1,64}$")
 _LEASE_TOKEN = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
+_ERROR_CODE = re.compile(r"^[A-Z][A-Z0-9_]{1,63}$")
 _HEARTBEAT_BUSY_TIMEOUT_MS = 100
 _HEARTBEAT_SHUTDOWN_GRACE_SECONDS = 1.5
 
@@ -70,10 +70,9 @@ class ProjectionJobRunner:
         token_factory: Callable[[], str] | None = None,
         lease_duration_us: int = 30_000_000,
         heartbeat_interval_us: int | None = None,
-        heartbeat_connection_factory: (
-            Callable[[], sqlite3.Connection] | None
-        ) = None,
+        heartbeat_connection_factory: (Callable[[], sqlite3.Connection] | None) = None,
         retry_delay_us: int = 1_000_000,
+        cancelled: Callable[[], bool] | None = None,
     ) -> None:
         if not isinstance(connection, sqlite3.Connection):
             raise ValueError("connection must be a SQLite connection")
@@ -100,9 +99,7 @@ class ProjectionJobRunner:
             or heartbeat_interval_us < 1
             or heartbeat_interval_us >= lease_duration_us
         ):
-            raise ValueError(
-                "heartbeat_interval_us must be shorter than the lease"
-            )
+            raise ValueError("heartbeat_interval_us must be shorter than the lease")
         if heartbeat_connection_factory is not None and not callable(
             heartbeat_connection_factory
         ):
@@ -123,6 +120,9 @@ class ProjectionJobRunner:
         self._heartbeat_connection_factory = heartbeat_connection_factory
         self._heartbeat_database_path = database_path
         self._retry_delay_us = retry_delay_us
+        if cancelled is not None and not callable(cancelled):
+            raise ValueError("cancelled must be callable")
+        self._cancelled = cancelled or (lambda: False)
 
     def run_once(self) -> ProjectionJobRun | None:
         """Claim at most one job and drive it to a durable next state."""
@@ -133,24 +133,32 @@ class ProjectionJobRunner:
         projections: tuple[str, ...] = ()
         stop, heartbeat_failed, heartbeat = self._start_heartbeat(claim)
         failed = False
+        failure_code = "PROJECTION_REBUILD_FAILED"
         try:
             projections = self._validate_payload(claim)
             for projection in projections:
+                if self._cancelled():
+                    raise ProjectionJobError("PROJECTION_CANCELLED")
                 builder = self._builders.get(projection)
                 if builder is None:
                     raise ProjectionJobError("PROJECTION_BUILDER_UNAVAILABLE")
                 builder(claim.workspace_id)
             if heartbeat_failed.is_set():
                 raise ProjectionJobError("PROJECTION_JOB_HEARTBEAT_FAILED")
-        except Exception:
+        except Exception as exc:
             failed = True
+            candidate = getattr(exc, "code", None)
+            if isinstance(candidate, str) and _ERROR_CODE.fullmatch(candidate):
+                failure_code = candidate
         finally:
             stop.set()
             heartbeat.join(timeout=2.0)
             if heartbeat.is_alive() or heartbeat_failed.is_set():
                 failed = True
         if failed:
-            return self._record_failure(claim, projections)
+            if failure_code == "PROJECTION_CANCELLED":
+                return self._record_cancelled(claim, projections)
+            return self._record_failure(claim, projections, failure_code)
         return self._record_success(claim, projections)
 
     def _start_heartbeat(
@@ -189,14 +197,17 @@ class ProjectionJobRunner:
                 )
             if not isinstance(connection, sqlite3.Connection):
                 raise TypeError("heartbeat connection is unavailable")
-            connection.execute(
-                f"PRAGMA busy_timeout={_HEARTBEAT_BUSY_TIMEOUT_MS}"
-            )
+            connection.execute(f"PRAGMA busy_timeout={_HEARTBEAT_BUSY_TIMEOUT_MS}")
             if connection.in_transaction:
                 raise RuntimeError("heartbeat connection has an open transaction")
             ready.set()
             interval_seconds = self._heartbeat_interval_us / 1_000_000
-            while not stop.wait(interval_seconds):
+            while True:
+                # A builder may hold SQLite's writer lock until after the
+                # original lease deadline.  Even when completion requests a
+                # stop before the next interval, acquire the lock once and
+                # publish a fresh lease before the terminal state update.
+                stop.wait(interval_seconds)
                 stop_seen_at: float | None = None
                 while True:
                     try:
@@ -270,9 +281,10 @@ class ProjectionJobRunner:
             raise ProjectionJobError("PROJECTION_JOB_TRANSACTION_OPEN")
         now = self._now()
         lease_token = self._token_factory()
-        if not isinstance(lease_token, str) or _LEASE_TOKEN.fullmatch(
-            lease_token
-        ) is None:
+        if (
+            not isinstance(lease_token, str)
+            or _LEASE_TOKEN.fullmatch(lease_token) is None
+        ):
             raise ProjectionJobError("PROJECTION_JOB_LEASE_INVALID")
         try:
             self.connection.execute("BEGIN IMMEDIATE")
@@ -428,11 +440,10 @@ class ProjectionJobRunner:
         self,
         claim: _ClaimedJob,
         projections: tuple[str, ...],
+        failure_code: str,
     ) -> ProjectionJobRun:
         now = self._now()
-        last_error = canonical_json_bytes(
-            {"code": "PROJECTION_REBUILD_FAILED"}
-        ).decode("utf-8")
+        last_error = canonical_json_bytes({"code": failure_code}).decode("utf-8")
         self.connection.execute("BEGIN IMMEDIATE")
         try:
             current = self.connection.execute(
@@ -449,7 +460,10 @@ class ProjectionJobRunner:
             ):
                 raise ProjectionJobError("PROJECTION_JOB_LEASE_LOST")
             superseded = current[0] != claim.source_event_id
-            dead = claim.attempts >= claim.max_attempts and not superseded
+            terminal = failure_code.endswith("_UNAVAILABLE") or failure_code in {
+                "PROJECTION_JOB_PAYLOAD_INVALID",
+            }
+            dead = (terminal or claim.attempts >= claim.max_attempts) and not superseded
             status = "dead_letter" if dead else "queued"
             available = now if superseded else now + self._retry_delay_us
             self.connection.execute(
@@ -481,7 +495,57 @@ class ProjectionJobRunner:
             claim.workspace_id,
             projections,
             status,
-            "PROJECTION_REBUILD_FAILED",
+            failure_code,
+        )
+
+    def _record_cancelled(
+        self,
+        claim: _ClaimedJob,
+        projections: tuple[str, ...],
+    ) -> ProjectionJobRun:
+        """Release shutdown-cancelled work without consuming its retry budget."""
+
+        now = self._now()
+        last_error = canonical_json_bytes({"code": "PROJECTION_CANCELLED"}).decode(
+            "utf-8"
+        )
+        self.connection.execute("BEGIN IMMEDIATE")
+        try:
+            current = self.connection.execute(
+                "SELECT lease_token,lease_expires_at_us FROM background_jobs "
+                "WHERE job_id=? AND status='running'",
+                (claim.job_id,),
+            ).fetchone()
+            if (
+                current is None
+                or str(current[0]) != claim.lease_token
+                or current[1] is None
+                or int(current[1]) <= now
+            ):
+                raise ProjectionJobError("PROJECTION_JOB_LEASE_LOST")
+            changed = self.connection.execute(
+                """
+                UPDATE background_jobs
+                SET status='queued',available_at_us=?,
+                    attempts=CASE WHEN attempts>0 THEN attempts-1 ELSE 0 END,
+                    lease_owner=NULL,lease_token=NULL,lease_expires_at_us=NULL,
+                    last_error_json=?,result_json=NULL,updated_at_us=?,finished_at_us=NULL
+                WHERE job_id=? AND lease_token=?
+                """,
+                (now, last_error, now, claim.job_id, claim.lease_token),
+            ).rowcount
+            if changed != 1:
+                raise ProjectionJobError("PROJECTION_JOB_LEASE_LOST")
+            self.connection.commit()
+        except Exception:
+            self.connection.rollback()
+            raise
+        return ProjectionJobRun(
+            claim.job_id,
+            claim.workspace_id,
+            projections,
+            "queued",
+            "PROJECTION_CANCELLED",
         )
 
     def _now(self) -> int:
@@ -493,9 +557,17 @@ class ProjectionJobRunner:
     @staticmethod
     def _is_lock_contention(exc: sqlite3.OperationalError) -> bool:
         code = getattr(exc, "sqlite_errorcode", None)
-        return isinstance(code, int) and code & 0xFF in {
-            sqlite3.SQLITE_BUSY,
-            sqlite3.SQLITE_LOCKED,
+        if isinstance(code, int):
+            return code & 0xFF in {
+                sqlite3.SQLITE_BUSY,
+                sqlite3.SQLITE_LOCKED,
+            }
+        # sqlite_errorcode is unavailable on supported Python 3.10 builds.
+        # Match only SQLite's fixed lock diagnostics, never arbitrary detail.
+        return str(exc).casefold() in {
+            "database is locked",
+            "database table is locked",
+            "database schema is locked",
         }
 
 

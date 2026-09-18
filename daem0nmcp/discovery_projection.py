@@ -21,14 +21,15 @@ from .api.v7.public_ids import (
 )
 from .event_store import canonical_json_bytes, deterministic_id, sha256_json
 
-
 _WORKSPACE_ID_RE = re.compile(r"^ws_[0-9a-f]{24}$")
 _RECORD_ID_RE = re.compile(r"^mem_[0-9a-f]{64}$")
+_CODE_ID_RE = re.compile(r"^code_[0-9a-f]{64}$")
 _ENTITY_TYPE_RE = re.compile(r"^[a-z][a-z0-9_-]{0,79}$")
 _CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
 _CODE_KINDS = frozenset(
     {"file", "module", "class", "function", "method", "variable", "symbol"}
 )
+_CODE_EDGE_KINDS = frozenset({"call", "import", "reference"})
 _REQUIRED_TABLES = frozenset(
     {
         "discovery_projection_partitions",
@@ -37,6 +38,7 @@ _REQUIRED_TABLES = frozenset(
         "discovery_communities",
         "discovery_community_members",
         "discovery_code_entities",
+        "discovery_code_edges",
         "memory_records",
         "projection_manifests",
         "public_object_ids",
@@ -47,10 +49,19 @@ _MAX_ENTITIES = 100_000
 _MAX_COMMUNITIES = 20_000
 _MAX_MEMBERSHIPS = 1_000_000
 _MAX_CODE_ENTITIES = 200_000
+_MAX_CODE_EDGES = 200_000
 
 
 class DiscoveryProjectionBuildError(RuntimeError):
     """Deterministic discovery build/import failure."""
+
+    def __init__(self, code: str) -> None:
+        self.code = code
+        super().__init__(code)
+
+
+class CodeProjectionIntegrityError(RuntimeError):
+    """A bounded code-generation integrity check failed closed."""
 
     def __init__(self, code: str) -> None:
         self.code = code
@@ -91,6 +102,14 @@ class CodeEntityProjectionSeed:
 
 
 @dataclass(frozen=True, slots=True)
+class CodeEdgeProjectionSeed:
+    source_key: str
+    target_key: str
+    kind: str
+    source_line: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class DiscoveryProjectionBuildResult:
     graph_generation: int | None = None
     code_generation: int | None = None
@@ -118,6 +137,12 @@ class _CommunityRow:
 class _CodeRow:
     seed: CodeEntityProjectionSeed
     normalized_name: str
+    identity_hash: str
+
+
+@dataclass(frozen=True, slots=True)
+class _CodeEdgeRow:
+    seed: CodeEdgeProjectionSeed
     identity_hash: str
 
 
@@ -205,6 +230,176 @@ def _partition_digest(rows: Iterable[object]) -> str:
     return sha256_json(list(rows))
 
 
+def verify_code_projection(
+    connection: sqlite3.Connection,
+    workspace_id: str,
+    generation: int,
+    *,
+    expected_row_count: int | None = None,
+    expected_root_hash: str,
+    max_entities: int = _MAX_CODE_ENTITIES,
+    max_edges: int = _MAX_CODE_EDGES,
+) -> tuple[int, int]:
+    """Recompute one immutable code generation and its public-ID bindings."""
+
+    try:
+        workspace_id = _workspace_id(workspace_id)
+        generation = _plain_int(generation, minimum=1, maximum=2**63 - 1)
+        max_entities = _plain_int(max_entities, minimum=1, maximum=2**31 - 1)
+        max_edges = _plain_int(max_edges, minimum=1, maximum=2**31 - 1)
+        if not isinstance(expected_root_hash, str) or not re.fullmatch(
+            r"[0-9a-f]{64}", expected_root_hash
+        ):
+            raise CodeProjectionIntegrityError("CODE_PROJECTION_CORRUPT")
+        partition_rows = connection.execute(
+            "SELECT row_count,content_hash FROM discovery_projection_partitions "
+            "WHERE workspace_id=? AND projection_name='code' AND generation=? "
+            "AND partition_name='code' LIMIT 2",
+            (workspace_id, generation),
+        ).fetchall()
+        if len(partition_rows) != 1:
+            raise CodeProjectionIntegrityError("CODE_PROJECTION_CORRUPT")
+        partition_count = _plain_int(
+            partition_rows[0][0], minimum=0, maximum=max_entities
+        )
+        if expected_row_count is None:
+            expected_row_count = partition_count
+        else:
+            expected_row_count = _plain_int(
+                expected_row_count, minimum=0, maximum=max_entities
+            )
+        entity_rows = connection.execute(
+            "SELECT code.code_entity_id,code.kind,code.qualified_name,"
+            "code.normalized_name,code.relative_file_path,code.start_line,"
+            "code.end_line,code.identity_hash,mapping.source_key,"
+            "mapping.projection_generation FROM discovery_code_entities AS code "
+            "LEFT JOIN public_object_ids AS mapping ON "
+            "mapping.public_id=code.code_entity_id "
+            "AND mapping.workspace_id=code.workspace_id "
+            "AND mapping.object_kind='code' WHERE code.workspace_id=? "
+            "AND code.code_generation=? ORDER BY code.identity_hash LIMIT ?",
+            (workspace_id, generation, max_entities + 1),
+        ).fetchall()
+        if len(entity_rows) > max_entities:
+            raise CodeProjectionIntegrityError("CODE_PROJECTION_TOO_LARGE")
+        entity_payload: list[object] = []
+        entity_ids: set[str] = set()
+        for row in entity_rows:
+            code_id, kind, qualified_name, normalized_name = row[:4]
+            relative_path, start_line, end_line, identity_hash = row[4:8]
+            source_key, binding_generation = row[8:10]
+            try:
+                validated_path = _relative_path(relative_path)
+            except DiscoveryProjectionBuildError:
+                raise CodeProjectionIntegrityError("CODE_PROJECTION_CORRUPT") from None
+            if (
+                not isinstance(source_key, str)
+                or not source_key.startswith("s:")
+                or binding_generation != generation
+                or _CODE_ID_RE.fullmatch(str(code_id)) is None
+                or kind not in _CODE_KINDS
+                or not isinstance(qualified_name, str)
+                or not qualified_name
+                or len(qualified_name) > 256
+                or unicodedata.normalize("NFC", qualified_name) != qualified_name
+                or normalized_name
+                != unicodedata.normalize("NFC", qualified_name.casefold())
+                or isinstance(start_line, bool)
+                or not isinstance(start_line, int)
+                or start_line < 1
+                or isinstance(end_line, bool)
+                or not isinstance(end_line, int)
+                or end_line < start_line
+                or identity_hash
+                != sha256_json(
+                    [
+                        "code",
+                        kind,
+                        normalized_name,
+                        validated_path,
+                        start_line,
+                        end_line,
+                    ]
+                )
+                or code_id
+                != derive_public_object_id(
+                    workspace_id,
+                    PublicObjectKind.CODE,
+                    source_key[2:],
+                    generation,
+                )
+            ):
+                raise CodeProjectionIntegrityError("CODE_PROJECTION_CORRUPT")
+            entity_ids.add(str(code_id))
+            entity_payload.append(
+                {
+                    "code_entity_id": code_id,
+                    "end_line": end_line,
+                    "identity_hash": identity_hash,
+                    "kind": kind,
+                    "normalized_name": normalized_name,
+                    "qualified_name": qualified_name,
+                    "relative_file_path": validated_path,
+                    "start_line": start_line,
+                }
+            )
+        edge_rows = connection.execute(
+            "SELECT source_code_entity_id,target_code_entity_id,edge_kind,"
+            "source_line,identity_hash FROM discovery_code_edges "
+            "WHERE workspace_id=? AND code_generation=? "
+            "ORDER BY identity_hash LIMIT ?",
+            (workspace_id, generation, max_edges + 1),
+        ).fetchall()
+        if len(edge_rows) > max_edges:
+            raise CodeProjectionIntegrityError("CODE_PROJECTION_TOO_LARGE")
+        edge_payload: list[object] = []
+        for row in edge_rows:
+            source_id, target_id, kind, source_line, identity_hash = row
+            if (
+                source_id not in entity_ids
+                or target_id not in entity_ids
+                or source_id == target_id
+                or kind not in _CODE_EDGE_KINDS
+                or (
+                    source_line is not None
+                    and (
+                        isinstance(source_line, bool)
+                        or not isinstance(source_line, int)
+                        or source_line < 1
+                    )
+                )
+                or identity_hash
+                != sha256_json(["code-edge", source_id, target_id, kind, source_line])
+            ):
+                raise CodeProjectionIntegrityError("CODE_PROJECTION_CORRUPT")
+            edge_payload.append(
+                {
+                    "edge_kind": kind,
+                    "identity_hash": identity_hash,
+                    "source_code_entity_id": source_id,
+                    "source_line": source_line,
+                    "target_code_entity_id": target_id,
+                }
+            )
+        entity_hash = _partition_digest(entity_payload)
+        combined_hash = sha256_json(
+            {"code": entity_hash, "code_edges": _partition_digest(edge_payload)}
+        )
+        partition_hash = partition_rows[0][1]
+        if (
+            len(entity_rows) != expected_row_count
+            or partition_count != expected_row_count
+            or partition_hash != expected_root_hash
+            or combined_hash != expected_root_hash
+        ):
+            raise CodeProjectionIntegrityError("CODE_PROJECTION_CORRUPT")
+        return len(entity_rows), len(edge_rows)
+    except CodeProjectionIntegrityError:
+        raise
+    except (DiscoveryProjectionBuildError, sqlite3.Error, TypeError, ValueError):
+        raise CodeProjectionIntegrityError("CODE_PROJECTION_CORRUPT") from None
+
+
 class DiscoveryProjectionBuilder:
     """Build immutable discovery rows on caller-selected SQLite storage."""
 
@@ -223,7 +418,7 @@ class DiscoveryProjectionBuilder:
         self._savepoint = 0
 
     def _require_schema(self) -> None:
-        if not _REQUIRED_TABLES <= _table_names(self.connection):
+        if not _table_names(self.connection).issuperset(_REQUIRED_TABLES):
             raise DiscoveryProjectionBuildError("DISCOVERY_SCHEMA_INCOMPLETE")
         foreign_keys = self.connection.execute("PRAGMA foreign_keys").fetchone()
         if foreign_keys is None or foreign_keys[0] != 1:
@@ -284,6 +479,22 @@ class DiscoveryProjectionBuilder:
             raise DiscoveryProjectionBuildError("GRAPH_PROJECTION_UNAVAILABLE")
         return generation
 
+    def _candidate_graph_generation(self, workspace_id: str, generation: object) -> int:
+        if (
+            isinstance(generation, bool)
+            or not isinstance(generation, int)
+            or generation < 1
+        ):
+            raise DiscoveryProjectionBuildError("INVALID_DISCOVERY_SEED")
+        rows = self.connection.execute(
+            "SELECT status FROM projection_manifests WHERE workspace_id=? "
+            "AND projection_name='graph' AND generation=? LIMIT 2",
+            (workspace_id, generation),
+        ).fetchall()
+        if len(rows) != 1 or rows[0][0] != "building":
+            raise DiscoveryProjectionBuildError("GRAPH_CANDIDATE_UNAVAILABLE")
+        return generation
+
     def _validate_records(self, workspace_id: str, record_ids: set[str]) -> None:
         if not record_ids:
             return
@@ -327,8 +538,10 @@ class DiscoveryProjectionBuilder:
                     record.mention_count, minimum=1, maximum=1_000_000
                 )
                 memberships += 1
-            declared = mentions if seed.mention_count is None else _plain_int(
-                seed.mention_count, minimum=0, maximum=1_000_000
+            declared = (
+                mentions
+                if seed.mention_count is None
+                else _plain_int(seed.mention_count, minimum=0, maximum=1_000_000)
             )
             if declared < len(seen_records):
                 raise DiscoveryProjectionBuildError("INVALID_DISCOVERY_SEED")
@@ -367,7 +580,7 @@ class DiscoveryProjectionBuilder:
             source_key = _safe_text(seed.source_key, maximum=256)
             label, _ = _normalized_name(seed.label)
             level = _plain_int(seed.level, minimum=0, maximum=32)
-            parent = (
+            parent_key = (
                 None
                 if seed.parent_source_key is None
                 else _safe_text(seed.parent_source_key, maximum=256)
@@ -383,22 +596,22 @@ class DiscoveryProjectionBuilder:
                 label=label,
                 level=level,
                 member_record_ids=members,
-                parent_source_key=parent,
+                parent_source_key=parent_key,
             )
         if memberships > _MAX_MEMBERSHIPS:
             raise DiscoveryProjectionBuildError("DISCOVERY_BUILD_TOO_LARGE")
         for source_key, seed in indexed.items():
             if seed.parent_source_key is None:
                 continue
-            parent = indexed.get(seed.parent_source_key)
+            parent_seed = indexed.get(seed.parent_source_key)
             if (
-                parent is None
-                or parent.source_key == source_key
-                or parent.level <= seed.level
+                parent_seed is None
+                or parent_seed.source_key == source_key
+                or parent_seed.level <= seed.level
             ):
                 raise DiscoveryProjectionBuildError("INVALID_DISCOVERY_SEED")
             visited = {source_key}
-            cursor = parent
+            cursor = parent_seed
             while cursor.parent_source_key is not None:
                 if cursor.parent_source_key in visited:
                     raise DiscoveryProjectionBuildError("INVALID_DISCOVERY_SEED")
@@ -468,12 +681,63 @@ class DiscoveryProjectionBuilder:
         return tuple(sorted(result, key=lambda item: item.identity_hash))
 
     @staticmethod
+    def _code_edge_rows(
+        seeds: Sequence[CodeEdgeProjectionSeed],
+        code_rows: tuple[_CodeRow, ...],
+    ) -> tuple[_CodeEdgeRow, ...]:
+        if not isinstance(seeds, Sequence) or len(seeds) > _MAX_CODE_EDGES:
+            raise DiscoveryProjectionBuildError("DISCOVERY_BUILD_TOO_LARGE")
+        source_keys = {row.seed.source_key for row in code_rows}
+        result: list[_CodeEdgeRow] = []
+        edge_keys: set[tuple[str, str, str]] = set()
+        identities: set[str] = set()
+        for seed in seeds:
+            if not isinstance(seed, CodeEdgeProjectionSeed):
+                raise DiscoveryProjectionBuildError("INVALID_DISCOVERY_SEED")
+            source_key = _safe_text(seed.source_key, maximum=256)
+            target_key = _safe_text(seed.target_key, maximum=256)
+            if (
+                source_key not in source_keys
+                or target_key not in source_keys
+                or source_key == target_key
+                or seed.kind not in _CODE_EDGE_KINDS
+            ):
+                raise DiscoveryProjectionBuildError("INVALID_DISCOVERY_SEED")
+            source_line = (
+                None
+                if seed.source_line is None
+                else _plain_int(seed.source_line, minimum=1, maximum=2**31 - 1)
+            )
+            edge_key = (source_key, target_key, seed.kind)
+            if edge_key in edge_keys:
+                raise DiscoveryProjectionBuildError("INVALID_DISCOVERY_SEED")
+            edge_keys.add(edge_key)
+            identity = sha256_json(
+                ["code-edge", source_key, target_key, seed.kind, source_line]
+            )
+            if identity in identities:
+                raise DiscoveryProjectionBuildError("INVALID_DISCOVERY_SEED")
+            identities.add(identity)
+            result.append(
+                _CodeEdgeRow(
+                    CodeEdgeProjectionSeed(
+                        source_key=source_key,
+                        target_key=target_key,
+                        kind=seed.kind,
+                        source_line=source_line,
+                    ),
+                    identity,
+                )
+            )
+        return tuple(sorted(result, key=lambda item: item.identity_hash))
+
+    @staticmethod
     def _graph_payloads(
         entities: tuple[_EntityRow, ...],
         communities: tuple[_CommunityRow, ...],
         entity_ids: dict[str, str],
         community_ids: dict[str, str],
-    ) -> tuple[list[object], list[object]]:
+    ) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
         entity_payload = [
             {
                 "entity_id": entity_ids[row.identity_hash],
@@ -491,7 +755,7 @@ class DiscoveryProjectionBuilder:
             }
             for row in entities
         ]
-        community_payload = [
+        community_payload: list[dict[str, object]] = [
             {
                 "community_id": community_ids[row.seed.source_key],
                 "identity_hash": row.identity_hash,
@@ -508,21 +772,78 @@ class DiscoveryProjectionBuilder:
         ]
         return entity_payload, community_payload
 
+    def graph_matches(
+        self,
+        workspace_id: str,
+        generation: int,
+        *,
+        entities: Sequence[EntityProjectionSeed],
+        communities: Sequence[CommunityProjectionSeed],
+    ) -> bool:
+        """Return whether a complete retained graph partition matches the seeds."""
+
+        workspace_id = _workspace_id(workspace_id)
+        if (
+            isinstance(generation, bool)
+            or not isinstance(generation, int)
+            or generation < 1
+        ):
+            return False
+        self._require_schema()
+        entity_rows = self._entity_rows(entities)
+        community_rows = self._community_rows(communities)
+        entity_ids = {
+            row.identity_hash: derive_public_object_id(
+                workspace_id,
+                PublicObjectKind.ENTITY,
+                row.identity_hash,
+            )
+            for row in entity_rows
+        }
+        community_ids = {
+            row.seed.source_key: derive_public_object_id(
+                workspace_id,
+                PublicObjectKind.COMMUNITY,
+                row.seed.source_key,
+                generation,
+            )
+            for row in community_rows
+        }
+        entity_payload, community_payload = self._graph_payloads(
+            entity_rows, community_rows, entity_ids, community_ids
+        )
+        expected = {
+            "entities": (len(entity_rows), _partition_digest(entity_payload)),
+            "communities": (len(community_rows), _partition_digest(community_payload)),
+        }
+        try:
+            actual = {
+                str(row[0]): (int(row[1]), str(row[2]))
+                for row in self.connection.execute(
+                    "SELECT partition_name,row_count,content_hash "
+                    "FROM discovery_projection_partitions WHERE workspace_id=? "
+                    "AND projection_name='graph' AND generation=?",
+                    (workspace_id, generation),
+                )
+            }
+        except (sqlite3.Error, TypeError, ValueError):
+            return False
+        return actual == expected
+
     def populate_graph(
         self,
         workspace_id: str,
         *,
         entities: Sequence[EntityProjectionSeed],
         communities: Sequence[CommunityProjectionSeed],
+        generation: int | None = None,
     ) -> DiscoveryProjectionBuildResult:
         workspace_id = _workspace_id(workspace_id)
         self._require_schema()
         entity_rows = self._entity_rows(entities)
         community_rows = self._community_rows(communities)
         record_ids = {
-            record.record_id
-            for entity in entity_rows
-            for record in entity.seed.records
+            record.record_id for entity in entity_rows for record in entity.seed.records
         } | {
             record_id
             for community in community_rows
@@ -530,7 +851,11 @@ class DiscoveryProjectionBuilder:
         }
         try:
             with self._transaction():
-                generation = self._active_graph_generation(workspace_id)
+                generation = (
+                    self._active_graph_generation(workspace_id)
+                    if generation is None
+                    else self._candidate_graph_generation(workspace_id, generation)
+                )
                 self._validate_records(workspace_id, record_ids)
                 repository = PublicObjectIdRepository(
                     self.connection, clock_us=self._clock_value
@@ -583,14 +908,13 @@ class DiscoveryProjectionBuilder:
                             entity_ids[row.identity_hash] for row in entity_rows
                         ),
                         community_ids=tuple(
-                            community_ids[row.seed.source_key]
-                            for row in community_rows
+                            community_ids[row.seed.source_key] for row in community_rows
                         ),
                         reused=True,
                     )
                 now = self._clock_value()
-                for row in entity_rows:
-                    entity_id = entity_ids[row.identity_hash]
+                for entity_row in entity_rows:
+                    entity_id = entity_ids[entity_row.identity_hash]
                     self.connection.execute(
                         "INSERT INTO discovery_entities("
                         "workspace_id,graph_generation,entity_id,name,"
@@ -600,15 +924,15 @@ class DiscoveryProjectionBuilder:
                             workspace_id,
                             generation,
                             entity_id,
-                            row.seed.name,
-                            row.normalized_name,
-                            row.seed.entity_type,
-                            row.mention_count,
-                            row.identity_hash,
+                            entity_row.seed.name,
+                            entity_row.normalized_name,
+                            entity_row.seed.entity_type,
+                            entity_row.mention_count,
+                            entity_row.identity_hash,
                         ),
                     )
                     for record in sorted(
-                        row.seed.records, key=lambda item: item.record_id
+                        entity_row.seed.records, key=lambda item: item.record_id
                     ):
                         self.connection.execute(
                             "INSERT INTO discovery_entity_records VALUES (?,?,?,?,?)",
@@ -620,7 +944,7 @@ class DiscoveryProjectionBuilder:
                                 record.mention_count,
                             ),
                         )
-                for row in community_rows:
+                for community_row in community_rows:
                     self.connection.execute(
                         "INSERT INTO discovery_communities("
                         "workspace_id,graph_generation,community_id,label,level,"
@@ -629,26 +953,26 @@ class DiscoveryProjectionBuilder:
                         (
                             workspace_id,
                             generation,
-                            community_ids[row.seed.source_key],
-                            row.seed.label,
-                            row.seed.level,
+                            community_ids[community_row.seed.source_key],
+                            community_row.seed.label,
+                            community_row.seed.level,
                             (
                                 None
-                                if row.seed.parent_source_key is None
-                                else community_ids[row.seed.parent_source_key]
+                                if community_row.seed.parent_source_key is None
+                                else community_ids[community_row.seed.parent_source_key]
                             ),
-                            len(row.seed.member_record_ids),
-                            row.identity_hash,
+                            len(community_row.seed.member_record_ids),
+                            community_row.identity_hash,
                         ),
                     )
-                for row in community_rows:
-                    for record_id in sorted(row.seed.member_record_ids):
+                for community_row in community_rows:
+                    for record_id in sorted(community_row.seed.member_record_ids):
                         self.connection.execute(
                             "INSERT INTO discovery_community_members VALUES (?,?,?,?)",
                             (
                                 workspace_id,
                                 generation,
-                                community_ids[row.seed.source_key],
+                                community_ids[community_row.seed.source_key],
                                 record_id,
                             ),
                         )
@@ -698,11 +1022,37 @@ class DiscoveryProjectionBuilder:
             for row in rows
         ]
 
+    @staticmethod
+    def _code_edge_payload(
+        rows: tuple[_CodeEdgeRow, ...], code_ids: dict[str, str]
+    ) -> list[dict[str, object]]:
+        payload: list[dict[str, object]] = [
+            {
+                "edge_kind": row.seed.kind,
+                "identity_hash": sha256_json(
+                    [
+                        "code-edge",
+                        code_ids[row.seed.source_key],
+                        code_ids[row.seed.target_key],
+                        row.seed.kind,
+                        row.seed.source_line,
+                    ]
+                ),
+                "source_code_entity_id": code_ids[row.seed.source_key],
+                "source_line": row.seed.source_line,
+                "target_code_entity_id": code_ids[row.seed.target_key],
+            }
+            for row in rows
+        ]
+        payload.sort(key=lambda item: str(item["identity_hash"]))
+        return payload
+
     def rebuild_code(
         self,
         workspace_id: str,
         *,
         entities: Sequence[CodeEntityProjectionSeed],
+        edges: Sequence[CodeEdgeProjectionSeed] = (),
         force: bool = False,
         before_commit: Callable[[], None] | None = None,
     ) -> DiscoveryProjectionBuildResult:
@@ -713,6 +1063,7 @@ class DiscoveryProjectionBuilder:
             raise TypeError("before_commit must be callable")
         self._require_schema()
         rows = self._code_rows(entities)
+        edge_rows = self._code_edge_rows(edges, rows)
         try:
             with self._transaction(before_commit):
                 active = self.connection.execute(
@@ -744,8 +1095,14 @@ class DiscoveryProjectionBuilder:
                         )
                         for row in rows
                     }
-                    content_hash = _partition_digest(
+                    entity_hash = _partition_digest(
                         self._code_payload(rows, expected_ids)
+                    )
+                    edge_hash = _partition_digest(
+                        self._code_edge_payload(edge_rows, expected_ids)
+                    )
+                    content_hash = sha256_json(
+                        {"code": entity_hash, "code_edges": edge_hash}
                     )
                     partition = self.connection.execute(
                         "SELECT row_count,content_hash FROM "
@@ -791,8 +1148,12 @@ class DiscoveryProjectionBuilder:
                     )
                     for row in rows
                 }
-                content_hash = _partition_digest(
-                    self._code_payload(rows, expected_ids)
+                entity_hash = _partition_digest(self._code_payload(rows, expected_ids))
+                edge_hash = _partition_digest(
+                    self._code_edge_payload(edge_rows, expected_ids)
+                )
+                content_hash = sha256_json(
+                    {"code": entity_hash, "code_edges": edge_hash}
                 )
                 repository = PublicObjectIdRepository(
                     self.connection, clock_us=self._clock_value
@@ -807,9 +1168,7 @@ class DiscoveryProjectionBuilder:
                     for row in rows
                 }
                 if code_ids != expected_ids:
-                    raise DiscoveryProjectionBuildError(
-                        "DISCOVERY_PROJECTION_CONFLICT"
-                    )
+                    raise DiscoveryProjectionBuildError("DISCOVERY_PROJECTION_CONFLICT")
                 now = self._clock_value()
                 manifest_id = deterministic_id(
                     "prj",
@@ -861,6 +1220,30 @@ class DiscoveryProjectionBuilder:
                             row.identity_hash,
                         ),
                     )
+                for edge in edge_rows:
+                    self.connection.execute(
+                        "INSERT INTO discovery_code_edges("
+                        "workspace_id,code_generation,source_code_entity_id,"
+                        "target_code_entity_id,edge_kind,source_line,identity_hash) "
+                        "VALUES (?,?,?,?,?,?,?)",
+                        (
+                            workspace_id,
+                            generation,
+                            code_ids[edge.seed.source_key],
+                            code_ids[edge.seed.target_key],
+                            edge.seed.kind,
+                            edge.seed.source_line,
+                            sha256_json(
+                                [
+                                    "code-edge",
+                                    code_ids[edge.seed.source_key],
+                                    code_ids[edge.seed.target_key],
+                                    edge.seed.kind,
+                                    edge.seed.source_line,
+                                ]
+                            ),
+                        ),
+                    )
                 self.connection.execute(
                     "INSERT INTO discovery_projection_partitions VALUES "
                     "(?,'code',?,'code',?,?,?,?)",
@@ -886,9 +1269,7 @@ class DiscoveryProjectionBuilder:
                     (len(rows), now, now, manifest_id),
                 ).rowcount
                 if changed != 1:
-                    raise DiscoveryProjectionBuildError(
-                        "DISCOVERY_PROJECTION_CONFLICT"
-                    )
+                    raise DiscoveryProjectionBuildError("DISCOVERY_PROJECTION_CONFLICT")
                 return DiscoveryProjectionBuildResult(
                     code_generation=generation,
                     code_entity_ids=tuple(
@@ -929,7 +1310,9 @@ class DiscoveryProjectionBuilder:
         try:
             candidate = Path(value)
             if not candidate.is_absolute():
-                candidate = root.joinpath(*PurePosixPath(value.replace("\\", "/")).parts)
+                candidate = root.joinpath(
+                    *PurePosixPath(value.replace("\\", "/")).parts
+                )
             resolved = candidate.resolve(strict=False)
             relative = resolved.relative_to(root).as_posix()
         except (OSError, RuntimeError, ValueError):
@@ -967,7 +1350,10 @@ class DiscoveryProjectionBuilder:
         if (
             not isinstance(decoded, list)
             or len(decoded) > _MAX_MEMBERSHIPS
-            or any(isinstance(item, bool) or not isinstance(item, (int, str)) for item in decoded)
+            or any(
+                isinstance(item, bool) or not isinstance(item, (int, str))
+                for item in decoded
+            )
         ):
             raise DiscoveryProjectionBuildError("INVALID_LEGACY_DISCOVERY")
         result = tuple(str(item) for item in decoded)
@@ -1004,9 +1390,7 @@ class DiscoveryProjectionBuilder:
             raise DiscoveryProjectionBuildError("INVALID_LEGACY_DISCOVERY")
         try:
             with self._transaction():
-                record_map = self._legacy_record_map(
-                    workspace_id, migration_run_id
-                )
+                record_map = self._legacy_record_map(workspace_id, migration_run_id)
                 selected_entities: dict[int, sqlite3.Row] = {}
                 self.connection.row_factory = sqlite3.Row
                 for row in self.connection.execute(
@@ -1014,7 +1398,9 @@ class DiscoveryProjectionBuilder:
                     "mention_count FROM extracted_entities ORDER BY id"
                 ):
                     if self._legacy_project_matches(row["project_path"], root):
-                        if isinstance(row["id"], bool) or not isinstance(row["id"], int):
+                        if isinstance(row["id"], bool) or not isinstance(
+                            row["id"], int
+                        ):
                             raise DiscoveryProjectionBuildError(
                                 "INVALID_LEGACY_DISCOVERY"
                             )
@@ -1030,9 +1416,7 @@ class DiscoveryProjectionBuilder:
                         continue
                     target = record_map.get(str(row["memory_id"]))
                     if target is None:
-                        raise DiscoveryProjectionBuildError(
-                            "INVALID_LEGACY_DISCOVERY"
-                        )
+                        raise DiscoveryProjectionBuildError("INVALID_LEGACY_DISCOVERY")
                     refs[int(entity_id)].append(target)
                 entity_seeds: list[EntityProjectionSeed] = []
                 for entity_id, row in selected_entities.items():
@@ -1043,9 +1427,7 @@ class DiscoveryProjectionBuilder:
                         or not isinstance(declared, int)
                         or declared < len(members)
                     ):
-                        raise DiscoveryProjectionBuildError(
-                            "INVALID_LEGACY_DISCOVERY"
-                        )
+                        raise DiscoveryProjectionBuildError("INVALID_LEGACY_DISCOVERY")
                     entity_seeds.append(
                         EntityProjectionSeed(
                             name=str(row["qualified_name"] or row["name"]),
@@ -1060,7 +1442,9 @@ class DiscoveryProjectionBuilder:
                     "parent_id FROM memory_communities ORDER BY id"
                 ):
                     if self._legacy_project_matches(row["project_path"], root):
-                        if isinstance(row["id"], bool) or not isinstance(row["id"], int):
+                        if isinstance(row["id"], bool) or not isinstance(
+                            row["id"], int
+                        ):
                             raise DiscoveryProjectionBuildError(
                                 "INVALID_LEGACY_DISCOVERY"
                             )
@@ -1077,14 +1461,10 @@ class DiscoveryProjectionBuilder:
                             )
                         mapped.append(target)
                     if row["member_count"] != len(mapped):
-                        raise DiscoveryProjectionBuildError(
-                            "INVALID_LEGACY_DISCOVERY"
-                        )
+                        raise DiscoveryProjectionBuildError("INVALID_LEGACY_DISCOVERY")
                     parent_id = row["parent_id"]
                     if parent_id is not None and parent_id not in community_rows:
-                        raise DiscoveryProjectionBuildError(
-                            "INVALID_LEGACY_DISCOVERY"
-                        )
+                        raise DiscoveryProjectionBuildError("INVALID_LEGACY_DISCOVERY")
                     community_seeds.append(
                         CommunityProjectionSeed(
                             source_key=f"legacy-community:{community_id}",
@@ -1106,7 +1486,9 @@ class DiscoveryProjectionBuilder:
                 ):
                     if not self._legacy_project_matches(row["project_path"], root):
                         continue
-                    kind = kind_map.get(str(row["entity_type"]), str(row["entity_type"]))
+                    kind = kind_map.get(
+                        str(row["entity_type"]), str(row["entity_type"])
+                    )
                     if kind not in _CODE_KINDS:
                         kind = "symbol"
                     start = 1 if row["line_start"] is None else row["line_start"]
@@ -1148,6 +1530,7 @@ class DiscoveryProjectionBuilder:
 
 
 __all__ = [
+    "CodeEdgeProjectionSeed",
     "CodeEntityProjectionSeed",
     "CommunityProjectionSeed",
     "DiscoveryProjectionBuildError",

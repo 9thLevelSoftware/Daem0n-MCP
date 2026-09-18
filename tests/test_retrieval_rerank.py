@@ -52,7 +52,9 @@ class RetrievalRerankerTests(unittest.IsolatedAsyncioTestCase):
             all(thread_id != event_loop_thread for thread_id in encoder.thread_ids)
         )
 
-    async def test_cancelled_rerank_retains_worker_capacity_until_encoder_finishes(self):
+    async def test_cancelled_rerank_retains_worker_capacity_until_encoder_finishes(
+        self,
+    ):
         from daem0nmcp.bounded_workers import BoundedWorkerBusyError, BoundedWorkerPool
         from daem0nmcp.retrieval.rerank import EmbeddingSimilarityReranker
         from daem0nmcp.retrieval.types import RetrievalQuery
@@ -87,9 +89,7 @@ class RetrievalRerankerTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(asyncio.CancelledError):
             await task
         with self.assertRaises(BoundedWorkerBusyError):
-            await reranker.rerank(
-                query, (_source("2", "second evidence", score=1.0),)
-            )
+            await reranker.rerank(query, (_source("2", "second evidence", score=1.0),))
         release.set()
         for _ in range(100):
             if pool.in_flight == 0:
@@ -128,9 +128,7 @@ class RetrievalRerankerTests(unittest.IsolatedAsyncioTestCase):
                     _record_id("2"): "best semantic evidence",
                 }
             ),
-            reranker=EmbeddingSimilarityReranker(
-                encoder=DeterministicEncoder()
-            ),
+            reranker=EmbeddingSimilarityReranker(encoder=DeterministicEncoder()),
             rerank_enabled=True,
             rerank_candidate_limit=2,
         )

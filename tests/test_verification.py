@@ -21,6 +21,11 @@ from daem0nmcp.reflexion.verification import (
 )
 
 
+@pytest.fixture(autouse=True)
+def models_local_enabled(monkeypatch):
+    monkeypatch.setenv("DAEM0NMCP_MODELS_LOCAL_ENABLED", "true")
+
+
 @pytest.fixture
 def mock_memory_manager():
     """Create a mock MemoryManager."""
@@ -98,9 +103,7 @@ class TestVerifyClaim:
                 "daem0nmcp.reflexion.verification.encode_document"
             ) as mock_encode_doc,
             patch("daem0nmcp.reflexion.verification.decode") as mock_decode,
-            patch(
-                "daem0nmcp.reflexion.verification.cosine_similarity"
-            ) as mock_sim,
+            patch("daem0nmcp.reflexion.verification.cosine_similarity") as mock_sim,
         ):
             # Mock embedding operations
             mock_encode.return_value = b"fake_embedding"
@@ -159,9 +162,7 @@ class TestVerifyClaim:
                 "daem0nmcp.reflexion.verification.encode_document"
             ) as mock_encode_doc,
             patch("daem0nmcp.reflexion.verification.decode") as mock_decode,
-            patch(
-                "daem0nmcp.reflexion.verification.cosine_similarity"
-            ) as mock_sim,
+            patch("daem0nmcp.reflexion.verification.cosine_similarity") as mock_sim,
         ):
             mock_encode.return_value = b"fake_embedding"
             mock_encode_doc.return_value = b"fake_embedding"
@@ -256,9 +257,7 @@ class TestVerifyClaim:
                 "daem0nmcp.reflexion.verification.encode_document"
             ) as mock_encode_doc,
             patch("daem0nmcp.reflexion.verification.decode") as mock_decode,
-            patch(
-                "daem0nmcp.reflexion.verification.cosine_similarity"
-            ) as mock_sim,
+            patch("daem0nmcp.reflexion.verification.cosine_similarity") as mock_sim,
         ):
             mock_encode.return_value = b"fake_embedding"
             mock_encode_doc.return_value = b"fake_embedding"
@@ -522,9 +521,7 @@ class TestVerificationIntegration:
                 "daem0nmcp.reflexion.verification.encode_document"
             ) as mock_encode_doc,
             patch("daem0nmcp.reflexion.verification.decode") as mock_decode,
-            patch(
-                "daem0nmcp.reflexion.verification.cosine_similarity"
-            ) as mock_sim,
+            patch("daem0nmcp.reflexion.verification.cosine_similarity") as mock_sim,
         ):
             mock_encode.return_value = b"embedding"
             mock_encode_doc.return_value = b"embedding"

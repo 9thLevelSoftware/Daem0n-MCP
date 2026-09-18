@@ -9,7 +9,6 @@ from ..bounded_workers import BoundedWorkerPool
 from .composer import SelectedEvidence
 from .types import FusedCandidate, RetrievalQuery
 
-
 _RERANK_WORKERS = BoundedWorkerPool(
     max_workers=2,
     thread_name_prefix="daem0nmcp-retrieval-rerank",
@@ -40,9 +39,7 @@ class EmbeddingSimilarityReranker:
         ):
             if not callable(getattr(encoder, "encode", None)):
                 raise ValueError(f"{field_name} must provide encode")
-        if worker_pool is not None and not isinstance(
-            worker_pool, BoundedWorkerPool
-        ):
+        if worker_pool is not None and not isinstance(worker_pool, BoundedWorkerPool):
             raise ValueError("worker_pool must be a BoundedWorkerPool")
         self._query_encoder = query_encoder
         self._document_encoder = document_encoder
@@ -73,9 +70,7 @@ class EmbeddingSimilarityReranker:
         query_vector = _vector(self._query_encoder.encode(query_text))
         scored: list[tuple[float, int, SelectedEvidence]] = []
         for index, candidate in enumerate(candidates):
-            document_vector = _vector(
-                self._document_encoder.encode(candidate.content)
-            )
+            document_vector = _vector(self._document_encoder.encode(candidate.content))
             if len(document_vector) != len(query_vector):
                 raise RuntimeError("RERANKER_VECTOR_INVALID")
             score = _cosine_similarity(query_vector, document_vector)
@@ -85,9 +80,7 @@ class EmbeddingSimilarityReranker:
 
 
 def _vector(value: object) -> tuple[float, ...]:
-    if isinstance(value, (str, bytes, bytearray)) or not isinstance(
-        value, Sequence
-    ):
+    if isinstance(value, (str, bytes, bytearray)) or not isinstance(value, Sequence):
         raise RuntimeError("RERANKER_VECTOR_INVALID")
     try:
         vector = tuple(float(component) for component in value)
@@ -106,7 +99,9 @@ def _cosine_similarity(
     right_norm = math.sqrt(sum(component * component for component in right))
     if left_norm == 0.0 or right_norm == 0.0:
         return -1.0
-    score = sum(a * b for a, b in zip(left, right)) / (left_norm * right_norm)
+    score = sum(a * b for a, b in zip(left, right, strict=True)) / (
+        left_norm * right_norm
+    )
     if not math.isfinite(score):
         raise RuntimeError("RERANKER_VECTOR_INVALID")
     return score

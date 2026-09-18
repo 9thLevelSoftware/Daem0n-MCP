@@ -438,9 +438,7 @@ async def test_check_triggers_glob_patterns(trigger_manager, temp_storage):
 
 
 @pytest.fixture
-async def covenant_compliant_project_for_triggers(
-    tmp_path, covenant_workspace_factory
-):
+async def covenant_compliant_project_for_triggers(tmp_path, covenant_workspace_factory):
     """Create project that passes communion checks."""
     from daem0nmcp import server
 
@@ -483,7 +481,7 @@ async def test_mcp_list_context_triggers(covenant_compliant_project_for_triggers
 
     result = await covenant_compliant_project_for_triggers.call(
         server.list_context_triggers,
-        project_path=covenant_compliant_project_for_triggers
+        project_path=covenant_compliant_project_for_triggers,
     )
 
     assert "triggers" in result
@@ -509,7 +507,8 @@ async def test_mcp_remove_context_trigger(covenant_compliant_project_for_trigger
     # Remove it
     result = await covenant_compliant_project_for_triggers.call(
         server.remove_context_trigger,
-        trigger_id=trigger_id, project_path=covenant_compliant_project_for_triggers
+        trigger_id=trigger_id,
+        project_path=covenant_compliant_project_for_triggers,
     )
 
     assert result["status"] == "removed"
@@ -517,7 +516,7 @@ async def test_mcp_remove_context_trigger(covenant_compliant_project_for_trigger
     # Verify it's gone
     list_result = await covenant_compliant_project_for_triggers.call(
         server.list_context_triggers,
-        project_path=covenant_compliant_project_for_triggers
+        project_path=covenant_compliant_project_for_triggers,
     )
     assert len(list_result["triggers"]) == 0
 
@@ -601,9 +600,10 @@ async def test_mcp_resource_triggered_context(covenant_compliant_project_for_tri
     )
 
     # Access the resource directly (simulates MCP resource access)
-    result_json = await server.get_triggered_context_resource(
-        file_path="test.py", project_path=covenant_compliant_project_for_triggers
-    )
+    with covenant_compliant_project_for_triggers.installed():
+        result_json = await server.get_triggered_context_resource(
+            file_path="test.py", project_path=covenant_compliant_project_for_triggers
+        )
 
     result = json.loads(result_json)
     assert result["file"] == "test.py"

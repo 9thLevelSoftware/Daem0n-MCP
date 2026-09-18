@@ -5,7 +5,6 @@ import tempfile
 import unittest
 from pathlib import Path
 
-
 WORKSPACE_ID = "ws_0123456789abcdef01234567"
 
 
@@ -41,7 +40,9 @@ class DiscoveryProjectionSchemaTests(unittest.TestCase):
         self.assertGreaterEqual(CURRENT_SCHEMA_VERSION, 22)
         self.assertEqual(
             22,
-            next(version for version, _description, _sql in MIGRATIONS if version == 22),
+            next(
+                version for version, _description, _sql in MIGRATIONS if version == 22
+            ),
         )
         _apply_v7_schema(self.connection)
 
@@ -118,7 +119,9 @@ class DiscoveryProjectionSchemaTests(unittest.TestCase):
                 for index, name in enumerate(names, 1)
             ],
         )
-        self.assertEqual(names, tuple(item.projection for item in brief.projection_freshness))
+        self.assertEqual(
+            names, tuple(item.projection for item in brief.projection_freshness)
+        )
 
 
 class DiscoveryProjectionBuilderTests(unittest.TestCase):
@@ -181,9 +184,11 @@ class DiscoveryProjectionBuilderTests(unittest.TestCase):
             SpecializedProjectionBuilder,
         )
 
-        return SpecializedProjectionBuilder(
-            self.connection, clock_us=lambda: 900
-        ).rebuild(WORKSPACE_ID, "graph").generation
+        return (
+            SpecializedProjectionBuilder(self.connection, clock_us=lambda: 900)
+            .rebuild(WORKSPACE_ID, "graph")
+            .generation
+        )
 
     @staticmethod
     def _seeds(record_id: str):
@@ -218,14 +223,14 @@ class DiscoveryProjectionBuilderTests(unittest.TestCase):
             ),
         )
 
-    def test_graph_ids_are_stable_or_generation_bound_and_rows_are_immutable(self) -> None:
+    def test_graph_ids_are_stable_or_generation_bound_and_rows_are_immutable(
+        self,
+    ) -> None:
         """A graph rebuild must not retarget a community or rename an entity."""
         from daem0nmcp.discovery_projection import DiscoveryProjectionBuilder
 
         entities, communities = self._seeds(self.record_id)
-        builder = DiscoveryProjectionBuilder(
-            self.connection, clock_us=lambda: 1_000
-        )
+        builder = DiscoveryProjectionBuilder(self.connection, clock_us=lambda: 1_000)
         first = builder.populate_graph(
             WORKSPACE_ID,
             entities=entities,
@@ -254,8 +259,8 @@ class DiscoveryProjectionBuilderTests(unittest.TestCase):
         """A bad hierarchy must not strand identifiers outside its generation."""
         from daem0nmcp.discovery_projection import (
             CommunityProjectionSeed,
-            DiscoveryProjectionBuildError,
             DiscoveryProjectionBuilder,
+            DiscoveryProjectionBuildError,
         )
 
         before = self.connection.execute(
@@ -289,17 +294,17 @@ class DiscoveryProjectionBuilderTests(unittest.TestCase):
             ).fetchone()[0],
         )
 
-    def test_code_rebuild_binds_ids_to_generation_and_rejects_unsafe_paths(self) -> None:
+    def test_code_rebuild_binds_ids_to_generation_and_rejects_unsafe_paths(
+        self,
+    ) -> None:
         """A code ID cannot survive a rebuild or carry a path outside the workspace."""
         from daem0nmcp.discovery_projection import (
             CodeEntityProjectionSeed,
-            DiscoveryProjectionBuildError,
             DiscoveryProjectionBuilder,
+            DiscoveryProjectionBuildError,
         )
 
-        builder = DiscoveryProjectionBuilder(
-            self.connection, clock_us=lambda: 2_000
-        )
+        builder = DiscoveryProjectionBuilder(self.connection, clock_us=lambda: 2_000)
         seed = CodeEntityProjectionSeed(
             source_key="legacy-code-1",
             kind="function",
@@ -319,9 +324,7 @@ class DiscoveryProjectionBuilderTests(unittest.TestCase):
                 "SELECT count(*) FROM public_object_ids WHERE object_kind='code'"
             ).fetchone()[0],
         )
-        second = builder.rebuild_code(
-            WORKSPACE_ID, entities=(seed,), force=True
-        )
+        second = builder.rebuild_code(WORKSPACE_ID, entities=(seed,), force=True)
 
         self.assertTrue(reused.reused)
         self.assertEqual(first.code_entity_ids, reused.code_entity_ids)
@@ -397,9 +400,7 @@ class DiscoveryProjectionBuilderTests(unittest.TestCase):
             "INSERT INTO extracted_entities VALUES (1,?,'concept','Authentication',NULL,2)",
             (project,),
         )
-        self.connection.execute(
-            "INSERT INTO memory_entity_refs VALUES (1,7,1)"
-        )
+        self.connection.execute("INSERT INTO memory_entity_refs VALUES (1,7,1)")
         self.connection.execute(
             "INSERT INTO memory_communities VALUES (1,?,'Authentication',1,'[7]',0,NULL)",
             (project,),
@@ -469,8 +470,8 @@ class DiscoveryProjectionBuilderTests(unittest.TestCase):
     def test_legacy_import_rejects_a_code_path_outside_the_workspace(self) -> None:
         """A retained absolute path may be translated, never trusted or leaked."""
         from daem0nmcp.discovery_projection import (
-            DiscoveryProjectionBuildError,
             DiscoveryProjectionBuilder,
+            DiscoveryProjectionBuildError,
         )
 
         run_id = self._install_legacy_rows(unsafe_code_path=True)

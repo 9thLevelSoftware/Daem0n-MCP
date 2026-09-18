@@ -4,10 +4,8 @@ import ast
 import hashlib
 import json
 import sqlite3
-import tempfile
 import unittest
 from pathlib import Path
-
 
 WORKSPACE_A = "ws_0123456789abcdef01234567"
 WORKSPACE_B = "ws_89abcdef0123456701234567"
@@ -126,9 +124,7 @@ class Migration19Tests(unittest.TestCase):
             with self.assertRaisesRegex(
                 sqlite3.IntegrityError, "IMMUTABLE_PUBLIC_OBJECT_ID"
             ):
-                connection.execute(
-                    "UPDATE public_object_ids SET source_key='i:2'"
-                )
+                connection.execute("UPDATE public_object_ids SET source_key='i:2'")
             with self.assertRaisesRegex(
                 sqlite3.IntegrityError, "IMMUTABLE_PUBLIC_OBJECT_ID"
             ):
@@ -184,9 +180,7 @@ class PublicObjectIdRepositoryTests(unittest.TestCase):
         )
         for kind, prefix, source_key in cases:
             with self.subTest(kind=kind):
-                public_id = repository.get_or_create(
-                    WORKSPACE_A, kind, source_key
-                )
+                public_id = repository.get_or_create(WORKSPACE_A, kind, source_key)
                 self.assertEqual(
                     public_id,
                     _expected_id(
@@ -199,14 +193,10 @@ class PublicObjectIdRepositoryTests(unittest.TestCase):
                 )
                 self.assertRegex(public_id, rf"^{prefix}_[0-9a-f]{{64}}$")
                 self.assertEqual(
-                    repository.public_id_for_source(
-                        WORKSPACE_A, kind, source_key
-                    ),
+                    repository.public_id_for_source(WORKSPACE_A, kind, source_key),
                     public_id,
                 )
-                resolved = repository.resolve_public_id(
-                    WORKSPACE_A, kind, public_id
-                )
+                resolved = repository.resolve_public_id(WORKSPACE_A, kind, public_id)
                 self.assertEqual(resolved.source_key, source_key)
                 self.assertIsNone(resolved.projection_generation)
                 self.assertEqual(resolved.public_id, public_id)
@@ -215,9 +205,12 @@ class PublicObjectIdRepositoryTests(unittest.TestCase):
             repository.get_or_create(WORKSPACE_A, "rule", 7),
             repository.get_or_create(WORKSPACE_A, "rule", 7),
         )
-        self.assertEqual(4, self.connection.execute(
-            "SELECT count(*) FROM public_object_ids"
-        ).fetchone()[0])
+        self.assertEqual(
+            4,
+            self.connection.execute(
+                "SELECT count(*) FROM public_object_ids"
+            ).fetchone()[0],
+        )
 
     def test_projection_kinds_bind_ids_to_manifest_generation(self) -> None:
         # Catches stale community/code identifiers selecting a rebuilt projection.
@@ -267,9 +260,7 @@ class PublicObjectIdRepositoryTests(unittest.TestCase):
             (WORKSPACE_A, "rule_" + "f" * 64),
         ):
             with self.assertRaises(PublicObjectIdNotFound) as raised:
-                repository.resolve_public_id(
-                    workspace_id, "rule", candidate
-                )
+                repository.resolve_public_id(workspace_id, "rule", candidate)
             failures.append((raised.exception.code, str(raised.exception)))
         self.assertEqual([("NOT_FOUND", "NOT_FOUND")] * 3, failures)
 
@@ -277,7 +268,9 @@ class PublicObjectIdRepositoryTests(unittest.TestCase):
         # Catches deterministic-ID collisions being mistaken for idempotent replay.
         from daem0nmcp.api.v7.public_ids import PublicObjectIdIntegrityError
 
-        constant_id = lambda *_args: "rule_" + "a" * 64
+        def constant_id(*_args):
+            return "rule_" + "a" * 64
+
         repository = self._repository(id_factory=constant_id)
         repository.get_or_create(WORKSPACE_A, "rule", 1)
         with self.assertRaises(PublicObjectIdIntegrityError) as raised:
@@ -307,12 +300,15 @@ class PublicObjectIdRepositoryTests(unittest.TestCase):
             (WORKSPACE_A, "code", "source", True),
         )
         for workspace_id, kind, source_key, generation in invalid:
-            with self.subTest(
-                workspace_id=workspace_id,
-                kind=kind,
-                source_key=source_key,
-                generation=generation,
-            ), self.assertRaises(ValueError):
+            with (
+                self.subTest(
+                    workspace_id=workspace_id,
+                    kind=kind,
+                    source_key=source_key,
+                    generation=generation,
+                ),
+                self.assertRaises(ValueError),
+            ):
                 repository.get_or_create(
                     workspace_id,
                     kind,

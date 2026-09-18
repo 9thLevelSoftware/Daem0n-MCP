@@ -165,7 +165,7 @@ class RetrievalRouter:
         }
 
     # ------------------------------------------------------------------
-    # Backward-compatible route alias. V7 composition owns token budgeting.
+    # Legacy assembled-text compression. V7 composition owns its token budget.
     # ------------------------------------------------------------------
 
     async def route_and_compress(
@@ -175,10 +175,39 @@ class RetrievalRouter:
         result_text: str | None = None,
         **kwargs: Any,
     ) -> dict[str, Any]:
-        """Route without post-hoc compression that would erase provenance."""
+        """Preserve v6 optional text compression and its separate metadata.
 
-        del result_text
-        return await self.route_search(query, top_k=top_k, **kwargs)
+        Structured retrieval results remain intact. V7 production retrieval uses
+        its citation-aware composer directly and does not call this legacy API.
+        """
+        result = await self.route_search(query, top_k=top_k, **kwargs)
+        manager = getattr(self, "_mm", None)
+        database = getattr(manager, "db", None)
+        # Unknown and v7 stores require citation-aware evidence composition.
+        # Only explicitly retained format-6 storage uses the legacy text API.
+        if result_text and getattr(database, "format_version", None) == 6:
+            result["compression_metadata"] = None
+            try:
+                from .compression.jit import get_jit_compressor
+
+                compressed = get_jit_compressor().compress_if_needed(result_text)
+                if compressed.get("threshold_triggered") is not None:
+                    result["compression_metadata"] = {
+                        key: compressed.get(key)
+                        for key in (
+                            "original_tokens",
+                            "compressed_tokens",
+                            "compression_rate",
+                            "threshold_triggered",
+                            "content_type",
+                        )
+                    }
+                    result["compressed_text"] = compressed["text"]
+            except Exception:
+                logger.warning(
+                    "Legacy JIT compression unavailable; returning structured results"
+                )
+        return result
 
     # ------------------------------------------------------------------
     # Strategy: vector-only (SIMPLE queries)

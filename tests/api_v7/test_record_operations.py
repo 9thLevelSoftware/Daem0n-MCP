@@ -9,10 +9,10 @@ import unittest
 from contextlib import closing, contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from types import MappingProxyType
+from types import MappingProxyType, SimpleNamespace
+from unittest.mock import patch
 
 from daem0nmcp.api.v7.application import AdmittedRequest
-
 
 NOW = datetime(2026, 8, 8, 12, 0, tzinfo=timezone.utc)
 PREFLIGHT_TOKEN = "t" * 32
@@ -23,16 +23,12 @@ def _apply_v7_schema(connection: sqlite3.Connection) -> None:
     from daem0nmcp.migrations.schema import MIGRATIONS
     from daem0nmcp.schema_version import CURRENT_SCHEMA_VERSION
 
-    connection.execute(
-        "CREATE TABLE schema_version (version INTEGER PRIMARY KEY)"
-    )
+    connection.execute("CREATE TABLE schema_version (version INTEGER PRIMARY KEY)")
     for version in range(16, CURRENT_SCHEMA_VERSION + 1):
         migration = next(item for item in MIGRATIONS if item[0] == version)
         for statement in migration[2]:
             connection.execute(statement)
-        connection.execute(
-            "INSERT INTO schema_version(version) VALUES (?)", (version,)
-        )
+        connection.execute("INSERT INTO schema_version(version) VALUES (?)", (version,))
     connection.commit()
 
 
@@ -66,17 +62,13 @@ class RecordOperationTests(unittest.IsolatedAsyncioTestCase):
             self.storage,
             ActiveDatabasePointer(7, 1, self.database.name, None, None),
         )
-        self.workspace = WorkspaceRegistry(
-            [self.root], default_root=self.root
-        ).default
+        self.workspace = WorkspaceRegistry([self.root], default_root=self.root).default
         self.scheduler_observations: list[tuple[Path, int]] = []
 
     def _schedule(self, path: Path) -> None:
         with closing(sqlite3.connect(path)) as connection:
             count = int(
-                connection.execute(
-                    "SELECT count(*) FROM memory_events"
-                ).fetchone()[0]
+                connection.execute("SELECT count(*) FROM memory_events").fetchone()[0]
             )
         self.scheduler_observations.append((Path(path), count))
 
@@ -93,6 +85,146 @@ class RecordOperationTests(unittest.IsolatedAsyncioTestCase):
         }
         options.update(changes)
         return build_record_operations(RecordOperationDependencies(**options))
+
+    async def test_canonical_batch_namespace_keeps_legacy_replays_and_separates_new_receipts(
+        self,
+    ) -> None:
+        """The extension must not invalidate pre-extension batch receipts."""
+        from daem0nmcp.api.v7.record_operations import (
+            CanonicalBatchStoreRequest,
+            RecordOperationDependencies,
+            store_canonical_batch,
+        )
+
+        legacy = self._batch_request()
+        operation = self._operations()["memory_store_batch"]
+        first = await operation(workspace=self.workspace, request=legacy)
+        replay = await operation(workspace=self.workspace, request=legacy)
+        self.assertTrue(replay.idempotent_replay)
+        self.assertEqual(first.event_ids, replay.event_ids)
+
+        dependencies = RecordOperationDependencies(
+            clock=lambda: NOW,
+            projection_scheduler=self._schedule,
+        )
+        request = CanonicalBatchStoreRequest(
+            records=({"record_type": "learning", "content": "Pinned provenance."},),
+            idempotency_key="document-ingest-0001",
+            semantic_namespace="document-ingest-url",
+            provenance={"url": "https://example.test/a", "content_hash": "a" * 64},
+        )
+        namespaced = await store_canonical_batch(
+            dependencies, workspace=self.workspace, request=request
+        )
+        namespaced_replay = await store_canonical_batch(
+            dependencies, workspace=self.workspace, request=request
+        )
+        self.assertFalse(namespaced.idempotent_replay)
+        self.assertTrue(namespaced_replay.idempotent_replay)
+        self.assertEqual(namespaced.event_ids, namespaced_replay.event_ids)
+
+    async def test_extracted_batch_seam_replays_frozen_legacy_receipt_byte_for_byte(
+        self,
+    ) -> None:
+        """The public seam must preserve the cc08b4f legacy receipt contract."""
+        from daem0nmcp.api.v7.pinned import IdempotencyConflict
+        from daem0nmcp.api.v7.record_operations import (
+            CanonicalBatchStoreRequest,
+            RecordOperationDependencies,
+            store_canonical_batch,
+        )
+        from daem0nmcp.workspace import Workspace
+
+        workspace = Workspace("ws_" + "a" * 24, self.root)
+        records = (
+            {
+                "record_type": "learning",
+                "content": "Frozen legacy receipt.",
+                "tags": ["legacy"],
+            },
+        )
+        admitted = _request(
+            "memory_store_batch",
+            workspace_id=workspace.workspace_id,
+            records=list(records),
+            idempotency_key="record-batch-golden-0001",
+            preflight_token=PREFLIGHT_TOKEN,
+        )
+        legacy_operation = self._operations()["memory_store_batch"]
+        with (
+            patch(
+                "daem0nmcp.api.v7.record_operations.WorkspaceRegistry",
+                return_value=SimpleNamespace(default=workspace),
+            ),
+            patch(
+                "daem0nmcp.api.v7.runtime_services.WorkspaceRegistry",
+                return_value=SimpleNamespace(default=workspace),
+            ),
+        ):
+            legacy = await legacy_operation(workspace=workspace, request=admitted)
+
+        request = CanonicalBatchStoreRequest(
+            records=records,
+            idempotency_key="record-batch-golden-0001",
+        )
+        with patch(
+            "daem0nmcp.api.v7.runtime_services.WorkspaceRegistry",
+            return_value=SimpleNamespace(default=workspace),
+        ):
+            replay = await store_canonical_batch(
+                RecordOperationDependencies(clock=lambda: NOW),
+                workspace=workspace,
+                request=request,
+            )
+
+        self.assertTrue(replay.idempotent_replay)
+        self.assertEqual(
+            legacy.event_ids,
+            ["evt_57525b6768d9b92cf07720951c7e9107dcb76f787daf298e1b657f9dddb122b7"],
+        )
+        self.assertEqual(replay.event_ids, legacy.event_ids)
+        with closing(sqlite3.connect(self.database)) as connection:
+            row = connection.execute(
+                "SELECT stream_id,correlation_id,payload_json,payload_hash,event_hash "
+                "FROM memory_events"
+            ).fetchone()
+        self.assertEqual(
+            row,
+            (
+                "mem_c14193dfb685cdbaeaacf03b7b5e2300fd0d2beb3d58e17b0f1b6693548617ca",
+                "job_8ff19a5f50a9c1a59e9c15d2d6d84db5993661b82ee36579da3f8c5d897caf12",
+                '{"batch_index":0,"batch_size":1,"idempotency_request_hash":"c0a0d841029c7cdb331d21a7cd2f85a51245ad668eeaddd4bd1658fc8e455e2a","record":{"archived":false,"content":"Frozen legacy receipt.","context":{},"deleted_at_us":null,"file_path":null,"file_path_relative":null,"importance_score":null,"is_permanent":false,"keywords":null,"legacy_type":null,"outcome":null,"pinned":false,"rationale":null,"recall_count":0,"record_type":"learning","source_client":null,"source_model":null,"surprise_score":null,"tags":["legacy"],"worked":null}}',
+                "be5b02d99c68aabef0a668d9978e75871af5a6df0abfa8d86ce063d009e5db55",
+                "57525b6768d9b92cf07720951c7e9107dcb76f787daf298e1b657f9dddb122b7",
+            ),
+        )
+
+        conflicting = CanonicalBatchStoreRequest(
+            records=(
+                {
+                    "record_type": "learning",
+                    "content": "Rebound legacy receipt.",
+                },
+            ),
+            idempotency_key="record-batch-golden-0001",
+        )
+        with (
+            patch(
+                "daem0nmcp.api.v7.runtime_services.WorkspaceRegistry",
+                return_value=SimpleNamespace(default=workspace),
+            ),
+            self.assertRaises(IdempotencyConflict),
+        ):
+            await store_canonical_batch(
+                RecordOperationDependencies(clock=lambda: NOW),
+                workspace=workspace,
+                request=conflicting,
+            )
+        with closing(sqlite3.connect(self.database)) as connection:
+            self.assertEqual(
+                connection.execute("SELECT count(*) FROM memory_events").fetchone()[0],
+                1,
+            )
 
     def test_dependencies_require_a_32_byte_cursor_secret(self) -> None:
         """Weak or ambiguously typed cursor keys must fail during composition."""
@@ -139,9 +271,7 @@ class RecordOperationTests(unittest.IsolatedAsyncioTestCase):
                 )
                 columns = [str(item[0]) for item in query.description]
                 values = list(query.fetchone())
-                values[columns.index("workspace_id")] = (
-                    other_workspace.workspace_id
-                )
+                values[columns.index("workspace_id")] = other_workspace.workspace_id
                 placeholders = ",".join("?" for _ in columns)
                 destination.execute(
                     f"INSERT INTO {table} ({','.join(columns)}) "
@@ -214,7 +344,9 @@ class RecordOperationTests(unittest.IsolatedAsyncioTestCase):
             operations["extra"] = object()
         for operation in operations.values():
             parameters = tuple(inspect.signature(operation).parameters.values())
-            self.assertEqual(("workspace", "request"), tuple(p.name for p in parameters))
+            self.assertEqual(
+                ("workspace", "request"), tuple(p.name for p in parameters)
+            )
             self.assertTrue(
                 all(p.kind is inspect.Parameter.KEYWORD_ONLY for p in parameters)
             )
@@ -239,9 +371,9 @@ class RecordOperationTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(
                 (2, 2),
                 (
-                    connection.execute(
-                        "SELECT count(*) FROM memory_events"
-                    ).fetchone()[0],
+                    connection.execute("SELECT count(*) FROM memory_events").fetchone()[
+                        0
+                    ],
                     connection.execute(
                         "SELECT count(*) FROM memory_records"
                     ).fetchone()[0],
@@ -292,9 +424,9 @@ class RecordOperationTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(
                 (2, 2),
                 (
-                    connection.execute(
-                        "SELECT count(*) FROM memory_events"
-                    ).fetchone()[0],
+                    connection.execute("SELECT count(*) FROM memory_events").fetchone()[
+                        0
+                    ],
                     connection.execute(
                         "SELECT count(*) FROM memory_records"
                     ).fetchone()[0],
@@ -328,9 +460,7 @@ class RecordOperationTests(unittest.IsolatedAsyncioTestCase):
         with closing(sqlite3.connect(self.database)) as connection:
             self.assertEqual(
                 0,
-                connection.execute(
-                    "SELECT count(*) FROM memory_events"
-                ).fetchone()[0],
+                connection.execute("SELECT count(*) FROM memory_events").fetchone()[0],
             )
         self.assertEqual([], self.scheduler_observations)
 
@@ -349,9 +479,9 @@ class RecordOperationTests(unittest.IsolatedAsyncioTestCase):
                 with super().locked_active(workspace) as active:
                     yield active
 
-        operation = self._operations(
-            storage_resolver=BlockingResolver()
-        )["memory_recall_file"]
+        operation = self._operations(storage_resolver=BlockingResolver())[
+            "memory_recall_file"
+        ]
         task = asyncio.create_task(
             operation(
                 workspace=self.workspace,
@@ -583,9 +713,7 @@ class RecordOperationTests(unittest.IsolatedAsyncioTestCase):
                 ]
             ),
         )
-        operation = self._operations(cursor_secret=CURSOR_SECRET)[
-            "memory_recall_file"
-        ]
+        operation = self._operations(cursor_secret=CURSOR_SECRET)["memory_recall_file"]
         first = await operation(
             workspace=self.workspace,
             request=_request(
@@ -767,10 +895,14 @@ class RecordOperationTests(unittest.IsolatedAsyncioTestCase):
         operations = self._operations()
         stored = await operations["memory_store_batch"](
             workspace=self.workspace,
-            request=self._batch_request(records=[{
-                "record_type": "decision",
-                "content": "First session update.",
-            }]),
+            request=self._batch_request(
+                records=[
+                    {
+                        "record_type": "decision",
+                        "content": "First session update.",
+                    }
+                ]
+            ),
         )
         first = await operations["session_updates_get"](
             workspace=self.workspace,
@@ -790,9 +922,9 @@ class RecordOperationTests(unittest.IsolatedAsyncioTestCase):
 
         from daem0nmcp.api.v7.record_operations import RecordOperationError
 
-        rotated = self._operations(
-            cursor_secret=b"rotated-record-cursor-secret-32!"
-        )["session_updates_get"]
+        rotated = self._operations(cursor_secret=b"rotated-record-cursor-secret-32!")[
+            "session_updates_get"
+        ]
         with self.assertRaises(RecordOperationError) as caught:
             await rotated(
                 workspace=self.workspace,
@@ -804,9 +936,7 @@ class RecordOperationTests(unittest.IsolatedAsyncioTestCase):
             )
         self.assertEqual("INVALID_ARGUMENT", caught.exception.code)
 
-        tampered = first.cursor[:-1] + (
-            "0" if first.cursor[-1] != "0" else "1"
-        )
+        tampered = first.cursor[:-1] + ("0" if first.cursor[-1] != "0" else "1")
         with self.assertRaises(RecordOperationError) as caught:
             await operations["session_updates_get"](
                 workspace=self.workspace,
@@ -845,10 +975,12 @@ class RecordOperationTests(unittest.IsolatedAsyncioTestCase):
             workspace=self.workspace,
             request=self._batch_request(
                 key="record-batch-later-0002",
-                records=[{
-                    "record_type": "warning",
-                    "content": "Second update at the same recorded timestamp.",
-                }],
+                records=[
+                    {
+                        "record_type": "warning",
+                        "content": "Second update at the same recorded timestamp.",
+                    }
+                ],
             ),
         )
         changed = await operations["session_updates_get"](
@@ -865,9 +997,7 @@ class RecordOperationTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_empty_session_cursor_is_authenticated(self) -> None:
         """The origin cursor is a capability too, even before the first event."""
-        operation = self._operations(cursor_secret=CURSOR_SECRET)[
-            "session_updates_get"
-        ]
+        operation = self._operations(cursor_secret=CURSOR_SECRET)["session_updates_get"]
         first = await operation(
             workspace=self.workspace,
             request=_request(
@@ -878,9 +1008,9 @@ class RecordOperationTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(first.changed)
         self.assertRegex(first.cursor, r"^cur_v1_origin_[0-9a-f]{64}$")
 
-        rotated = self._operations(
-            cursor_secret=b"rotated-record-cursor-secret-32!"
-        )["session_updates_get"]
+        rotated = self._operations(cursor_secret=b"rotated-record-cursor-secret-32!")[
+            "session_updates_get"
+        ]
         from daem0nmcp.api.v7.record_operations import RecordOperationError
 
         with self.assertRaises(RecordOperationError) as caught:

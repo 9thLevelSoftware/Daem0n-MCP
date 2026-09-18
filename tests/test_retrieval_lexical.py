@@ -12,17 +12,13 @@ import threading
 import unittest
 from pathlib import Path
 
-
 WORKSPACE_ID = "ws_0123456789abcdef01234567"
 OTHER_WORKSPACE_ID = "ws_76543210fedcba9876543210"
 
 
 def _schema_migrations():
     path = (
-        Path(__file__).resolve().parents[1]
-        / "daem0nmcp"
-        / "migrations"
-        / "schema.py"
+        Path(__file__).resolve().parents[1] / "daem0nmcp" / "migrations" / "schema.py"
     )
     spec = importlib.util.spec_from_file_location("retrieval_test_schema", path)
     assert spec is not None and spec.loader is not None
@@ -87,17 +83,13 @@ class RetrievalMigration18Tests(unittest.TestCase):
                     "PRAGMA table_info(dense_projection_refs)"
                 )
             }
-            self.assertFalse(
-                dense_columns & {"vector", "embedding", "payload", "blob"}
-            )
+            self.assertFalse(dense_columns & {"vector", "embedding", "payload", "blob"})
         finally:
             connection.close()
 
     def test_orm_and_upgrade_metadata_include_retrieval_projection_schema(self):
         root = Path(__file__).resolve().parents[1]
-        tree = ast.parse(
-            (root / "daem0nmcp" / "models.py").read_text(encoding="utf-8")
-        )
+        tree = ast.parse((root / "daem0nmcp" / "models.py").read_text(encoding="utf-8"))
         declared = {}
         for node in tree.body:
             if not isinstance(node, ast.ClassDef):
@@ -106,8 +98,7 @@ class RetrievalMigration18Tests(unittest.TestCase):
                 if (
                     isinstance(statement, ast.Assign)
                     and any(
-                        isinstance(target, ast.Name)
-                        and target.id == "__tablename__"
+                        isinstance(target, ast.Name) and target.id == "__tablename__"
                         for target in statement.targets
                     )
                     and isinstance(statement.value, ast.Constant)
@@ -136,9 +127,7 @@ class RetrievalMigration18Tests(unittest.TestCase):
             upgrade,
         )
 
-        model_source = (root / "daem0nmcp" / "models.py").read_text(
-            encoding="utf-8"
-        )
+        model_source = (root / "daem0nmcp" / "models.py").read_text(encoding="utf-8")
         for class_name in (
             "RecordProcedure",
             "RecordOutcomeView",
@@ -148,9 +137,9 @@ class RetrievalMigration18Tests(unittest.TestCase):
                 "\nclass ", 1
             )[0]
             self.assertIn('"sqlite_with_rowid": False', class_source)
-        retrieval_source = model_source.split("class RetrievalDocument", 1)[
-            1
-        ].split("\nclass ", 1)[0]
+        retrieval_source = model_source.split("class RetrievalDocument", 1)[1].split(
+            "\nclass ", 1
+        )[0]
         self.assertIn(
             'rationale = Column(Text, nullable=False, server_default="")',
             retrieval_source,
@@ -235,14 +224,38 @@ class LexicalProjectionTests(unittest.IsolatedAsyncioTestCase):
                 occurred_at_us=100,
                 recorded_at_us=101,
                 actor_type="system",
-                payload={
-                    "record": self._record(
-                        content, rationale, tags, **changes
-                    )
-                },
+                payload={"record": self._record(content, rationale, tags, **changes)},
             )
         )
         return record_id
+
+    def _update_record(
+        self,
+        suffix: str,
+        content: str,
+        rationale: str,
+        tags: list[str],
+        *,
+        version: int = 2,
+        event_type: str = "memory.updated",
+        **changes,
+    ):
+        from daem0nmcp.event_store import EventCommand, EventStore
+
+        record_id = "mem_" + suffix * 64
+        return EventStore(self.connection).append_and_project(
+            EventCommand(
+                workspace_id=WORKSPACE_ID,
+                stream_id=record_id,
+                stream_kind="memory",
+                event_type=event_type,
+                occurred_at_us=100 + version,
+                recorded_at_us=101 + version,
+                actor_type="system",
+                payload={"record": self._record(content, rationale, tags, **changes)},
+                expected_stream_version=version,
+            )
+        )
 
     async def test_build_activates_generation_and_fts_search_returns_evidence(self):
         from daem0nmcp.retrieval.projections import LexicalProjectionBuilder
@@ -280,9 +293,7 @@ class LexicalProjectionTests(unittest.IsolatedAsyncioTestCase):
             [durable],
             [candidate.evidence.record_id for candidate in provider_result.candidates],
         )
-        self.assertEqual(
-            "lexical", provider_result.candidates[0].evidence.provider
-        )
+        self.assertEqual("lexical", provider_result.candidates[0].evidence.provider)
         self.assertEqual(
             self.connection.execute(
                 "SELECT source_event_id FROM memory_records WHERE record_id=?",
@@ -457,9 +468,7 @@ class LexicalProjectionTests(unittest.IsolatedAsyncioTestCase):
         self._append_record("d", "dry run", "capability", ["fts"])
         before = self.connection.total_changes
 
-        result = MissingFtsBuilder(self.connection).rebuild(
-            WORKSPACE_ID, dry_run=True
-        )
+        result = MissingFtsBuilder(self.connection).rebuild(WORKSPACE_ID, dry_run=True)
 
         self.assertEqual("unavailable", result.status)
         self.assertEqual("unavailable", result.capability_status)
@@ -629,9 +638,7 @@ class LexicalProjectionTests(unittest.IsolatedAsyncioTestCase):
         from daem0nmcp.retrieval.providers import LexicalProvider
         from daem0nmcp.retrieval.types import RetrievalQuery
 
-        record_id = self._append_record(
-            "8", "obsoleteword", "first", ["old"]
-        )
+        record_id = self._append_record("8", "obsoleteword", "first", ["old"])
         builder = LexicalProjectionBuilder(self.connection, clock_us=lambda: 500)
         builder.rebuild(WORKSPACE_ID)
         EventStore(self.connection).append_and_project(
@@ -643,11 +650,7 @@ class LexicalProjectionTests(unittest.IsolatedAsyncioTestCase):
                 occurred_at_us=200,
                 recorded_at_us=201,
                 actor_type="system",
-                payload={
-                    "record": self._record(
-                        "replacementword", "second", ["new"]
-                    )
-                },
+                payload={"record": self._record("replacementword", "second", ["new"])},
             )
         )
         builder.rebuild(WORKSPACE_ID)
@@ -664,7 +667,9 @@ class LexicalProjectionTests(unittest.IsolatedAsyncioTestCase):
             RetrievalQuery(workspace_id=WORKSPACE_ID, text='" OR * NOT'), 10
         )
         self.assertEqual((), old.candidates)
-        self.assertEqual([record_id], [item.evidence.record_id for item in new.candidates])
+        self.assertEqual(
+            [record_id], [item.evidence.record_id for item in new.candidates]
+        )
         self.assertEqual("ready", operator_text.status)
         self.assertEqual((), operator_text.candidates)
         self.assertEqual(
@@ -714,7 +719,9 @@ class LexicalProjectionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("unavailable", stale.status)
         self.assertEqual("LEXICAL_UNAVAILABLE", stale.reason)
 
-    async def test_canonical_append_invalidates_and_queues_stale_lexical_projection(self):
+    async def test_canonical_append_invalidates_and_queues_stale_lexical_projection(
+        self,
+    ):
         from daem0nmcp.retrieval.projections import LexicalProjectionBuilder
         from daem0nmcp.retrieval.providers import LexicalProvider
         from daem0nmcp.retrieval.types import RetrievalQuery
@@ -743,9 +750,7 @@ class LexicalProjectionTests(unittest.IsolatedAsyncioTestCase):
         new_record = self._append_record(
             "d", "novelterm added later", "fixture", ["new"]
         )
-        self._append_record(
-            "e", "another canonical write", "fixture", ["new"]
-        )
+        self._append_record("e", "another canonical write", "fixture", ["new"])
         self.connection.commit()
 
         self.assertEqual(
@@ -785,7 +790,7 @@ class LexicalProjectionTests(unittest.IsolatedAsyncioTestCase):
             ).fetchone()[0],
         )
         job = self.connection.execute(
-            "SELECT status,job_type,payload_json,source_event_id "
+            "SELECT status,job_type,payload_json,source_event_id,available_at_us "
             "FROM background_jobs WHERE workspace_id=? "
             "AND idempotency_key='active-projection:lexical'",
             (WORKSPACE_ID,),
@@ -800,6 +805,7 @@ class LexicalProjectionTests(unittest.IsolatedAsyncioTestCase):
             },
             json.loads(job[2]),
         )
+        self.assertEqual(5_000_101, job[4])
         self.assertEqual(
             [("active-projection:lexical", 100), ("active-projection:dense", 50)],
             [
@@ -815,7 +821,17 @@ class LexicalProjectionTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual("degraded", stale.status)
         self.assertEqual("LEXICAL_REBUILD_REQUIRED", stale.reason)
-        self.assertEqual((), stale.candidates)
+        self.assertEqual(
+            [new_record],
+            [item.evidence.record_id for item in stale.candidates],
+        )
+        manifest = self.connection.execute(
+            "SELECT source_event_count,row_count FROM projection_manifests "
+            "WHERE workspace_id=? AND projection_name='lexical' "
+            "AND status='active'",
+            (WORKSPACE_ID,),
+        ).fetchone()
+        self.assertEqual((1, 3), tuple(manifest))
         retained = await LexicalProvider(self.connection).search(
             RetrievalQuery(workspace_id=WORKSPACE_ID, text="alpha"), 10
         )
@@ -835,6 +851,185 @@ class LexicalProjectionTests(unittest.IsolatedAsyncioTestCase):
             [new_record],
             [item.evidence.record_id for item in fresh.candidates],
         )
+
+    async def test_active_delta_tracks_update_archive_pin_outcome_and_delete(self):
+        from daem0nmcp.retrieval.projections import LexicalProjectionBuilder
+        from daem0nmcp.retrieval.providers import LexicalProvider
+        from daem0nmcp.retrieval.types import RetrievalQuery
+
+        record_id = self._append_record("f", "oldterm", "old", ["before"])
+        LexicalProjectionBuilder(self.connection).rebuild(WORKSPACE_ID)
+        self.connection.commit()
+
+        updated = self._update_record(
+            "f",
+            "newterm",
+            "new rationale",
+            ["after"],
+            pinned=True,
+            archived=True,
+            outcome="verified",
+            worked=True,
+        )
+        self.connection.commit()
+        provider = LexicalProvider(self.connection)
+        result = await provider.search(
+            RetrievalQuery(workspace_id=WORKSPACE_ID, text="newterm"), 10
+        )
+        document = self.connection.execute(
+            "SELECT content,rationale,tags_text,archived,source_event_id "
+            "FROM retrieval_documents WHERE workspace_id=? AND record_id=?",
+            (WORKSPACE_ID, record_id),
+        ).fetchone()
+
+        self.assertEqual(
+            [record_id], [row.evidence.record_id for row in result.candidates]
+        )
+        self.assertEqual(
+            ("newterm", "new rationale", "after", 1, updated.event_id),
+            tuple(document),
+        )
+
+        self._update_record(
+            "f",
+            "newterm",
+            "new rationale",
+            ["after"],
+            version=3,
+            event_type="memory.deleted",
+            pinned=True,
+            archived=True,
+            outcome="verified",
+            worked=True,
+            deleted_at_us=103,
+        )
+        self.connection.commit()
+        deleted = await provider.search(
+            RetrievalQuery(workspace_id=WORKSPACE_ID, text="newterm"), 10
+        )
+        manifest_count = self.connection.execute(
+            "SELECT row_count FROM projection_manifests WHERE workspace_id=? "
+            "AND projection_name='lexical' AND status='active'",
+            (WORKSPACE_ID,),
+        ).fetchone()[0]
+
+        self.assertEqual((), deleted.candidates)
+        self.assertEqual(0, manifest_count)
+        self.assertIsNone(
+            self.connection.execute(
+                "SELECT 1 FROM retrieval_documents WHERE workspace_id=? "
+                "AND record_id=?",
+                (WORKSPACE_ID, record_id),
+            ).fetchone()
+        )
+
+    def test_active_delta_fts_failure_rolls_back_the_canonical_append(self):
+        from daem0nmcp.retrieval.projections import (
+            LexicalProjectionBuilder,
+            ProjectionBuildError,
+        )
+
+        record_id = self._append_record("7", "baseline", "old", ["before"])
+        LexicalProjectionBuilder(self.connection).rebuild(WORKSPACE_ID)
+        self.connection.commit()
+        before = tuple(
+            self.connection.execute(
+                "SELECT content,stream_version,source_event_id FROM memory_records "
+                "WHERE record_id=?",
+                (record_id,),
+            ).fetchone()
+        )
+        event_count = self.connection.execute(
+            "SELECT count(*) FROM memory_events WHERE workspace_id=?",
+            (WORKSPACE_ID,),
+        ).fetchone()[0]
+        self.connection.execute(
+            "CREATE TRIGGER fail_lexical_delta BEFORE UPDATE ON retrieval_documents "
+            "BEGIN SELECT RAISE(ABORT,'forced lexical failure'); END"
+        )
+
+        with self.assertRaises(ProjectionBuildError) as raised:
+            self._update_record("7", "changed", "new", ["after"])
+
+        self.assertEqual("LEXICAL_UNAVAILABLE", raised.exception.code)
+        self.assertEqual(
+            before,
+            tuple(
+                self.connection.execute(
+                    "SELECT content,stream_version,source_event_id FROM memory_records "
+                    "WHERE record_id=?",
+                    (record_id,),
+                ).fetchone()
+            ),
+        )
+        self.assertEqual(
+            event_count,
+            self.connection.execute(
+                "SELECT count(*) FROM memory_events WHERE workspace_id=?",
+                (WORKSPACE_ID,),
+            ).fetchone()[0],
+        )
+
+    def test_incompatible_active_manifest_queues_rebuild_without_delta(self):
+        from daem0nmcp.retrieval.projections import LexicalProjectionBuilder
+
+        self._append_record("8", "baseline", "old", ["before"])
+        LexicalProjectionBuilder(self.connection).rebuild(WORKSPACE_ID)
+        details = json.loads(
+            self.connection.execute(
+                "SELECT details_json FROM projection_manifests WHERE workspace_id=? "
+                "AND projection_name='lexical' AND status='active'",
+                (WORKSPACE_ID,),
+            ).fetchone()[0]
+        )
+        self.connection.execute(
+            "UPDATE projection_manifests SET details_json=? WHERE workspace_id=? "
+            "AND projection_name='lexical' AND status='active'",
+            (json.dumps({**details, "build_config_hash": "0" * 64}), WORKSPACE_ID),
+        )
+        self.connection.commit()
+
+        record_id = self._append_record("9", "queued fallback", "new", ["after"])
+        self.connection.commit()
+
+        self.assertIsNone(
+            self.connection.execute(
+                "SELECT 1 FROM retrieval_documents WHERE workspace_id=? "
+                "AND record_id=?",
+                (WORKSPACE_ID, record_id),
+            ).fetchone()
+        )
+        job = self.connection.execute(
+            "SELECT status,source_event_id,available_at_us,created_at_us "
+            "FROM background_jobs WHERE workspace_id=? "
+            "AND idempotency_key='active-projection:lexical'",
+            (WORKSPACE_ID,),
+        ).fetchone()
+        self.assertEqual("queued", job[0])
+        self.assertIsNotNone(job[1])
+        self.assertEqual(job[3], job[2])
+
+    def test_cold_workspace_queues_immediate_lexical_rebuild(self):
+        record_id = self._append_record(
+            "0", "cold lexical fallback", "no active generation", ["cold"]
+        )
+        self.connection.commit()
+
+        self.assertIsNone(
+            self.connection.execute(
+                "SELECT 1 FROM retrieval_documents WHERE workspace_id=? "
+                "AND record_id=?",
+                (WORKSPACE_ID, record_id),
+            ).fetchone()
+        )
+        job = self.connection.execute(
+            "SELECT status,available_at_us,created_at_us,payload_json "
+            "FROM background_jobs WHERE workspace_id=? "
+            "AND idempotency_key='active-projection:lexical'",
+            (WORKSPACE_ID,),
+        ).fetchone()
+        self.assertEqual(("queued", 101, 101), tuple(job[:3]))
+        self.assertEqual(["lexical"], json.loads(job[3])["projection_names"])
 
     async def test_bm25_corpus_isolated_by_workspace_and_generation(self):
         from daem0nmcp.retrieval.projections import LexicalProjectionBuilder
@@ -953,9 +1148,7 @@ class LexicalProjectionTests(unittest.IsolatedAsyncioTestCase):
                         occurred_at_us=100,
                         recorded_at_us=101,
                         actor_type="system",
-                        payload={
-                            "record": self._record("first", "race", ["one"])
-                        },
+                        payload={"record": self._record("first", "race", ["one"])},
                     )
                 )
                 first.commit()

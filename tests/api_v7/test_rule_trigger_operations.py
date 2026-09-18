@@ -14,7 +14,6 @@ from types import MappingProxyType
 
 from daem0nmcp.api.v7.application import AdmittedRequest
 
-
 NOW = datetime(2026, 8, 8, 12, 0, tzinfo=timezone.utc)
 PREFLIGHT_TOKEN = "t" * 32
 
@@ -56,9 +55,7 @@ def _apply_v7_schema(connection: sqlite3.Connection) -> None:
         migration = next(item for item in MIGRATIONS if item[0] == version)
         for statement in migration[2]:
             connection.execute(statement)
-        connection.execute(
-            "INSERT INTO schema_version(version) VALUES (?)", (version,)
-        )
+        connection.execute("INSERT INTO schema_version(version) VALUES (?)", (version,))
     connection.commit()
 
 
@@ -92,9 +89,7 @@ class RuleTriggerOperationTests(unittest.IsolatedAsyncioTestCase):
             self.storage,
             ActiveDatabasePointer(7, 1, self.database.name, None, None),
         )
-        self.workspace = WorkspaceRegistry(
-            [self.root], default_root=self.root
-        ).default
+        self.workspace = WorkspaceRegistry([self.root], default_root=self.root).default
 
     def _operations(self, **changes: object):
         from daem0nmcp.api.v7.rule_trigger_operations import (
@@ -227,9 +222,7 @@ class RuleTriggerOperationTests(unittest.IsolatedAsyncioTestCase):
             build_rule_trigger_operations,
         )
 
-        operations = build_rule_trigger_operations(
-            RuleTriggerOperationDependencies()
-        )
+        operations = build_rule_trigger_operations(RuleTriggerOperationDependencies())
 
         self.assertEqual(
             {
@@ -306,9 +299,9 @@ class RuleTriggerOperationTests(unittest.IsolatedAsyncioTestCase):
         with closing(sqlite3.connect(self.database)) as connection:
             self.assertEqual(
                 1,
-                connection.execute(
-                    "SELECT count(*) FROM governance_events"
-                ).fetchone()[0],
+                connection.execute("SELECT count(*) FROM governance_events").fetchone()[
+                    0
+                ],
             )
 
     async def test_governance_events_are_sql_immutable(self) -> None:
@@ -319,8 +312,7 @@ class RuleTriggerOperationTests(unittest.IsolatedAsyncioTestCase):
         )
         with closing(sqlite3.connect(self.database)) as connection:
             event_id = connection.execute(
-                "SELECT event_id FROM governance_events "
-                "WHERE stream_id=?",
+                "SELECT event_id FROM governance_events WHERE stream_id=?",
                 (created.rule_id,),
             ).fetchone()[0]
             with self.assertRaisesRegex(
@@ -598,15 +590,11 @@ class RuleTriggerOperationTests(unittest.IsolatedAsyncioTestCase):
                 with super().locked_active(workspace) as active:
                     yield active
 
-        operation = self._operations(
-            storage_resolver=BlockingResolver()
-        )["rule_list"]
+        operation = self._operations(storage_resolver=BlockingResolver())["rule_list"]
         task = asyncio.create_task(
             operation(
                 workspace=self.workspace,
-                request=_request(
-                    "rule_list", workspace_id=self.workspace.workspace_id
-                ),
+                request=_request("rule_list", workspace_id=self.workspace.workspace_id),
             )
         )
         self.assertTrue(await asyncio.to_thread(entered.wait, 2))
@@ -793,8 +781,7 @@ class RuleTriggerOperationTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertTrue(
             all(
-                match.records == [retrieval.items[0].record]
-                for match in result.matches
+                match.records == [retrieval.items[0].record] for match in result.matches
             )
         )
         with closing(sqlite3.connect(self.database)) as connection:

@@ -123,9 +123,7 @@ async def debate_internal(
     pp = project_path or _default_project_path
     if not pp:
         return _missing_project_path_error()
-    violation = authorize_operation_call(
-        "debate_internal", locals(), preflight_token
-    )
+    violation = authorize_operation_call("debate_internal", locals(), preflight_token)
     if violation is not None:
         return violation
 

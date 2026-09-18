@@ -4,10 +4,9 @@ from __future__ import annotations
 
 import hashlib
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from types import MappingProxyType
-from typing import Mapping
-
 
 _TOKEN = re.compile(r"[a-z0-9]+")
 
@@ -128,7 +127,11 @@ class ToolSearchIndex:
         """Get all currently represented tool categories."""
 
         return sorted(
-            {tool.category for tool in self._tools.values() if tool.category is not None}
+            {
+                tool.category
+                for tool in self._tools.values()
+                if tool.category is not None
+            }
         )
 
     def get_tools_by_category(self, category: str) -> list[ToolMetadata]:

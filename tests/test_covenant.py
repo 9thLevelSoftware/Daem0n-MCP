@@ -41,9 +41,7 @@ class ScopedCovenantContractTests(unittest.TestCase):
         variants = (
             InvocationScope("other", "session", self.workspace),
             InvocationScope("principal", "other", self.workspace),
-            InvocationScope(
-                "principal", "session", str(Path(self.workspace, "other"))
-            ),
+            InvocationScope("principal", "session", str(Path(self.workspace, "other"))),
         )
         for scope in variants:
             with self.subTest(scope=scope):
@@ -55,9 +53,7 @@ class ScopedCovenantContractTests(unittest.TestCase):
     def test_capability_is_exact_expiring_and_one_use(self) -> None:
         arguments = {"category": "decision", "content": "bound"}
         self.gate.record_briefing(self.scope)
-        token = self.gate.issue_preflight(
-            self.scope, "inscribe.remember", arguments
-        )
+        token = self.gate.issue_preflight(self.scope, "inscribe.remember", arguments)
         mismatch = self.gate.authorize(
             "inscribe.remember",
             {**arguments, "content": "changed"},
@@ -81,9 +77,7 @@ class ScopedCovenantContractTests(unittest.TestCase):
         )
         self.assertEqual("TOKEN_REPLAYED", replay["violation"])
 
-        expiring = self.gate.issue_preflight(
-            self.scope, "inscribe.remember", arguments
-        )
+        expiring = self.gate.issue_preflight(self.scope, "inscribe.remember", arguments)
         self.clock_value += 300
         expired = self.gate.authorize(
             "inscribe.remember",

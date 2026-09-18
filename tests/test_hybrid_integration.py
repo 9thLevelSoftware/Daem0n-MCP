@@ -1,9 +1,16 @@
 # tests/test_hybrid_integration.py
 """Integration tests for hybrid BM25 + vector search."""
 
+import pytest
+
 from daem0nmcp.bm25_index import BM25Index
 from daem0nmcp.fusion import RRFHybridSearch
 from daem0nmcp.vectors import VectorIndex
+
+
+@pytest.fixture(autouse=True)
+def models_local_enabled(monkeypatch):
+    monkeypatch.setenv("DAEM0NMCP_MODELS_LOCAL_ENABLED", "true")
 
 
 class TestHybridSearchIntegration:

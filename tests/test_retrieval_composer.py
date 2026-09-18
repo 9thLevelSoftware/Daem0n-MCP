@@ -8,7 +8,6 @@ import unittest
 from time import perf_counter
 from unittest.mock import patch
 
-
 WORKSPACE_ID = "ws_0123456789abcdef01234567"
 
 
@@ -115,19 +114,19 @@ class EvidenceComposerTests(unittest.TestCase):
         )
         self.assertEqual(
             tuple(source.candidate.record_id for source in reversed(sources)),
-            tuple(
-                item.evidence_refs[0].record_id
-                for item in reversed_result.items
-            ),
+            tuple(item.evidence_refs[0].record_id for item in reversed_result.items),
         )
         self.assertLessEqual(first.context.rendered_tokens, 44)
-        self.assertEqual(first.context.rendered_tokens, WordTokenizer().count_tokens(first.context.text))
+        self.assertEqual(
+            first.context.rendered_tokens,
+            WordTokenizer().count_tokens(first.context.text),
+        )
         self.assertEqual(["[E1]", "[E2]"], [item.citation for item in first.items])
         self.assertEqual(
             {item.citation for item in first.items},
             {entry.marker for entry in first.context.citations},
         )
-        for item, entry in zip(first.items, first.context.citations):
+        for item, entry in zip(first.items, first.context.citations, strict=True):
             self.assertEqual(item.evidence_refs, entry.evidence_refs)
             self.assertEqual(
                 item.excerpt,
@@ -173,9 +172,8 @@ class EvidenceComposerTests(unittest.TestCase):
             {"tags": ("t" * 129,)},
         )
         for changes in invalid:
-            with self.subTest(changes=tuple(changes)):
-                with self.assertRaises(ValueError):
-                    SelectedEvidence(**values, **changes)
+            with self.subTest(changes=tuple(changes)), self.assertRaises(ValueError):
+                SelectedEvidence(**values, **changes)
 
     def test_secondary_graph_paths_are_all_preserved_and_rendered(self):
         from daem0nmcp.retrieval.composer import SelectedEvidence
@@ -298,9 +296,7 @@ class EvidenceComposerTests(unittest.TestCase):
             token_budget=128,
         )
 
-        by_record = {
-            item.evidence_refs[0].record_id: item for item in result.items
-        }
+        by_record = {item.evidence_refs[0].record_id: item for item in result.items}
         self.assertFalse(by_record[_record_id("1")].outcome_failed)
         self.assertTrue(by_record[_record_id("2")].outcome_failed)
         self.assertIn("Failed outcome:", result.context.text)
@@ -472,6 +468,7 @@ class AsyncEvidenceComposerTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_oversized_budget_is_rejected_before_worker_submission(self):
         from daem0nmcp.retrieval.composer import EvidenceComposer
+
         composer = EvidenceComposer(tokenizer=WordTokenizer())
         try:
             await composer.compose_async(
@@ -514,9 +511,7 @@ class AsyncEvidenceComposerTests(unittest.IsolatedAsyncioTestCase):
                 "daem0nmcp.retrieval.composer._COMPOSER_FALLBACK_WORKERS",
                 new=DelayedFallbackPool(),
             ):
-                result = await composer.compose_async(
-                    (source,), token_budget=24
-                )
+                result = await composer.compose_async((source,), token_budget=24)
         finally:
             release.set()
 

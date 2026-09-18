@@ -352,7 +352,7 @@ class TestPluginTemplate:
 
     def test_simplified_covenant_in_plugin_template(self):
         """PLUGIN_TEMPLATE must contain both COVENANT_RULES_FULL and COVENANT_RULES_SIMPLIFIED,
-        plus _client_meta injection and currentModel tracking."""
+        and must not stage forgeable client metadata."""
         from daem0nmcp.opencode_install import PLUGIN_TEMPLATE
 
         assert "COVENANT_RULES_FULL" in PLUGIN_TEMPLATE, (
@@ -361,9 +361,5 @@ class TestPluginTemplate:
         assert "COVENANT_RULES_SIMPLIFIED" in PLUGIN_TEMPLATE, (
             "PLUGIN_TEMPLATE must reference COVENANT_RULES_SIMPLIFIED"
         )
-        assert "_client_meta" in PLUGIN_TEMPLATE, (
-            "PLUGIN_TEMPLATE must inject _client_meta for provenance tracking"
-        )
-        assert "currentModel" in PLUGIN_TEMPLATE, (
-            "PLUGIN_TEMPLATE must track currentModel for _client_meta injection"
-        )
+        assert "_client_meta" not in PLUGIN_TEMPLATE
+        assert "currentModel" not in PLUGIN_TEMPLATE

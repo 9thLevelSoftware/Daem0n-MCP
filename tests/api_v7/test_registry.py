@@ -83,9 +83,7 @@ class RegistryTests(unittest.TestCase):
 
         with self.assertRaisesRegex(ManifestError, "project_path"):
             V7Manifest(
-                tools=(
-                    tool.replace(input_model=_LeakyInput),
-                ),
+                tools=(tool.replace(input_model=_LeakyInput),),
                 resources=(),
                 policy={"session_brief": CovenantLevel.EXEMPT},
                 require_full_surface=False,
@@ -96,9 +94,7 @@ class RegistryTests(unittest.TestCase):
 
         with self.assertRaisesRegex(ManifestError, "integer public ID"):
             V7Manifest(
-                tools=(
-                    tool.replace(input_model=_IntegerIdInput),
-                ),
+                tools=(tool.replace(input_model=_IntegerIdInput),),
                 resources=(),
                 policy={"session_brief": CovenantLevel.EXEMPT},
                 require_full_surface=False,
@@ -121,7 +117,9 @@ class RegistryTests(unittest.TestCase):
                 require_full_surface=False,
             )
 
-    def test_inspectable_server_is_fresh_and_legacy_import_cannot_mutate_it(self) -> None:
+    def test_inspectable_server_is_fresh_and_legacy_import_cannot_mutate_it(
+        self,
+    ) -> None:
         from daem0nmcp.api.v7.registry import InspectableV7Server, V7Manifest
 
         manifest = V7Manifest(

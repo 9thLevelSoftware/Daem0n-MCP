@@ -6,7 +6,6 @@ import sys
 import types
 import unittest
 
-
 _previous_package = sys.modules.get("sentence_transformers")
 _previous_util = sys.modules.get("sentence_transformers.util")
 _util = types.ModuleType("sentence_transformers.util")

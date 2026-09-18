@@ -68,7 +68,9 @@ class CovenantMiddlewareCapabilityTests(unittest.IsolatedAsyncioTestCase):
         structured = getattr(result, "structured_content", None)
         return structured.get("violation") if isinstance(structured, dict) else None
 
-    async def test_unknown_and_unbriefed_consolidated_actions_block_before_dispatch(self) -> None:
+    async def test_unknown_and_unbriefed_consolidated_actions_block_before_dispatch(
+        self,
+    ) -> None:
         middleware = CovenantMiddleware(
             gate=self.gate,
             scope_provider=lambda _context, _workspace: self.scope,
@@ -82,10 +84,18 @@ class CovenantMiddlewareCapabilityTests(unittest.IsolatedAsyncioTestCase):
             return {"ok": True}
 
         cases = (
-            ("inscribe", {"action": "remember", "category": "decision", "content": "x"}, "COMMUNION_REQUIRED"),
+            (
+                "inscribe",
+                {"action": "remember", "category": "decision", "content": "x"},
+                "COMMUNION_REQUIRED",
+            ),
             ("govern", {"action": "add_rule", "trigger": "auth"}, "COMMUNION_REQUIRED"),
             ("maintain", {"action": "import_data", "data": {}}, "COMMUNION_REQUIRED"),
-            ("reflect", {"action": "execute", "code": "print(1)"}, "COMMUNION_REQUIRED"),
+            (
+                "reflect",
+                {"action": "execute", "code": "print(1)"},
+                "COMMUNION_REQUIRED",
+            ),
             ("inscribe", {"action": "future"}, "UNKNOWN_COVENANT_OPERATION"),
         )
         for workflow, arguments, expected in cases:
@@ -96,7 +106,9 @@ class CovenantMiddlewareCapabilityTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(expected, self._code(result))
         self.assertEqual(0, dispatched)
 
-    async def test_standalone_cognitive_tools_are_classified_before_dispatch(self) -> None:
+    async def test_standalone_cognitive_tools_are_classified_before_dispatch(
+        self,
+    ) -> None:
         middleware = CovenantMiddleware(
             gate=self.gate,
             scope_provider=lambda _context, _workspace: self.scope,
@@ -132,7 +144,9 @@ class CovenantMiddlewareCapabilityTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual("COMMUNION_REQUIRED", self._code(result))
         self.assertEqual(0, dispatched)
 
-    async def test_middleware_copies_filtered_arguments_and_resets_contextvars(self) -> None:
+    async def test_middleware_copies_filtered_arguments_and_resets_contextvars(
+        self,
+    ) -> None:
         middleware = CovenantMiddleware(
             gate=self.gate,
             scope_provider=lambda _context, _workspace: self.scope,
@@ -241,7 +255,9 @@ class CovenantMiddlewareCapabilityTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual({"status": "ready"}, protected)
 
-    async def test_remote_protected_call_fails_closed_without_proven_identity(self) -> None:
+    async def test_remote_protected_call_fails_closed_without_proven_identity(
+        self,
+    ) -> None:
         middleware = CovenantMiddleware(
             gate=self.gate,
             transport_mode="remote",
@@ -268,7 +284,9 @@ class CovenantMiddlewareCapabilityTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("IDENTITY_UNAVAILABLE", self._code(result))
         self.assertFalse(dispatched)
 
-    async def test_remote_identity_uses_authenticated_subject_and_mcp_session(self) -> None:
+    async def test_remote_identity_uses_authenticated_subject_and_mcp_session(
+        self,
+    ) -> None:
         fastmcp_context = SimpleNamespace(
             request_context=object(), session_id="remote-session"
         )
@@ -342,7 +360,9 @@ class CovenantMiddlewareCapabilityTests(unittest.IsolatedAsyncioTestCase):
             )
         )
 
-    async def test_remote_identity_rejects_malformed_or_unestablished_context(self) -> None:
+    async def test_remote_identity_rejects_malformed_or_unestablished_context(
+        self,
+    ) -> None:
         cases = (
             (
                 SimpleNamespace(claims={"sub": 7}, client_id=None),
@@ -415,27 +435,31 @@ class CovenantMiddlewareCapabilityTests(unittest.IsolatedAsyncioTestCase):
             scope_provider=lambda _context, _workspace: self.scope,
             workspace_resolver=lambda _selector: self.workspace,
         )
-        with patch.object(
-            self.gate, "fingerprint", side_effect=RuntimeError("fingerprint failed")
+        with (
+            patch.object(
+                self.gate, "fingerprint", side_effect=RuntimeError("fingerprint failed")
+            ),
+            self.assertRaisesRegex(RuntimeError, "fingerprint failed"),
         ):
-            with self.assertRaisesRegex(RuntimeError, "fingerprint failed"):
-                await middleware.on_call_tool(
-                    FakeContext(
-                        "commune",
-                        {
-                            "action": "health",
-                            "project_path": self.workspace,
-                            "_client_meta": {"client": "test"},
-                        },
-                    ),
-                    lambda _context: None,
-                )
+            await middleware.on_call_tool(
+                FakeContext(
+                    "commune",
+                    {
+                        "action": "health",
+                        "project_path": self.workspace,
+                        "_client_meta": {"client": "test"},
+                    },
+                ),
+                lambda _context: None,
+            )
         self.assertIsNone(client_meta_var.get())
         self.assertIsNone(invocation_scope_var.get())
         self.assertIsNone(covenant_gate_var.get())
         self.assertIsNone(admitted_call_var.get())
 
-    async def test_malformed_fixed_operations_return_stable_argument_violation(self) -> None:
+    async def test_malformed_fixed_operations_return_stable_argument_violation(
+        self,
+    ) -> None:
         middleware = CovenantMiddleware(
             gate=self.gate,
             scope_provider=lambda _context, _workspace: self.scope,
@@ -468,9 +492,7 @@ class CovenantMiddlewareCapabilityTests(unittest.IsolatedAsyncioTestCase):
                         call_next,
                     )
                 except Exception as exc:
-                    self.fail(
-                        f"malformed operation escaped as {type(exc).__name__}"
-                    )
+                    self.fail(f"malformed operation escaped as {type(exc).__name__}")
                 self.assertEqual("TOKEN_ARGUMENT_MISMATCH", self._code(result))
                 self.assertIsNone(client_meta_var.get())
                 self.assertIsNone(invocation_scope_var.get())
@@ -497,7 +519,8 @@ class CovenantMiddlewareCapabilityTests(unittest.IsolatedAsyncioTestCase):
         context_module._missing_project_path_error = lambda: {"error": "missing"}
 
         class FakeRegistry:
-            def resolve(_self, selector):
+            @staticmethod
+            def resolve(selector):
                 roots = {
                     "ws_a": self.workspace,
                     "ws_b": self.workspace_b,
@@ -579,7 +602,8 @@ class CovenantMiddlewareCapabilityTests(unittest.IsolatedAsyncioTestCase):
         context_module._missing_project_path_error = lambda: {"error": "missing"}
 
         class FakeRegistry:
-            def resolve(_self, selector):
+            @staticmethod
+            def resolve(selector):
                 roots = {
                     "ws_a": self.workspace,
                     "ws_b": self.workspace_b,
@@ -649,10 +673,7 @@ class CovenantMiddlewareCapabilityTests(unittest.IsolatedAsyncioTestCase):
             },
         }
         module_path = (
-            Path(__file__).parents[1]
-            / "daem0nmcp"
-            / "tools"
-            / "cognitive_tools.py"
+            Path(__file__).parents[1] / "daem0nmcp" / "tools" / "cognitive_tools.py"
         )
         spec = importlib.util.spec_from_file_location(
             "daem0nmcp.tools._covenant_cognitive_test", module_path
@@ -691,10 +712,8 @@ class CovenantMiddlewareCapabilityTests(unittest.IsolatedAsyncioTestCase):
         context_module = types.ModuleType("daem0nmcp.context_manager")
         context_module._default_project_path = self.workspace
         context_module._missing_project_path_error = lambda: {"error": "missing"}
-        context_module._check_covenant_counsel = (
-            lambda tool_name, project_path: authorize_legacy_call(
-                tool_name, {"project_path": project_path}
-            )
+        context_module._check_covenant_counsel = lambda tool_name, project_path: (
+            authorize_legacy_call(tool_name, {"project_path": project_path})
         )
         context_module._check_covenant_communion = (
             lambda project_path, tool_name="recall": authorize_legacy_call(
@@ -726,9 +745,7 @@ class CovenantMiddlewareCapabilityTests(unittest.IsolatedAsyncioTestCase):
             "daem0nmcp.models": models_module,
             "sqlalchemy": sqlalchemy_module,
         }
-        module_path = (
-            Path(__file__).parents[1] / "daem0nmcp" / "tools" / "memory.py"
-        )
+        module_path = Path(__file__).parents[1] / "daem0nmcp" / "tools" / "memory.py"
         spec = importlib.util.spec_from_file_location(
             "daem0nmcp.tools._covenant_memory_leaf_test", module_path
         )
@@ -738,7 +755,9 @@ class CovenantMiddlewareCapabilityTests(unittest.IsolatedAsyncioTestCase):
             spec.loader.exec_module(module)
         return module, manager_calls
 
-    async def test_actual_batch_and_recall_leaf_dispatch_preserve_admission(self) -> None:
+    async def test_actual_batch_and_recall_leaf_dispatch_preserve_admission(
+        self,
+    ) -> None:
         from daem0nmcp.tools._deprecation import WorkflowCall
         from daem0nmcp.workflows import consult as consult_workflow
         from daem0nmcp.workflows import inscribe as inscribe_workflow
@@ -751,9 +770,9 @@ class CovenantMiddlewareCapabilityTests(unittest.IsolatedAsyncioTestCase):
         middleware = CovenantMiddleware(
             gate=self.gate,
             scope_provider=lambda _context, _workspace: self.scope,
-            workspace_resolver=lambda selector: self.workspace
-            if selector == self.workspace
-            else self.workspace_b,
+            workspace_resolver=lambda selector: (
+                self.workspace if selector == self.workspace else self.workspace_b
+            ),
         )
         self.gate.record_briefing(self.scope)
         memories = [{"category": "decision", "content": "batch"}]
@@ -765,15 +784,11 @@ class CovenantMiddlewareCapabilityTests(unittest.IsolatedAsyncioTestCase):
 
         async def dispatch_batch(context: FakeContext) -> dict:
             with WorkflowCall():
-                return await inscribe_workflow.dispatch(
-                    **context.message.arguments
-                )
+                return await inscribe_workflow.dispatch(**context.message.arguments)
 
         async def dispatch_recall(context: FakeContext) -> dict:
             with WorkflowCall():
-                return await consult_workflow.dispatch(
-                    **context.message.arguments
-                )
+                return await consult_workflow.dispatch(**context.message.arguments)
 
         with patch.dict(sys.modules, {"daem0nmcp.server": server_module}):
             batch = await middleware.on_call_tool(
@@ -803,13 +818,13 @@ class CovenantMiddlewareCapabilityTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("violation", batch, batch)
         self.assertEqual(1, batch["created_count"])
         self.assertEqual("Stored 1 memories", batch["message"])
-        self.assertEqual(
-            {"results": [{"id": 1, "content": "recalled"}]}, recall
-        )
+        self.assertEqual({"results": [{"id": 1, "content": "recalled"}]}, recall)
         self.assertEqual("remember_batch", manager_calls[0][0])
         self.assertEqual("recall", manager_calls[1][0])
 
-    def test_argument_schemas_cover_registered_tool_signatures_and_defaults(self) -> None:
+    def test_argument_schemas_cover_registered_tool_signatures_and_defaults(
+        self,
+    ) -> None:
         async def dispatch(**_kwargs):
             return {}
 
@@ -869,9 +884,9 @@ class CovenantMiddlewareCapabilityTests(unittest.IsolatedAsyncioTestCase):
             "debate_internal",
         ):
             signature = inspect.signature(getattr(cognitive_tools, operation))
-            expected_fields = (
-                set(ACTION_ARGUMENT_DEFAULTS[operation]) | {"project_path"}
-            )
+            expected_fields = set(ACTION_ARGUMENT_DEFAULTS[operation]) | {
+                "project_path"
+            }
             if operation == "debate_internal":
                 expected_fields.add("preflight_token")
             self.assertEqual(expected_fields, set(signature.parameters), operation)
@@ -881,9 +896,7 @@ class CovenantMiddlewareCapabilityTests(unittest.IsolatedAsyncioTestCase):
                 if parameter.default is inspect.Parameter.empty
             )
             self.assertEqual(
-                getattr(covenant, "ACTION_REQUIRED_ARGUMENTS", {}).get(
-                    operation
-                ),
+                getattr(covenant, "ACTION_REQUIRED_ARGUMENTS", {}).get(operation),
                 required_parameters,
                 operation,
             )
@@ -892,7 +905,9 @@ class CovenantMiddlewareCapabilityTests(unittest.IsolatedAsyncioTestCase):
                 if parameter.default is not inspect.Parameter.empty:
                     self.assertEqual(default, parameter.default, operation)
 
-    async def test_direct_cognitive_tools_gate_identity_and_workspace_before_context(self) -> None:
+    async def test_direct_cognitive_tools_gate_identity_and_workspace_before_context(
+        self,
+    ) -> None:
         tools, context_calls, cognitive_calls = self._load_cognitive_tools()
         with patch.dict(sys.modules, tools._test_stubs):
             blocked = await tools.simulate_decision(7, self.workspace)
@@ -901,14 +916,14 @@ class CovenantMiddlewareCapabilityTests(unittest.IsolatedAsyncioTestCase):
 
         self.gate.record_briefing(self.scope)
         registry = tools._test_stubs["daem0nmcp.context_manager"].workspace_registry
-        with patch.dict(sys.modules, tools._test_stubs):
-            with installed_invocation(
+        with (
+            patch.dict(sys.modules, tools._test_stubs),
+            installed_invocation(
                 self.scope, self.gate, workspace_resolver=registry.resolve
-            ):
-                wrong_workspace = await tools.simulate_decision(
-                    7, self.workspace_b
-                )
-                allowed = await tools.simulate_decision(7, "ws_a")
+            ),
+        ):
+            wrong_workspace = await tools.simulate_decision(7, self.workspace_b)
+            allowed = await tools.simulate_decision(7, "ws_a")
         self.assertEqual("TOKEN_SCOPE_MISMATCH", wrong_workspace["violation"])
         self.assertEqual({"simulated": 7}, allowed)
         self.assertEqual(["ws_a"], context_calls)
@@ -923,29 +938,31 @@ class CovenantMiddlewareCapabilityTests(unittest.IsolatedAsyncioTestCase):
             "advocate_position": "keep",
             "challenger_position": "change",
         }
-        with patch.dict(sys.modules, tools._test_stubs):
-            with installed_invocation(
+        with (
+            patch.dict(sys.modules, tools._test_stubs),
+            installed_invocation(
                 self.scope, self.gate, workspace_resolver=registry.resolve
-            ):
-                blocked = await tools.debate_internal(
-                    project_path=self.workspace, **arguments
-                )
+            ),
+        ):
+            blocked = await tools.debate_internal(
+                project_path=self.workspace, **arguments
+            )
         self.assertEqual("COUNSEL_REQUIRED", blocked["violation"])
         self.assertEqual([], context_calls)
         self.assertEqual([], cognitive_calls)
 
-        token = self.gate.issue_preflight(
-            self.scope, "debate_internal", arguments
-        )
-        with patch.dict(sys.modules, tools._test_stubs):
-            with installed_invocation(
+        token = self.gate.issue_preflight(self.scope, "debate_internal", arguments)
+        with (
+            patch.dict(sys.modules, tools._test_stubs),
+            installed_invocation(
                 self.scope, self.gate, workspace_resolver=registry.resolve
-            ):
-                allowed = await tools.debate_internal(
-                    project_path=self.workspace,
-                    preflight_token=token,
-                    **arguments,
-                )
+            ),
+        ):
+            allowed = await tools.debate_internal(
+                project_path=self.workspace,
+                preflight_token=token,
+                **arguments,
+            )
         self.assertEqual({"consensus": "auth"}, allowed)
         self.assertEqual([self.workspace], context_calls)
         self.assertEqual(
@@ -953,7 +970,9 @@ class CovenantMiddlewareCapabilityTests(unittest.IsolatedAsyncioTestCase):
             cognitive_calls,
         )
 
-    async def test_direct_consolidated_wrapper_uses_same_gate_before_dispatch(self) -> None:
+    async def test_direct_consolidated_wrapper_uses_same_gate_before_dispatch(
+        self,
+    ) -> None:
         dispatch_calls: list[dict] = []
 
         async def dispatch(**kwargs):
@@ -970,29 +989,29 @@ class CovenantMiddlewareCapabilityTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([], dispatch_calls)
 
         self.gate.record_briefing(self.scope)
-        token = self.gate.issue_preflight(
-            self.scope, "inscribe.remember", target_args
-        )
-        with patch.dict(sys.modules, wrappers._test_stubs):
-            with installed_invocation(self.scope, self.gate):
-                allowed = await wrappers.inscribe(
-                    action="remember",
-                    project_path=self.workspace,
-                    preflight_token=token,
-                    **target_args,
-                )
+        token = self.gate.issue_preflight(self.scope, "inscribe.remember", target_args)
+        with (
+            patch.dict(sys.modules, wrappers._test_stubs),
+            installed_invocation(self.scope, self.gate),
+        ):
+            allowed = await wrappers.inscribe(
+                action="remember",
+                project_path=self.workspace,
+                preflight_token=token,
+                **target_args,
+            )
         self.assertEqual({"stored": True}, allowed)
         self.assertEqual(1, len(dispatch_calls))
         self.assertNotIn("preflight_token", dispatch_calls[0])
 
-    async def test_direct_wrapper_installs_exact_admission_for_real_leaf_dispatch(self) -> None:
+    async def test_direct_wrapper_installs_exact_admission_for_real_leaf_dispatch(
+        self,
+    ) -> None:
         from daem0nmcp.workflows import inscribe as inscribe_workflow
 
         leaf_tools, manager_calls = self._load_memory_leaf_tools()
         wrappers = self._load_workflow_wrappers(inscribe_workflow.dispatch)
-        registry = wrappers._test_stubs[
-            "daem0nmcp.context_manager"
-        ].workspace_registry
+        registry = wrappers._test_stubs["daem0nmcp.context_manager"].workspace_registry
         server_module = types.ModuleType("daem0nmcp.server")
         server_module.remember_batch = leaf_tools.remember_batch
         memories = [{"category": "decision", "content": "direct batch"}]
@@ -1005,26 +1024,28 @@ class CovenantMiddlewareCapabilityTests(unittest.IsolatedAsyncioTestCase):
             **wrappers._test_stubs,
             "daem0nmcp.server": server_module,
         }
-        with patch.dict(sys.modules, call_modules):
-            with installed_invocation(
+        with (
+            patch.dict(sys.modules, call_modules),
+            installed_invocation(
                 self.scope,
                 self.gate,
                 workspace_resolver=registry.resolve,
-            ):
-                allowed = await wrappers.inscribe(
-                    action="remember_batch",
-                    memories=memories,
-                    project_path=self.workspace,
-                    preflight_token=token,
-                )
-                self.assertIsNone(admitted_call_var.get())
-                replay = await wrappers.inscribe(
-                    action="remember_batch",
-                    memories=memories,
-                    project_path=self.workspace,
-                    preflight_token=token,
-                )
-                self.assertIsNone(admitted_call_var.get())
+            ),
+        ):
+            allowed = await wrappers.inscribe(
+                action="remember_batch",
+                memories=memories,
+                project_path=self.workspace,
+                preflight_token=token,
+            )
+            self.assertIsNone(admitted_call_var.get())
+            replay = await wrappers.inscribe(
+                action="remember_batch",
+                memories=memories,
+                project_path=self.workspace,
+                preflight_token=token,
+            )
+            self.assertIsNone(admitted_call_var.get())
 
         self.assertNotIn("violation", allowed, allowed)
         self.assertEqual(1, allowed["created_count"])
@@ -1038,25 +1059,27 @@ class CovenantMiddlewareCapabilityTests(unittest.IsolatedAsyncioTestCase):
         workspace_token = self.gate.issue_preflight(
             self.scope, "inscribe.remember_batch", {"memories": memories}
         )
-        with patch.dict(sys.modules, call_modules):
-            with installed_invocation(
+        with (
+            patch.dict(sys.modules, call_modules),
+            installed_invocation(
                 self.scope,
                 self.gate,
                 workspace_resolver=registry.resolve,
-            ):
-                mismatch = await wrappers.inscribe(
-                    action="remember_batch",
-                    memories=different_memories,
-                    project_path=self.workspace,
-                    preflight_token=mismatch_token,
-                )
-                wrong_workspace = await wrappers.inscribe(
-                    action="remember_batch",
-                    memories=memories,
-                    project_path=self.workspace_b,
-                    preflight_token=workspace_token,
-                )
-                self.assertIsNone(admitted_call_var.get())
+            ),
+        ):
+            mismatch = await wrappers.inscribe(
+                action="remember_batch",
+                memories=different_memories,
+                project_path=self.workspace,
+                preflight_token=mismatch_token,
+            )
+            wrong_workspace = await wrappers.inscribe(
+                action="remember_batch",
+                memories=memories,
+                project_path=self.workspace_b,
+                preflight_token=workspace_token,
+            )
+            self.assertIsNone(admitted_call_var.get())
         self.assertEqual("TOKEN_ARGUMENT_MISMATCH", mismatch["violation"])
         self.assertEqual("TOKEN_SCOPE_MISMATCH", wrong_workspace["violation"])
         self.assertEqual(1, len(manager_calls))
@@ -1069,20 +1092,22 @@ class CovenantMiddlewareCapabilityTests(unittest.IsolatedAsyncioTestCase):
         failure_token = self.gate.issue_preflight(
             self.scope, "inscribe.remember_batch", {"memories": memories}
         )
-        with patch.dict(sys.modules, call_modules):
-            with installed_invocation(
+        with (
+            patch.dict(sys.modules, call_modules),
+            installed_invocation(
                 self.scope,
                 self.gate,
                 workspace_resolver=registry.resolve,
-            ):
-                with self.assertRaisesRegex(RuntimeError, "leaf failed"):
-                    await wrappers.inscribe(
-                        action="remember_batch",
-                        memories=memories,
-                        project_path=self.workspace,
-                        preflight_token=failure_token,
-                    )
-                self.assertIsNone(admitted_call_var.get())
+            ),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "leaf failed"):
+                await wrappers.inscribe(
+                    action="remember_batch",
+                    memories=memories,
+                    project_path=self.workspace,
+                    preflight_token=failure_token,
+                )
+            self.assertIsNone(admitted_call_var.get())
 
     async def test_direct_wrappers_validate_all_levels_before_dispatch(self) -> None:
         dispatch_calls = []
@@ -1092,43 +1117,43 @@ class CovenantMiddlewareCapabilityTests(unittest.IsolatedAsyncioTestCase):
             return {"unexpected": True}
 
         wrappers = self._load_workflow_wrappers(dispatch)
-        registry = wrappers._test_stubs[
-            "daem0nmcp.context_manager"
-        ].workspace_registry
+        registry = wrappers._test_stubs["daem0nmcp.context_manager"].workspace_registry
         self.gate.record_briefing(self.scope)
-        with patch.dict(sys.modules, wrappers._test_stubs):
-            with installed_invocation(
+        with (
+            patch.dict(sys.modules, wrappers._test_stubs),
+            installed_invocation(
                 self.scope,
                 self.gate,
                 workspace_resolver=registry.resolve,
-            ):
-                results = (
-                    await wrappers.commune(
-                        action="briefing",
-                        focus_areas=[{"invalid"}],
-                        project_path=self.workspace,
-                    ),
-                    await wrappers.consult(
-                        action="recall",
-                        topic={"invalid"},
-                        project_path=self.workspace,
-                    ),
-                    await wrappers.inscribe(
-                        action="remember",
-                        category={"invalid"},
-                        content="blocked",
-                        project_path=self.workspace,
-                    ),
-                    await wrappers.maintain(
-                        action="import_data",
-                        data={"invalid": {1}},
-                        project_path=self.workspace,
-                    ),
-                )
-                unknown = await wrappers.consult(
-                    action="not_registered", project_path=self.workspace
-                )
-                self.assertIsNone(admitted_call_var.get())
+            ),
+        ):
+            results = (
+                await wrappers.commune(
+                    action="briefing",
+                    focus_areas=[{"invalid"}],
+                    project_path=self.workspace,
+                ),
+                await wrappers.consult(
+                    action="recall",
+                    topic={"invalid"},
+                    project_path=self.workspace,
+                ),
+                await wrappers.inscribe(
+                    action="remember",
+                    category={"invalid"},
+                    content="blocked",
+                    project_path=self.workspace,
+                ),
+                await wrappers.maintain(
+                    action="import_data",
+                    data={"invalid": {1}},
+                    project_path=self.workspace,
+                ),
+            )
+            unknown = await wrappers.consult(
+                action="not_registered", project_path=self.workspace
+            )
+            self.assertIsNone(admitted_call_var.get())
 
         self.assertEqual(
             ["TOKEN_ARGUMENT_MISMATCH"] * 4,
@@ -1137,7 +1162,9 @@ class CovenantMiddlewareCapabilityTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("UNKNOWN_COVENANT_OPERATION", unknown["violation"])
         self.assertEqual([], dispatch_calls)
 
-    async def test_direct_legacy_leaves_validate_all_levels_before_handler(self) -> None:
+    async def test_direct_legacy_leaves_validate_all_levels_before_handler(
+        self,
+    ) -> None:
         reached = []
 
         @covenant.legacy_entrypoint("get_briefing")
@@ -1157,22 +1184,19 @@ class CovenantMiddlewareCapabilityTests(unittest.IsolatedAsyncioTestCase):
             reached.append("destructive")
 
         self.gate.record_briefing(self.scope)
-        resolver = lambda selector: {
-            self.workspace: self.workspace,
-            self.workspace_b: self.workspace_b,
-        }[selector]
-        with installed_invocation(
-            self.scope, self.gate, workspace_resolver=resolver
-        ):
+
+        def resolver(selector):
+            return {
+                self.workspace: self.workspace,
+                self.workspace_b: self.workspace_b,
+            }[selector]
+
+        with installed_invocation(self.scope, self.gate, workspace_resolver=resolver):
             results = (
-                await briefing_leaf(
-                    [{"invalid"}], project_path=self.workspace
-                ),
+                await briefing_leaf([{"invalid"}], project_path=self.workspace),
                 await recall_leaf({"invalid"}, project_path=self.workspace),
                 await add_rule_leaf({"invalid"}, project_path=self.workspace),
-                await import_leaf(
-                    {"invalid": {1}}, project_path=self.workspace
-                ),
+                await import_leaf({"invalid": {1}}, project_path=self.workspace),
             )
 
         self.assertEqual(
@@ -1181,7 +1205,9 @@ class CovenantMiddlewareCapabilityTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual([], reached)
 
-    async def test_nested_legacy_admission_is_operation_and_workspace_bound(self) -> None:
+    async def test_nested_legacy_admission_is_operation_and_workspace_bound(
+        self,
+    ) -> None:
         middleware = CovenantMiddleware(
             gate=self.gate,
             scope_provider=lambda _context, _workspace: self.scope,
@@ -1228,11 +1254,11 @@ class CovenantMiddlewareCapabilityTests(unittest.IsolatedAsyncioTestCase):
             "TOKEN_SCOPE_MISMATCH",
             result["other_workspace"]["violation"],
         )
-        self.assertEqual(
-            "COUNSEL_REQUIRED", result["other_operation"]["violation"]
-        )
+        self.assertEqual("COUNSEL_REQUIRED", result["other_operation"]["violation"])
 
-    async def test_scope_for_workspace_a_cannot_dispatch_workspace_b_in_any_wrapper(self) -> None:
+    async def test_scope_for_workspace_a_cannot_dispatch_workspace_b_in_any_wrapper(
+        self,
+    ) -> None:
         dispatch_calls: list[dict] = []
 
         async def dispatch(**kwargs):
@@ -1278,30 +1304,36 @@ class CovenantMiddlewareCapabilityTests(unittest.IsolatedAsyncioTestCase):
                     self.scope, protected_operation, action_args
                 )
             with self.subTest(workflow=workflow):
-                with patch.dict(sys.modules, wrappers._test_stubs):
-                    with installed_invocation(
+                with (
+                    patch.dict(sys.modules, wrappers._test_stubs),
+                    installed_invocation(
                         self.scope,
                         self.gate,
                         workspace_resolver=wrappers._test_stubs[
                             "daem0nmcp.context_manager"
                         ].workspace_registry.resolve,
-                    ):
-                        result = await getattr(wrappers, workflow)(
+                    ),
+                ):
+                    result = (
+                        await getattr(wrappers, workflow)(
                             action=action,
                             project_path=self.workspace_b,
                             preflight_token=token,
                             **action_args,
-                        ) if workflow not in {"commune", "consult"} else await getattr(
-                            wrappers, workflow
-                        )(
+                        )
+                        if workflow not in {"commune", "consult"}
+                        else await getattr(wrappers, workflow)(
                             action=action,
                             project_path=self.workspace_b,
                             **action_args,
                         )
+                    )
                 self.assertEqual("TOKEN_SCOPE_MISMATCH", result["violation"])
         self.assertEqual([], dispatch_calls)
 
-    async def test_default_workspace_mismatch_blocks_but_same_and_opaque_selectors_dispatch(self) -> None:
+    async def test_default_workspace_mismatch_blocks_but_same_and_opaque_selectors_dispatch(
+        self,
+    ) -> None:
         dispatch_calls: list[dict] = []
 
         async def dispatch(**kwargs):
@@ -1311,21 +1343,21 @@ class CovenantMiddlewareCapabilityTests(unittest.IsolatedAsyncioTestCase):
         wrappers = self._load_workflow_wrappers(
             dispatch, default_project_path=self.workspace_b
         )
-        registry = wrappers._test_stubs[
-            "daem0nmcp.context_manager"
-        ].workspace_registry
+        registry = wrappers._test_stubs["daem0nmcp.context_manager"].workspace_registry
         self.gate.record_briefing(self.scope)
-        with patch.dict(sys.modules, wrappers._test_stubs):
-            with installed_invocation(
+        with (
+            patch.dict(sys.modules, wrappers._test_stubs),
+            installed_invocation(
                 self.scope, self.gate, workspace_resolver=registry.resolve
-            ):
-                defaulted = await wrappers.consult(action="recall", topic="auth")
-                same = await wrappers.consult(
-                    action="recall", topic="auth", project_path=self.workspace
-                )
-                opaque = await wrappers.consult(
-                    action="recall", topic="auth", project_path="ws_a"
-                )
+            ),
+        ):
+            defaulted = await wrappers.consult(action="recall", topic="auth")
+            same = await wrappers.consult(
+                action="recall", topic="auth", project_path=self.workspace
+            )
+            opaque = await wrappers.consult(
+                action="recall", topic="auth", project_path="ws_a"
+            )
         self.assertEqual("TOKEN_SCOPE_MISMATCH", defaulted["violation"])
         self.assertEqual({"dispatched": True}, same)
         self.assertEqual({"dispatched": True}, opaque)

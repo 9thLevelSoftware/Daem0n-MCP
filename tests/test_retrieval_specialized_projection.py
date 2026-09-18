@@ -2,25 +2,23 @@
 
 from __future__ import annotations
 
+import asyncio
 import copy
 import hashlib
 import importlib.util
 import json
 import sqlite3
 import tempfile
+import threading
 import unittest
 from pathlib import Path
-
 
 WORKSPACE_ID = "ws_0123456789abcdef01234567"
 
 
 def _schema_migrations():
     path = (
-        Path(__file__).resolve().parents[1]
-        / "daem0nmcp"
-        / "migrations"
-        / "schema.py"
+        Path(__file__).resolve().parents[1] / "daem0nmcp" / "migrations" / "schema.py"
     )
     spec = importlib.util.spec_from_file_location("specialized_test_schema", path)
     assert spec is not None and spec.loader is not None
@@ -110,9 +108,54 @@ class SpecializedProjectionTests(unittest.IsolatedAsyncioTestCase):
     def _build_lexical(self) -> None:
         from daem0nmcp.retrieval.projections import LexicalProjectionBuilder
 
-        LexicalProjectionBuilder(
-            self.connection, clock_us=lambda: 800
-        ).rebuild(WORKSPACE_ID)
+        LexicalProjectionBuilder(self.connection, clock_us=lambda: 800).rebuild(
+            WORKSPACE_ID
+        )
+
+    async def test_paused_staging_does_not_hold_sqlite_writer_lock(self):
+        from daem0nmcp.retrieval.specialized_projection import (
+            SpecializedProjectionBuilder,
+            SpecializedProjectionBuildError,
+        )
+
+        self._append_memory(
+            "c",
+            "Procedure staged outside writer transaction.",
+            record_type="procedure",
+            context={"steps": ["Read canonical state.", "Publish briefly."]},
+        )
+        self._build_lexical()
+        staging_started = threading.Event()
+        release_staging = threading.Event()
+        builder_connection = sqlite3.connect(
+            self.database_path,
+            timeout=0.2,
+            check_same_thread=False,
+        )
+        builder_connection.row_factory = sqlite3.Row
+
+        class PausedBuilder(SpecializedProjectionBuilder):
+            def _procedure_steps(self, workspace_id):
+                staging_started.set()
+                release_staging.wait(timeout=2)
+                return super()._procedure_steps(workspace_id)
+
+        builder = PausedBuilder(builder_connection, clock_us=lambda: 900)
+        build = asyncio.create_task(
+            asyncio.to_thread(builder.rebuild, WORKSPACE_ID, "procedure")
+        )
+        self.assertTrue(await asyncio.to_thread(staging_started.wait, 2))
+        try:
+            # This follows the canonical foreground event-store writer path.
+            self._append_memory("d", "Foreground write during staging.")
+            self.connection.commit()
+        finally:
+            release_staging.set()
+        with self.assertRaises(SpecializedProjectionBuildError) as raised:
+            await build
+        builder_connection.close()
+
+        self.assertEqual("PROJECTION_BUILD_SUPERSEDED", raised.exception.code)
 
     def _record_outcome(
         self,
@@ -134,9 +177,7 @@ class SpecializedProjectionTests(unittest.IsolatedAsyncioTestCase):
                 recorded_at_us=200 + self._sequence,
                 actor_type="system",
                 payload={
-                    "record": self._record(
-                        content, outcome=outcome, worked=worked
-                    )
+                    "record": self._record(content, outcome=outcome, worked=worked)
                 },
             )
         )
@@ -193,9 +234,7 @@ class SpecializedProjectionTests(unittest.IsolatedAsyncioTestCase):
                         "subject_record_id": subject_record_id,
                         "predicate": "uses",
                         "object_kind": (
-                            "record_ref"
-                            if target_record_id is not None
-                            else "text"
+                            "record_ref" if target_record_id is not None else "text"
                         ),
                         "object": target_record_id or "SQLite",
                         "legacy_type": None,
@@ -423,9 +462,7 @@ class SpecializedProjectionTests(unittest.IsolatedAsyncioTestCase):
             10,
         )
         self.assertEqual("ready", provider.status)
-        self.assertEqual(
-            failed_id, provider.candidates[0].evidence.record_id
-        )
+        self.assertEqual(failed_id, provider.candidates[0].evidence.record_id)
 
     def test_outcome_lineage_ignores_later_non_outcome_record_update(self):
         from daem0nmcp.retrieval.specialized_projection import (
@@ -446,9 +483,9 @@ class SpecializedProjectionTests(unittest.IsolatedAsyncioTestCase):
             worked=True,
         )
 
-        SpecializedProjectionBuilder(
-            self.connection, clock_us=lambda: 900
-        ).rebuild(WORKSPACE_ID, "outcome")
+        SpecializedProjectionBuilder(self.connection, clock_us=lambda: 900).rebuild(
+            WORKSPACE_ID, "outcome"
+        )
 
         row = self.connection.execute(
             "SELECT outcome_event_id,transaction_at_us "
@@ -479,9 +516,9 @@ class SpecializedProjectionTests(unittest.IsolatedAsyncioTestCase):
             worked=True,
         )
 
-        SpecializedProjectionBuilder(
-            self.connection, clock_us=lambda: 900
-        ).rebuild(WORKSPACE_ID, "outcome")
+        SpecializedProjectionBuilder(self.connection, clock_us=lambda: 900).rebuild(
+            WORKSPACE_ID, "outcome"
+        )
 
         row = self.connection.execute(
             "SELECT outcome_event_id,transaction_at_us "
@@ -515,9 +552,7 @@ class SpecializedProjectionTests(unittest.IsolatedAsyncioTestCase):
                 "ORDER BY relationship_version_id"
             )
         ]
-        builder = SpecializedProjectionBuilder(
-            self.connection, clock_us=lambda: 900
-        )
+        builder = SpecializedProjectionBuilder(self.connection, clock_us=lambda: 900)
 
         temporal = builder.rebuild(WORKSPACE_ID, "temporal")
         graph = builder.rebuild(WORKSPACE_ID, "graph")
@@ -527,9 +562,7 @@ class SpecializedProjectionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(1, temporal.row_count)
         self.assertEqual(1, graph.row_count)
         self.assertEqual(4, temporal.source_event_count)
-        self.assertEqual(
-            temporal.source_event_root_hash, graph.source_event_root_hash
-        )
+        self.assertEqual(temporal.source_event_root_hash, graph.source_event_root_hash)
         self.assertRegex(temporal.content_digest, r"^[0-9a-f]{64}$")
         self.assertRegex(graph.content_digest, r"^[0-9a-f]{64}$")
         self.assertNotEqual(temporal.content_digest, graph.content_digest)
@@ -538,8 +571,7 @@ class SpecializedProjectionTests(unittest.IsolatedAsyncioTestCase):
             [
                 tuple(row)
                 for row in self.connection.execute(
-                    "SELECT * FROM memory_fact_versions "
-                    "ORDER BY fact_version_id"
+                    "SELECT * FROM memory_fact_versions ORDER BY fact_version_id"
                 )
             ],
         )
@@ -587,12 +619,8 @@ class SpecializedProjectionTests(unittest.IsolatedAsyncioTestCase):
                     sort_keys=True,
                 ).encode("utf-8")
             ).hexdigest()
-            self.assertEqual(
-                expected_contract_hash, details["builder_contract_hash"]
-            )
-            self.assertEqual(
-                expected_contract_hash, result.builder_contract_hash
-            )
+            self.assertEqual(expected_contract_hash, details["builder_contract_hash"])
+            self.assertEqual(expected_contract_hash, result.builder_contract_hash)
 
         original_version = projection_module._BUILDER_VERSION
         try:
@@ -618,9 +646,7 @@ class SpecializedProjectionTests(unittest.IsolatedAsyncioTestCase):
             context={"steps": ["First step."]},
         )
         self._build_lexical()
-        builder = SpecializedProjectionBuilder(
-            self.connection, clock_us=lambda: 900
-        )
+        builder = SpecializedProjectionBuilder(self.connection, clock_us=lambda: 900)
         first = builder.rebuild(WORKSPACE_ID, "procedure")
         self._append_memory(
             "c",
@@ -644,9 +670,7 @@ class SpecializedProjectionTests(unittest.IsolatedAsyncioTestCase):
             ]
         )
 
-        preview = builder.rebuild(
-            WORKSPACE_ID, "procedure", dry_run=True
-        )
+        preview = builder.rebuild(WORKSPACE_ID, "procedure", dry_run=True)
 
         self.assertTrue(preview.dry_run)
         self.assertEqual("ready", preview.status)
@@ -696,9 +720,7 @@ class SpecializedProjectionTests(unittest.IsolatedAsyncioTestCase):
             context={"steps": ["Validate source."]},
         )
         self._build_lexical()
-        builder = SpecializedProjectionBuilder(
-            self.connection, clock_us=lambda: 900
-        )
+        builder = SpecializedProjectionBuilder(self.connection, clock_us=lambda: 900)
         first = builder.rebuild(WORKSPACE_ID, "procedure")
         before_changes = self.connection.total_changes
         before_tables = {
@@ -747,9 +769,7 @@ class SpecializedProjectionTests(unittest.IsolatedAsyncioTestCase):
             context={"steps": ["Keep active."]},
         )
         self._build_lexical()
-        builder = SpecializedProjectionBuilder(
-            self.connection, clock_us=lambda: 900
-        )
+        builder = SpecializedProjectionBuilder(self.connection, clock_us=lambda: 900)
         first = builder.rebuild(WORKSPACE_ID, "procedure")
         first_rows = [
             tuple(row)
@@ -817,9 +837,7 @@ class SpecializedProjectionTests(unittest.IsolatedAsyncioTestCase):
             + ("f" * 64)
             + "' WHERE projection_name='procedure' AND status='building'; END"
         )
-        builder = SpecializedProjectionBuilder(
-            self.connection, clock_us=lambda: 900
-        )
+        builder = SpecializedProjectionBuilder(self.connection, clock_us=lambda: 900)
 
         with self.assertRaises(SpecializedProjectionBuildError) as raised:
             builder.rebuild(WORKSPACE_ID, "procedure")
@@ -851,15 +869,11 @@ class SpecializedProjectionTests(unittest.IsolatedAsyncioTestCase):
             context={"steps": ["Keep FTS exact."]},
         )
         self._build_lexical()
-        builder = SpecializedProjectionBuilder(
-            self.connection, clock_us=lambda: 900
-        )
+        builder = SpecializedProjectionBuilder(self.connection, clock_us=lambda: 900)
         result = builder.rebuild(WORKSPACE_ID, "procedure")
         self.assertTrue(builder.active_is_current(WORKSPACE_ID, "procedure"))
 
-        self.connection.execute(
-            f'DELETE FROM "{result.storage_target}"'
-        )
+        self.connection.execute(f'DELETE FROM "{result.storage_target}"')
 
         self.assertFalse(builder.active_is_current(WORKSPACE_ID, "procedure"))
 
@@ -874,9 +888,9 @@ class SpecializedProjectionTests(unittest.IsolatedAsyncioTestCase):
 
         before_changes = self.connection.total_changes
 
-        preview = NoFtsBuilder(
-            self.connection, clock_us=lambda: 900
-        ).rebuild(WORKSPACE_ID, "procedure", dry_run=True)
+        preview = NoFtsBuilder(self.connection, clock_us=lambda: 900).rebuild(
+            WORKSPACE_ID, "procedure", dry_run=True
+        )
 
         self.assertEqual("unavailable", preview.status)
         self.assertEqual("unavailable", preview.capability_status)
@@ -895,9 +909,7 @@ class SpecializedProjectionTests(unittest.IsolatedAsyncioTestCase):
             context={"steps": ["Preserve tokenizer."]},
         )
         self._build_lexical()
-        builder = SpecializedProjectionBuilder(
-            self.connection, clock_us=lambda: 900
-        )
+        builder = SpecializedProjectionBuilder(self.connection, clock_us=lambda: 900)
         result = builder.rebuild(WORKSPACE_ID, "procedure")
         rows = [
             tuple(row)

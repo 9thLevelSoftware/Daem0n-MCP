@@ -7,7 +7,6 @@ import re
 import unittest
 from html.parser import HTMLParser
 
-
 INJECTION = "</script><img src=x onerror=alert(1)>\"'<svg onload=alert(2)>};color:red&\u2028\u2029"
 
 
@@ -58,10 +57,39 @@ def _fixtures():
         "test": {},
         "search": {
             "topic": INJECTION,
-            "decisions": [{"id": INJECTION, "content": INJECTION, "created_at": INJECTION, "tags": [INJECTION], "category": INJECTION}],
-            "warnings": [{"id": INJECTION, "content": INJECTION, "created_at": INJECTION, "tags": [INJECTION]}],
-            "patterns": [{"id": INJECTION, "content": INJECTION, "created_at": INJECTION, "tags": [INJECTION]}],
-            "learnings": [{"id": INJECTION, "content": INJECTION, "created_at": INJECTION, "tags": [INJECTION]}],
+            "decisions": [
+                {
+                    "id": INJECTION,
+                    "content": INJECTION,
+                    "created_at": INJECTION,
+                    "tags": [INJECTION],
+                    "category": INJECTION,
+                }
+            ],
+            "warnings": [
+                {
+                    "id": INJECTION,
+                    "content": INJECTION,
+                    "created_at": INJECTION,
+                    "tags": [INJECTION],
+                }
+            ],
+            "patterns": [
+                {
+                    "id": INJECTION,
+                    "content": INJECTION,
+                    "created_at": INJECTION,
+                    "tags": [INJECTION],
+                }
+            ],
+            "learnings": [
+                {
+                    "id": INJECTION,
+                    "content": INJECTION,
+                    "created_at": INJECTION,
+                    "tags": [INJECTION],
+                }
+            ],
         },
         "briefing": {
             "status": INJECTION,
@@ -77,13 +105,22 @@ def _fixtures():
             "phase_label": INJECTION,
             "phase_description": INJECTION,
             "message": INJECTION,
-            "preflight": {"status": INJECTION, "expires_at": INJECTION, "token": INJECTION},
+            "preflight": {
+                "status": INJECTION,
+                "expires_at": INJECTION,
+                "token": INJECTION,
+            },
             "credential": INJECTION,
         },
         "community": {
             "communities": [
                 {"id": "root", "name": INJECTION, "summary": INJECTION},
-                {"id": "child", "parent_community_id": "root", "name": INJECTION, "summary": INJECTION},
+                {
+                    "id": "child",
+                    "parent_community_id": "root",
+                    "name": INJECTION,
+                    "summary": INJECTION,
+                },
             ],
             "path": [{"id": "breadcrumb", "name": INJECTION}],
         },
@@ -152,11 +189,17 @@ class UIDocumentSecurityTests(unittest.TestCase):
                 self.assertIn("\\u003c", raw) if app_id != "test" else None
                 for tag, attrs in parser.start_tags:
                     self.assertNotEqual(tag, "img")
-                    self.assertFalse(any(name.lower().startswith("on") for name in attrs))
+                    self.assertFalse(
+                        any(name.lower().startswith("on") for name in attrs)
+                    )
                     self.assertNotIn("style", attrs)
                 scripts = [attrs for tag, attrs in parser.start_tags if tag == "script"]
-                app_scripts = [attrs for attrs in scripts if attrs.get("id") == "app-data"]
-                self.assertEqual(app_scripts, [{"id": "app-data", "type": "application/json"}])
+                app_scripts = [
+                    attrs for attrs in scripts if attrs.get("id") == "app-data"
+                ]
+                self.assertEqual(
+                    app_scripts, [{"id": "app-data", "type": "application/json"}]
+                )
                 self.assertNotIn("credential", parsed)
                 self.assertNotIn("token", json.dumps(parsed))
                 self.assertNotIn("onerror=alert(1)", outside_data)
@@ -165,16 +208,32 @@ class UIDocumentSecurityTests(unittest.TestCase):
 
     def test_normal_unicode_round_trips_for_each_data_app(self):
         fixtures = {
-            "search": {"topic": "café / 東京", "decisions": [{"id": 1, "content": "Use PostgreSQL ✓"}]},
-            "briefing": {"git_changes": {"files": [{"status": "M", "path": "src/東京.py"}]}, "message": "ready ✓"},
-            "covenant": {"phase": "counsel", "preflight": {"status": "valid", "expires_at": "2026-08-08T12:00:00Z"}},
-            "community": {"communities": [{"id": 1, "name": "Équipe", "summary": "résumé"}]},
-            "graph": {"topic": "mémoire", "nodes": [{"id": 1, "content": "東京", "full_content": "東京 graph"}]},
+            "search": {
+                "topic": "café / 東京",
+                "decisions": [{"id": 1, "content": "Use PostgreSQL ✓"}],
+            },
+            "briefing": {
+                "git_changes": {"files": [{"status": "M", "path": "src/東京.py"}]},
+                "message": "ready ✓",
+            },
+            "covenant": {
+                "phase": "counsel",
+                "preflight": {"status": "valid", "expires_at": "2026-08-08T12:00:00Z"},
+            },
+            "community": {
+                "communities": [{"id": 1, "name": "Équipe", "summary": "résumé"}]
+            },
+            "graph": {
+                "topic": "mémoire",
+                "nodes": [{"id": 1, "content": "東京", "full_content": "東京 graph"}],
+            },
         }
         for app_id, fixture in fixtures.items():
             with self.subTest(app_id=app_id):
                 _, parsed = _app_data(self.builders[app_id](fixture))
-                self.assertIn("✓", json.dumps(parsed, ensure_ascii=False)) if app_id in {"search", "briefing"} else None
+                self.assertIn(
+                    "✓", json.dumps(parsed, ensure_ascii=False)
+                ) if app_id in {"search", "briefing"} else None
                 self.assertIsInstance(parsed, dict)
 
     def test_graph_and_community_hostile_display_text_survives_only_escaped(self):
@@ -193,12 +252,16 @@ class UIDocumentSecurityTests(unittest.TestCase):
 
         graph_raw, graph = _app_data(self.builders["graph"](_fixtures()["graph"]))
         self.assertEqual(graph["topic"], INJECTION)
-        self.assertEqual([item["content"] for item in graph["nodes"]], [INJECTION, INJECTION])
+        self.assertEqual(
+            [item["content"] for item in graph["nodes"]], [INJECTION, INJECTION]
+        )
         self.assertEqual(
             [item["full_content"] for item in graph["nodes"]],
             [INJECTION, INJECTION],
         )
-        self.assertEqual([item["tags"] for item in graph["nodes"]], [[INJECTION], [INJECTION]])
+        self.assertEqual(
+            [item["tags"] for item in graph["nodes"]], [[INJECTION], [INJECTION]]
+        )
         self.assertEqual(graph["edges"][0]["description"], INJECTION)
         self.assertEqual(graph["edges"][0]["source"], "source")
         self.assertEqual(graph["edges"][0]["target"], "target")
@@ -220,15 +283,31 @@ class UIDocumentSecurityTests(unittest.TestCase):
                 second_parser = _parse_document(second)
 
                 def fixed_parts(parser):
-                    scripts = [(attrs, data) for tag, attrs, data in parser.data_by_open_tag if tag == "script" and attrs.get("id") != "app-data"]
-                    styles = [(attrs, data) for tag, attrs, data in parser.data_by_open_tag if tag == "style"]
-                    html_attrs = [attrs for tag, attrs in parser.start_tags if tag == "html"]
+                    scripts = [
+                        (attrs, data)
+                        for tag, attrs, data in parser.data_by_open_tag
+                        if tag == "script" and attrs.get("id") != "app-data"
+                    ]
+                    styles = [
+                        (attrs, data)
+                        for tag, attrs, data in parser.data_by_open_tag
+                        if tag == "style"
+                    ]
+                    html_attrs = [
+                        attrs for tag, attrs in parser.start_tags if tag == "html"
+                    ]
                     metas = [attrs for tag, attrs in parser.start_tags if tag == "meta"]
-                    titles = [data for tag, attrs, data in parser.data_by_open_tag if tag == "title"]
+                    titles = [
+                        data
+                        for tag, attrs, data in parser.data_by_open_tag
+                        if tag == "title"
+                    ]
                     return scripts, styles, html_attrs, metas, titles
 
                 self.assertEqual(fixed_parts(first_parser), fixed_parts(second_parser))
-                self.assertNotEqual(_app_data(first)[0], _app_data(second)[0]) if app_id != "test" else None
+                self.assertNotEqual(
+                    _app_data(first)[0], _app_data(second)[0]
+                ) if app_id != "test" else None
 
     def test_csp_is_deny_by_default_and_hashes_exact_emitted_assets(self):
         required = (
@@ -249,18 +328,51 @@ class UIDocumentSecurityTests(unittest.TestCase):
         for app_id, builder in self.builders.items():
             with self.subTest(app_id=app_id):
                 parser = _parse_document(builder(_fixtures()[app_id]))
-                policies = [attrs["content"] for tag, attrs in parser.start_tags if tag == "meta" and attrs.get("http-equiv") == "Content-Security-Policy"]
+                policies = [
+                    attrs["content"]
+                    for tag, attrs in parser.start_tags
+                    if tag == "meta"
+                    and attrs.get("http-equiv") == "Content-Security-Policy"
+                ]
                 self.assertEqual(len(policies), 1)
                 policy = policies[0]
                 for directive in required:
                     self.assertIn(directive, policy)
-                self.assertIsNone(re.search(r"unsafe-|https?:|wss?:|nonce-|\bself\b", policy, re.I))
-                emitted_scripts = [data for tag, attrs, data in parser.data_by_open_tag if tag == "script" and attrs.get("data-asset")]
-                emitted_styles = [data for tag, attrs, data in parser.data_by_open_tag if tag == "style" and attrs.get("data-asset")]
-                expected_script_hashes = ["'sha256-" + base64.b64encode(hashlib.sha256(value.encode()).digest()).decode() + "'" for value in emitted_scripts]
-                expected_style_hashes = ["'sha256-" + base64.b64encode(hashlib.sha256(value.encode()).digest()).decode() + "'" for value in emitted_styles]
-                script_clause = next(part.strip() for part in policy.split(";") if part.strip().startswith("script-src "))
-                style_clause = next(part.strip() for part in policy.split(";") if part.strip().startswith("style-src "))
+                self.assertIsNone(
+                    re.search(r"unsafe-|https?:|wss?:|nonce-|\bself\b", policy, re.I)
+                )
+                emitted_scripts = [
+                    data
+                    for tag, attrs, data in parser.data_by_open_tag
+                    if tag == "script" and attrs.get("data-asset")
+                ]
+                emitted_styles = [
+                    data
+                    for tag, attrs, data in parser.data_by_open_tag
+                    if tag == "style" and attrs.get("data-asset")
+                ]
+                expected_script_hashes = [
+                    "'sha256-"
+                    + base64.b64encode(hashlib.sha256(value.encode()).digest()).decode()
+                    + "'"
+                    for value in emitted_scripts
+                ]
+                expected_style_hashes = [
+                    "'sha256-"
+                    + base64.b64encode(hashlib.sha256(value.encode()).digest()).decode()
+                    + "'"
+                    for value in emitted_styles
+                ]
+                script_clause = next(
+                    part.strip()
+                    for part in policy.split(";")
+                    if part.strip().startswith("script-src ")
+                )
+                style_clause = next(
+                    part.strip()
+                    for part in policy.split(";")
+                    if part.strip().startswith("style-src ")
+                )
                 self.assertEqual(script_clause.split()[1:], expected_script_hashes)
                 self.assertEqual(style_clause.split()[1:], expected_style_hashes)
 
@@ -275,14 +387,16 @@ class UIDocumentSecurityTests(unittest.TestCase):
             "new Function",
             "eval(",
             ".style.",
-            "setAttribute(\"style\"",
+            'setAttribute("style"',
             "setAttribute('style'",
         )
         for app_id, spec in self.rendering.APP_SPECS.items():
             for asset in spec.scripts:
                 if asset == "d3.bundle.js":
                     continue
-                source = root.joinpath("static", *asset.split("/")).read_text(encoding="utf-8")
+                source = root.joinpath("static", *asset.split("/")).read_text(
+                    encoding="utf-8"
+                )
                 for token in forbidden:
                     with self.subTest(app_id=app_id, asset=asset, token=token):
                         self.assertNotIn(token, source)

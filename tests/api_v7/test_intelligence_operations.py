@@ -13,7 +13,6 @@ from types import MappingProxyType, SimpleNamespace
 
 from daem0nmcp.api.v7.application import AdmittedRequest
 
-
 NOW = datetime(2026, 8, 9, 12, 0, tzinfo=timezone.utc)
 NOW_US = 1_786_276_800_000_000
 PREFLIGHT_TOKEN = "preflight-token-0001"
@@ -37,9 +36,7 @@ def _apply_v7_schema(connection: sqlite3.Connection) -> None:
     from daem0nmcp.migrations.schema import MIGRATIONS
     from daem0nmcp.schema_version import CURRENT_SCHEMA_VERSION
 
-    connection.execute(
-        "CREATE TABLE schema_version (version INTEGER PRIMARY KEY)"
-    )
+    connection.execute("CREATE TABLE schema_version (version INTEGER PRIMARY KEY)")
     for version, _description, statements in MIGRATIONS:
         if 16 <= version <= CURRENT_SCHEMA_VERSION:
             for statement in statements:
@@ -80,9 +77,7 @@ class IntelligenceOperationTests(unittest.IsolatedAsyncioTestCase):
             self.storage,
             ActiveDatabasePointer(7, 1, self.database.name, None, None),
         )
-        self.workspace = WorkspaceRegistry(
-            [self.root], default_root=self.root
-        ).default
+        self.workspace = WorkspaceRegistry([self.root], default_root=self.root).default
         self.dependencies = None
 
     async def asyncTearDown(self) -> None:
@@ -159,9 +154,7 @@ class IntelligenceOperationTests(unittest.IsolatedAsyncioTestCase):
                         else "memory.updated"
                     ),
                     occurred_at_us=(
-                        recorded_at_us
-                        if occurred_at_us is None
-                        else occurred_at_us
+                        recorded_at_us if occurred_at_us is None else occurred_at_us
                     ),
                     recorded_at_us=recorded_at_us,
                     actor_type="system",
@@ -340,10 +333,7 @@ class IntelligenceOperationTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(
             {contradicted_id},
-            {
-                ref.record_id
-                for ref in result.contradictions[0].evidence_refs
-            },
+            {ref.record_id for ref in result.contradictions[0].evidence_refs},
         )
 
     async def test_memory_verify_honors_category_and_transaction_time(self) -> None:
@@ -442,9 +432,7 @@ class IntelligenceOperationTests(unittest.IsolatedAsyncioTestCase):
         self,
     ) -> None:
         """A rule report must be grounded in governance and memory authority."""
-        rule_id, _rule_event = self._append_rule(
-            1, "database migration deployment"
-        )
+        rule_id, _rule_event = self._append_rule(1, "database migration deployment")
         worked_id, worked_event = self._append_record(
             "1",
             "The database migration deployment completed after backup.",
@@ -472,10 +460,7 @@ class IntelligenceOperationTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("1 canonical revision", result.reports[0].summary)
         self.assertEqual(
             {(worked_id, worked_event), (failed_id, failed_event)},
-            {
-                (ref.record_id, ref.event_id)
-                for ref in result.reports[0].evidence_refs
-            },
+            {(ref.record_id, ref.event_id) for ref in result.reports[0].evidence_refs},
         )
         self.assertEqual(
             result.reports[0].evidence_refs,
@@ -539,9 +524,7 @@ class IntelligenceOperationTests(unittest.IsolatedAsyncioTestCase):
         unrelated_id, _ = self._append_record("0", "Unrelated deployment note.")
         self._activate_communities((first_id, second_id), unrelated_id)
         with closing(sqlite3.connect(self.database)) as connection:
-            connection.execute(
-                "DROP TRIGGER discovery_communities_no_update"
-            )
+            connection.execute("DROP TRIGGER discovery_communities_no_update")
             connection.execute(
                 "UPDATE discovery_communities SET label='Tampered label' "
                 "WHERE workspace_id=? AND label='Authentication'",

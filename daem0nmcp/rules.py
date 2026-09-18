@@ -226,7 +226,7 @@ class RulesEngine:
         combined = {"must_do": [], "must_not": [], "ask_first": [], "warnings": []}
 
         matched_details = []
-        for _rule_id, _score, rule in sorted_matches:
+        for _rule_id, score, rule in sorted_matches:
             combined["must_do"].extend(rule.must_do)
             combined["must_not"].extend(rule.must_not)
             combined["ask_first"].extend(rule.ask_first)

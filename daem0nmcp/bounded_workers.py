@@ -5,7 +5,8 @@ from __future__ import annotations
 import asyncio
 import threading
 from collections.abc import Callable
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
+from contextlib import suppress
 from typing import Any
 
 
@@ -35,6 +36,35 @@ class BoundedWorkerPool:
 
     async def run(self, operation: Callable[[], Any]) -> Any:
         """Admit one operation, or reject immediately when the pool is full."""
+        work = self._submit(operation)
+        return await asyncio.wrap_future(work)
+
+    async def run_with_cancellation_cleanup(
+        self,
+        operation: Callable[[], Any],
+        *,
+        request_cancel: Callable[[], Any],
+    ) -> Any:
+        """Request cancellation and drain admitted work before propagating it."""
+        work = self._submit(operation)
+        waiter = asyncio.wrap_future(work)
+        try:
+            return await asyncio.shield(waiter)
+        except asyncio.CancelledError as cancellation:
+            request_cancel()
+            while not waiter.done():
+                try:
+                    await asyncio.shield(waiter)
+                except asyncio.CancelledError:
+                    continue
+                except BaseException:
+                    break
+            with suppress(BaseException):
+                waiter.result()
+            raise cancellation from None
+
+    def _submit(self, operation: Callable[[], Any]) -> Future[Any]:
+        """Admit and submit one operation while retaining its capacity slot."""
         if not self._slots.acquire(blocking=False):
             raise BoundedWorkerBusyError("Background worker capacity is unavailable")
         with self._state_lock:
@@ -49,7 +79,7 @@ class BoundedWorkerPool:
         # The concurrent future owns capacity until the underlying operation
         # truly ends. Cancelling its asyncio waiter must not over-admit work.
         work.add_done_callback(lambda _future: self._release_slot())
-        return await asyncio.wrap_future(work)
+        return work
 
     def shutdown(self) -> None:
         """Shut down an explicitly owned pool after its workers have stopped."""

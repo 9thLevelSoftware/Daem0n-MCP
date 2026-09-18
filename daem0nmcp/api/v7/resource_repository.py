@@ -17,7 +17,9 @@ import posixpath
 import re
 import sqlite3
 import subprocess
+import tempfile
 from collections.abc import Awaitable, Callable, Mapping
+from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -26,17 +28,148 @@ from typing import TypeVar, cast
 from ...bounded_workers import BoundedWorkerPool
 from ...schema_version import CURRENT_SCHEMA_VERSION
 from ...storage_activation import DatabaseFileLock, ResolvedActiveDatabase
-from ...workspace import Workspace
+from ...workspace import Workspace, normalize_resolved_path
 from .models import RecordSummary
 from .public_ids import PublicObjectIdRepository
 from .resources import (
     RESOURCE_FETCH_LIMIT,
     ActiveContextItem,
-    ResourceReadRequest,
     ResourceReader,
+    ResourceReadRequest,
     ResourceRow,
     RuleView,
 )
+
+
+class _WindowsKillOnCloseJob:
+    """Own a Windows process tree without an optional pywin32 dependency."""
+
+    def __init__(self, process: subprocess.Popen[bytes]) -> None:
+        self._handle: object | None = None
+        if os.name != "nt":
+            return
+        import ctypes
+        from ctypes import wintypes
+
+        class _BasicLimit(ctypes.Structure):
+            _fields_ = [
+                ("PerProcessUserTimeLimit", ctypes.c_longlong),
+                ("PerJobUserTimeLimit", ctypes.c_longlong),
+                ("LimitFlags", wintypes.DWORD),
+                ("MinimumWorkingSetSize", ctypes.c_size_t),
+                ("MaximumWorkingSetSize", ctypes.c_size_t),
+                ("ActiveProcessLimit", wintypes.DWORD),
+                ("Affinity", ctypes.c_size_t),
+                ("PriorityClass", wintypes.DWORD),
+                ("SchedulingClass", wintypes.DWORD),
+            ]
+
+        class _ExtendedLimit(ctypes.Structure):
+            _fields_ = [
+                ("BasicLimitInformation", _BasicLimit),
+                ("IoInfo", ctypes.c_byte * 48),
+                ("ProcessMemoryLimit", ctypes.c_size_t),
+                ("JobMemoryLimit", ctypes.c_size_t),
+                ("PeakProcessMemoryUsed", ctypes.c_size_t),
+                ("PeakJobMemoryUsed", ctypes.c_size_t),
+            ]
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.CreateJobObjectW.argtypes = [ctypes.c_void_p, wintypes.LPCWSTR]
+        kernel32.CreateJobObjectW.restype = wintypes.HANDLE
+        kernel32.SetInformationJobObject.argtypes = [
+            wintypes.HANDLE,
+            ctypes.c_int,
+            ctypes.c_void_p,
+            wintypes.DWORD,
+        ]
+        kernel32.SetInformationJobObject.restype = wintypes.BOOL
+        kernel32.AssignProcessToJobObject.argtypes = [wintypes.HANDLE, wintypes.HANDLE]
+        kernel32.AssignProcessToJobObject.restype = wintypes.BOOL
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+        kernel32.CloseHandle.restype = wintypes.BOOL
+        job = kernel32.CreateJobObjectW(None, None)
+        if not job:
+            raise OSError(ctypes.get_last_error(), "CreateJobObjectW failed")
+        try:
+            info = _ExtendedLimit()
+            info.BasicLimitInformation.LimitFlags = 0x00002000  # KILL_ON_JOB_CLOSE
+            if not kernel32.SetInformationJobObject(
+                job, 9, ctypes.byref(info), ctypes.sizeof(info)
+            ):
+                raise OSError(ctypes.get_last_error(), "SetInformationJobObject failed")
+            if not kernel32.AssignProcessToJobObject(job, process._handle):  # type: ignore[attr-defined]
+                raise OSError(
+                    ctypes.get_last_error(), "AssignProcessToJobObject failed"
+                )
+        except Exception:
+            kernel32.CloseHandle(job)
+            raise
+        self._handle = job
+        self._close = kernel32.CloseHandle
+
+    def resume(self, process_id: int) -> None:
+        """Resume the primary thread only after the suspended process is owned."""
+        if os.name != "nt":
+            return
+        import ctypes
+        from ctypes import wintypes
+
+        class ThreadEntry(ctypes.Structure):
+            _fields_ = [
+                ("dwSize", wintypes.DWORD),
+                ("cntUsage", wintypes.DWORD),
+                ("th32ThreadID", wintypes.DWORD),
+                ("th32OwnerProcessID", wintypes.DWORD),
+                ("tpBasePri", wintypes.LONG),
+                ("tpDeltaPri", wintypes.LONG),
+                ("dwFlags", wintypes.DWORD),
+            ]
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.CreateToolhelp32Snapshot.argtypes = [wintypes.DWORD, wintypes.DWORD]
+        kernel32.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
+        for name in ("Thread32First", "Thread32Next"):
+            method = getattr(kernel32, name)
+            method.argtypes = [wintypes.HANDLE, ctypes.POINTER(ThreadEntry)]
+            method.restype = wintypes.BOOL
+        kernel32.OpenThread.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        kernel32.OpenThread.restype = wintypes.HANDLE
+        kernel32.ResumeThread.argtypes = [wintypes.HANDLE]
+        kernel32.ResumeThread.restype = wintypes.DWORD
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+        kernel32.CloseHandle.restype = wintypes.BOOL
+        snapshot = kernel32.CreateToolhelp32Snapshot(4, 0)  # TH32CS_SNAPTHREAD
+        if snapshot == ctypes.c_void_p(-1).value:
+            raise OSError(ctypes.get_last_error(), "Thread snapshot failed")
+        try:
+            entry = ThreadEntry()
+            entry.dwSize = ctypes.sizeof(entry)
+            found = kernel32.Thread32First(snapshot, ctypes.byref(entry))
+            thread_ids = []
+            while found:
+                if entry.th32OwnerProcessID == process_id:
+                    thread_ids.append(entry.th32ThreadID)
+                found = kernel32.Thread32Next(snapshot, ctypes.byref(entry))
+            if len(thread_ids) != 1:
+                raise OSError("Suspended process primary thread is ambiguous")
+            thread = kernel32.OpenThread(
+                2, False, thread_ids[0]
+            )  # THREAD_SUSPEND_RESUME
+            if not thread:
+                raise OSError(ctypes.get_last_error(), "OpenThread failed")
+            try:
+                if kernel32.ResumeThread(thread) != 1:
+                    raise OSError("Unexpected primary thread suspend count")
+            finally:
+                kernel32.CloseHandle(thread)
+        finally:
+            kernel32.CloseHandle(snapshot)
+
+    def close(self) -> None:
+        if self._handle is not None:
+            self._close(self._handle)  # type: ignore[attr-defined]
+            self._handle = None
 
 
 _EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
@@ -67,6 +200,8 @@ _RESOURCE_WORKERS = BoundedWorkerPool(
     max_workers=4,
     thread_name_prefix="daem0nmcp-v7-resources",
 )
+
+
 class ResourceRepositoryError(RuntimeError):
     """Invariant, path-free failure raised for every repository fault."""
 
@@ -102,9 +237,9 @@ class ResourceRepositoryReaders:
     failure_reader: ResourceReader
     rule_reader: ResourceReader
     active_context_reader: ResourceReader
-    briefing_snapshot_reader: Callable[
-        ..., Awaitable[ResourceRepositorySnapshot]
-    ] | None = None
+    briefing_snapshot_reader: (
+        Callable[..., Awaitable[ResourceRepositorySnapshot]] | None
+    ) = None
 
 
 def _bounded_timeout(value: object) -> float:
@@ -227,7 +362,11 @@ def _reject_canonical_root(value: object, workspace: Workspace) -> None:
 
 def _validated_now(clock: Callable[[], datetime]) -> datetime:
     value = clock()
-    if not isinstance(value, datetime) or value.tzinfo is None or value.utcoffset() is None:
+    if (
+        not isinstance(value, datetime)
+        or value.tzinfo is None
+        or value.utcoffset() is None
+    ):
         raise ValueError("clock must return a timezone-aware datetime")
     return value.astimezone(timezone.utc)
 
@@ -400,16 +539,12 @@ class SQLiteResourceRepository:
         warning_request = (
             None
             if warning_limit == 0
-            else ResourceReadRequest(
-                "warnings", warning_limit, "updated_at_desc"
-            )
+            else ResourceReadRequest("warnings", warning_limit, "updated_at_desc")
         )
         failure_request = (
             None
             if failure_limit == 0
-            else ResourceReadRequest(
-                "failures", failure_limit, "updated_at_desc"
-            )
+            else ResourceReadRequest("failures", failure_limit, "updated_at_desc")
         )
         rule_request = ResourceReadRequest(
             "rules", rule_limit, "priority_desc", enabled_only=True
@@ -473,9 +608,7 @@ class SQLiteResourceRepository:
             )
             decisions = self._read_records_sync(
                 workspace,
-                ResourceReadRequest(
-                    "warnings", 50, "updated_at_desc"
-                ),
+                ResourceReadRequest("warnings", 50, "updated_at_desc"),
                 record_type="decision",
                 failed_only=False,
                 _connection=connection,
@@ -515,31 +648,88 @@ class SQLiteResourceRepository:
         )
 
     @staticmethod
-    def _read_git_changes_sync(workspace: Workspace) -> list[object]:
+    def _read_git_output_sync(
+        workspace: Workspace, arguments: list[str]
+    ) -> bytes | None:
         creation_flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        if os.name == "nt":
+            creation_flags |= 0x00000004  # CREATE_SUSPENDED: contain before execution
         try:
-            completed = subprocess.run(
-                [
-                    "git",
-                    "--no-optional-locks",
-                    "-C",
-                    str(workspace.root),
-                    "status",
-                    "--porcelain=v1",
-                    "-z",
-                    "--untracked-files=normal",
-                    "--",
-                ],
-                check=False,
-                capture_output=True,
-                timeout=2.0,
-                creationflags=creation_flags,
-                env={**os.environ, "GIT_OPTIONAL_LOCKS": "0"},
-            )
+            # A descendant may inherit captured pipe handles. On Windows,
+            # captured-pipe timeout cleanup then waits indefinitely for
+            # those pipes to close even after Git has been killed. A temporary
+            # file keeps both process waiting and output consumption bounded.
+            with tempfile.TemporaryFile() as output:
+                process = subprocess.Popen(
+                    [
+                        "git",
+                        "--no-optional-locks",
+                        "-c",
+                        "core.fsmonitor=false",
+                        "-C",
+                        str(workspace.root),
+                        *arguments,
+                    ],
+                    stdin=subprocess.DEVNULL,
+                    stdout=output,
+                    stderr=subprocess.DEVNULL,
+                    creationflags=creation_flags,
+                    start_new_session=(os.name != "nt"),
+                    env={**os.environ, "GIT_OPTIONAL_LOCKS": "0"},
+                )
+                job = None
+                try:
+                    job = _WindowsKillOnCloseJob(process)
+                    job.resume(process.pid)
+                    try:
+                        process.wait(timeout=2.0)
+                    except subprocess.TimeoutExpired:
+                        return None
+                    output.seek(0)
+                    raw = output.read(_MAX_GIT_OUTPUT_BYTES + 1)
+                finally:
+                    if job is not None:
+                        job.close()
+                    if os.name != "nt":
+                        # Even a successfully exited Git can leave descendants.
+                        with suppress(ProcessLookupError):
+                            getattr(os, "killpg")(process.pid, 9)  # noqa: B009 - absent in Windows stubs
+                    if process.poll() is None:
+                        process.kill()
+                    process.wait(timeout=0.5)
         except (OSError, subprocess.SubprocessError):
+            return None
+        if process.returncode != 0 or len(raw) > _MAX_GIT_OUTPUT_BYTES:
+            return None
+        return raw
+
+    @staticmethod
+    def _read_git_changes_sync(workspace: Workspace) -> list[object]:
+        # Porcelain paths are repository-relative even when Git runs from a
+        # nested workspace. Filter at Git and again before exposing public paths.
+        prefix_raw = SQLiteResourceRepository._read_git_output_sync(
+            workspace, ["rev-parse", "--show-prefix"]
+        )
+        if prefix_raw is None:
             return []
-        raw = completed.stdout
-        if completed.returncode != 0 or len(raw) > _MAX_GIT_OUTPUT_BYTES:
+        try:
+            prefix = (
+                prefix_raw.decode("utf-8", errors="strict")
+                .removesuffix("\n")
+                .removesuffix("\r")
+            )
+        except UnicodeDecodeError:
+            return []
+        if prefix and (
+            not prefix.endswith("/")
+            or not SQLiteResourceRepository._safe_relative_git_path(prefix[:-1])
+        ):
+            return []
+        raw = SQLiteResourceRepository._read_git_output_sync(
+            workspace,
+            ["status", "--porcelain=v1", "-z", "--untracked-files=normal", "--", "."],
+        )
+        if raw is None:
             return []
         try:
             entries = raw.decode("utf-8", errors="strict").split("\x00")
@@ -560,6 +750,9 @@ class SQLiteResourceRepository:
                 if index >= len(entries) or not entries[index]:
                     return []
                 index += 1
+            if not path.startswith(prefix):
+                continue
+            path = path[len(prefix) :]
             if not SQLiteResourceRepository._safe_relative_git_path(path):
                 continue
             if state == "??":
@@ -574,9 +767,7 @@ class SQLiteResourceRepository:
                 status = "added"
             else:
                 status = "modified"
-            values.append(
-                {"relative_file_path": path, "status": status}
-            )
+            values.append({"relative_file_path": path, "status": status})
         return values
 
     @staticmethod
@@ -642,9 +833,10 @@ class SQLiteResourceRepository:
         for row in state_rows:
             if row["projection_name"] not in _PROJECTION_NAMES:
                 raise ValueError("projection name is invalid")
-            if _plain_int(row["has_active"]) == 0 or _plain_int(
-                row["marked_stale"]
-            ) == 1:
+            if (
+                _plain_int(row["has_active"]) == 0
+                or _plain_int(row["marked_stale"]) == 1
+            ):
                 stale += 1
         return values, stale
 
@@ -657,9 +849,7 @@ class SQLiteResourceRepository:
         now_text = now.isoformat()
         delta = now - _EPOCH
         now_us = (
-            delta.days * 86_400_000_000
-            + delta.seconds * 1_000_000
-            + delta.microseconds
+            delta.days * 86_400_000_000 + delta.seconds * 1_000_000 + delta.microseconds
         )
         canonical = connection.execute(
             "SELECT COUNT(*) FROM active_context_entries ac "
@@ -716,6 +906,9 @@ class SQLiteResourceRepository:
             "SELECT COUNT(*) AS records,"
             "SUM(CASE WHEN record_type='decision' THEN 1 ELSE 0 END) AS decisions,"
             "SUM(CASE WHEN record_type='warning' THEN 1 ELSE 0 END) AS warnings,"
+            "SUM(CASE WHEN record_type='pattern' THEN 1 ELSE 0 END) AS patterns,"
+            "SUM(CASE WHEN record_type='learning' THEN 1 ELSE 0 END) AS learnings,"
+            "SUM(CASE WHEN worked=1 THEN 1 ELSE 0 END) AS successful_outcomes,"
             "SUM(CASE WHEN worked=0 THEN 1 ELSE 0 END) AS failed_outcomes,"
             "SUM(CASE WHEN archived=1 THEN 1 ELSE 0 END) AS archived_records "
             "FROM memory_records WHERE workspace_id=? AND record_type<>'legacy' "
@@ -739,6 +932,9 @@ class SQLiteResourceRepository:
             "records": _plain_int(record["records"]),
             "decisions": _plain_int(record["decisions"] or 0),
             "warnings": _plain_int(record["warnings"] or 0),
+            "patterns": _plain_int(record["patterns"] or 0),
+            "learnings": _plain_int(record["learnings"] or 0),
+            "successful_outcomes": _plain_int(record["successful_outcomes"] or 0),
             "failed_outcomes": _plain_int(record["failed_outcomes"] or 0),
             "archived_records": _plain_int(record["archived_records"] or 0),
             "rules": _plain_int(rule["rules"]),
@@ -781,10 +977,8 @@ class SQLiteResourceRepository:
             except Exception:
                 break
         if worker.done():
-            try:
+            with suppress(Exception):
                 worker.result()
-            except Exception:
-                pass
         if cancellation is not None:
             raise cancellation
         raise ResourceRepositoryError()
@@ -795,8 +989,10 @@ class SQLiteResourceRepository:
     ) -> tuple[sqlite3.Connection, DatabaseFileLock]:
         connection: sqlite3.Connection | None = None
         try:
-            root = workspace.root.resolve(strict=True)
-            expected_storage = (root / ".daem0nmcp" / "storage").resolve(strict=True)
+            root = normalize_resolved_path(workspace.root.resolve(strict=True))
+            expected_storage = normalize_resolved_path(
+                (root / ".daem0nmcp" / "storage").resolve(strict=True)
+            )
         except (OSError, RuntimeError, ValueError) as exc:
             raise ValueError("workspace storage is unavailable") from exc
 
@@ -805,15 +1001,21 @@ class SQLiteResourceRepository:
         try:
             selected = self._active_database_resolver(workspace)
             if not isinstance(selected, ResolvedActiveDatabase):
-                raise TypeError("active database resolver returned an invalid selection")
+                raise TypeError(
+                    "active database resolver returned an invalid selection"
+                )
             if selected.format_version != 7:
                 raise ValueError("active database is not architecture format 7")
-            storage = selected.storage_path.resolve(strict=True)
-            database_path = selected.path.resolve(strict=True)
+            storage = normalize_resolved_path(
+                selected.storage_path.resolve(strict=True)
+            )
+            database_path = normalize_resolved_path(selected.path.resolve(strict=True))
             database_path.relative_to(storage)
         except (OSError, RuntimeError, ValueError) as exc:
             storage_lock.release()
-            raise ValueError("active database selection is outside its workspace") from exc
+            raise ValueError(
+                "active database selection is outside its workspace"
+            ) from exc
         if storage != expected_storage or not database_path.is_file():
             storage_lock.release()
             raise ValueError("active database selection is outside its workspace")
@@ -846,15 +1048,12 @@ class SQLiteResourceRepository:
                 "SELECT name FROM sqlite_master WHERE type='table'"
             )
         }
-        if not _REQUIRED_TABLES <= tables:
+        if not tables >= _REQUIRED_TABLES:
             raise ValueError("active database schema is incomplete")
         version_row = connection.execute(
             "SELECT COALESCE(MAX(version),0) FROM schema_version"
         ).fetchone()
-        if (
-            version_row is None
-            or _plain_int(version_row[0]) < CURRENT_SCHEMA_VERSION
-        ):
+        if version_row is None or _plain_int(version_row[0]) < CURRENT_SCHEMA_VERSION:
             raise ValueError("active database schema predates the v7 resource contract")
         query_only = connection.execute("PRAGMA query_only").fetchone()
         if query_only is None or _plain_int(query_only[0]) != 1:
@@ -1127,8 +1326,7 @@ class SQLiteResourceRepository:
             legacy_parameters: list[object] = [str(workspace.root)]
             if not request.include_expired:
                 legacy_predicates.append(
-                    "(ac.expires_at IS NULL OR "
-                    "julianday(ac.expires_at)>julianday(?))"
+                    "(ac.expires_at IS NULL OR julianday(ac.expires_at)>julianday(?))"
                 )
                 legacy_parameters.append(now_text)
             if not request.include_archived:

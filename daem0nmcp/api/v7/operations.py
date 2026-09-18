@@ -9,31 +9,32 @@ v6 tool implementation.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable, Mapping, Sequence
-from contextlib import contextmanager
-from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
 import hashlib
 import hmac
 import os
-from pathlib import Path
 import re
 import secrets
 import sqlite3
 import threading
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from contextlib import contextmanager, suppress
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from types import MappingProxyType
-from typing import Any, Iterator
+from typing import Any
 
 from ...bounded_workers import BoundedWorkerBusyError, BoundedWorkerPool
 from ...covenant import CovenantGate, InvocationScope
 from ...event_store import (
     EventBundleError,
+    EventCommand,
+    EventStore,
     EventStreamConflict,
     canonical_json_bytes,
     deterministic_id,
     event_hash_for,
     event_id_for_hash,
-    export_event_bundle,
     import_event_bundle,
     memory_content_hash,
     parse_canonical_json,
@@ -51,6 +52,23 @@ from ...workspace import Workspace
 from .application import AdmittedRequest
 from .errors import STABLE_ERROR_CODE_SET
 from .models import EvidenceRef, Page, RecordSummary
+from .portable_projections import (
+    ImportFinalizationLease,
+    PortableTransferError,
+    activate_vector_candidate,
+    claim_import_finalization,
+    cleanup_import_attempt,
+    complete_import_session,
+    create_export_session,
+    prepare_import,
+    prepare_vector_candidate,
+    read_export_page,
+    reconstruct_legacy_mappings,
+    release_import_finalization,
+    renew_import_finalization,
+    stage_import_page,
+    validate_legacy_projection,
+)
 from .tasks import await_task_terminal
 from .tools import (
     CovenantNextStep,
@@ -59,23 +77,20 @@ from .tools import (
     ExportBundle,
     ExportEvent,
     MemoryAtTimeData,
+    MemoryAtTimeGetInput,
     MemoryVersionView,
     ProjectionManifest,
     ProjectionRebuildData,
     WorkspaceImportData,
 )
 
-
 _SCHEMA_VERSION = CURRENT_SCHEMA_VERSION
 _FORMAT_VERSION = 7
 _MAX_EXPORT_EVENTS = 10_000
+_IMPORT_LEASE_RENEW_MARGIN_US = 5 * 60 * 1_000_000
 _CURSOR_RE = re.compile(r"^cur_([0-9a-f]{64})$")
-_WINDOWS_ABSOLUTE_PATH = re.compile(
-    r"(?<![A-Za-z0-9])(?:[A-Za-z]:[\\/]|\\\\)"
-)
-_POSIX_ABSOLUTE_PATH = re.compile(
-    r"(?:^|[\s\"'=(])/(?!/)[A-Za-z0-9_.-]"
-)
+_WINDOWS_ABSOLUTE_PATH = re.compile(r"(?<![A-Za-z0-9])(?:[A-Za-z]:[\\/]|\\\\)")
+_POSIX_ABSOLUTE_PATH = re.compile(r"(?:^|[\s\"'=(])/(?!/)[A-Za-z0-9_.-]")
 _EVENT_COLUMNS = (
     "event_id,workspace_id,stream_id,stream_kind,stream_version,event_type,"
     "event_schema_version,occurred_at_us,recorded_at_us,actor_type,actor_id,"
@@ -162,6 +177,7 @@ class CoreOperationDependencies:
     )
     clock: Callable[[], datetime] = field(default=_default_clock)
     projection_config: object | None = None
+    projection_capability_statuses: Mapping[str, str] | None = None
     cursor_secret: bytes = field(default_factory=lambda: secrets.token_bytes(32))
 
     def __post_init__(self) -> None:
@@ -261,10 +277,8 @@ async def _run_blocking(operation: Callable[[], Any]) -> Any:
             except Exception:
                 break
         if worker.done():
-            try:
+            with suppress(Exception):
                 worker.result()
-            except Exception:
-                pass
         raise cancellation
     except BoundedWorkerBusyError as exc:
         raise CoreOperationError("TASK_REQUIRED") from exc
@@ -314,9 +328,7 @@ def _us_from_datetime(value: object) -> int:
     try:
         delta = value.astimezone(timezone.utc) - _UNIX_EPOCH
         return (
-            delta.days * 86_400_000_000
-            + delta.seconds * 1_000_000
-            + delta.microseconds
+            delta.days * 86_400_000_000 + delta.seconds * 1_000_000 + delta.microseconds
         )
     except (OSError, OverflowError, ValueError) as exc:
         raise CoreOperationError("IMPORT_INVALID") from exc
@@ -628,16 +640,18 @@ def _summary(
     else:
         status = "current"
     try:
-        return RecordSummary(
-            record_id=event["stream_id"],
-            record_type=record["record_type"],
-            excerpt=content[:4000],
-            tags=tags,
-            relative_file_path=relative,
-            current_status=status,
-            content_hash=memory_content_hash(record),
-            created_at=_utc_from_us(created_at_us),
-            updated_at=_utc_from_us(event["recorded_at_us"]),
+        return RecordSummary.model_validate(
+            {
+                "record_id": event["stream_id"],
+                "record_type": record["record_type"],
+                "excerpt": content[:4000],
+                "tags": tags,
+                "relative_file_path": relative,
+                "current_status": status,
+                "content_hash": memory_content_hash(record),
+                "created_at": _utc_from_us(created_at_us),
+                "updated_at": _utc_from_us(event["recorded_at_us"]),
+            }
         )
     except CoreOperationError:
         raise
@@ -750,12 +764,15 @@ def _at_time_sync(
     workspace: Workspace,
     request: AdmittedRequest,
 ) -> MemoryAtTimeData:
+    # Admission deliberately retains JSON-safe normalized arguments. Restore
+    # schema types here; ISO timestamps on the MCP wire are not datetime objects.
+    arguments = MemoryAtTimeGetInput.model_validate(request.model_dump())
     with _active_connection(dependencies, workspace) as connection:
         created_at_us = _first_occurred_at(
             connection, workspace.workspace_id, request.record_id
         )
-        valid_at = _us_from_datetime(request.valid_time)
-        transaction_time = request.transaction_time or dependencies.clock()
+        valid_at = _us_from_datetime(arguments.valid_time)
+        transaction_time = arguments.transaction_time or dependencies.clock()
         transaction_at = _us_from_datetime(transaction_time)
         rows = connection.execute(
             f"SELECT {_EVENT_COLUMNS} FROM memory_events "
@@ -835,6 +852,7 @@ def _projection_sync(
         previous_row = _active_manifest(
             connection, workspace.workspace_id, request.projection
         )
+        builders: Mapping[str, object] | None = None
         try:
             from ...retrieval.runtime import create_projection_builders
 
@@ -843,6 +861,7 @@ def _projection_sync(
                 connection.execute("PRAGMA database_list").fetchone()[2],
                 config=dependencies.projection_config,
                 include_optional=request.projection != "lexical",
+                capability_statuses=dependencies.projection_capability_statuses,
             )
             if previous_row is not None and not request.force:
                 preview = rebuild_projection(
@@ -898,6 +917,11 @@ def _projection_sync(
             raise
         except Exception as exc:
             raise CoreOperationError("CAPABILITY_DEGRADED") from exc
+        finally:
+            close = getattr(builders, "close", None)
+            if callable(close):
+                with suppress(Exception):
+                    close()
         active_row = _active_manifest(
             connection, workspace.workspace_id, request.projection
         )
@@ -929,26 +953,82 @@ def _export_sync(
     dependencies: CoreOperationDependencies,
     workspace: Workspace,
     request: AdmittedRequest,
+    cancelled: threading.Event,
 ) -> ExportBundle:
-    if request.include_vectors:
-        raise CoreOperationError("CAPABILITY_DISABLED")
     with _active_connection(dependencies, workspace) as connection:
         try:
-            internal = export_event_bundle(connection, workspace.workspace_id)
-        except EventBundleError as exc:
-            raise CoreOperationError("IMPORT_INVALID") from exc
-        _validate_bundle(internal, workspace.workspace_id)
-        try:
+            storage = _validated_storage_path(dependencies, workspace)
+            if request.export_session_id is None:
+                page = create_export_session(
+                    connection,
+                    storage,
+                    workspace.workspace_id,
+                    include_legacy_projection=request.include_legacy_projection,
+                    include_vectors=request.include_vectors,
+                    config=dependencies.projection_config,
+                    clock=dependencies.clock(),
+                    cursor_secret=dependencies.cursor_secret,
+                    public_event=lambda event: _public_event(event).model_dump(
+                        mode="json"
+                    ),
+                    page_byte_limit=request.page_byte_limit,
+                    local_capability_ready=(
+                        dependencies.projection_capability_statuses is not None
+                        and dependencies.projection_capability_statuses.get("local")
+                        == "ready"
+                    ),
+                    cancelled=cancelled.is_set,
+                )
+            else:
+                page = read_export_page(
+                    connection,
+                    storage,
+                    workspace.workspace_id,
+                    session_id=request.export_session_id,
+                    page_index=request.page_index,
+                    cursor=request.cursor,
+                    cursor_secret=dependencies.cursor_secret,
+                    now=dependencies.clock(),
+                )
+            content = page["content"]
+            manifest = page["manifest"]
+            items = content["items"]
+            descriptor = page.get(
+                "page_descriptor",
+                {
+                    "page_index": page["page_index"],
+                    "page_kind": page["page_kind"],
+                    "item_count": len(items),
+                    "byte_count": len(canonical_json_bytes(content)),
+                    "page_hash": page["page_hash"],
+                },
+            )
             return ExportBundle(
+                bundle_version=2,
                 workspace_id=workspace.workspace_id,
                 exported_at=dependencies.clock(),
-                root_hash=internal["root_hash"],
-                events=[_public_event(event) for event in internal["events"]],
-                legacy_projection_included=request.include_legacy_projection,
-                vectors_included=False,
+                root_hash=manifest["event_root_hash"],
+                events=items if page["page_kind"] == "events" else [],
+                legacy_projection_included=manifest["legacy_projection"] is not None,
+                vectors_included=manifest["vectors"] is not None,
+                export_session_id=page["export_session_id"],
+                manifest_hash=page["manifest_hash"],
+                manifest=manifest,
+                page_index=page["page_index"],
+                page_count=page["page_count"],
+                page_kind=page["page_kind"],
+                page_hash=page["page_hash"],
+                page_descriptor=descriptor,
+                page_proof=page.get("page_proof", []),
+                next_cursor=page["next_cursor"],
+                complete=page["complete"],
+                legacy_rows=items if page["page_kind"] == "legacy" else [],
+                vector_points=items if page["page_kind"] == "vectors" else [],
             )
         except CoreOperationError:
             raise
+        except PortableTransferError as exc:
+            raise CoreOperationError(exc.code) from exc
         except Exception as exc:
             raise CoreOperationError("IMPORT_INVALID") from exc
 
@@ -963,6 +1043,449 @@ def _journal_payload(bundle: ExportBundle, merge: bool) -> dict[str, Any]:
     }
 
 
+def _portable_page(bundle: ExportBundle) -> dict[str, Any]:
+    if bundle.bundle_version != 2 or bundle.page_kind is None:
+        raise CoreOperationError("IMPORT_INVALID")
+    items: list[dict[str, Any]]
+    if bundle.page_kind == "events":
+        items = [event.model_dump(mode="json") for event in bundle.events]
+    elif bundle.page_kind == "legacy":
+        items = list(bundle.legacy_rows)
+    else:
+        items = [point.model_dump(mode="json") for point in bundle.vector_points]
+    return {
+        "manifest_hash": bundle.manifest_hash,
+        "manifest": bundle.manifest,
+        "page_index": bundle.page_index,
+        "page_count": bundle.page_count,
+        "page_kind": bundle.page_kind,
+        "page_hash": bundle.page_hash,
+        "page_descriptor": bundle.page_descriptor,
+        "page_proof": bundle.page_proof,
+        "content": {"kind": bundle.page_kind, "items": items},
+    }
+
+
+def _decode_portable_event(
+    public_value: Mapping[str, Any], workspace_id: str
+) -> dict[str, Any]:
+    try:
+        public = ExportEvent.model_validate(public_value)
+        envelope = public.payload
+        if set(envelope) != _PUBLIC_ENVELOPE_KEYS:
+            raise CoreOperationError("IMPORT_INVALID")
+        data = envelope.get("data")
+        if not isinstance(data, Mapping):
+            raise CoreOperationError("IMPORT_INVALID")
+        _reject_raw_paths(data)
+        event = {
+            "event_id": public.event_id,
+            "workspace_id": workspace_id,
+            "stream_id": envelope["stream_id"],
+            "stream_kind": envelope["stream_kind"],
+            "stream_version": envelope["stream_version"],
+            "event_type": public.event_type,
+            "event_schema_version": envelope["event_schema_version"],
+            "occurred_at_us": _us_from_datetime(public.happened_at),
+            "recorded_at_us": envelope["recorded_at_us"],
+            "actor_type": envelope["actor_type"],
+            "actor_id": envelope["actor_id"],
+            "causation_event_id": envelope["causation_event_id"],
+            "correlation_id": envelope["correlation_id"],
+            "payload": dict(data),
+            "payload_hash": sha256_json(data),
+            "previous_event_hash": envelope["previous_event_hash"],
+            "event_hash": public.content_hash,
+        }
+        expected_record_id = (
+            event["stream_id"] if event["stream_kind"] == "memory" else None
+        )
+        if public.record_id != expected_record_id:
+            raise CoreOperationError("IMPORT_INVALID")
+        _verify_event(event, workspace_id)
+        return event
+    except CoreOperationError:
+        raise
+    except Exception as exc:
+        raise CoreOperationError("IMPORT_INVALID") from exc
+
+
+def _event_command(event: Mapping[str, Any]) -> EventCommand:
+    return EventCommand(
+        workspace_id=str(event["workspace_id"]),
+        stream_id=str(event["stream_id"]),
+        stream_kind=str(event["stream_kind"]),
+        event_type=str(event["event_type"]),
+        occurred_at_us=int(event["occurred_at_us"]),
+        recorded_at_us=int(event["recorded_at_us"]),
+        actor_type=str(event["actor_type"]),
+        actor_id=event["actor_id"],
+        causation_event_id=event["causation_event_id"],
+        correlation_id=event["correlation_id"],
+        event_schema_version=int(event["event_schema_version"]),
+        expected_stream_version=int(event["stream_version"]),
+        payload=dict(event["payload"]),
+    )
+
+
+def _import_v2_sync(
+    dependencies: CoreOperationDependencies,
+    workspace: Workspace,
+    request: AdmittedRequest,
+    cancelled: threading.Event,
+) -> WorkspaceImportData:
+    storage = _validated_storage_path(dependencies, workspace)
+    vector_candidate = None
+    lease: ImportFinalizationLease | None = None
+    committed = False
+    session_id: str | None = request.import_session_id
+    with _active_connection(dependencies, workspace) as connection:
+        try:
+            if request.bundle is not None:
+                bundle = ExportBundle.model_validate(request.bundle)
+                if bundle.workspace_id != workspace.workspace_id:
+                    raise CoreOperationError("CROSS_WORKSPACE_IMPORT_UNSUPPORTED")
+                if bundle.bundle_version != 2:
+                    raise CoreOperationError("IMPORT_INVALID")
+                _raise_if_cancelled(cancelled)
+                connection.execute("BEGIN IMMEDIATE")
+                session_id, ready = stage_import_page(
+                    connection,
+                    storage,
+                    workspace.workspace_id,
+                    _portable_page(bundle),
+                    import_session_id=request.import_session_id,
+                    now=dependencies.clock(),
+                )
+                _raise_if_cancelled(cancelled)
+                connection.commit()
+                staged = connection.execute(
+                    "SELECT staged_page_count,page_count "
+                    "FROM portable_transfer_sessions "
+                    "WHERE session_id=?",
+                    (session_id,),
+                ).fetchone()
+                if not (ready and request.finalize):
+                    return WorkspaceImportData(
+                        root_hash=bundle.root_hash,
+                        imported=0,
+                        skipped=0,
+                        import_session_id=session_id,
+                        status="ready" if ready else "staging",
+                        staged_pages=int(staged[0]) if staged is not None else 0,
+                        page_count=int(staged[1]) if staged is not None else 0,
+                    )
+            if not isinstance(session_id, str):
+                raise CoreOperationError("IMPORT_INVALID")
+            _raise_if_cancelled(cancelled)
+            session_row = connection.execute(
+                "SELECT manifest_json,manifest_hash FROM portable_transfer_sessions "
+                "WHERE session_id=? AND workspace_id=? AND direction='import'",
+                (session_id, workspace.workspace_id),
+            ).fetchone()
+            if session_row is None:
+                raise CoreOperationError("IMPORT_INVALID")
+            session_manifest = parse_canonical_json(str(session_row[0]))
+            if not isinstance(session_manifest, Mapping) or sha256_json(
+                session_manifest
+            ) != str(session_row[1]):
+                raise CoreOperationError("IMPORT_INVALID")
+            manifest_hash = str(session_row[1])
+            journal = {
+                "api_version": "7",
+                "bundle_version": 2,
+                "manifest_hash": manifest_hash,
+                "merge": request.merge,
+                "root_hash": session_manifest.get("event_root_hash"),
+            }
+            payload_text = canonical_json_bytes(journal).decode("utf-8")
+            payload_hash = sha256_json(journal)
+            existing_receipt = connection.execute(
+                "SELECT payload_hash,status,result_json FROM background_jobs "
+                "WHERE workspace_id=? AND job_type='v7.workspace_import' "
+                "AND idempotency_key=?",
+                (workspace.workspace_id, request.idempotency_key),
+            ).fetchone()
+            if existing_receipt is not None:
+                if (
+                    existing_receipt[0] != payload_hash
+                    or existing_receipt[1] != "succeeded"
+                    or existing_receipt[2] is None
+                ):
+                    raise CoreOperationError("IDEMPOTENCY_CONFLICT")
+                receipt = WorkspaceImportData.model_validate(
+                    parse_canonical_json(str(existing_receipt[2]))
+                )
+                return receipt.model_copy(
+                    update={
+                        "imported": 0,
+                        "skipped": receipt.imported + receipt.skipped,
+                    }
+                )
+            lease = claim_import_finalization(
+                connection,
+                storage,
+                workspace.workspace_id,
+                session_id,
+                now=dependencies.clock(),
+            )
+            prepared = prepare_import(
+                connection,
+                storage,
+                workspace.workspace_id,
+                session_id,
+                lease=lease,
+                decode_event=lambda value: _decode_portable_event(
+                    value, workspace.workspace_id
+                ),
+                clock=dependencies.clock,
+                cancelled=cancelled.is_set,
+            )
+            if prepared.lease is None:
+                raise CoreOperationError("IMPORT_INVALID")
+            lease = prepared.lease
+            connection.commit()
+
+            def finalization_checkpoint() -> None:
+                nonlocal lease
+                _raise_if_cancelled(cancelled)
+                if lease is None:
+                    raise PortableTransferError("IMPORT_INVALID")
+                current = dependencies.clock()
+                if (
+                    _us_from_datetime(current)
+                    >= lease.expires_at_us - _IMPORT_LEASE_RENEW_MARGIN_US
+                ):
+                    lease = renew_import_finalization(
+                        connection,
+                        workspace.workspace_id,
+                        lease,
+                        now=current,
+                    )
+
+            vector_candidate, vector_diagnostic = prepare_vector_candidate(
+                prepared,
+                connection,
+                workspace.workspace_id,
+                dependencies.projection_config,
+                local_capability_ready=(
+                    dependencies.projection_capability_statuses is not None
+                    and dependencies.projection_capability_statuses.get("local")
+                    == "ready"
+                ),
+                checkpoint=finalization_checkpoint,
+            )
+            lease = renew_import_finalization(
+                connection,
+                workspace.workspace_id,
+                lease,
+                now=dependencies.clock(),
+            )
+            connection.execute("BEGIN IMMEDIATE")
+            existing_job = connection.execute(
+                "SELECT payload_hash,status,result_json FROM background_jobs "
+                "WHERE workspace_id=? AND job_type='v7.workspace_import' "
+                "AND idempotency_key=?",
+                (workspace.workspace_id, request.idempotency_key),
+            ).fetchone()
+            if existing_job is not None:
+                if existing_job[0] != payload_hash or existing_job[1] != "succeeded":
+                    raise CoreOperationError("IDEMPOTENCY_CONFLICT")
+                result = parse_canonical_json(str(existing_job[2]))
+                connection.commit()
+                if vector_candidate is not None:
+                    vector_candidate.discard(connection, workspace.workspace_id)
+                    vector_candidate = None
+                receipt = WorkspaceImportData.model_validate(result)
+                return receipt.model_copy(
+                    update={
+                        "imported": 0,
+                        "skipped": receipt.imported + receipt.skipped,
+                    }
+                )
+            if not request.merge:
+                occupied = connection.execute(
+                    "SELECT 1 FROM memory_events WHERE workspace_id=? LIMIT 1",
+                    (workspace.workspace_id,),
+                ).fetchone()
+                if occupied is not None:
+                    raise CoreOperationError("CONFLICT")
+            store = EventStore(connection, assume_transaction=True)
+            imported = 0
+            skipped = 0
+            event_ids: list[str] = []
+            total = 0
+            for event in prepared.iter_events():
+                finalization_checkpoint()
+                present = connection.execute(
+                    "SELECT event_hash FROM memory_events WHERE workspace_id=? "
+                    "AND stream_id=? AND stream_version=?",
+                    (
+                        workspace.workspace_id,
+                        event["stream_id"],
+                        event["stream_version"],
+                    ),
+                ).fetchone()
+                try:
+                    appended = store.append_and_project(_event_command(event))
+                except EventStreamConflict as exc:
+                    raise CoreOperationError("EVENT_STREAM_CONFLICT") from exc
+                if appended.event_hash != event["event_hash"]:
+                    raise CoreOperationError("IMPORT_INVALID")
+                if present is None:
+                    imported += 1
+                else:
+                    if str(present[0]) != event["event_hash"]:
+                        raise CoreOperationError("EVENT_STREAM_CONFLICT")
+                    skipped += 1
+                if len(event_ids) < 4096:
+                    event_ids.append(str(event["event_id"]))
+                total += 1
+            now = dependencies.clock()
+            reconstruct_legacy_mappings(
+                connection,
+                workspace.workspace_id,
+                event_root_hash=str(prepared.manifest["event_root_hash"]),
+                manifest_hash=manifest_hash,
+                now_us=_us_from_datetime(now),
+            )
+            validate_legacy_projection(prepared, connection, workspace.workspace_id)
+            diagnostics: list[DiagnosticSummary] = []
+            if vector_candidate is not None:
+                try:
+                    activate_vector_candidate(
+                        vector_candidate,
+                        connection,
+                        workspace.workspace_id,
+                        now_us=_us_from_datetime(now),
+                        checkpoint=finalization_checkpoint,
+                    )
+                except PortableTransferError as exc:
+                    if exc.code != "VECTOR_REBUILD_REQUIRED":
+                        raise
+                    vector_candidate.discard(connection, workspace.workspace_id)
+                    vector_candidate = None
+                    vector_diagnostic = exc.code
+            elif vector_diagnostic is not None:
+                pass
+            if vector_diagnostic is not None:
+                diagnostics.append(
+                    DiagnosticSummary(
+                        code=vector_diagnostic,
+                        message=(
+                            "The imported vectors use a different model contract; "
+                            "the dense projection must be rebuilt."
+                        ),
+                    )
+                )
+            result_model = WorkspaceImportData(
+                root_hash=prepared.manifest["event_root_hash"],
+                imported=imported,
+                skipped=skipped,
+                event_ids=event_ids,
+                import_session_id=session_id,
+                status="succeeded",
+                staged_pages=prepared.page_count,
+                page_count=prepared.page_count,
+                event_ids_truncated=total > len(event_ids),
+                diagnostics=diagnostics,
+            )
+            now_us = _us_from_datetime(now)
+            connection.execute(
+                "INSERT INTO background_jobs(job_id,workspace_id,job_type,"
+                "idempotency_key,payload_json,payload_hash,status,priority,attempts,"
+                "max_attempts,available_at_us,result_json,created_at_us,updated_at_us,"
+                "started_at_us,finished_at_us) VALUES (?,?,?,?,?,?,'succeeded',0,1,1,"
+                "?,?,?,?,?,?)",
+                (
+                    deterministic_id(
+                        "job",
+                        "v7.workspace_import",
+                        workspace.workspace_id,
+                        request.idempotency_key,
+                    ),
+                    workspace.workspace_id,
+                    "v7.workspace_import",
+                    request.idempotency_key,
+                    payload_text,
+                    payload_hash,
+                    now_us,
+                    canonical_json_bytes(result_model.model_dump(mode="json")).decode(
+                        "utf-8"
+                    ),
+                    now_us,
+                    now_us,
+                    now_us,
+                    now_us,
+                ),
+            )
+            finalization_checkpoint()
+            complete_import_session(
+                connection,
+                workspace.workspace_id,
+                lease,
+                now=dependencies.clock(),
+            )
+            connection.commit()
+            committed = True
+            if vector_candidate is not None:
+                vector_candidate.close()
+                vector_candidate = None
+            with suppress(Exception):
+                cleanup_import_attempt(
+                    connection,
+                    storage,
+                    workspace.workspace_id,
+                    lease,
+                    now=dependencies.clock(),
+                )
+            return result_model
+        except PortableTransferError as exc:
+            if connection.in_transaction:
+                connection.rollback()
+            if vector_candidate is not None:
+                vector_candidate.discard(connection, workspace.workspace_id)
+                vector_candidate = None
+            raise CoreOperationError(exc.code) from exc
+        except CoreOperationError:
+            if connection.in_transaction:
+                connection.rollback()
+            if vector_candidate is not None:
+                vector_candidate.discard(connection, workspace.workspace_id)
+                vector_candidate = None
+            raise
+        except sqlite3.IntegrityError as exc:
+            if connection.in_transaction:
+                connection.rollback()
+            if vector_candidate is not None:
+                vector_candidate.discard(connection, workspace.workspace_id)
+                vector_candidate = None
+            raise CoreOperationError("IDEMPOTENCY_CONFLICT") from exc
+        except _WorkerCancelledError:
+            if connection.in_transaction:
+                connection.rollback()
+            if vector_candidate is not None:
+                vector_candidate.discard(connection, workspace.workspace_id)
+                vector_candidate = None
+            raise
+        except Exception as exc:
+            if connection.in_transaction:
+                connection.rollback()
+            if vector_candidate is not None:
+                vector_candidate.discard(connection, workspace.workspace_id)
+            vector_candidate = None
+            raise CoreOperationError("IMPORT_INVALID") from exc
+        finally:
+            if lease is not None and not committed:
+                with suppress(Exception):
+                    release_import_finalization(
+                        connection,
+                        storage,
+                        lease,
+                        now=dependencies.clock(),
+                    )
+
+
 def _import_sync(
     dependencies: CoreOperationDependencies,
     workspace: Workspace,
@@ -970,10 +1493,14 @@ def _import_sync(
     cancelled: threading.Event,
 ) -> WorkspaceImportData:
     _raise_if_cancelled(cancelled)
+    if request.bundle is None:
+        return _import_v2_sync(dependencies, workspace, request, cancelled)
     try:
         bundle = ExportBundle.model_validate(request.bundle)
     except Exception as exc:
         raise CoreOperationError("IMPORT_INVALID") from exc
+    if bundle.bundle_version == 2:
+        return _import_v2_sync(dependencies, workspace, request, cancelled)
     if bundle.workspace_id != workspace.workspace_id:
         raise CoreOperationError("CROSS_WORKSPACE_IMPORT_UNSUPPORTED")
     internal = _internal_bundle(bundle)
@@ -1040,6 +1567,13 @@ def _import_sync(
             _raise_if_cancelled(cancelled)
             now = dependencies.clock()
             now_us = _us_from_datetime(now)
+            reconstruct_legacy_mappings(
+                connection,
+                workspace.workspace_id,
+                event_root_hash=result.root_hash,
+                manifest_hash=None,
+                now_us=now_us,
+            )
             result_payload = {
                 "event_ids": event_ids,
                 "imported": result.events_imported,
@@ -1105,10 +1639,9 @@ def _covenant_status(
     scope = dependencies.scope_provider()
     briefed = False
     briefed_at: datetime | None = None
-    if (
-        isinstance(scope, InvocationScope)
-        and scope.canonical_workspace == _canonical_root(workspace)
-    ):
+    if isinstance(
+        scope, InvocationScope
+    ) and scope.canonical_workspace == _canonical_root(workspace):
         try:
             status = dependencies.covenant_gate.state_store.status(scope)
             raw_briefed_at = status.get("briefed_at")
@@ -1186,8 +1719,8 @@ def build_core_operations(
         *, workspace: Workspace, request: AdmittedRequest
     ) -> ExportBundle:
         _authorize_workspace(workspace, request)
-        return await _run_blocking(
-            lambda: _export_sync(dependencies, workspace, request)
+        return await _run_mutation(
+            lambda cancelled: _export_sync(dependencies, workspace, request, cancelled)
         )
 
     async def workspace_import(

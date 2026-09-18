@@ -12,8 +12,10 @@
       id: p.safeId(item.id),
       content: p.text(item.content, 16384),
       relevance,
-      semantic_match: p.ratio(item.semantic_match, relevance),
-      recency_weight: p.ratio(item.recency_weight, 1),
+      semantic_match: Number.isFinite(item.semantic_match) ? p.ratio(item.semantic_match) : null,
+      recency_weight: Number.isFinite(item.recency_weight) ? p.ratio(item.recency_weight) : null,
+      origin_workspace_id: p.text(item.origin_workspace_id, 128),
+      citation: p.text(item.citation, 512),
       created_at: p.date(item.created_at),
       tags: p.list(item.tags, 32).filter(value => typeof value === "string").map(value => p.text(value, 128)),
       worked: p.optionalBoolean(item.worked),
@@ -28,9 +30,6 @@
       shown += result[category].length;
     }
     result.total_count = p.count(data.total_count, shown);
-    result.offset = p.count(data.offset);
-    result.limit = p.integer(data.limit, 1, 100, 10);
-    result.has_more = typeof data.has_more === "boolean" ? data.has_more : false;
     return result;
   }
 
@@ -79,27 +78,19 @@
     const content = ui.element("p", "result-card__content");
     appendHighlighted(content, item.content, topic);
     const details = ui.element("details", "daemon-score-breakdown");
-    details.append(
-      ui.element("summary", "daemon-score-summary", "Score breakdown"),
-      ui.element("p", "daemon-score-component", "Semantic match: " + percentage(item.semantic_match)),
-      ui.element("p", "daemon-score-component", "Recency weight: " + percentage(item.recency_weight)),
-      ui.element("p", "daemon-score-component", "Final relevance: " + percentage(item.relevance))
-    );
+    details.append(ui.element("summary", "daemon-score-summary", "Retrieval score"));
+    if (item.semantic_match !== null) details.append(ui.element("p", "daemon-score-component", "Semantic match: " + percentage(item.semantic_match)));
+    if (item.recency_weight !== null) details.append(ui.element("p", "daemon-score-component", "Recency weight: " + percentage(item.recency_weight)));
+    details.append(ui.element("p", "daemon-score-component", "Final relevance: " + percentage(item.relevance)));
     const meta = ui.element("footer", "result-card__meta");
+    if (item.origin_workspace_id) meta.append(ui.element("span", "result-card__origin", "Workspace: " + item.origin_workspace_id));
+    if (item.citation) meta.append(ui.element("span", "result-card__citation", item.citation));
     if (item.created_at) meta.append(ui.element("time", "result-card__date", item.created_at));
     for (const tag of item.tags) meta.append(ui.element("span", "result-card__tag", tag));
     if (category === "decision") {
       const outcome = item.worked === true ? "Success" : item.worked === false ? "Failed" : "Pending";
       const outcomeClass = item.worked === true ? "daemon-badge daemon-badge--success" : item.worked === false ? "daemon-badge daemon-badge--error" : "daemon-badge";
       meta.append(ui.element("span", outcomeClass, outcome));
-      if (item.worked === null && item.id !== null) {
-        const button = ui.element("button", "daemon-btn daemon-btn--small daemon-btn--secondary", "Record Outcome");
-        button.type = "button";
-        button.addEventListener("click", function () {
-          ui.sendHost(ui.actions.recordOutcome.method, { tool: ui.actions.recordOutcome.tool, args: { memory_id: item.id } });
-        });
-        meta.append(button);
-      }
     }
     card.append(header, meter, content, details, meta);
     return card;
@@ -124,35 +115,38 @@
       select.append(option);
     }
     const grid = ui.element("section", "search-results");
-    let cards = 0;
+    const cards = [];
     for (const listName of categories) {
       const category = categoryNames[listName];
       for (const item of data[listName]) {
-        grid.append(renderCard(item, category, data.topic));
-        cards += 1;
+        cards.push({ category, node: renderCard(item, category, data.topic) });
       }
     }
-    if (!cards) grid.append(ui.element("p", "daemon-empty", "No results found."));
-    select.addEventListener("change", function () {
-      const wanted = select.value;
-      const nodes = grid.querySelectorAll(".result-card");
-      for (const node of nodes) {
-        node.hidden = wanted !== "all" && !node.classList.contains("result-card--" + wanted);
-      }
-    });
-    const content = [header, select, grid];
-    if (data.has_more || data.offset > 0) {
-      const pager = ui.element("nav", "daemon-pagination");
-      const previous = ui.element("button", "daemon-pagination__btn", "Previous");
-      const next = ui.element("button", "daemon-pagination__btn", "Next");
-      previous.disabled = data.offset === 0;
-      next.disabled = !data.has_more;
-      previous.addEventListener("click", function () { ui.sendHost(ui.actions.pagination.method, { offset: Math.max(0, data.offset - data.limit), limit: data.limit }); });
-      next.addEventListener("click", function () { ui.sendHost(ui.actions.pagination.method, { offset: Math.min(Number.MAX_SAFE_INTEGER, data.offset + data.limit), limit: data.limit }); });
-      pager.append(previous, ui.element("span", "daemon-pagination__info", "Offset " + data.offset), next);
-      content.push(pager);
+    // Recall returns one bounded result set, with no server offset parameter.
+    // Page and filter only those authorized results already delivered to us.
+    let page = 0;
+    const pageSize = 10;
+    const pager = ui.element("nav", "daemon-pagination");
+    const previous = ui.element("button", "daemon-pagination__btn", "Previous");
+    const next = ui.element("button", "daemon-pagination__btn", "Next");
+    const info = ui.element("span", "daemon-pagination__info");
+    function showPage() {
+      const filtered = cards.filter(card => !select.value || select.value === "all" || card.category === select.value);
+      const pages = Math.max(1, Math.ceil(filtered.length / pageSize));
+      page = Math.min(page, pages - 1);
+      grid.replaceChildren(...filtered.slice(page * pageSize, (page + 1) * pageSize).map(card => card.node));
+      if (!filtered.length) grid.append(ui.element("p", "daemon-empty", "No results found."));
+      previous.disabled = page === 0;
+      next.disabled = page + 1 >= pages;
+      pager.hidden = pages === 1;
+      info.textContent = "Page " + (page + 1) + " of " + pages;
     }
-    mount.replaceChildren(...content);
+    select.addEventListener("change", function () { page = 0; showPage(); });
+    previous.addEventListener("click", function () { page = Math.max(0, page - 1); showPage(); });
+    next.addEventListener("click", function () { page += 1; showPage(); });
+    pager.append(previous, info, next);
+    showPage();
+    mount.replaceChildren(header, select, grid, pager);
   }
 
   ui.register("search", normalize, render);

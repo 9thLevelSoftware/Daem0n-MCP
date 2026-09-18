@@ -70,12 +70,12 @@
     const breadcrumbs = ui.element("nav", "community-breadcrumbs");
     const rootButton = ui.element("button", "community-breadcrumb", "All Communities");
     rootButton.type = "button";
-    rootButton.addEventListener("click", function () { ui.sendHost(ui.actions.listCommunities.method, { tool: ui.actions.listCommunities.tool, args: {} }); });
+    rootButton.addEventListener("click", function () { ui.callTool(ui.actions.listCommunities.tool, {}); });
     breadcrumbs.append(rootButton);
     for (const item of data.path) {
       const button = ui.element("button", "community-breadcrumb", item.name || "Community");
       button.type = "button";
-      button.addEventListener("click", function () { ui.sendHost(ui.actions.listCommunities.method, { tool: ui.actions.listCommunities.tool, args: { parent_community_id: item.id } }); });
+      button.addEventListener("click", function () { ui.callTool(ui.actions.listCommunities.tool, { parent_community_id: item.id }); });
       breadcrumbs.append(button);
     }
     const frame = ui.element("section", "community-frame");
@@ -112,7 +112,7 @@
             ui.element("p", "daemon-muted", item.member_count + " members")
           );
           details.hidden = false;
-          ui.sendHost(ui.actions.listCommunities.method, { tool: ui.actions.listCommunities.tool, args: { parent_community_id: item.id } });
+          ui.callTool(ui.actions.listCommunities.tool, { parent_community_id: item.id });
         });
         svg.append(group);
       }

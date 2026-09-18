@@ -12,12 +12,12 @@ import inspect
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Generic, Literal, Protocol, TypeVar, cast
+from typing import Annotated, Generic, Literal, Protocol, TypeVar, cast
 
 from pydantic import Field, StringConstraints, TypeAdapter
-from typing_extensions import Annotated
 
 from ...workspace import Workspace
+from .dashboard_resources import build_dashboard_resource_specs
 from .models import (
     ActiveContextId,
     AwareDateTime,
@@ -28,7 +28,6 @@ from .models import (
     WorkspaceId,
 )
 from .registry import ResourceSpec
-
 
 MAX_RESOURCE_ITEMS = 50
 RESOURCE_FETCH_LIMIT = MAX_RESOURCE_ITEMS + 1
@@ -90,15 +89,18 @@ class ActiveContextItem(WireModel):
     active_context_id: ActiveContextId
     record: RecordSummary
     priority: Annotated[int, Field(strict=True, ge=-100, le=100)]
-    reason: Annotated[
-        str,
-        StringConstraints(strict=True, min_length=1, max_length=2000),
-    ] | None = None
+    reason: (
+        Annotated[
+            str,
+            StringConstraints(strict=True, min_length=1, max_length=2000),
+        ]
+        | None
+    ) = None
     added_at: AwareDateTime
     expires_at: AwareDateTime | None = None
 
 
-T = TypeVar("T")
+T = TypeVar("T", bound=WireModel)
 
 
 class ResourceDocument(WireModel, Generic[T]):
@@ -230,7 +232,7 @@ def _unwrap(row: object, model: type[T]) -> tuple[T, bool]:
     else:
         item = row
         deleted = False
-    validator = getattr(model, "model_validate")
+    validator = model.model_validate
     return validator(item), deleted
 
 
@@ -248,7 +250,10 @@ class ResourceHandlers:
         validated_id = _WORKSPACE_ID_ADAPTER.validate_python(workspace_id, strict=True)
         workspace_value = self._dependencies.workspace_resolver.resolve(validated_id)
         workspace = await _resolve(workspace_value)
-        if not isinstance(workspace, Workspace) or workspace.workspace_id != validated_id:
+        if (
+            not isinstance(workspace, Workspace)
+            or workspace.workspace_id != validated_id
+        ):
             raise ValueError("workspace resolver returned a mismatched workspace")
         resource_uri = uri_template.format(workspace_id=validated_id)
         authorization = self._dependencies.communion_authorizer.authorize(
@@ -442,9 +447,9 @@ class ResourceHandlers:
 
 
 def build_resource_specs(handlers: ResourceHandlers) -> tuple[ResourceSpec, ...]:
-    """Return the exact four immutable resource specs for the v7 manifest."""
+    """Return four scoped JSON templates and six static dashboard shells."""
 
-    return (
+    workspace_specs = (
         ResourceSpec(
             uri_template=WARNING_RESOURCE_URI_TEMPLATE,
             name="workspace_warnings",
@@ -474,6 +479,7 @@ def build_resource_specs(handlers: ResourceHandlers) -> tuple[ResourceSpec, ...]
             output_model=ActiveContextResourceDocument,
         ),
     )
+    return workspace_specs + build_dashboard_resource_specs()
 
 
 __all__ = [

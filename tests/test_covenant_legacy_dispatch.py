@@ -12,7 +12,6 @@ from daem0nmcp.workflows import commune as commune_workflow
 from daem0nmcp.workflows import consult as consult_workflow
 from daem0nmcp.workflows import explore as explore_workflow
 
-
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 LEGACY_EXPORTS = {
@@ -284,6 +283,7 @@ def _recording_server(*names):
     server = _module("daem0nmcp.server")
 
     for name in names:
+
         async def leaf(_name=name, **kwargs):
             calls.append((_name, kwargs))
             return {"leaf": _name}
@@ -296,7 +296,9 @@ class LegacyServerCompositionTests(unittest.TestCase):
     def test_legacy_python_exports_are_lazy_and_never_touch_the_v7_registry(self):
         inventory = _lazy_export_inventory()
         expected = {
-            name for module_exports in LEGACY_EXPORTS.values() for name in module_exports
+            name
+            for module_exports in LEGACY_EXPORTS.values()
+            for name in module_exports
         }
         self.assertEqual(67, len(expected))
         self.assertTrue(expected <= set(inventory))

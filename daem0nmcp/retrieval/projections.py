@@ -9,7 +9,6 @@ import sqlite3
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any
 
 from ..event_store import canonical_json_bytes, deterministic_id, sha256_json
 from .lexical_config import (
@@ -17,7 +16,6 @@ from .lexical_config import (
     lexical_build_config_hash,
     lexical_fts_table_name,
 )
-
 
 _WORKSPACE_ID = re.compile(r"^ws_[0-9a-f]{24}$")
 _LEXICAL_BUILDER_VERSION = "retrieval-lexical-1"
@@ -96,9 +94,10 @@ class LexicalProjectionBuilder:
     ) -> ProjectionBuildResult:
         """Build, validate, and atomically switch one lexical generation."""
 
-        if not isinstance(workspace_id, str) or _WORKSPACE_ID.fullmatch(
-            workspace_id
-        ) is None:
+        if (
+            not isinstance(workspace_id, str)
+            or _WORKSPACE_ID.fullmatch(workspace_id) is None
+        ):
             raise ProjectionBuildError(
                 "INVALID_WORKSPACE_ID", "workspace identifier is invalid"
             )
@@ -119,18 +118,19 @@ class LexicalProjectionBuilder:
                     raise
                 capability_status = "unavailable"
             records = self._records(workspace_id)
-            source_event_count, source_root, cursor = self._event_snapshot(
-                workspace_id
-            )
+            source_event_count, source_root, cursor = self._event_snapshot(workspace_id)
             active = self._active_manifest(workspace_id)
-            generation = int(
-                self.connection.execute(
-                    "SELECT COALESCE(MAX(generation),0) "
-                    "FROM projection_manifests WHERE workspace_id=? "
-                    "AND projection_name='lexical'",
-                    (workspace_id,),
-                ).fetchone()[0]
-            ) + 1
+            generation = (
+                int(
+                    self.connection.execute(
+                        "SELECT COALESCE(MAX(generation),0) "
+                        "FROM projection_manifests WHERE workspace_id=? "
+                        "AND projection_name='lexical'",
+                        (workspace_id,),
+                    ).fetchone()[0]
+                )
+                + 1
+            )
             fts_table = lexical_fts_table_name(workspace_id, generation)
             content_digest = sha256_json(
                 [
@@ -161,7 +161,9 @@ class LexicalProjectionBuilder:
                 status=(
                     "unavailable"
                     if capability_status == "unavailable"
-                    else "ready" if dry_run else "active"
+                    else "ready"
+                    if dry_run
+                    else "active"
                 ),
                 row_count=len(records),
                 source_event_count=source_event_count,
@@ -169,9 +171,7 @@ class LexicalProjectionBuilder:
                 source_high_water_recorded_at_us=(
                     cursor[0] if cursor is not None else None
                 ),
-                source_high_water_event_id=(
-                    cursor[1] if cursor is not None else None
-                ),
+                source_high_water_event_id=(cursor[1] if cursor is not None else None),
                 content_digest=content_digest,
                 build_config_hash=build_config_hash,
                 dry_run=dry_run,
@@ -236,23 +236,7 @@ class LexicalProjectionBuilder:
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 [
-                    (
-                        workspace_id,
-                        generation,
-                        record.record_id,
-                        record.content,
-                        record.rationale,
-                        record.tags_text,
-                        record.category,
-                        record.valid_from_us,
-                        record.valid_to_us,
-                        record.transaction_from_us,
-                        record.transaction_to_us,
-                        record.visibility,
-                        record.archived,
-                        record.content_hash,
-                        record.source_event_id,
-                    )
+                    self._document_values(workspace_id, generation, record)
                     for record in records
                 ],
             )
@@ -307,12 +291,162 @@ class LexicalProjectionBuilder:
             raise
         return result
 
+    def apply_active_delta(self, workspace_id: str, record_id: str) -> bool:
+        """Update one active lexical partition inside its canonical write.
+
+        The active manifest deliberately remains marked stale by the event
+        store.  This delta only makes the changed record discoverable while
+        the durable full-generation rebuild catches up.
+        """
+
+        if (
+            not isinstance(workspace_id, str)
+            or _WORKSPACE_ID.fullmatch(workspace_id) is None
+            or not isinstance(record_id, str)
+            or not record_id.startswith("mem_")
+            or len(record_id) != 68
+        ):
+            raise ProjectionBuildError(
+                "INVALID_RECORD_ID", "lexical delta identity is invalid"
+            )
+        self._require_schema()
+        row = self.connection.execute(
+            "SELECT manifest_id,generation,details_json FROM projection_manifests "
+            "WHERE workspace_id=? AND projection_name='lexical' "
+            "AND status='active'",
+            (workspace_id,),
+        ).fetchone()
+        if row is None:
+            return False
+        generation = int(row[1])
+        try:
+            details = json.loads(str(row[2]))
+        except (TypeError, ValueError, json.JSONDecodeError, RecursionError):
+            return False
+        expected_table = lexical_fts_table_name(workspace_id, generation)
+        if (
+            not isinstance(details, dict)
+            or details.get("projection") != "lexical"
+            or details.get("build_config_hash") != lexical_build_config_hash()
+            or details.get("fts_table") != expected_table
+            or self.connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+                (expected_table,),
+            ).fetchone()
+            is None
+        ):
+            return False
+
+        record = self._record(workspace_id, record_id)
+        self._savepoint_number += 1
+        savepoint = f"retrieval_delta_{self._savepoint_number}"
+        self.connection.execute(f"SAVEPOINT {savepoint}")
+        try:
+            existing = self.connection.execute(
+                "SELECT document_rowid FROM retrieval_documents "
+                "WHERE workspace_id=? AND projection_generation=? AND record_id=?",
+                (workspace_id, generation, record_id),
+            ).fetchone()
+            document_rowid = None if existing is None else int(existing[0])
+            if document_rowid is not None:
+                self.connection.execute(
+                    f'DELETE FROM "{expected_table}" WHERE rowid=?',
+                    (document_rowid,),
+                )
+            if record is None:
+                self.connection.execute(
+                    "DELETE FROM retrieval_documents WHERE workspace_id=? "
+                    "AND projection_generation=? AND record_id=?",
+                    (workspace_id, generation, record_id),
+                )
+            else:
+                values = self._document_values(workspace_id, generation, record)
+                if document_rowid is None:
+                    inserted = self.connection.execute(
+                        """
+                        INSERT INTO retrieval_documents (
+                            workspace_id,projection_generation,record_id,content,
+                            rationale,tags_text,category,valid_from_us,valid_to_us,
+                            transaction_from_us,transaction_to_us,visibility,
+                            archived,content_hash,source_event_id
+                        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                        """,
+                        values,
+                    )
+                    document_rowid = int(inserted.lastrowid)
+                else:
+                    self.connection.execute(
+                        """
+                        UPDATE retrieval_documents SET
+                            content=?,rationale=?,tags_text=?,category=?,
+                            valid_from_us=?,valid_to_us=?,transaction_from_us=?,
+                            transaction_to_us=?,visibility=?,archived=?,
+                            content_hash=?,source_event_id=?
+                        WHERE document_rowid=?
+                        """,
+                        (*values[3:], document_rowid),
+                    )
+                self.connection.execute(
+                    f'INSERT INTO "{expected_table}"('
+                    "rowid,content,rationale,tags_text) VALUES (?,?,?,?)",
+                    (
+                        document_rowid,
+                        record.content,
+                        record.rationale,
+                        record.tags_text,
+                    ),
+                )
+                projected = self.connection.execute(
+                    f'SELECT content,rationale,tags_text FROM "{expected_table}" '
+                    "WHERE rowid=?",
+                    (document_rowid,),
+                ).fetchone()
+                if projected is None or tuple(projected) != (
+                    record.content,
+                    record.rationale,
+                    record.tags_text,
+                ):
+                    raise ProjectionBuildError(
+                        "PROJECTION_VALIDATION_FAILED",
+                        "lexical delta differs from canonical content",
+                    )
+            row_count = int(
+                self.connection.execute(
+                    "SELECT count(*) FROM retrieval_documents WHERE workspace_id=? "
+                    "AND projection_generation=?",
+                    (workspace_id, generation),
+                ).fetchone()[0]
+            )
+            changed = self.connection.execute(
+                "UPDATE projection_manifests SET row_count=? WHERE manifest_id=? "
+                "AND status='active' AND generation=?",
+                (row_count, str(row[0]), generation),
+            ).rowcount
+            if changed != 1:
+                raise ProjectionBuildError(
+                    "PROJECTION_ACTIVATION_FAILED",
+                    "active lexical generation changed during delta",
+                )
+            self.connection.execute(f"RELEASE SAVEPOINT {savepoint}")
+        except Exception as exc:
+            self.connection.execute(f"ROLLBACK TO SAVEPOINT {savepoint}")
+            self.connection.execute(f"RELEASE SAVEPOINT {savepoint}")
+            if isinstance(exc, ProjectionBuildError):
+                raise
+            if isinstance(exc, sqlite3.Error):
+                raise ProjectionBuildError(
+                    "LEXICAL_UNAVAILABLE", "active lexical delta failed"
+                ) from exc
+            raise
+        return True
+
     def active_is_current(self, workspace_id: str) -> bool:
         """Return whether the active partition exactly matches canonical state."""
 
-        if not isinstance(workspace_id, str) or _WORKSPACE_ID.fullmatch(
-            workspace_id
-        ) is None:
+        if (
+            not isinstance(workspace_id, str)
+            or _WORKSPACE_ID.fullmatch(workspace_id) is None
+        ):
             raise ProjectionBuildError(
                 "INVALID_WORKSPACE_ID", "workspace identifier is invalid"
             )
@@ -495,44 +629,89 @@ class LexicalProjectionBuilder:
         )
         try:
             for row in rows:
-                tags = json.loads(str(row[3]))
-                context = json.loads(str(row[5]))
-                if not isinstance(tags, list) or not isinstance(context, dict):
-                    raise ValueError
-                tag_values = [
-                    value
-                    if isinstance(value, str)
-                    else canonical_json_bytes(value).decode("utf-8")
-                    for value in tags
-                ]
-                visibility = context.get("visibility", "workspace")
-                if visibility not in {"workspace", "private", "shared"}:
-                    raise ProjectionBuildError(
-                        "INVALID_RECORD_VISIBILITY",
-                        "record visibility is not a supported policy value",
-                    )
-                records.append(
-                    _LexicalRecord(
-                        record_id=str(row[0]),
-                        content=str(row[1]),
-                        rationale=str(row[2] or ""),
-                        tags_text="\n".join(tag_values),
-                        category=str(row[4]),
-                        valid_from_us=int(row[9]),
-                        valid_to_us=None,
-                        transaction_from_us=int(row[10]),
-                        transaction_to_us=None,
-                        visibility=str(visibility),
-                        archived=int(row[6]),
-                        content_hash=str(row[7]),
-                        source_event_id=str(row[8]),
-                    )
-                )
+                records.append(self._record_from_row(row))
         except (TypeError, ValueError, json.JSONDecodeError, RecursionError) as exc:
             raise ProjectionBuildError(
                 "INVALID_RECORD_METADATA", "record projection metadata is invalid"
             ) from exc
         return tuple(records)
+
+    def _record(self, workspace_id: str, record_id: str) -> _LexicalRecord | None:
+        row = self.connection.execute(
+            """
+            SELECT record_id,content,rationale,tags_json,record_type,context_json,
+                   archived,content_hash,source_event_id,created_at_us,
+                   updated_at_us,deleted_at_us
+            FROM memory_records WHERE workspace_id=? AND record_id=?
+            """,
+            (workspace_id, record_id),
+        ).fetchone()
+        if row is None or row[11] is not None:
+            return None
+        try:
+            return self._record_from_row(row)
+        except (TypeError, ValueError, json.JSONDecodeError, RecursionError) as exc:
+            raise ProjectionBuildError(
+                "INVALID_RECORD_METADATA", "record projection metadata is invalid"
+            ) from exc
+
+    @staticmethod
+    def _record_from_row(row: sqlite3.Row | tuple[object, ...]) -> _LexicalRecord:
+        tags = json.loads(str(row[3]))
+        context = json.loads(str(row[5]))
+        if not isinstance(tags, list) or not isinstance(context, dict):
+            raise ValueError
+        tag_values = [
+            value
+            if isinstance(value, str)
+            else canonical_json_bytes(value).decode("utf-8")
+            for value in tags
+        ]
+        visibility = context.get("visibility", "workspace")
+        if visibility not in {"workspace", "private", "shared"}:
+            raise ProjectionBuildError(
+                "INVALID_RECORD_VISIBILITY",
+                "record visibility is not a supported policy value",
+            )
+        return _LexicalRecord(
+            record_id=str(row[0]),
+            content=str(row[1]),
+            rationale=str(row[2] or ""),
+            tags_text="\n".join(tag_values),
+            category=str(row[4]),
+            valid_from_us=int(row[9]),
+            valid_to_us=None,
+            transaction_from_us=int(row[10]),
+            transaction_to_us=None,
+            visibility=str(visibility),
+            archived=int(row[6]),
+            content_hash=str(row[7]),
+            source_event_id=str(row[8]),
+        )
+
+    @staticmethod
+    def _document_values(
+        workspace_id: str,
+        generation: int,
+        record: _LexicalRecord,
+    ) -> tuple[object, ...]:
+        return (
+            workspace_id,
+            generation,
+            record.record_id,
+            record.content,
+            record.rationale,
+            record.tags_text,
+            record.category,
+            record.valid_from_us,
+            record.valid_to_us,
+            record.transaction_from_us,
+            record.transaction_to_us,
+            record.visibility,
+            record.archived,
+            record.content_hash,
+            record.source_event_id,
+        )
 
     def _event_snapshot(
         self, workspace_id: str
@@ -556,9 +735,7 @@ class LexicalProjectionBuilder:
             (workspace_id,),
         ).fetchone()
         cursor = (
-            None
-            if cursor_row is None
-            else (int(cursor_row[0]), str(cursor_row[1]))
+            None if cursor_row is None else (int(cursor_row[0]), str(cursor_row[1]))
         )
         return count, digest.hexdigest(), cursor
 

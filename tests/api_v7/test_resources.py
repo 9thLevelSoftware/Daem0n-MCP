@@ -10,7 +10,6 @@ from pydantic import ValidationError
 from daem0nmcp.api.v7.models import RecordSummary
 from daem0nmcp.workspace import Workspace
 
-
 WORKSPACE_ID = "ws_0123456789abcdef01234567"
 OTHER_WORKSPACE_ID = "ws_fedcba9876543210fedcba98"
 NOW = datetime(2026, 8, 8, 12, 0, tzinfo=timezone.utc)
@@ -77,13 +76,13 @@ class _Reader:
             (
                 "read",
                 workspace.workspace_id,
-                getattr(request, "kind"),
-                getattr(request, "limit"),
-                getattr(request, "order_by"),
-                getattr(request, "include_archived"),
-                getattr(request, "include_deleted"),
-                getattr(request, "include_expired"),
-                getattr(request, "enabled_only"),
+                request.kind,
+                request.limit,
+                request.order_by,
+                request.include_archived,
+                request.include_deleted,
+                request.include_expired,
+                request.enabled_only,
             )
         )
         if self.fail:
@@ -158,7 +157,9 @@ class ResourceModelTests(unittest.TestCase):
                 project_path=r"D:\private\project",
             )
 
-    def test_manifest_specs_are_exactly_the_four_versioned_json_templates(self) -> None:
+    def test_manifest_specs_include_four_json_templates_and_six_static_shells(
+        self,
+    ) -> None:
         from daem0nmcp.api.v7.resources import (
             RESOURCE_URI_TEMPLATES,
             ResourceHandlers,
@@ -173,12 +174,34 @@ class ResourceModelTests(unittest.TestCase):
             for suffix in ("warnings", "failures", "rules", "active-context")
         }
         self.assertEqual(set(RESOURCE_URI_TEMPLATES), expected)
-        self.assertEqual({spec.uri_template for spec in specs}, expected)
-        self.assertEqual(len(specs), 4)
-        self.assertTrue(all(spec.mime_type == "application/json" for spec in specs))
+        workspace_specs = tuple(spec for spec in specs if spec.requires_workspace)
+        dashboard_specs = tuple(spec for spec in specs if not spec.requires_workspace)
+        self.assertEqual({spec.uri_template for spec in workspace_specs}, expected)
+        self.assertEqual(len(workspace_specs), 4)
+        self.assertTrue(
+            all(spec.mime_type == "application/json" for spec in workspace_specs)
+        )
+        self.assertEqual(
+            {spec.uri_template for spec in dashboard_specs},
+            {
+                "ui://daem0n/test",
+                "ui://daem0n/search",
+                "ui://daem0n/briefing",
+                "ui://daem0n/covenant",
+                "ui://daem0n/community",
+                "ui://daem0n/graph",
+            },
+        )
+        self.assertTrue(
+            all(
+                spec.mime_type == "text/html;profile=mcp-app"
+                for spec in dashboard_specs
+            )
+        )
+        self.assertTrue(all(spec.output_model is None for spec in dashboard_specs))
         self.assertTrue(all(spec.version == "7" for spec in specs))
         self.assertEqual(
-            {spec.name for spec in specs},
+            {spec.name for spec in workspace_specs},
             {
                 "workspace_warnings",
                 "workspace_failures",
@@ -189,7 +212,9 @@ class ResourceModelTests(unittest.TestCase):
 
 
 class ResourceHandlerTests(unittest.IsolatedAsyncioTestCase):
-    async def test_warnings_resolve_authorize_then_read_and_return_newest_active(self) -> None:
+    async def test_warnings_resolve_authorize_then_read_and_return_newest_active(
+        self,
+    ) -> None:
         from daem0nmcp.api.v7.resources import ResourceHandlers, ResourceRow
 
         events: list[tuple[object, ...]] = []
@@ -199,9 +224,7 @@ class ResourceHandlerTests(unittest.IsolatedAsyncioTestCase):
             ResourceRow(item=_record(90), deleted=True),
             _record(91, status="archived"),
         ]
-        handlers = ResourceHandlers(
-            _dependencies(events=events, warning_rows=rows)
-        )
+        handlers = ResourceHandlers(_dependencies(events=events, warning_rows=rows))
 
         document = await handlers.warnings(WORKSPACE_ID)
 
@@ -231,7 +254,9 @@ class ResourceHandlerTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(document.truncated)
         self.assertEqual(document.items[0].record_id, f"mem_{52:064x}")
         self.assertEqual(document.items[-1].record_id, f"mem_{3:064x}")
-        self.assertTrue(all(item.current_status != "archived" for item in document.items))
+        self.assertTrue(
+            all(item.current_status != "archived" for item in document.items)
+        )
         wire = document.model_dump_json()
         self.assertNotIn("private", wire)
         self.assertEqual(
@@ -263,7 +288,9 @@ class ResourceHandlerTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(events[2][2:5], ("failures", 51, "updated_at_desc"))
 
-    async def test_rules_and_active_context_return_only_highest_priority_active_items(self) -> None:
+    async def test_rules_and_active_context_return_only_highest_priority_active_items(
+        self,
+    ) -> None:
         from daem0nmcp.api.v7.resources import (
             ActiveContextItem,
             ResourceHandlers,
@@ -331,7 +358,9 @@ class ResourceHandlerTests(unittest.IsolatedAsyncioTestCase):
             [item.active_context_id for item in active_context.items],
             [f"act_{2:064x}", f"act_{1:064x}"],
         )
-        rule_read = next(event for event in events if event[:3] == ("read", WORKSPACE_ID, "rules"))
+        rule_read = next(
+            event for event in events if event[:3] == ("read", WORKSPACE_ID, "rules")
+        )
         active_read = next(
             event
             for event in events
@@ -370,7 +399,9 @@ class ResourceHandlerTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(ResourceAccessError) as caught:
             await unauthorized.warnings(WORKSPACE_ID)
         errors.append(caught.exception)
-        self.assertEqual([event[0] for event in unauthorized_events], ["resolve", "authorize"])
+        self.assertEqual(
+            [event[0] for event in unauthorized_events], ["resolve", "authorize"]
+        )
 
         failed_read_events: list[tuple[object, ...]] = []
         failed_read = ResourceHandlers(
@@ -387,7 +418,9 @@ class ResourceHandlerTests(unittest.IsolatedAsyncioTestCase):
             ["resolve", "authorize", "read"],
         )
 
-        signatures = {(type(error), error.code, error.args, str(error)) for error in errors}
+        signatures = {
+            (type(error), error.code, error.args, str(error)) for error in errors
+        }
         self.assertEqual(len(signatures), 1)
         for error in errors:
             self.assertIsNone(error.__cause__)
@@ -396,7 +429,9 @@ class ResourceHandlerTests(unittest.IsolatedAsyncioTestCase):
         for secret in ("private", "sqlite", "alice", "lookup", "permission"):
             self.assertNotIn(secret, rendered)
 
-    async def test_invalid_or_mismatched_workspace_stops_before_authorization(self) -> None:
+    async def test_invalid_or_mismatched_workspace_stops_before_authorization(
+        self,
+    ) -> None:
         from daem0nmcp.api.v7.resources import ResourceAccessError, ResourceHandlers
 
         events: list[tuple[object, ...]] = []
@@ -421,7 +456,9 @@ class ResourceHandlerTests(unittest.IsolatedAsyncioTestCase):
             await handlers.warnings(WORKSPACE_ID)
         self.assertEqual(events, [("resolve", WORKSPACE_ID)])
 
-    async def test_sync_injected_dependencies_are_supported_without_framework_imports(self) -> None:
+    async def test_sync_injected_dependencies_are_supported_without_framework_imports(
+        self,
+    ) -> None:
         from daem0nmcp.api.v7.resources import ResourceDependencies, ResourceHandlers
 
         events: list[tuple[object, ...]] = []
@@ -431,7 +468,7 @@ class ResourceHandlerTests(unittest.IsolatedAsyncioTestCase):
                 events.append(("authorize", workspace.workspace_id, resource_uri))
 
         def sync_reader(workspace: Workspace, request: object) -> list[RecordSummary]:
-            events.append(("read", workspace.workspace_id, getattr(request, "kind")))
+            events.append(("read", workspace.workspace_id, request.kind))
             return [_record(1)]
 
         dependencies = ResourceDependencies(
@@ -447,7 +484,9 @@ class ResourceHandlerTests(unittest.IsolatedAsyncioTestCase):
         result = await ResourceHandlers(dependencies).warnings(WORKSPACE_ID)
 
         self.assertEqual(len(result.items), 1)
-        self.assertEqual([event[0] for event in events], ["resolve", "authorize", "read"])
+        self.assertEqual(
+            [event[0] for event in events], ["resolve", "authorize", "read"]
+        )
 
 
 if __name__ == "__main__":

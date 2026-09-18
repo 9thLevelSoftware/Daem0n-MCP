@@ -12,7 +12,6 @@ from daem0nmcp.covenant import (
 )
 from daem0nmcp.workspace import Workspace
 
-
 WORKSPACE_ID = "ws_0123456789abcdef01234567"
 RECORD_ID = "mem_" + "a" * 64
 
@@ -31,11 +30,14 @@ class _Resolver:
 
 class V7ApplicationTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
-        from daem0nmcp.api.v7.tools import build_argument_normalizer
         from daem0nmcp.api.v7.policy import V7_COVENANT_POLICY
+        from daem0nmcp.api.v7.tools import build_argument_normalizer
 
         self.root = Path("tests") / "fixture-workspace"
-        clock = lambda: 1_000
+
+        def clock() -> int:
+            return 1_000
+
         self.gate = CovenantGate(
             state_store=CovenantStateStore(clock=clock),
             authority=CapabilityAuthority(
@@ -65,7 +67,9 @@ class V7ApplicationTests(unittest.IsolatedAsyncioTestCase):
             )
         )
 
-    async def test_communion_blocks_before_operation_then_allows_after_brief(self) -> None:
+    async def test_communion_blocks_before_operation_then_allows_after_brief(
+        self,
+    ) -> None:
         called: list[str] = []
 
         async def operation(*, workspace: Workspace, request: object) -> object:
@@ -88,7 +92,9 @@ class V7ApplicationTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(allowed.ok)
         self.assertEqual(called, [WORKSPACE_ID])
 
-    async def test_protected_token_is_consumed_before_operation_and_never_forwarded(self) -> None:
+    async def test_protected_token_is_consumed_before_operation_and_never_forwarded(
+        self,
+    ) -> None:
         calls: list[object] = []
 
         async def operation(*, workspace: Workspace, request: object) -> object:
@@ -121,6 +127,95 @@ class V7ApplicationTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(first.ok)
         self.assertFalse(second.ok)
         self.assertEqual(second.error.code, "TOKEN_REPLAYED")
+        self.assertEqual(len(calls), 1)
+
+    async def test_protected_durable_execution_requires_exact_worker_context(
+        self,
+    ) -> None:
+        from daem0nmcp.api.v7.models import MutationReceipt
+        from daem0nmcp.api.v7.tasks import (
+            DurableTaskExecution,
+            durable_task_arguments_sha256,
+            durable_task_execution_var,
+        )
+
+        calls: list[object] = []
+
+        async def operation(*, workspace: Workspace, request: object) -> object:
+            del workspace
+            calls.append(request)
+            self.assertNotIn("preflight_token", request.model_dump())
+            return MutationReceipt(
+                operation_id="op_durable_archive_test",
+                affected_ids=[request.record_id],
+                event_ids=[],
+                counts={"changed": 1},
+                idempotent_replay=False,
+            )
+
+        target = {
+            "workspace_id": WORKSPACE_ID,
+            "record_id": RECORD_ID,
+            "archived": True,
+        }
+        handler = self._router({"memory_archive_set": operation}).handler(
+            "memory_archive_set"
+        )
+
+        execution = DurableTaskExecution(
+            task_id="tsk_" + "1" * 64,
+            tool_name="memory_archive_set",
+            workspace_id=WORKSPACE_ID,
+            arguments_sha256=durable_task_arguments_sha256(target),
+            principal_id="principal",
+            transport_session_id="session",
+        )
+        context = durable_task_execution_var.set(execution)
+        try:
+            succeeded = await handler(**target)
+        finally:
+            durable_task_execution_var.reset(context)
+        self.assertTrue(succeeded.ok)
+        self.assertEqual(len(calls), 1)
+
+        for changed in (
+            {"arguments_sha256": "0" * 64},
+            {"tool_name": "memory_store"},
+            {"workspace_id": "ws_" + "f" * 24},
+        ):
+            invalid = {
+                "task_id": execution.task_id,
+                "tool_name": execution.tool_name,
+                "workspace_id": execution.workspace_id,
+                "arguments_sha256": execution.arguments_sha256,
+                "principal_id": execution.principal_id,
+                "transport_session_id": execution.transport_session_id,
+                **changed,
+            }
+            context = durable_task_execution_var.set(DurableTaskExecution(**invalid))
+            try:
+                rejected = await handler(**target)
+            finally:
+                durable_task_execution_var.reset(context)
+            self.assertFalse(rejected.ok)
+            self.assertEqual(rejected.error.code, "INVALID_ARGUMENT")
+        self.assertEqual(len(calls), 1)
+
+        client_placeholder = await handler(
+            **target, preflight_token="durable.task.validation"
+        )
+        self.assertFalse(client_placeholder.ok)
+        self.assertEqual(client_placeholder.error.code, "TOKEN_TAMPERED")
+        self.assertEqual(len(calls), 1)
+
+        self.gate._workspace_authorizer = lambda scope: False
+        context = durable_task_execution_var.set(execution)
+        try:
+            revoked = await handler(**target)
+        finally:
+            durable_task_execution_var.reset(context)
+        self.assertFalse(revoked.ok)
+        self.assertEqual(revoked.error.code, "UNAUTHORIZED_WORKSPACE")
         self.assertEqual(len(calls), 1)
 
     async def test_scope_mismatch_and_unavailable_capability_fail_closed(self) -> None:
@@ -191,7 +286,9 @@ class V7ApplicationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.error.code, "INTERNAL_ERROR")
         self.assertNotIn("private", result.model_dump_json())
 
-    async def test_disabled_protected_operation_does_not_consume_capability(self) -> None:
+    async def test_disabled_protected_operation_does_not_consume_capability(
+        self,
+    ) -> None:
         from daem0nmcp.api.v7.models import MutationReceipt
 
         self.gate.record_briefing(self.scope)
@@ -222,15 +319,17 @@ class V7ApplicationTests(unittest.IsolatedAsyncioTestCase):
                 idempotent_replay=False,
             )
 
-        admitted = await self._router(
-            {"memory_archive_set": operation}
-        ).handler("memory_archive_set")(
+        admitted = await self._router({"memory_archive_set": operation}).handler(
+            "memory_archive_set"
+        )(
             **target,
             preflight_token=token,
         )
         self.assertTrue(admitted.ok)
 
-    async def test_task_unavailable_is_reported_only_after_policy_admission(self) -> None:
+    async def test_task_unavailable_is_reported_only_after_policy_admission(
+        self,
+    ) -> None:
         from daem0nmcp.api.v7.tasks import task_admission_only_var
 
         called = False

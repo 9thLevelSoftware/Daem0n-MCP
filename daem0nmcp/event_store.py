@@ -12,20 +12,20 @@ import json
 import math
 import re
 import unicodedata
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
 from typing import Any
 
-
 _ID_PREFIXES = frozenset({"mem", "fact", "rel", "evt", "prj", "enr", "job", "mig"})
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+_PROJECTION_REBUILD_GRACE_US = 5_000_000
 
 
 class CanonicalEncodingError(ValueError):
     """Raised when a value cannot be represented by the v7 canonical format."""
 
 
-class EventStreamConflict(RuntimeError):
+class EventStreamConflict(RuntimeError):  # noqa: N818 -- retained public Python API name
     """Raised when an append would fork or overwrite an event stream."""
 
     code = "EVENT_STREAM_CONFLICT"
@@ -105,11 +105,15 @@ class EventBundleImportResult:
 
 
 def _normalize_string(value: str) -> str:
-    normalized = unicodedata.normalize("NFC", value.replace("\r\n", "\n").replace("\r", "\n"))
+    normalized = unicodedata.normalize(
+        "NFC", value.replace("\r\n", "\n").replace("\r", "\n")
+    )
     try:
         normalized.encode("utf-8")
     except UnicodeEncodeError as exc:
-        raise CanonicalEncodingError("strings must contain valid Unicode scalar values") from exc
+        raise CanonicalEncodingError(
+            "strings must contain valid Unicode scalar values"
+        ) from exc
     return normalized
 
 
@@ -253,8 +257,10 @@ def compatibility_memory_record(
         "observation",
     }
     record_type = category if category in known_categories else "legacy"
-    legacy_type = None if record_type != "legacy" else (
-        "<null>" if category is None else str(category)
+    legacy_type = (
+        None
+        if record_type != "legacy"
+        else ("<null>" if category is None else str(category))
     )
     return {
         "record_type": record_type,
@@ -285,7 +291,9 @@ def apply_compatibility_memory_update(memory: Any, **changes: Any) -> None:
 
     unsupported = set(changes) - _COMPATIBILITY_MEMORY_FIELDS
     if unsupported:
-        raise ValueError(f"unsupported compatibility memory fields: {sorted(unsupported)}")
+        raise ValueError(
+            f"unsupported compatibility memory fields: {sorted(unsupported)}"
+        )
     for name, value in changes.items():
         setattr(memory, name, value)
 
@@ -363,13 +371,18 @@ def _signed_int64(value: object) -> bool:
 
 
 def _validate_command(command: EventCommand) -> dict[str, Any]:
-    if not isinstance(command.workspace_id, str) or not command.workspace_id.startswith("ws_"):
+    if not isinstance(command.workspace_id, str) or not command.workspace_id.startswith(
+        "ws_"
+    ):
         raise ValueError("workspace_id must be an opaque ws_ identifier")
     if command.stream_kind not in _STREAM_KINDS:
         raise ValueError("unsupported event stream kind")
     if not isinstance(command.stream_id, str) or not command.stream_id:
         raise ValueError("stream_id must be non-empty")
-    if not isinstance(command.event_type, str) or not 3 <= len(command.event_type) <= 80:
+    if (
+        not isinstance(command.event_type, str)
+        or not 3 <= len(command.event_type) <= 80
+    ):
         raise ValueError("event_type length is invalid")
     if command.actor_type not in _ACTOR_TYPES:
         raise ValueError("unsupported actor type")
@@ -406,7 +419,9 @@ class EventStore:
 
     def append_and_project(self, command: EventCommand) -> AppendedEvent:
         payload = _validate_command(command)
-        if not self.assume_transaction and not getattr(self.connection, "in_transaction", False):
+        if not self.assume_transaction and not getattr(
+            self.connection, "in_transaction", False
+        ):
             self.connection.execute("BEGIN IMMEDIATE")
         self._savepoint_number += 1
         savepoint = f"v7_append_{self._savepoint_number}"
@@ -501,8 +516,12 @@ class EventStore:
         ).fetchone()
         if existing is not None:
             if tuple(existing) != values:
-                raise EventStreamConflict("different event already occupies stream version")
-            return AppendedEvent(event_id, event_hash, payload_hash, stream_version, previous_hash)
+                raise EventStreamConflict(
+                    "different event already occupies stream version"
+                )
+            return AppendedEvent(
+                event_id, event_hash, payload_hash, stream_version, previous_hash
+            )
         if stream_version != head_version + 1:
             raise EventStreamConflict("expected version is not the current stream head")
         try:
@@ -518,10 +537,14 @@ class EventStore:
                 values,
             )
         except Exception as exc:
-            raise EventStreamConflict("event identity or stream version is occupied") from exc
+            raise EventStreamConflict(
+                "event identity or stream version is occupied"
+            ) from exc
         self._project(command, payload, event_id, stream_version)
         self._invalidate_retrieval_projections(command, event_id)
-        return AppendedEvent(event_id, event_hash, payload_hash, stream_version, previous_hash)
+        return AppendedEvent(
+            event_id, event_hash, payload_hash, stream_version, previous_hash
+        )
 
     def _invalidate_retrieval_projections(
         self, command: EventCommand, event_id: str
@@ -533,10 +556,12 @@ class EventStore:
         }
         available = {
             str(row[0])
-            for row in self.connection.execute(
-                "SELECT name FROM sqlite_master WHERE type='table' "
-                "AND name IN ('background_jobs','projection_manifests',"
-                "'retrieval_documents')"
+            for row in _bounded_cursor_rows(
+                self.connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' "
+                    "AND name IN ('background_jobs','projection_manifests',"
+                    "'retrieval_documents')"
+                )
             )
         }
         if available != required:
@@ -557,8 +582,20 @@ class EventStore:
             f"AND projection_name IN ({placeholders})",
             (command.workspace_id, *invalidated_projection_names),
         ).fetchall()
-        if not active_manifests:
+        if not active_manifests and command.stream_kind != "memory":
             return
+        lexical_delta_applied = False
+        if command.stream_kind == "memory" and any(
+            str(row[1]) == "lexical" for row in active_manifests
+        ):
+            from .retrieval.projections import LexicalProjectionBuilder
+
+            lexical_delta_applied = LexicalProjectionBuilder(
+                self.connection
+            ).apply_active_delta(
+                command.workspace_id,
+                command.stream_id,
+            )
         for manifest_id, _projection_name, details_text in active_manifests:
             try:
                 details = json.loads(str(details_text))
@@ -581,7 +618,13 @@ class EventStore:
                     manifest_id,
                 ),
             )
-        for projection_name in sorted(str(row[1]) for row in active_manifests):
+        projection_names = {str(row[1]) for row in active_manifests}
+        if command.stream_kind == "memory":
+            # Lexical retrieval is core.  A cold or incompatible workspace must
+            # still receive a durable immediate rebuild; only a successfully
+            # applied active-generation delta makes delayed coalescing safe.
+            projection_names.add("lexical")
+        for projection_name in sorted(projection_names):
             from .retrieval.job_queue import enqueue_projection_rebuild
 
             enqueue_projection_rebuild(
@@ -590,6 +633,14 @@ class EventStore:
                 projection_name=projection_name,
                 source_event_id=event_id,
                 recorded_at_us=command.recorded_at_us,
+                available_at_us=(
+                    min(
+                        command.recorded_at_us + _PROJECTION_REBUILD_GRACE_US,
+                        9_223_372_036_854_775_807,
+                    )
+                    if lexical_delta_applied
+                    else command.recorded_at_us
+                ),
             )
 
     def _project(
@@ -671,7 +722,9 @@ class EventStore:
             "SELECT created_at_us FROM memory_records WHERE record_id=?",
             (command.stream_id,),
         ).fetchone()
-        created_at = int(existing[0]) if existing is not None else command.occurred_at_us
+        created_at = (
+            int(existing[0]) if existing is not None else command.occurred_at_us
+        )
         values = (
             command.stream_id,
             command.workspace_id,
@@ -752,12 +805,23 @@ class EventStore:
         legacy_type = fact.get("legacy_type")
         if not isinstance(predicate, str) or not 1 <= len(predicate) <= 120:
             raise ValueError("fact predicate length is invalid")
-        if object_kind not in {"text", "number", "boolean", "json", "record_ref", "legacy"}:
+        if object_kind not in {
+            "text",
+            "number",
+            "boolean",
+            "json",
+            "record_ref",
+            "legacy",
+        }:
             raise ValueError("fact object kind is invalid")
         if (object_kind == "legacy") != (legacy_type is not None):
             raise ValueError("fact legacy_type is inconsistent")
         confidence = fact.get("confidence", 1.0)
-        if isinstance(confidence, bool) or not isinstance(confidence, (int, float)) or not 0 <= confidence <= 1:
+        if (
+            isinstance(confidence, bool)
+            or not isinstance(confidence, (int, float))
+            or not 0 <= confidence <= 1
+        ):
             raise ValueError("fact confidence is invalid")
         verification_count = fact.get("verification_count", 0)
         if not _plain_int(verification_count) or verification_count < 0:
@@ -817,7 +881,9 @@ class EventStore:
             ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             """,
             (
-                deterministic_id("fact", "fact-version", command.stream_id, stream_version),
+                deterministic_id(
+                    "fact", "fact-version", command.stream_id, stream_version
+                ),
                 command.stream_id,
                 command.workspace_id,
                 stream_version,
@@ -840,6 +906,7 @@ class EventStore:
                 event_id if retracted else None,
             ),
         )
+
     def _project_relationship(self, command, payload, event_id, stream_version) -> None:
         relation = payload.get("relationship")
         if not isinstance(relation, dict):
@@ -867,7 +934,11 @@ class EventStore:
         if (relation_type == "legacy") != (legacy_type is not None):
             raise ValueError("relationship legacy_type is inconsistent")
         confidence = relation.get("confidence", 1.0)
-        if isinstance(confidence, bool) or not isinstance(confidence, (int, float)) or not 0 <= confidence <= 1:
+        if (
+            isinstance(confidence, bool)
+            or not isinstance(confidence, (int, float))
+            or not 0 <= confidence <= 1
+        ):
             raise ValueError("relationship confidence is invalid")
         metadata = relation.get("metadata", {})
         if not isinstance(metadata, dict):
@@ -915,7 +986,9 @@ class EventStore:
             ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             """,
             (
-                deterministic_id("rel", "relationship-version", command.stream_id, stream_version),
+                deterministic_id(
+                    "rel", "relationship-version", command.stream_id, stream_version
+                ),
                 command.stream_id,
                 command.workspace_id,
                 stream_version,
@@ -1027,20 +1100,14 @@ def _payload_legacy_claims(
         columns = legacy.get("columns")
         if source_table in _COMPATIBILITY_SOURCE_KINDS and isinstance(columns, list):
             for column in columns:
-                if (
-                    isinstance(column, list)
-                    and len(column) == 2
-                    and column[0] == "id"
-                ):
+                if isinstance(column, list) and len(column) == 2 and column[0] == "id":
                     legacy_id = _compatibility_id_text(column[1])
                     if legacy_id is not None:
                         claims.add((str(source_table), legacy_id))
 
     compatibility = payload.get("compatibility")
     if stream_kind == "memory" and isinstance(compatibility, Mapping):
-        legacy_id = _compatibility_id_text(
-            compatibility.get("legacy_memory_id")
-        )
+        legacy_id = _compatibility_id_text(compatibility.get("legacy_memory_id"))
         if legacy_id is not None:
             claims.add(("memories", legacy_id))
 
@@ -1062,6 +1129,21 @@ def _payload_legacy_claims(
         if legacy_id is not None:
             claims.add((metadata_key[0], legacy_id))
     return claims
+
+
+def _bounded_cursor_rows(cursor: Any, *, batch_size: int = 1024) -> Iterator[Any]:
+    """Yield DB-API rows without assuming cursor iteration or buffering all rows."""
+
+    try:
+        while True:
+            rows = cursor.fetchmany(batch_size)
+            if not rows:
+                return
+            yield from rows
+    finally:
+        close = getattr(cursor, "close", None)
+        if callable(close):
+            close()
 
 
 def build_live_compatibility_claim_index(
@@ -1090,18 +1172,22 @@ def build_live_compatibility_claim_index(
         )
     selected_kinds = {_COMPATIBILITY_SOURCE_KINDS[table] for table in selected}
     candidates: dict[tuple[str, str], set[str]] = {}
-    event_streams: dict[str, set[str]] = {
-        kind: set() for kind in selected_kinds
-    }
+    event_streams: dict[str, set[str]] = {kind: set() for kind in selected_kinds}
 
-    has_map = connection.execute(
+    schema_cursor = connection.execute(
         "SELECT 1 FROM sqlite_master WHERE type='table' AND name='legacy_id_map'"
-    ).fetchone()
+    )
+    try:
+        has_map = schema_cursor.fetchone()
+    finally:
+        schema_cursor.close()
     if has_map is not None:
-        for row in connection.execute(
-            "SELECT source_table,legacy_id,target_kind,target_id "
-            "FROM legacy_id_map WHERE workspace_id=?",
-            (workspace_id,),
+        for row in _bounded_cursor_rows(
+            connection.execute(
+                "SELECT source_table,legacy_id,target_kind,target_id "
+                "FROM legacy_id_map WHERE workspace_id=?",
+                (workspace_id,),
+            )
         ):
             source_table = str(row[0])
             if source_table not in selected:
@@ -1112,14 +1198,14 @@ def build_live_compatibility_claim_index(
                     "COMPATIBILITY_STREAM_INVALID",
                     "migration mapping has an invalid target kind",
                 )
-            candidates.setdefault((source_table, str(row[1])), set()).add(
-                str(row[3])
-            )
+            candidates.setdefault((source_table, str(row[1])), set()).add(str(row[3]))
 
-    for row in connection.execute(
-        "SELECT stream_id,stream_kind,payload_json FROM memory_events "
-        "WHERE workspace_id=? ORDER BY stream_id,stream_version",
-        (workspace_id,),
+    for row in _bounded_cursor_rows(
+        connection.execute(
+            "SELECT stream_id,stream_kind,payload_json FROM memory_events "
+            "WHERE workspace_id=? ORDER BY stream_id,stream_version",
+            (workspace_id,),
+        )
     ):
         stream_kind = str(row[1])
         if stream_kind not in selected_kinds:
@@ -1145,10 +1231,12 @@ def build_live_compatibility_claim_index(
     if "memory" in selected_kinds:
         current_projection["memory"] = {
             str(row[0]): row[1] is None
-            for row in connection.execute(
-                "SELECT record_id,deleted_at_us FROM memory_records "
-                "WHERE workspace_id=?",
-                (workspace_id,),
+            for row in _bounded_cursor_rows(
+                connection.execute(
+                    "SELECT record_id,deleted_at_us FROM memory_records "
+                    "WHERE workspace_id=?",
+                    (workspace_id,),
+                )
             )
         }
     for stream_kind, table, id_column in (
@@ -1158,10 +1246,12 @@ def build_live_compatibility_claim_index(
         if stream_kind not in selected_kinds:
             continue
         status: dict[str, bool] = {}
-        for row in connection.execute(
-            f"SELECT {id_column},valid_to_us FROM {table} "
-            "WHERE workspace_id=? AND transaction_to_us IS NULL",
-            (workspace_id,),
+        for row in _bounded_cursor_rows(
+            connection.execute(
+                f"SELECT {id_column},valid_to_us FROM {table} "
+                "WHERE workspace_id=? AND transaction_to_us IS NULL",
+                (workspace_id,),
+            )
         ):
             stream_id = str(row[0])
             if stream_id in status:
@@ -1244,8 +1334,12 @@ def _event_root_hash(events: list[Mapping[str, Any]]) -> str:
 
 def _row_mapping(cursor: Any, row: Any) -> dict[str, Any]:
     if hasattr(row, "keys"):
-        return {key: row[key] for key in row.keys()}
-    return {column[0]: value for column, value in zip(cursor.description, row)}
+        # sqlite3.Row iterates values, so its named columns must be explicit.
+        keys = row.keys()
+        return {key: row[key] for key in keys}
+    return {
+        column[0]: value for column, value in zip(cursor.description, row, strict=True)
+    }
 
 
 def export_event_bundle(connection: Any, workspace_id: str) -> dict[str, Any]:
@@ -1300,13 +1394,14 @@ def _validated_bundle_commands(
         raise EventBundleError("INVALID_EVENT_BUNDLE", "event fields are invalid")
     event_ids = [event["event_id"] for event in events]
     if any(
-        not isinstance(event_id, str)
-        or not re.fullmatch(r"evt_[0-9a-f]{64}", event_id)
+        not isinstance(event_id, str) or not re.fullmatch(r"evt_[0-9a-f]{64}", event_id)
         for event_id in event_ids
     ):
         raise EventBundleError("INVALID_EVENT_BUNDLE", "event_id is malformed")
     if event_ids != sorted(event_ids):
-        raise EventBundleError("INVALID_EVENT_BUNDLE", "events are not ordered by event_id")
+        raise EventBundleError(
+            "INVALID_EVENT_BUNDLE", "events are not ordered by event_id"
+        )
     if len(set(event_ids)) != len(events):
         raise EventBundleError("INVALID_EVENT_BUNDLE", "event_id is duplicated")
 
@@ -1319,7 +1414,9 @@ def _validated_bundle_commands(
         try:
             payload_hash = sha256_json(payload)
         except (CanonicalEncodingError, RecursionError) as exc:
-            raise EventBundleError("INVALID_EVENT_BUNDLE", "payload is invalid") from exc
+            raise EventBundleError(
+                "INVALID_EVENT_BUNDLE", "payload is invalid"
+            ) from exc
         if payload_hash != event.get("payload_hash"):
             raise EventBundleError("INVALID_EVENT_BUNDLE", "payload hash differs")
         envelope = {
@@ -1344,7 +1441,9 @@ def _validated_bundle_commands(
         try:
             calculated_hash = event_hash_for(envelope)
         except (CanonicalEncodingError, ValueError, RecursionError) as exc:
-            raise EventBundleError("INVALID_EVENT_BUNDLE", "event envelope is invalid") from exc
+            raise EventBundleError(
+                "INVALID_EVENT_BUNDLE", "event envelope is invalid"
+            ) from exc
         if calculated_hash != event.get("event_hash"):
             raise EventBundleError("INVALID_EVENT_BUNDLE", "event hash differs")
         if event.get("event_id") != event_id_for_hash(calculated_hash):
@@ -1367,7 +1466,9 @@ def _validated_bundle_commands(
         try:
             _validate_command(command)
         except (CanonicalEncodingError, ValueError, RecursionError) as exc:
-            raise EventBundleError("INVALID_EVENT_BUNDLE", "event command is invalid") from exc
+            raise EventBundleError(
+                "INVALID_EVENT_BUNDLE", "event command is invalid"
+            ) from exc
         commands.append(command)
         by_stream.setdefault((workspace_id, event["stream_id"]), []).append(event)
 
@@ -1376,7 +1477,11 @@ def _validated_bundle_commands(
         for expected_version, event in enumerate(ordered, 1):
             if event["stream_version"] != expected_version:
                 raise EventBundleError("INVALID_EVENT_BUNDLE", "event stream has a gap")
-            expected_previous = None if expected_version == 1 else ordered[-2 + expected_version]["event_hash"]
+            expected_previous = (
+                None
+                if expected_version == 1
+                else ordered[-2 + expected_version]["event_hash"]
+            )
             if event["previous_event_hash"] != expected_previous:
                 raise EventBundleError("INVALID_EVENT_BUNDLE", "event chain differs")
 
@@ -1388,8 +1493,19 @@ def _validated_bundle_commands(
     # and cross-stream causation foreign keys. Produce a deterministic
     # topological order only after the entire bundle has validated.
     command_by_id = {
-        event["event_id"]: command for event, command in zip(events, commands)
+        event["event_id"]: command
+        for event, command in zip(events, commands, strict=True)
     }
+    first_memory_event: dict[str, str] = {}
+    for event in events:
+        if event["stream_kind"] != "memory":
+            continue
+        current = first_memory_event.get(event["stream_id"])
+        if (
+            current is None
+            or event["stream_version"] < command_by_id[current].expected_stream_version
+        ):
+            first_memory_event[event["stream_id"]] = event["event_id"]
     event_id_by_hash = {event["event_hash"]: event["event_id"] for event in events}
     dependencies: dict[str, set[str]] = {}
     for event in events:
@@ -1409,18 +1525,55 @@ def _validated_bundle_commands(
                     "INVALID_EVENT_BUNDLE", "causation event is absent from bundle"
                 )
             required.add(causation_id)
+        command = command_by_id[event["event_id"]]
+        projection = None
+        if command.stream_kind == "fact":
+            projection = command.payload.get("fact")
+            references = (
+                [projection.get("subject_record_id")]
+                if isinstance(projection, Mapping)
+                else []
+            )
+        elif command.stream_kind == "relationship":
+            projection = command.payload.get("relationship")
+            references = (
+                [
+                    projection.get("source_record_id"),
+                    projection.get("target_record_id"),
+                ]
+                if isinstance(projection, Mapping)
+                else []
+            )
+        else:
+            references = []
+        for reference in references:
+            dependency = (
+                first_memory_event.get(reference)
+                if isinstance(reference, str)
+                else None
+            )
+            if dependency is not None:
+                required.add(dependency)
         dependencies[event["event_id"]] = required
 
     ordered_commands: list[EventCommand] = []
     completed: set[str] = set()
     while len(completed) < len(events):
         ready = sorted(
-            event_id
-            for event_id, required in dependencies.items()
-            if event_id not in completed and required <= completed
+            [
+                event_id
+                for event_id, required in dependencies.items()
+                if event_id not in completed and required <= completed
+            ],
+            key=lambda event_id: (
+                command_by_id[event_id].recorded_at_us,
+                event_id,
+            ),
         )
         if not ready:
-            raise EventBundleError("INVALID_EVENT_BUNDLE", "event dependencies are cyclic")
+            raise EventBundleError(
+                "INVALID_EVENT_BUNDLE", "event dependencies are cyclic"
+            )
         for event_id in ready:
             ordered_commands.append(command_by_id[event_id])
             completed.add(event_id)
@@ -1474,9 +1627,7 @@ _GOVERNANCE_STREAM_PREFIXES = {
 }
 _GOVERNANCE_EVENT_TYPES = {
     "rule": frozenset({"rule.created", "rule.updated"}),
-    "trigger": frozenset(
-        {"context_trigger.created", "context_trigger.deleted"}
-    ),
+    "trigger": frozenset({"context_trigger.created", "context_trigger.deleted"}),
 }
 _GOVERNANCE_RECORD_TYPES = frozenset(
     {"decision", "pattern", "warning", "learning", "procedure", "observation"}
@@ -1521,11 +1672,7 @@ def _opaque_governance_id(value: object, prefix: str, length: int) -> bool:
 
 
 def _governance_timestamp(value: object, name: str) -> int:
-    if (
-        not _plain_int(value)
-        or value < 0
-        or value > 9_223_372_036_854_775_807
-    ):
+    if not _plain_int(value) or value < 0 or value > 9_223_372_036_854_775_807:
         raise ValueError(f"{name} must be a non-negative signed integer")
     return value
 
@@ -1538,8 +1685,7 @@ def _governance_text_list(
         not isinstance(value, list)
         or len(value) > maximum
         or any(
-            not isinstance(item, str) or not 1 <= len(item) <= 2_000
-            for item in value
+            not isinstance(item, str) or not 1 <= len(item) <= 2_000 for item in value
         )
     ):
         raise ValueError(f"{name} must be a bounded text list")
@@ -1563,16 +1709,15 @@ def _validate_governance_command(
             and 3 <= len(command.event_type) <= 80
         )
     else:
-        valid_event_type = command.event_type in _GOVERNANCE_EVENT_TYPES[
-            command.stream_kind
-        ]
+        valid_event_type = (
+            command.event_type in _GOVERNANCE_EVENT_TYPES[command.stream_kind]
+        )
     if not valid_event_type:
         raise ValueError("unsupported governance event type")
     if command.actor_type not in _ACTOR_TYPES:
         raise ValueError("unsupported actor type")
     if command.actor_id is not None and (
-        not isinstance(command.actor_id, str)
-        or not 1 <= len(command.actor_id) <= 200
+        not isinstance(command.actor_id, str) or not 1 <= len(command.actor_id) <= 200
     ):
         raise ValueError("actor_id length is invalid")
     if command.correlation_id is not None and (
@@ -1586,10 +1731,7 @@ def _validate_governance_command(
         raise ValueError("causation_event_id must be an opaque event identifier")
     _governance_timestamp(command.occurred_at_us, "occurred_at_us")
     _governance_timestamp(command.recorded_at_us, "recorded_at_us")
-    if (
-        not _plain_int(command.event_schema_version)
-        or command.event_schema_version < 1
-    ):
+    if not _plain_int(command.event_schema_version) or command.event_schema_version < 1:
         raise ValueError("event_schema_version must be positive")
     if command.expected_stream_version is not None and (
         not _plain_int(command.expected_stream_version)
@@ -1609,7 +1751,10 @@ def _validate_governance_command(
 def _validate_governance_rule_state(
     command: GovernanceEventCommand, payload: Mapping[str, Any]
 ) -> None:
-    if set(payload) != _RULE_STATE_FIELDS or payload.get("rule_id") != command.stream_id:
+    if (
+        set(payload) != _RULE_STATE_FIELDS
+        or payload.get("rule_id") != command.stream_id
+    ):
         raise ValueError("rule event must contain one complete canonical state")
     trigger = payload.get("trigger")
     if not isinstance(trigger, str) or not 1 <= len(trigger) <= 2_000:
@@ -1671,9 +1816,7 @@ class GovernanceEventStore:
         self.assume_transaction = assume_transaction
         self._savepoint_number = 0
 
-    def append_and_project(
-        self, command: GovernanceEventCommand
-    ) -> AppendedEvent:
+    def append_and_project(self, command: GovernanceEventCommand) -> AppendedEvent:
         payload = _validate_governance_command(command)
         if not self.assume_transaction and not getattr(
             self.connection, "in_transaction", False
@@ -1948,13 +2091,50 @@ class GovernanceEventStore:
             raise EventStreamConflict("trigger projection update was not singular")
 
 
-async def append_and_project_async(session: Any, command: EventCommand) -> AppendedEvent:
+class _SyncExecuteConnection:
+    """Give SQLAlchemy's adapted async DB-API connection sqlite semantics."""
+
+    def __init__(self, connection: Any, *, in_transaction: bool) -> None:
+        self._connection = connection
+        self._in_transaction = in_transaction
+
+    @property
+    def in_transaction(self) -> bool:
+        return self._in_transaction
+
+    def execute(self, statement: str, parameters: Any = ()) -> Any:
+        cursor = self._connection.cursor()
+        try:
+            cursor.execute(statement, parameters)
+        except Exception:
+            cursor.close()
+            raise
+        return cursor
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._connection, name)
+
+
+def _sync_execute_connection(sync_connection: Any) -> _SyncExecuteConnection:
+    pooled = sync_connection.connection
+    physical_transaction = bool(
+        getattr(pooled.driver_connection, "in_transaction", False)
+    )
+    return _SyncExecuteConnection(
+        pooled.dbapi_connection,
+        in_transaction=physical_transaction,
+    )
+
+
+async def append_and_project_async(
+    session: Any, command: EventCommand
+) -> AppendedEvent:
     """Run the stdlib projector on an AsyncSession's current DBAPI transaction."""
 
     async_connection = await session.connection()
 
     def append(sync_connection):
-        dbapi_connection = sync_connection.connection.dbapi_connection
+        dbapi_connection = _sync_execute_connection(sync_connection)
         assume_transaction = bool(getattr(dbapi_connection, "in_transaction", False))
         return EventStore(
             dbapi_connection, assume_transaction=assume_transaction
@@ -1978,7 +2158,7 @@ async def resolve_compatibility_stream_async(
 
     def resolve(sync_connection):
         return resolve_compatibility_stream(
-            sync_connection.connection.dbapi_connection,
+            _sync_execute_connection(sync_connection),
             workspace_id,
             stream_kind,
             source_table,
@@ -1994,7 +2174,9 @@ async def export_event_bundle_async(session: Any, workspace_id: str) -> dict[str
     async_connection = await session.connection()
 
     def export(sync_connection):
-        return export_event_bundle(sync_connection.connection.dbapi_connection, workspace_id)
+        return export_event_bundle(
+            _sync_execute_connection(sync_connection), workspace_id
+        )
 
     return await async_connection.run_sync(export)
 
@@ -2009,14 +2191,12 @@ async def import_event_bundle_async(
     async_connection = await session.connection()
 
     def restore(sync_connection):
-        dbapi_connection = sync_connection.connection.dbapi_connection
+        dbapi_connection = _sync_execute_connection(sync_connection)
         return import_event_bundle(
             dbapi_connection,
             bundle,
             workspace_id,
-            assume_transaction=bool(
-                getattr(dbapi_connection, "in_transaction", False)
-            ),
+            assume_transaction=bool(getattr(dbapi_connection, "in_transaction", False)),
         )
 
     result = await async_connection.run_sync(restore)

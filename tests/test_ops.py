@@ -7,19 +7,21 @@ class TestHealthTool:
     """Test health and version reporting."""
 
     @pytest.mark.asyncio
-    async def test_health_returns_version(self):
+    async def test_health_returns_version(self, tmp_path, covenant_workspace_factory):
         """Verify health tool returns version info."""
         from daem0nmcp import __version__
         from daem0nmcp.server import health
 
-        result = await health(project_path="/tmp/test")
+        workspace = covenant_workspace_factory(tmp_path)
+        with workspace.installed():
+            result = await health(project_path=workspace)
 
         assert "version" in result
         assert result["version"] == __version__
         assert "status" in result
 
     @pytest.mark.asyncio
-    async def test_health_returns_statistics(self):
+    async def test_health_returns_statistics(self, covenant_workspace_factory):
         """Verify health tool returns memory statistics."""
         import shutil
         import tempfile
@@ -28,7 +30,9 @@ class TestHealthTool:
 
         temp_dir = tempfile.mkdtemp()
         try:
-            result = await health(project_path=temp_dir)
+            workspace = covenant_workspace_factory(temp_dir)
+            with workspace.installed():
+                result = await health(project_path=workspace)
 
             assert "memories_count" in result
             assert "rules_count" in result
@@ -82,8 +86,10 @@ class TestExportImport:
             shutil.rmtree(temp_dir, ignore_errors=True)
 
     @pytest.mark.asyncio
-    async def test_import_restores_data(self, covenant_workspace_factory):
-        """Verify import restores exported data."""
+    async def test_import_preserves_workspace_identity(
+        self, covenant_workspace_factory
+    ):
+        """Verify ordinary import accepts only an export from the same workspace."""
         import shutil
         import tempfile
 
@@ -95,7 +101,6 @@ class TestExportImport:
         )
 
         temp_dir1 = tempfile.mkdtemp()
-        temp_dir2 = tempfile.mkdtemp()
         try:
             _project_contexts.clear()
             source_workspace = covenant_workspace_factory(temp_dir1)
@@ -112,22 +117,21 @@ class TestExportImport:
                 export_data, project_path=source_workspace
             )
 
-            # Import to second project
+            # Reopen the same project to preserve the export's workspace identity.
+            await ctx1.db_manager.close()
             _project_contexts.clear()
-
-            destination_workspace = covenant_workspace_factory(temp_dir2)
-            await destination_workspace.brief()
-            result = await destination_workspace.call(
+            result = await source_workspace.call(
                 import_data,
                 data=exported,
-                project_path=destination_workspace,
+                project_path=source_workspace,
             )
 
-            assert result["memories_imported"] >= 1
+            assert result["status"] == "imported"
+            assert result["bundle_events_existing"] >= 1
 
-            # Verify data exists
-            with destination_workspace.installed():
-                ctx2 = await get_project_context(destination_workspace)
+            # Verify the retained workspace data remains queryable after import.
+            with source_workspace.installed():
+                ctx2 = await get_project_context(source_workspace)
             recall_result = await ctx2.memory_manager.recall("Imported memory")
             assert recall_result["found"] >= 1
         finally:
@@ -135,11 +139,7 @@ class TestExportImport:
             if temp_dir1 in _project_contexts:
                 await _project_contexts[temp_dir1].db_manager.close()
                 del _project_contexts[temp_dir1]
-            if temp_dir2 in _project_contexts:
-                await _project_contexts[temp_dir2].db_manager.close()
-                del _project_contexts[temp_dir2]
             shutil.rmtree(temp_dir1, ignore_errors=True)
-            shutil.rmtree(temp_dir2, ignore_errors=True)
 
 
 class TestMaintenanceTools:

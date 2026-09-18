@@ -14,7 +14,6 @@ from unittest.mock import patch
 
 from daem0nmcp import covenant
 
-
 REPOSITORY_ROOT = Path(__file__).resolve().parent.parent
 LEGACY_TEST_FILES = tuple(
     path.name for path in sorted((REPOSITORY_ROOT / "tests").glob("test_*.py"))
@@ -22,9 +21,7 @@ LEGACY_TEST_FILES = tuple(
 
 
 def _protected_legacy_calls(source: str, filename: str) -> list[str]:
-    protected = set(covenant.LEGACY_ENTRYPOINTS) - set(
-        covenant.COVENANT_EXEMPT_TOOLS
-    )
+    protected = set(covenant.LEGACY_ENTRYPOINTS) - set(covenant.COVENANT_EXEMPT_TOOLS)
     tree = ast.parse(source, filename=filename)
     aliases: dict[str, str] = {}
     for node in ast.walk(tree):
@@ -38,9 +35,7 @@ def _protected_legacy_calls(source: str, filename: str) -> list[str]:
         elif isinstance(node, ast.ImportFrom):
             module = node.module or ""
             for imported in node.names:
-                aliases[imported.asname or imported.name] = (
-                    f"{module}.{imported.name}"
-                )
+                aliases[imported.asname or imported.name] = f"{module}.{imported.name}"
 
     def dotted_name(node: ast.expr) -> str:
         if isinstance(node, ast.Name):
@@ -57,9 +52,7 @@ def _protected_legacy_calls(source: str, filename: str) -> list[str]:
         leaf_name = qualified.rsplit(".", 1)[-1]
         if leaf_name not in protected:
             continue
-        if not qualified.startswith(
-            ("daem0nmcp.server.", "daem0nmcp.tools.")
-        ):
+        if not qualified.startswith(("daem0nmcp.server.", "daem0nmcp.tools.")):
             continue
         violations.append(f"{filename}:{node.lineno}:{qualified}")
     return violations
@@ -144,7 +137,9 @@ class CovenantTestWorkspaceTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(7, result["id"])
         self.assertEqual(["Bind the exact arguments"], calls)
-        self.assertEqual(0, workspace.gate.state_store.status(workspace.scope)["active_capabilities"])
+        self.assertEqual(
+            0, workspace.gate.state_store.status(workspace.scope)["active_capabilities"]
+        )
         self.assertIsNone(covenant.invocation_scope_var.get())
 
     async def test_explicit_token_rejects_changed_arguments_and_replay(self) -> None:
@@ -209,7 +204,9 @@ class CovenantTestWorkspaceTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(workspace.gate.state_store.is_briefed(workspace.scope))
         self.assertIsNone(covenant.invocation_scope_var.get())
 
-    def test_installed_scope_registers_only_explicit_test_roots_and_restores(self) -> None:
+    def test_installed_scope_registers_only_explicit_test_roots_and_restores(
+        self,
+    ) -> None:
         support = _support_module()
         other_root = str((Path(self.workspace_path) / "linked").resolve())
         Path(other_root).mkdir()
@@ -220,22 +217,26 @@ class CovenantTestWorkspaceTests(unittest.IsolatedAsyncioTestCase):
         fake_context_manager = types.ModuleType("daem0nmcp.context_manager")
         fake_context_manager.workspace_registry = original_registry
 
-        with patch.dict(
-            sys.modules, {"daem0nmcp.context_manager": fake_context_manager}
+        with (
+            patch.dict(
+                sys.modules, {"daem0nmcp.context_manager": fake_context_manager}
+            ),
+            workspace.installed(),
         ):
-            with workspace.installed():
-                self.assertEqual(
-                    Path(self.workspace_path),
-                    fake_context_manager.workspace_registry.resolve(workspace).root,
+            self.assertEqual(
+                Path(self.workspace_path),
+                fake_context_manager.workspace_registry.resolve(workspace).root,
+            )
+            self.assertEqual(
+                Path(other_root),
+                fake_context_manager.workspace_registry.resolve(other_root).root,
+            )
+            from daem0nmcp.workspace import WorkspaceAccessError
+
+            with self.assertRaises(WorkspaceAccessError):
+                fake_context_manager.workspace_registry.resolve(
+                    str(Path(self.workspace_path).parent / "not-registered")
                 )
-                self.assertEqual(
-                    Path(other_root),
-                    fake_context_manager.workspace_registry.resolve(other_root).root,
-                )
-                with self.assertRaises(Exception):
-                    fake_context_manager.workspace_registry.resolve(
-                        str(Path(self.workspace_path).parent / "not-registered")
-                    )
 
         self.assertIs(original_registry, fake_context_manager.workspace_registry)
 

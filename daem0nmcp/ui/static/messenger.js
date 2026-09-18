@@ -1,358 +1,144 @@
-/**
- * SecureMessenger - Secure postMessage handler for MCP Apps
- *
- * Validates message origins and enforces JSON-RPC 2.0 format.
- * Used by all Daem0n MCP Apps UIs for host communication.
- *
- * Security features:
- * - Origin validation using Set.has() for O(1) lookup
- * - Exact origin matching (not startsWith or includes)
- * - JSON-RPC 2.0 message structure validation
- * - Request/response tracking with message IDs
- *
- * @example
- * const messenger = new SecureMessenger();
- * messenger.init();
- *
- * // Register a handler
- * messenger.on('updateData', (params) => {
- *   console.log('Received:', params);
- *   return { status: 'ok' };
- * });
- *
- * // Send a request to host
- * const result = await messenger.request('getData', { id: 123 });
- *
- * // Send a notification (no response expected)
- * messenger.notify('logEvent', { event: 'click' });
- */
+/* Hardened JSON-RPC bridge for MCP Apps views. */
 class SecureMessenger {
-    /**
-     * Create a SecureMessenger instance.
-     * @param {string[]} allowedOrigins - Additional origins to trust (beyond defaults)
-     */
     constructor(allowedOrigins = []) {
-        // Default allowed origins for MCP Apps hosts
-        this.allowedOrigins = new Set([
-            'https://claude.ai',
-            'https://desktop.claude.ai',
-            'null',  // Sandboxed iframe origin
-            ...allowedOrigins
-        ]);
-
+        this.allowedOrigins = new Set(["https://claude.ai", "https://desktop.claude.ai", "null", ...allowedOrigins]);
+        // A compliant web host places the view inside its own sandbox proxy.
+        // Pin that browser-supplied parent origin, rather than assuming the
+        // proxy shares the product's public origin. Never trust a message to
+        // tell us which origin to accept.
+        this.parentOrigin = null;
+        try {
+            const referrer = new URL(document.referrer);
+            const loopback = ["localhost", "127.0.0.1", "[::1]"].includes(referrer.hostname);
+            if (referrer.protocol === "https:" || (referrer.protocol === "http:" && loopback)) {
+                this.parentOrigin = referrer.origin;
+            }
+        } catch (_error) { /* Native/opaque hosts may omit the referrer. */ }
         this.handlers = new Map();
         this.pendingRequests = new Map();
         this.nextId = 1;
         this.initialized = false;
+        this.connected = false;
+        this.connecting = null;
+        this._listener = event => this._handleMessage(event);
     }
 
-    /**
-     * Initialize the message listener.
-     * Call once when the UI is ready.
-     */
     init() {
-        if (this.initialized) {
-            console.warn('[SecureMessenger] Already initialized');
-            return;
-        }
-
-        window.addEventListener('message', (event) => {
-            this._handleMessage(event);
-        });
-
+        if (this.initialized) return;
+        window.addEventListener("message", this._listener);
         this.initialized = true;
     }
 
-    /**
-     * Internal message handler with security checks.
-     * @private
-     */
+    connect() {
+        if (this.connected) return Promise.resolve(this.hostContext || {});
+        if (this.connecting) return this.connecting;
+        this.init();
+        this.connecting = this.request("ui/initialize", {
+            protocolVersion: "2026-01-26",
+            appInfo: { name: "Daem0n MCP Apps", version: "7" },
+            appCapabilities: { availableDisplayModes: ["inline", "fullscreen"] },
+        }).then(result => {
+            if (!result || result.protocolVersion !== "2026-01-26") {
+                throw new Error("Unsupported MCP Apps protocol version");
+            }
+            this.hostContext = result && typeof result === "object" ? result : {};
+            this.connected = true;
+            this.notify("ui/notifications/initialized", {});
+            return this.hostContext;
+        }).finally(() => { this.connecting = null; });
+        return this.connecting;
+    }
+
+    _isBounded(value) {
+        try { return new TextEncoder().encode(JSON.stringify(value)).byteLength <= 1_048_576; }
+        catch (_error) { return false; }
+    }
+
     _handleMessage(event) {
-        // SECURITY: Validate origin first - exact match only
-        if (!this.allowedOrigins.has(event.origin)) {
-            console.warn(`[SecureMessenger] Blocked message from untrusted origin: ${event.origin}`);
-            return;
-        }
-
+        // An opaque sandbox origin alone cannot identify the host.
+        if (event.source !== window.parent) return;
+        if (this.parentOrigin !== null ? event.origin !== this.parentOrigin : !this.allowedOrigins.has(event.origin)) return;
         const message = event.data;
-
-        // Validate message structure
-        if (!message || typeof message !== 'object') {
-            return;
-        }
-
-        // Must be JSON-RPC 2.0
-        if (message.jsonrpc !== '2.0') {
-            return;
-        }
-
-        // Handle response to our request
+        if (!message || typeof message !== "object" || Array.isArray(message) ||
+            message.jsonrpc !== "2.0" || !this._isBounded(message)) return;
         if (message.id !== undefined && (message.result !== undefined || message.error !== undefined)) {
             this._handleResponse(message);
-            return;
-        }
-
-        // Handle incoming request/notification
-        if (message.method) {
-            this._handleRequest(message, event.source, event.origin);
+        } else if (typeof message.method === "string" && message.method.length <= 256) {
+            this._handleRequest(message, event.source);
         }
     }
 
-    /**
-     * Handle response to a request we sent.
-     * @private
-     */
     _handleResponse(message) {
         const pending = this.pendingRequests.get(message.id);
-        if (!pending) {
-            console.warn(`[SecureMessenger] No pending request for id: ${message.id}`);
-            return;
-        }
-
+        if (!pending) return;
         this.pendingRequests.delete(message.id);
-
         if (message.error) {
-            const error = new Error(message.error.message || 'Unknown error');
+            const error = new Error(typeof message.error.message === "string" ? message.error.message : "Unknown error");
             error.code = message.error.code;
             pending.reject(error);
-        } else {
-            pending.resolve(message.result);
-        }
+        } else pending.resolve(message.result);
     }
 
-    /**
-     * Handle incoming request from host.
-     * @private
-     */
-    _handleRequest(message, source, origin) {
+    _handleRequest(message, source) {
         const handler = this.handlers.get(message.method);
-
         if (!handler) {
-            // Send error response for requests (not notifications)
-            if (message.id !== undefined) {
-                this._sendResponse(source, message.id, null, {
-                    code: -32601,
-                    message: `Method not found: ${message.method}`
-                }, origin);
-            }
+            if (message.id !== undefined) this._sendResponse(source, message.id, null, { code: -32601, message: "Method not found" });
             return;
         }
-
-        try {
-            const result = handler(message.params || {});
-
-            // If method returns a Promise, wait for it
-            if (result && typeof result.then === 'function') {
-                result.then(
-                    (res) => {
-                        if (message.id !== undefined) {
-                            this._sendResponse(source, message.id, res, null, origin);
-                        }
-                    },
-                    (err) => {
-                        if (message.id !== undefined) {
-                            this._sendResponse(source, message.id, null, {
-                                code: -32603,
-                                message: err.message
-                            }, origin);
-                        }
-                    }
-                );
-            } else if (message.id !== undefined) {
-                // Synchronous result
-                this._sendResponse(source, message.id, result, null, origin);
-            }
-        } catch (err) {
-            if (message.id !== undefined) {
-                this._sendResponse(source, message.id, null, {
-                    code: -32603,
-                    message: err.message
-                }, origin);
-            }
-        }
+        Promise.resolve().then(() => handler(message.params && typeof message.params === "object" ? message.params : {})).then(
+            result => { if (message.id !== undefined) this._sendResponse(source, message.id, result); },
+            _error => { if (message.id !== undefined) this._sendResponse(source, message.id, null, { code: -32603, message: "Internal error" }); },
+        );
     }
 
-    /**
-     * Send a JSON-RPC 2.0 response.
-     * @private
-     * @param {Window} target - The target window to send to
-     * @param {number|string} id - The JSON-RPC request ID
-     * @param {*} result - The result value (if success)
-     * @param {object|null} error - The error object (if error)
-     * @param {string} targetOrigin - The validated origin to send to
-     */
-    _sendResponse(target, id, result, error = null, targetOrigin = '*') {
-        if (id === undefined) return;  // Notification, no response needed
-
-        const response = {
-            jsonrpc: '2.0',
-            id: id
-        };
-
-        if (error) {
-            response.error = error;
-        } else {
-            response.result = result;
-        }
-
-        target.postMessage(response, targetOrigin);
+    _sendResponse(target, id, result, error = null) {
+        if (id === undefined) return;
+        target.postMessage(error ? { jsonrpc: "2.0", id, error } : { jsonrpc: "2.0", id, result }, "*");
     }
 
-    /**
-     * Register a handler for a method.
-     * @param {string} method - Method name
-     * @param {function} handler - Handler function (receives params, returns result)
-     */
     on(method, handler) {
-        if (typeof handler !== 'function') {
-            throw new Error(`Handler for '${method}' must be a function`);
-        }
+        if (typeof handler !== "function") throw new Error("handler must be a function");
         this.handlers.set(method, handler);
     }
+    off(method) { this.handlers.delete(method); }
 
-    /**
-     * Remove a handler.
-     * @param {string} method - Method name
-     */
-    off(method) {
-        this.handlers.delete(method);
-    }
-
-    /**
-     * Send a request to the host and wait for response.
-     * @param {string} method - Method name
-     * @param {object} params - Method parameters
-     * @param {number} timeout - Timeout in milliseconds (default: 30000)
-     * @returns {Promise} - Resolves with result or rejects with error
-     */
-    request(method, params = {}, timeout = 30000) {
+    request(method, params = {}, timeout = 30_000) {
+        if (!this.initialized) this.init();
+        if (!this._isBounded(params)) return Promise.reject(new Error("Request payload exceeds limit"));
         return new Promise((resolve, reject) => {
             const id = this.nextId++;
-
-            this.pendingRequests.set(id, { resolve, reject });
-
-            // Timeout handling
             const timeoutId = setTimeout(() => {
-                if (this.pendingRequests.has(id)) {
-                    this.pendingRequests.delete(id);
-                    const error = new Error(`Request timeout: ${method}`);
-                    error.code = -32000;
-                    reject(error);
-                }
+                if (this.pendingRequests.delete(id)) reject(new Error("Request timeout: " + method));
             }, timeout);
-
-            // Store timeout ID for cleanup
-            const pending = this.pendingRequests.get(id);
-            pending.timeoutId = timeoutId;
-
-            // Override resolve/reject to clear timeout
-            const originalResolve = pending.resolve;
-            const originalReject = pending.reject;
-            pending.resolve = (value) => {
-                clearTimeout(timeoutId);
-                originalResolve(value);
-            };
-            pending.reject = (error) => {
-                clearTimeout(timeoutId);
-                originalReject(error);
-            };
-
-            const message = {
-                jsonrpc: '2.0',
-                id: id,
-                method: method,
-                params: params
-            };
-
-            window.parent.postMessage(message, '*');
+            this.pendingRequests.set(id, {
+                resolve: value => { clearTimeout(timeoutId); resolve(value); },
+                reject: error => { clearTimeout(timeoutId); reject(error); },
+            });
+            window.parent.postMessage({ jsonrpc: "2.0", id, method, params }, "*");
         });
     }
 
-    /**
-     * Send a notification (no response expected).
-     * Alias: send() — used by UI templates.
-     * @param {string} method - Method name
-     * @param {object} params - Method parameters
-     */
-    send(method, params = {}) {
-        return this.notify(method, params);
-    }
-
-    /**
-     * Send a notification (no response expected).
-     * @param {string} method - Method name
-     * @param {object} params - Method parameters
-     */
+    send(method, params = {}) { this.notify(method, params); }
     notify(method, params = {}) {
-        const message = {
-            jsonrpc: '2.0',
-            method: method,
-            params: params
-        };
-
-        window.parent.postMessage(message, '*');
+        if (!this._isBounded(params)) return false;
+        window.parent.postMessage({ jsonrpc: "2.0", method, params }, "*");
+        return true;
     }
-
-    /**
-     * Add an allowed origin dynamically.
-     * @param {string} origin - Origin to add (e.g., 'https://example.com')
-     */
-    addOrigin(origin) {
-        this.allowedOrigins.add(origin);
-    }
-
-    /**
-     * Remove an allowed origin.
-     * @param {string} origin - Origin to remove
-     */
-    removeOrigin(origin) {
-        // Don't allow removing default security origins
-        const defaults = ['https://claude.ai', 'https://desktop.claude.ai', 'null'];
-        if (defaults.includes(origin)) {
-            console.warn(`[SecureMessenger] Cannot remove default origin: ${origin}`);
-            return;
-        }
-        this.allowedOrigins.delete(origin);
-    }
-
-    /**
-     * Check if an origin is allowed.
-     * @param {string} origin - Origin to check
-     * @returns {boolean}
-     */
-    isOriginAllowed(origin) {
-        return this.allowedOrigins.has(origin);
-    }
-
-    /**
-     * Get all registered method names.
-     * @returns {string[]}
-     */
-    getMethods() {
-        return Array.from(this.handlers.keys());
-    }
-
-    /**
-     * Destroy the messenger instance.
-     * Removes event listener and clears all pending requests.
-     */
+    addOrigin(origin) { if (typeof origin === "string") this.allowedOrigins.add(origin); }
+    isOriginAllowed(origin) { return this.allowedOrigins.has(origin); }
+    getMethods() { return Array.from(this.handlers.keys()); }
     destroy() {
-        // Clear all pending requests with rejection
-        for (const [id, pending] of this.pendingRequests) {
-            pending.reject(new Error('Messenger destroyed'));
-        }
+        if (this.initialized) window.removeEventListener("message", this._listener);
+        for (const pending of this.pendingRequests.values()) pending.reject(new Error("Messenger destroyed"));
         this.pendingRequests.clear();
         this.handlers.clear();
         this.initialized = false;
+        this.connected = false;
     }
 }
 
-// Export for bundling
-if (typeof module !== 'undefined' && module.exports) {
-    module.exports = { SecureMessenger };
-}
-
-if (typeof window !== 'undefined') {
+if (typeof module !== "undefined" && module.exports) module.exports = { SecureMessenger };
+if (typeof window !== "undefined") {
     window.SecureMessenger = new SecureMessenger();
     window.SecureMessenger.init();
 }

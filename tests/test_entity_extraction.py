@@ -254,9 +254,7 @@ async def test_remember_auto_extracts_entities(temp_storage):
 
 
 @pytest.fixture
-async def covenant_compliant_project_for_entities(
-    tmp_path, covenant_workspace_factory
-):
+async def covenant_compliant_project_for_entities(tmp_path, covenant_workspace_factory):
     """Create a project that passes communion and counsel checks for entity tests."""
     from daem0nmcp import server
 
@@ -283,7 +281,8 @@ async def test_mcp_recall_by_entity(covenant_compliant_project_for_entities):
     # Query by entity
     result = await covenant_compliant_project_for_entities.call(
         server.recall_by_entity,
-        entity_name="UserService", project_path=covenant_compliant_project_for_entities
+        entity_name="UserService",
+        project_path=covenant_compliant_project_for_entities,
     )
 
     assert "memories" in result
@@ -335,8 +334,7 @@ async def test_mcp_list_entities(covenant_compliant_project_for_entities):
 
     # List entities
     result = await covenant_compliant_project_for_entities.call(
-        server.list_entities,
-        project_path=covenant_compliant_project_for_entities
+        server.list_entities, project_path=covenant_compliant_project_for_entities
     )
 
     assert "entities" in result
@@ -361,7 +359,8 @@ async def test_mcp_list_entities_with_type_filter(
     # List only function entities
     result = await covenant_compliant_project_for_entities.call(
         server.list_entities,
-        entity_type="function", project_path=covenant_compliant_project_for_entities
+        entity_type="function",
+        project_path=covenant_compliant_project_for_entities,
     )
 
     assert "entities" in result
@@ -385,8 +384,7 @@ async def test_mcp_backfill_entities(covenant_compliant_project_for_entities):
 
     # Run backfill
     result = await covenant_compliant_project_for_entities.call(
-        server.backfill_entities,
-        project_path=covenant_compliant_project_for_entities
+        server.backfill_entities, project_path=covenant_compliant_project_for_entities
     )
 
     assert "memories_processed" in result
@@ -411,8 +409,7 @@ async def test_mcp_recall_by_entity_missing_project_path(
         workspace = covenant_workspace_factory(tmp_path)
         await workspace.brief()
         result = await workspace.call(
-            server.recall_by_entity,
-            entity_name="UserService", project_path=None
+            server.recall_by_entity, entity_name="UserService", project_path=None
         )
         assert "error" in result
         assert result["error"] == "MISSING_PROJECT_PATH"

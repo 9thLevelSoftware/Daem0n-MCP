@@ -26,9 +26,7 @@ class RetrievalSettingsTests(unittest.TestCase):
             getattr(settings, "retrieval_rrf_weights", None),
         )
         self.assertEqual(2, getattr(settings, "retrieval_graph_max_depth", None))
-        self.assertEqual(
-            50, getattr(settings, "retrieval_graph_max_branching", None)
-        )
+        self.assertEqual(50, getattr(settings, "retrieval_graph_max_branching", None))
         self.assertFalse(getattr(settings, "retrieval_rerank_enabled", None))
         self.assertEqual(
             25, getattr(settings, "retrieval_rerank_candidate_limit", None)

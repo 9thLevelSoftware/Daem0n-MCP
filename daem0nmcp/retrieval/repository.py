@@ -14,6 +14,7 @@ import math
 import os
 import re
 import sqlite3
+import threading
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -28,7 +29,6 @@ from .specialized_contract import (
     specialized_manifest_matches_contract,
 )
 from .types import EvidenceRef, FusedCandidate, RetrievalQuery, _aware_datetime
-
 
 _HASH = re.compile(r"^[0-9a-f]{64}$")
 _SUPPORTED_CHANNELS = frozenset(
@@ -49,9 +49,7 @@ _REQUIRED_TABLES = frozenset(
         "retrieval_documents",
     }
 )
-_REBUILD_MARKERS = frozenset(
-    {"rebuild_required_at_us", "rebuild_required_event_id"}
-)
+_REBUILD_MARKERS = frozenset({"rebuild_required_at_us", "rebuild_required_event_id"})
 _MAX_RELATION_PATH = 8
 _EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
 _REPOSITORY_WORKERS = BoundedWorkerPool(
@@ -66,6 +64,16 @@ class RetrievalRepositoryError(RuntimeError):
     def __init__(self, code: str) -> None:
         self.code = code
         super().__init__(code)
+
+
+class _EventRootCacheMissError(RuntimeError):
+    """Internal signal that a read snapshot needs a freshly verified root."""
+
+
+@dataclass(frozen=True, slots=True)
+class _CachedEventRoot:
+    revision: int
+    value: tuple[int, str, int | None, str | None]
 
 
 @dataclass(frozen=True, slots=True)
@@ -91,9 +99,7 @@ def _bounded_timeout(value: object) -> float:
     try:
         timeout = float(value)
     except (OverflowError, ValueError) as exc:
-        raise ValueError(
-            "timeout_seconds must be a positive finite number"
-        ) from exc
+        raise ValueError("timeout_seconds must be a positive finite number") from exc
     if not math.isfinite(timeout) or timeout <= 0 or timeout > 60:
         raise ValueError("timeout_seconds must be a positive finite number")
     return timeout
@@ -130,10 +136,7 @@ def sqlite_read_connection_factory(
 
 def _datetime_us(value: datetime) -> int:
     delta = value.astimezone(timezone.utc) - _EPOCH
-    result = (
-        (delta.days * 86_400 + delta.seconds) * 1_000_000
-        + delta.microseconds
-    )
+    result = (delta.days * 86_400 + delta.seconds) * 1_000_000 + delta.microseconds
     if result < -(2**63) or result > 2**63 - 1:
         raise ValueError("snapshot time is outside SQLite's supported range")
     return result
@@ -194,10 +197,7 @@ def _validated_candidates(
                     or not evidence.version_id.startswith("fact_")
                 )
             )
-            or (
-                evidence.provider != "temporal"
-                and evidence.version_id is not None
-            )
+            or (evidence.provider != "temporal" and evidence.version_id is not None)
             or (
                 not allow_merged_evidence
                 and (
@@ -226,16 +226,15 @@ class SQLiteRetrievalRepository:
         *,
         connection_factory: Callable[[], sqlite3.Connection] | None = None,
         timeout_seconds: float = 2.0,
+        initialization_timeout_seconds: float = 15.0,
         worker_pool: BoundedWorkerPool | None = None,
-        visibility_authorizer: Callable[[RetrievalQuery, str], bool]
-        | None = None,
+        visibility_authorizer: Callable[[RetrievalQuery, str], bool] | None = None,
     ) -> None:
         timeout = _bounded_timeout(timeout_seconds)
+        initialization_timeout = _bounded_timeout(initialization_timeout_seconds)
         if connection_factory is None:
             if database_path is None:
-                raise ValueError(
-                    "database_path or connection_factory must be supplied"
-                )
+                raise ValueError("database_path or connection_factory must be supplied")
             path = _database_path(database_path)
             connection_factory = sqlite_read_connection_factory(
                 path, busy_timeout_seconds=timeout
@@ -247,15 +246,12 @@ class SQLiteRetrievalRepository:
                     "provide exactly one database_path or connection_factory"
                 )
             self.database_path = None
-        if worker_pool is not None and not isinstance(
-            worker_pool, BoundedWorkerPool
-        ):
+        if worker_pool is not None and not isinstance(worker_pool, BoundedWorkerPool):
             raise ValueError("worker_pool must be a BoundedWorkerPool")
-        if visibility_authorizer is not None and not callable(
-            visibility_authorizer
-        ):
+        if visibility_authorizer is not None and not callable(visibility_authorizer):
             raise ValueError("visibility_authorizer must be callable")
         self._timeout_seconds = timeout
+        self._initialization_timeout_seconds = initialization_timeout
         self._worker_pool = worker_pool or _REPOSITORY_WORKERS
         self._visibility_authorizer = (
             visibility_authorizer
@@ -263,9 +259,31 @@ class SQLiteRetrievalRepository:
             else lambda _query, visibility: visibility == "workspace"
         )
         assert connection_factory is not None
-        self._connection_factory: Callable[[], sqlite3.Connection] = (
-            connection_factory
-        )
+        self._connection_factory: Callable[[], sqlite3.Connection] = connection_factory
+        self._revision_lock = threading.RLock()
+        self._revision_connection: sqlite3.Connection | None = None
+        self._event_root_cache: dict[str, _CachedEventRoot] = {}
+        self._initialization_lock = threading.Lock()
+        self._initializations: dict[str, asyncio.Task[None]] = {}
+        self._lifecycle = threading.Condition()
+        self._active_operations = 0
+        self._closed = False
+
+    def close(self) -> None:
+        """Close the revision observer after admitted reads have finished."""
+
+        with self._lifecycle:
+            if self._closed:
+                return
+            self._closed = True
+            while self._active_operations:
+                self._lifecycle.wait()
+        with self._revision_lock:
+            connection = self._revision_connection
+            self._revision_connection = None
+            self._event_root_cache.clear()
+            if connection is not None:
+                connection.close()
 
     async def load_policy_records(
         self,
@@ -274,12 +292,11 @@ class SQLiteRetrievalRepository:
         *,
         snapshot_time: datetime,
     ) -> tuple[PolicyRecord, ...]:
-        candidate_values = _validated_candidates(
-            query, candidates, snapshot_time
-        )
+        candidate_values = _validated_candidates(query, candidates, snapshot_time)
         if not candidate_values:
             return ()
-        return await self._run(
+        return await self._run_with_verified_root(
+            query.workspace_id,
             lambda: self._load_policy_records_sync(
                 query, candidate_values, snapshot_time
             ),
@@ -301,23 +318,100 @@ class SQLiteRetrievalRepository:
         )
         if not candidate_values:
             return ()
-        return await self._run(
+        return await self._run_with_verified_root(
+            query.workspace_id,
             lambda: self._load_selected_evidence_sync(
                 query, candidate_values, snapshot_time
             ),
             "EVIDENCE_CONTENT_UNAVAILABLE",
         )
 
+    async def _run_with_verified_root(
+        self,
+        workspace_id: str,
+        operation: Callable[[], object],
+        code: str,
+    ):
+        if self.database_path is None:
+            return await self._run(operation, code)
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + self._initialization_timeout_seconds
+        while True:
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                raise RetrievalRepositoryError("REPOSITORY_TIMEOUT") from None
+            try:
+                await self._ensure_event_root(workspace_id, timeout=remaining)
+                return await self._run(operation, code)
+            except _EventRootCacheMissError:
+                continue
+            except asyncio.TimeoutError:
+                raise RetrievalRepositoryError("REPOSITORY_TIMEOUT") from None
+            except BoundedWorkerBusyError:
+                raise RetrievalRepositoryError("REPOSITORY_BUSY") from None
+            except RetrievalRepositoryError as exc:
+                if exc.code in {
+                    "POLICY_STATE_UNAVAILABLE",
+                    "EVIDENCE_CONTENT_UNAVAILABLE",
+                }:
+                    raise RetrievalRepositoryError(code) from None
+                raise
+
+    async def _ensure_event_root(self, workspace_id: str, *, timeout: float) -> None:
+        loop = asyncio.get_running_loop()
+        with self._initialization_lock:
+            task = self._initializations.get(workspace_id)
+            if task is None or task.done():
+                task = loop.create_task(
+                    self._worker_pool.run(
+                        lambda: self._tracked_operation(
+                            lambda: self._initialize_event_root_sync(workspace_id)
+                        )
+                    )
+                )
+                self._initializations[workspace_id] = task
+
+                def finish_initialization(completed: asyncio.Task[None]) -> None:
+                    self._finish_initialization(workspace_id, completed)
+
+                task.add_done_callback(finish_initialization)
+        await asyncio.wait_for(asyncio.shield(task), timeout=timeout)
+
+    def _finish_initialization(
+        self, workspace_id: str, task: asyncio.Task[None]
+    ) -> None:
+        with self._initialization_lock:
+            if self._initializations.get(workspace_id) is task:
+                self._initializations.pop(workspace_id, None)
+        if task.cancelled():
+            return
+        # Retrieve the exception even when every waiter timed out or was cancelled.
+        task.exception()
+
+    def _tracked_operation(self, operation: Callable[[], object]):
+        with self._lifecycle:
+            if self._closed:
+                raise RetrievalRepositoryError("POLICY_STATE_UNAVAILABLE")
+            self._active_operations += 1
+        try:
+            return operation()
+        finally:
+            with self._lifecycle:
+                self._active_operations -= 1
+                self._lifecycle.notify_all()
+
     async def _run(self, operation: Callable[[], object], code: str):
         try:
             return await asyncio.wait_for(
-                self._worker_pool.run(operation),
+                self._worker_pool.run(lambda: self._tracked_operation(operation)),
                 timeout=self._timeout_seconds,
             )
         except asyncio.TimeoutError:
             raise RetrievalRepositoryError("REPOSITORY_TIMEOUT") from None
         except BoundedWorkerBusyError:
             raise RetrievalRepositoryError("REPOSITORY_BUSY") from None
+        except _EventRootCacheMissError:
+            raise
         except RetrievalRepositoryError as exc:
             if exc.code in {
                 "POLICY_STATE_UNAVAILABLE",
@@ -331,17 +425,11 @@ class SQLiteRetrievalRepository:
     def _open_connection(self) -> sqlite3.Connection:
         connection = self._connection_factory()
         if not isinstance(connection, sqlite3.Connection):
-            raise TypeError(
-                "connection_factory must return a SQLite connection"
-            )
+            raise TypeError("connection_factory must return a SQLite connection")
         try:
-            database_row = connection.execute(
-                "PRAGMA database_list"
-            ).fetchone()
+            database_row = connection.execute("PRAGMA database_list").fetchone()
             if database_row is None or not str(database_row[2]):
-                raise TypeError(
-                    "connection_factory must open a file-backed database"
-                )
+                raise TypeError("connection_factory must open a file-backed database")
             connection.row_factory = sqlite3.Row
             connection.execute(
                 f"PRAGMA busy_timeout={int(self._timeout_seconds * 1_000)}"
@@ -361,9 +449,8 @@ class SQLiteRetrievalRepository:
     ) -> tuple[PolicyRecord, ...]:
         connection = self._open_connection()
         try:
-            connection.execute("BEGIN")
-            self._require_schema(connection)
-            root = self._event_root(connection, query.workspace_id)
+            revision = self._begin_read_snapshot(connection)
+            root = self._event_root(connection, query.workspace_id, revision)
             manifests: dict[str, _Manifest] = {}
             records = tuple(
                 self._load_policy_record(
@@ -389,22 +476,17 @@ class SQLiteRetrievalRepository:
     ) -> tuple[SelectedEvidence, ...]:
         connection = self._open_connection()
         try:
-            connection.execute("BEGIN")
-            self._require_schema(connection)
-            root = self._event_root(connection, query.workspace_id)
+            revision = self._begin_read_snapshot(connection)
+            root = self._event_root(connection, query.workspace_id, revision)
             manifests: dict[str, _Manifest] = {}
             retained_states: list[PolicyRecord] = []
             probe_count = 0
-            maximum_probes = (
-                query.candidate_limit * _MAX_PROVIDER_FANOUT
-            )
+            maximum_probes = query.candidate_limit * _MAX_PROVIDER_FANOUT
             for candidate in candidates:
                 probes = self._evidence_probes(candidate)
                 probe_count += len(probes)
                 if probe_count > maximum_probes:
-                    raise RetrievalRepositoryError(
-                        "EVIDENCE_CONTENT_UNAVAILABLE"
-                    )
+                    raise RetrievalRepositoryError("EVIDENCE_CONTENT_UNAVAILABLE")
                 states: dict[tuple[str, str | None], PolicyRecord] = {}
                 for probe in probes:
                     state = self._load_policy_record(
@@ -425,14 +507,10 @@ class SQLiteRetrievalRepository:
                     if (
                         policy_result.rejections
                         or len(policy_result.candidates) != 1
-                        or policy_result.candidates[0].record_id
-                        != probe.record_id
-                        or policy_result.candidates[0].version_id
-                        != probe.version_id
+                        or policy_result.candidates[0].record_id != probe.record_id
+                        or policy_result.candidates[0].version_id != probe.version_id
                     ):
-                        raise RetrievalRepositoryError(
-                            "EVIDENCE_CONTENT_UNAVAILABLE"
-                        )
+                        raise RetrievalRepositoryError("EVIDENCE_CONTENT_UNAVAILABLE")
                     states[state.identity] = state
                 retained_identity = (
                     candidate.record_id,
@@ -443,9 +521,7 @@ class SQLiteRetrievalRepository:
                     state.content_hash != retained_state.content_hash
                     for state in states.values()
                 ):
-                    raise RetrievalRepositoryError(
-                        "EVIDENCE_CONTENT_UNAVAILABLE"
-                    )
+                    raise RetrievalRepositoryError("EVIDENCE_CONTENT_UNAVAILABLE")
                 retained_states.append(retained_state)
             selected = tuple(
                 self._hydrate_selected(
@@ -457,9 +533,7 @@ class SQLiteRetrievalRepository:
                     root,
                     manifests,
                 )
-                for candidate, state in zip(
-                    candidates, retained_states, strict=True
-                )
+                for candidate, state in zip(candidates, retained_states, strict=True)
             )
             connection.rollback()
             return selected
@@ -472,14 +546,12 @@ class SQLiteRetrievalRepository:
     ) -> tuple[FusedCandidate, ...]:
         grouped: dict[tuple[str, str | None], list[EvidenceRef]] = {}
         for evidence in candidate.evidence_refs:
-            grouped.setdefault(
-                (evidence.record_id, evidence.version_id), []
-            ).append(evidence)
+            grouped.setdefault((evidence.record_id, evidence.version_id), []).append(
+                evidence
+            )
         ranks = dict(candidate.channel_ranks)
         generations = dict(candidate.manifest_generations)
-        evidence_channels = {
-            evidence.provider for evidence in candidate.evidence_refs
-        }
+        evidence_channels = {evidence.provider for evidence in candidate.evidence_refs}
         if evidence_channels != set(candidate.channels):
             raise RetrievalRepositoryError("EVIDENCE_CONTENT_UNAVAILABLE")
         probes: list[FusedCandidate] = []
@@ -494,16 +566,12 @@ class SQLiteRetrievalRepository:
         )
         for identity in identities:
             grouped_refs = tuple(grouped[identity])
-            channels = frozenset(
-                evidence.provider for evidence in grouped_refs
-            )
+            channels = frozenset(evidence.provider for evidence in grouped_refs)
             if not channels or any(
                 channel not in ranks or channel not in generations
                 for channel in channels
             ):
-                raise RetrievalRepositoryError(
-                    "EVIDENCE_CONTENT_UNAVAILABLE"
-                )
+                raise RetrievalRepositoryError("EVIDENCE_CONTENT_UNAVAILABLE")
             primary = (
                 candidate.evidence
                 if candidate.evidence in grouped_refs
@@ -530,10 +598,7 @@ class SQLiteRetrievalRepository:
                         sorted((channel, ranks[channel]) for channel in channels)
                     ),
                     manifest_generations=tuple(
-                        sorted(
-                            (channel, generations[channel])
-                            for channel in channels
-                        )
+                        sorted((channel, generations[channel]) for channel in channels)
                     ),
                     highlights=candidate.highlights,
                     policy_notes=candidate.policy_notes,
@@ -573,8 +638,7 @@ class SQLiteRetrievalRepository:
             and _safe_hash(record[2]) == state.content_hash
             and (
                 str(record[3]) in state.source_event_ids
-                or str(record[3])
-                == document_metadata[0]
+                or str(record[3]) == document_metadata[0]
             )
         ):
             raise RetrievalRepositoryError("EVIDENCE_CONTENT_UNAVAILABLE")
@@ -582,15 +646,12 @@ class SQLiteRetrievalRepository:
         try:
             tags = json.loads(str(record[7]))
         except (TypeError, ValueError, RecursionError) as exc:
-            raise RetrievalRepositoryError(
-                "EVIDENCE_CONTENT_UNAVAILABLE"
-            ) from exc
+            raise RetrievalRepositoryError("EVIDENCE_CONTENT_UNAVAILABLE") from exc
         if (
             (rationale is not None and not isinstance(rationale, str))
             or not isinstance(tags, list)
             or not all(
-                isinstance(tag, str) and tag and tag == tag.strip()
-                for tag in tags
+                isinstance(tag, str) and tag and tag == tag.strip() for tag in tags
             )
             or len(tags) != len(set(tags))
             or frozenset(tags) != state.tags
@@ -608,18 +669,14 @@ class SQLiteRetrievalRepository:
                 len(supersession) != 1
                 or state.superseded_by_version_id != supersession[0]
             ):
-                raise RetrievalRepositoryError(
-                    "EVIDENCE_CONTENT_UNAVAILABLE"
-                )
+                raise RetrievalRepositoryError("EVIDENCE_CONTENT_UNAVAILABLE")
             status = "superseded"
             superseded_by = supersession[0]
         else:
             status = "current"
             superseded_by = None
 
-        transaction_at_us = _datetime_us(
-            query.as_of_transaction_time or snapshot_time
-        )
+        transaction_at_us = _datetime_us(query.as_of_transaction_time or snapshot_time)
         procedure_steps = self._selected_procedure_steps(
             connection,
             query,
@@ -739,9 +796,8 @@ class SQLiteRetrievalRepository:
         ).fetchall()
         if not rows:
             return ()
-        expected_ordinal = 0
         steps: list[str] = []
-        for row in rows:
+        for expected_ordinal, row in enumerate(rows):
             ordinal = _plain_int(row[0], minimum=0)
             step_text = row[1]
             if (
@@ -749,27 +805,18 @@ class SQLiteRetrievalRepository:
                 or not isinstance(step_text, str)
                 or not step_text.strip()
             ):
-                raise RetrievalRepositoryError(
-                    "EVIDENCE_CONTENT_UNAVAILABLE"
-                )
+                raise RetrievalRepositoryError("EVIDENCE_CONTENT_UNAVAILABLE")
             _safe_hash(row[2])
             if sha256_json(step_text) != str(row[2]):
-                raise RetrievalRepositoryError(
-                    "EVIDENCE_CONTENT_UNAVAILABLE"
-                )
-            event = self._source_event(
-                connection, query.workspace_id, str(row[3])
-            )
+                raise RetrievalRepositoryError("EVIDENCE_CONTENT_UNAVAILABLE")
+            event = self._source_event(connection, query.workspace_id, str(row[3]))
             if (
                 event.stream_id != record_id
                 or event.stream_kind != "memory"
                 or event.recorded_at_us > transaction_at_us
             ):
-                raise RetrievalRepositoryError(
-                    "EVIDENCE_CONTENT_UNAVAILABLE"
-                )
+                raise RetrievalRepositoryError("EVIDENCE_CONTENT_UNAVAILABLE")
             steps.append(step_text)
-            expected_ordinal += 1
         return tuple(steps)
 
     def _selected_outcome(
@@ -816,9 +863,7 @@ class SQLiteRetrievalRepository:
         ):
             raise RetrievalRepositoryError("EVIDENCE_CONTENT_UNAVAILABLE")
         worked_value = None if worked is None else worked == 1
-        event = self._source_event(
-            connection, query.workspace_id, str(row[2])
-        )
+        event = self._source_event(connection, query.workspace_id, str(row[2]))
         if not (
             event.stream_id == record_id
             and event.stream_kind == "memory"
@@ -828,9 +873,7 @@ class SQLiteRetrievalRepository:
             raise RetrievalRepositoryError("EVIDENCE_CONTENT_UNAVAILABLE")
         if outcome is None or not outcome.strip():
             if worked == 0:
-                raise RetrievalRepositoryError(
-                    "EVIDENCE_CONTENT_UNAVAILABLE"
-                )
+                raise RetrievalRepositoryError("EVIDENCE_CONTENT_UNAVAILABLE")
             return None, False, worked_value
         return (
             outcome,
@@ -847,8 +890,90 @@ class SQLiteRetrievalRepository:
         if not _REQUIRED_TABLES.issubset(available):
             raise RetrievalRepositoryError("POLICY_STATE_UNAVAILABLE")
 
-    @staticmethod
+    def _begin_read_snapshot(self, connection: sqlite3.Connection) -> int | None:
+        if self.database_path is None:
+            connection.execute("BEGIN")
+            self._require_schema(connection)
+            return None
+        with self._revision_lock:
+            before = self._observer_revision_locked()
+            connection.execute("BEGIN")
+            self._require_schema(connection)
+            # Reading the canonical table pins this connection's WAL snapshot.
+            connection.execute("SELECT 1 FROM memory_events LIMIT 1").fetchone()
+            after = self._observer_revision_locked()
+            if before != after:
+                raise _EventRootCacheMissError
+            return before
+
+    def _observer_revision_locked(self) -> int:
+        connection = self._revision_connection
+        if connection is None:
+            path = self.database_path
+            if path is None:
+                raise _EventRootCacheMissError
+            connection = sqlite3.connect(
+                f"{path.as_uri()}?mode=ro",
+                uri=True,
+                timeout=self._timeout_seconds,
+                check_same_thread=False,
+                isolation_level=None,
+            )
+            try:
+                connection.execute(
+                    f"PRAGMA busy_timeout={int(self._timeout_seconds * 1_000)}"
+                )
+                connection.execute("PRAGMA query_only=ON")
+            except Exception:
+                connection.close()
+                raise
+            self._revision_connection = connection
+        row = connection.execute("PRAGMA data_version").fetchone()
+        if row is None:
+            raise RetrievalRepositoryError("POLICY_STATE_UNAVAILABLE")
+        return _plain_int(row[0], minimum=1)
+
+    def _initialize_event_root_sync(self, workspace_id: str) -> None:
+        connection = self._open_connection()
+        try:
+            revision = self._begin_read_snapshot(connection)
+            if revision is None:
+                return
+            with self._revision_lock:
+                cached = self._event_root_cache.get(workspace_id)
+                if cached is not None and cached.revision == revision:
+                    connection.rollback()
+                    return
+            root = self._calculate_event_root(connection, workspace_id)
+            with self._revision_lock:
+                if self._observer_revision_locked() != revision:
+                    raise _EventRootCacheMissError
+                self._event_root_cache[workspace_id] = _CachedEventRoot(
+                    revision=revision,
+                    value=root,
+                )
+            connection.rollback()
+        finally:
+            if connection.in_transaction:
+                connection.rollback()
+            connection.close()
+
     def _event_root(
+        self,
+        connection: sqlite3.Connection,
+        workspace_id: str,
+        revision: int | None,
+    ) -> tuple[int, str, int | None, str | None]:
+        if revision is None:
+            return self._calculate_event_root(connection, workspace_id)
+        with self._revision_lock:
+            cached = self._event_root_cache.get(workspace_id)
+            if cached is None or cached.revision != revision:
+                raise _EventRootCacheMissError
+            return cached.value
+
+    @staticmethod
+    def _calculate_event_root(
         connection: sqlite3.Connection,
         workspace_id: str,
     ) -> tuple[int, str, int | None, str | None]:
@@ -864,9 +989,7 @@ class SQLiteRetrievalRepository:
             try:
                 digest.update(bytes.fromhex(event_hash))
             except ValueError as exc:
-                raise RetrievalRepositoryError(
-                    "POLICY_STATE_UNAVAILABLE"
-                ) from exc
+                raise RetrievalRepositoryError("POLICY_STATE_UNAVAILABLE") from exc
             count += 1
         cursor = connection.execute(
             "SELECT recorded_at_us,event_id FROM memory_events "
@@ -919,9 +1042,7 @@ class SQLiteRetrievalRepository:
         try:
             details = json.loads(str(row[6]))
         except (TypeError, ValueError, RecursionError) as exc:
-            raise RetrievalRepositoryError(
-                "POLICY_STATE_UNAVAILABLE"
-            ) from exc
+            raise RetrievalRepositoryError("POLICY_STATE_UNAVAILABLE") from exc
         if not isinstance(details, dict):
             raise RetrievalRepositoryError("POLICY_STATE_UNAVAILABLE")
         marked_stale = bool(_REBUILD_MARKERS.intersection(details))
@@ -939,22 +1060,14 @@ class SQLiteRetrievalRepository:
                 and source_count < root[0]
                 and set(_REBUILD_MARKERS).issubset(details)
             ):
-                raise RetrievalRepositoryError(
-                    "POLICY_STATE_UNAVAILABLE"
-                )
+                raise RetrievalRepositoryError("POLICY_STATE_UNAVAILABLE")
             marker_at = _plain_int(details["rebuild_required_at_us"])
             marker_event_id = details["rebuild_required_event_id"]
             if not isinstance(marker_event_id, str):
-                raise RetrievalRepositoryError(
-                    "POLICY_STATE_UNAVAILABLE"
-                )
-            marker_event = self._source_event(
-                connection, workspace_id, marker_event_id
-            )
+                raise RetrievalRepositoryError("POLICY_STATE_UNAVAILABLE")
+            marker_event = self._source_event(connection, workspace_id, marker_event_id)
             if marker_event.recorded_at_us != marker_at:
-                raise RetrievalRepositoryError(
-                    "POLICY_STATE_UNAVAILABLE"
-                )
+                raise RetrievalRepositoryError("POLICY_STATE_UNAVAILABLE")
         if (
             channel in SPECIALIZED_PROJECTIONS
             and not specialized_manifest_matches_contract(
@@ -995,9 +1108,7 @@ class SQLiteRetrievalRepository:
         elif channel == "dense":
             provider_key = details.get("provider_key")
             if not isinstance(provider_key, str) or not provider_key:
-                raise RetrievalRepositoryError(
-                    "POLICY_STATE_UNAVAILABLE"
-                )
+                raise RetrievalRepositoryError("POLICY_STATE_UNAVAILABLE")
             sql = (
                 "SELECT count(*) FROM dense_projection_refs "
                 "WHERE workspace_id=? AND projection_generation=? "
@@ -1017,10 +1128,7 @@ class SQLiteRetrievalRepository:
             )
             parameters = (workspace_id, generation)
         elif channel == "temporal":
-            sql = (
-                "SELECT count(*) FROM memory_fact_versions "
-                "WHERE workspace_id=?"
-            )
+            sql = "SELECT count(*) FROM memory_fact_versions WHERE workspace_id=?"
             parameters = (workspace_id,)
         elif channel == "graph":
             sql = (
@@ -1049,9 +1157,7 @@ class SQLiteRetrievalRepository:
             "WHERE workspace_id=? AND event_id=?",
             (workspace_id, event_id),
         ).fetchone()
-        if row is None or str(row[0]).removeprefix("evt_") != _safe_hash(
-            row[5]
-        ):
+        if row is None or str(row[0]).removeprefix("evt_") != _safe_hash(row[5]):
             raise RetrievalRepositoryError("POLICY_STATE_UNAVAILABLE")
         return _Event(
             event_id=str(row[0]),
@@ -1088,15 +1194,12 @@ class SQLiteRetrievalRepository:
         try:
             tags_json = json.loads(str(row[6]))
         except (TypeError, ValueError, RecursionError) as exc:
-            raise RetrievalRepositoryError(
-                "POLICY_STATE_UNAVAILABLE"
-            ) from exc
+            raise RetrievalRepositoryError("POLICY_STATE_UNAVAILABLE") from exc
         if (
             row[3] != "object"
             or not isinstance(tags_json, list)
             or not all(
-                isinstance(tag, str) and tag and tag == tag.strip()
-                for tag in tags_json
+                isinstance(tag, str) and tag and tag == tag.strip() for tag in tags_json
             )
             or len(tags_json) != len(set(tags_json))
         ):
@@ -1113,9 +1216,7 @@ class SQLiteRetrievalRepository:
         if archived_value not in {0, 1}:
             raise RetrievalRepositoryError("POLICY_STATE_UNAVAILABLE")
         category = str(row[1])
-        record_event = self._source_event(
-            connection, query.workspace_id, str(row[9])
-        )
+        record_event = self._source_event(connection, query.workspace_id, str(row[9]))
         if (
             record_event.stream_id != candidate.record_id
             or record_event.stream_kind != "memory"
@@ -1124,12 +1225,8 @@ class SQLiteRetrievalRepository:
         ):
             raise RetrievalRepositoryError("POLICY_STATE_UNAVAILABLE")
 
-        stale_lexical_candidate = (
-            candidate.channels == frozenset({"lexical"})
-            and all(
-                evidence.provider == "lexical"
-                for evidence in candidate.evidence_refs
-            )
+        stale_lexical_candidate = candidate.channels == frozenset({"lexical"}) and all(
+            evidence.provider == "lexical" for evidence in candidate.evidence_refs
         )
         lexical = self._active_manifest(
             connection,
@@ -1165,16 +1262,10 @@ class SQLiteRetrievalRepository:
         source_event_ids: set[str] = set()
         projection_hashes: dict[str, str] = {}
         active_generations: dict[str, int] = {}
-        valid_from_us = (
-            None if document[1] is None else _plain_int(document[1])
-        )
-        valid_to_us = (
-            None if document[2] is None else _plain_int(document[2])
-        )
+        valid_from_us = None if document[1] is None else _plain_int(document[1])
+        valid_to_us = None if document[2] is None else _plain_int(document[2])
         transaction_from = _plain_int(document[3])
-        transaction_to_us = (
-            None if document[4] is None else _plain_int(document[4])
-        )
+        transaction_to_us = None if document[4] is None else _plain_int(document[4])
         superseded_by_version_id: str | None = None
         has_unresolved_contradiction = False
         for channel, generation in candidate.manifest_generations:
@@ -1201,20 +1292,14 @@ class SQLiteRetrievalRepository:
             )
             if evidence.provider == "lexical":
                 if event.event_id != str(document[8]):
-                    raise RetrievalRepositoryError(
-                        "POLICY_STATE_UNAVAILABLE"
-                    )
+                    raise RetrievalRepositoryError("POLICY_STATE_UNAVAILABLE")
             elif evidence.provider == "dense":
                 dense_manifest = manifests.get("dense")
                 if dense_manifest is None:
-                    raise RetrievalRepositoryError(
-                        "POLICY_STATE_UNAVAILABLE"
-                    )
+                    raise RetrievalRepositoryError("POLICY_STATE_UNAVAILABLE")
                 provider_key = dense_manifest.details.get("provider_key")
                 if not isinstance(provider_key, str) or not provider_key:
-                    raise RetrievalRepositoryError(
-                        "POLICY_STATE_UNAVAILABLE"
-                    )
+                    raise RetrievalRepositoryError("POLICY_STATE_UNAVAILABLE")
                 dense = connection.execute(
                     "SELECT content_hash,model_id,dimension,state,"
                     "updated_event_id,updated_at_us FROM dense_projection_refs "
@@ -1238,15 +1323,11 @@ class SQLiteRetrievalRepository:
                     and dense_manifest.details.get("model_id") == dense[1]
                     and dense_manifest.details.get("dimension") == dense[2]
                 ):
-                    raise RetrievalRepositoryError(
-                        "POLICY_STATE_UNAVAILABLE"
-                    )
+                    raise RetrievalRepositoryError("POLICY_STATE_UNAVAILABLE")
             elif evidence.provider == "procedure":
                 procedure_manifest = manifests.get("procedure")
                 if procedure_manifest is None:
-                    raise RetrievalRepositoryError(
-                        "POLICY_STATE_UNAVAILABLE"
-                    )
+                    raise RetrievalRepositoryError("POLICY_STATE_UNAVAILABLE")
                 procedure_columns = "ordinal,step_hash,source_event_id"
                 if verify_structured_content:
                     procedure_columns += ",step_text"
@@ -1261,16 +1342,12 @@ class SQLiteRetrievalRepository:
                     ),
                 ).fetchall()
                 if not steps:
-                    raise RetrievalRepositoryError(
-                        "POLICY_STATE_UNAVAILABLE"
-                    )
+                    raise RetrievalRepositoryError("POLICY_STATE_UNAVAILABLE")
                 selected_events: set[str] = set()
                 selected_recorded_at: list[int] = []
                 for expected_ordinal, step in enumerate(steps):
                     if _plain_int(step[0], minimum=0) != expected_ordinal:
-                        raise RetrievalRepositoryError(
-                            "POLICY_STATE_UNAVAILABLE"
-                        )
+                        raise RetrievalRepositoryError("POLICY_STATE_UNAVAILABLE")
                     step_hash = _safe_hash(step[1])
                     if verify_structured_content:
                         step_text = step[3]
@@ -1279,9 +1356,7 @@ class SQLiteRetrievalRepository:
                             or not step_text.strip()
                             or sha256_json(step_text) != step_hash
                         ):
-                            raise RetrievalRepositoryError(
-                                "POLICY_STATE_UNAVAILABLE"
-                            )
+                            raise RetrievalRepositoryError("POLICY_STATE_UNAVAILABLE")
                     step_event = self._source_event(
                         connection, query.workspace_id, str(step[2])
                     )
@@ -1289,24 +1364,16 @@ class SQLiteRetrievalRepository:
                         step_event.stream_id != candidate.record_id
                         or step_event.stream_kind != "memory"
                     ):
-                        raise RetrievalRepositoryError(
-                            "POLICY_STATE_UNAVAILABLE"
-                        )
+                        raise RetrievalRepositoryError("POLICY_STATE_UNAVAILABLE")
                     selected_events.add(step_event.event_id)
                     selected_recorded_at.append(step_event.recorded_at_us)
                 if event.event_id not in selected_events:
-                    raise RetrievalRepositoryError(
-                        "POLICY_STATE_UNAVAILABLE"
-                    )
-                transaction_from = max(
-                    transaction_from, *selected_recorded_at
-                )
+                    raise RetrievalRepositoryError("POLICY_STATE_UNAVAILABLE")
+                transaction_from = max(transaction_from, *selected_recorded_at)
             elif evidence.provider == "outcome":
                 outcome_manifest = manifests.get("outcome")
                 if outcome_manifest is None:
-                    raise RetrievalRepositoryError(
-                        "POLICY_STATE_UNAVAILABLE"
-                    )
+                    raise RetrievalRepositoryError("POLICY_STATE_UNAVAILABLE")
                 outcome_columns = "worked,outcome_event_id,transaction_at_us"
                 if verify_structured_content:
                     outcome_columns += ",outcome_text"
@@ -1321,18 +1388,14 @@ class SQLiteRetrievalRepository:
                     ),
                 ).fetchone()
                 if outcome is None or outcome[0] not in {None, 0, 1}:
-                    raise RetrievalRepositoryError(
-                        "POLICY_STATE_UNAVAILABLE"
-                    )
+                    raise RetrievalRepositoryError("POLICY_STATE_UNAVAILABLE")
                 if not (
                     event.event_id == str(outcome[1])
                     and event.stream_id == candidate.record_id
                     and event.stream_kind == "memory"
                     and event.recorded_at_us == _plain_int(outcome[2])
                 ):
-                    raise RetrievalRepositoryError(
-                        "POLICY_STATE_UNAVAILABLE"
-                    )
+                    raise RetrievalRepositoryError("POLICY_STATE_UNAVAILABLE")
                 if verify_structured_content:
                     canonical_outcome = connection.execute(
                         "SELECT worked,outcome FROM memory_records "
@@ -1345,23 +1408,15 @@ class SQLiteRetrievalRepository:
                         and canonical_outcome[1] == outcome[3]
                         and (
                             outcome[3] is None
-                            or (
-                                isinstance(outcome[3], str)
-                                and outcome[3].strip()
-                            )
+                            or (isinstance(outcome[3], str) and outcome[3].strip())
                         )
                     ):
-                        raise RetrievalRepositoryError(
-                            "POLICY_STATE_UNAVAILABLE"
-                        )
+                        raise RetrievalRepositoryError("POLICY_STATE_UNAVAILABLE")
             elif evidence.provider == "temporal":
-                if (
-                    candidate.version_id is None
-                    or not candidate.version_id.startswith("fact_")
+                if candidate.version_id is None or not candidate.version_id.startswith(
+                    "fact_"
                 ):
-                    raise RetrievalRepositoryError(
-                        "POLICY_STATE_UNAVAILABLE"
-                    )
+                    raise RetrievalRepositoryError("POLICY_STATE_UNAVAILABLE")
                 fact = connection.execute(
                     "SELECT fact_id,version,subject_record_id,metadata_json,"
                     "valid_from_us,valid_to_us,transaction_from_us,"
@@ -1372,27 +1427,19 @@ class SQLiteRetrievalRepository:
                     (query.workspace_id, candidate.version_id),
                 ).fetchone()
                 if fact is None:
-                    raise RetrievalRepositoryError(
-                        "POLICY_STATE_UNAVAILABLE"
-                    )
+                    raise RetrievalRepositoryError("POLICY_STATE_UNAVAILABLE")
                 try:
                     fact_metadata = json.loads(str(fact[3]))
                 except (TypeError, ValueError, RecursionError) as exc:
-                    raise RetrievalRepositoryError(
-                        "POLICY_STATE_UNAVAILABLE"
-                    ) from exc
+                    raise RetrievalRepositoryError("POLICY_STATE_UNAVAILABLE") from exc
                 if not isinstance(fact_metadata, dict):
-                    raise RetrievalRepositoryError(
-                        "POLICY_STATE_UNAVAILABLE"
-                    )
+                    raise RetrievalRepositoryError("POLICY_STATE_UNAVAILABLE")
                 _safe_hash(fact[10])
                 contradiction_value = fact_metadata.get(
                     "has_unresolved_contradiction", False
                 )
                 if not isinstance(contradiction_value, bool):
-                    raise RetrievalRepositoryError(
-                        "POLICY_STATE_UNAVAILABLE"
-                    )
+                    raise RetrievalRepositoryError("POLICY_STATE_UNAVAILABLE")
                 fact_version = _plain_int(fact[1], minimum=1)
                 if not (
                     str(fact[2]) == candidate.record_id
@@ -1402,17 +1449,11 @@ class SQLiteRetrievalRepository:
                     and event.stream_version == fact_version
                     and event.recorded_at_us == _plain_int(fact[6])
                 ):
-                    raise RetrievalRepositoryError(
-                        "POLICY_STATE_UNAVAILABLE"
-                    )
+                    raise RetrievalRepositoryError("POLICY_STATE_UNAVAILABLE")
                 valid_from_us = _plain_int(fact[4])
-                valid_to_us = (
-                    None if fact[5] is None else _plain_int(fact[5])
-                )
+                valid_to_us = None if fact[5] is None else _plain_int(fact[5])
                 transaction_from = _plain_int(fact[6])
-                transaction_to_us = (
-                    None if fact[7] is None else _plain_int(fact[7])
-                )
+                transaction_to_us = None if fact[7] is None else _plain_int(fact[7])
                 has_unresolved_contradiction = contradiction_value
                 transaction_at_us = _datetime_us(
                     query.as_of_transaction_time or snapshot_time
@@ -1439,16 +1480,13 @@ class SQLiteRetrievalRepository:
                         or successor_event.stream_kind != "fact"
                         or successor_event.stream_version
                         != _plain_int(successor[2], minimum=1)
-                        or successor_event.recorded_at_us
-                        != _plain_int(successor[3])
+                        or successor_event.recorded_at_us != _plain_int(successor[3])
                         or (
                             fact[9] is not None
                             and str(fact[9]) != successor_event.event_id
                         )
                     ):
-                        raise RetrievalRepositoryError(
-                            "POLICY_STATE_UNAVAILABLE"
-                        )
+                        raise RetrievalRepositoryError("POLICY_STATE_UNAVAILABLE")
                     superseded_by_version_id = str(successor[0])
             elif evidence.provider == "graph":
                 if (
@@ -1456,12 +1494,8 @@ class SQLiteRetrievalRepository:
                     or not evidence.relation_path
                     or len(evidence.relation_path) > _MAX_RELATION_PATH
                 ):
-                    raise RetrievalRepositoryError(
-                        "POLICY_STATE_UNAVAILABLE"
-                    )
-                valid_at_us = _datetime_us(
-                    query.as_of_valid_time or snapshot_time
-                )
+                    raise RetrievalRepositoryError("POLICY_STATE_UNAVAILABLE")
+                valid_at_us = _datetime_us(query.as_of_valid_time or snapshot_time)
                 transaction_at_us = _datetime_us(
                     query.as_of_transaction_time or snapshot_time
                 )
@@ -1489,9 +1523,7 @@ class SQLiteRetrievalRepository:
                     elif current_record == target_id:
                         current_record = source_id
                     else:
-                        raise RetrievalRepositoryError(
-                            "POLICY_STATE_UNAVAILABLE"
-                        )
+                        raise RetrievalRepositoryError("POLICY_STATE_UNAVAILABLE")
                     relation_valid_from.append(edge_valid_from)
                     if edge_valid_to is not None:
                         relation_valid_to.append(edge_valid_to)
@@ -1501,20 +1533,15 @@ class SQLiteRetrievalRepository:
                     if not (
                         relation_valid_from[-1] <= valid_at_us
                         and (
-                            edge_valid_to is None
-                            or valid_at_us < relation_valid_to[-1]
+                            edge_valid_to is None or valid_at_us < relation_valid_to[-1]
                         )
-                        and relation_transaction_from[-1]
-                        <= transaction_at_us
+                        and relation_transaction_from[-1] <= transaction_at_us
                         and (
                             edge_transaction_to is None
-                            or transaction_at_us
-                            < relation_transaction_to[-1]
+                            or transaction_at_us < relation_transaction_to[-1]
                         )
                     ):
-                        raise RetrievalRepositoryError(
-                            "POLICY_STATE_UNAVAILABLE"
-                        )
+                        raise RetrievalRepositoryError("POLICY_STATE_UNAVAILABLE")
                 valid_from_us = max(
                     value
                     for value in (
@@ -1529,9 +1556,7 @@ class SQLiteRetrievalRepository:
                         for value in (valid_to_us, *relation_valid_to)
                         if value is not None
                     )
-                transaction_from = max(
-                    transaction_from, *relation_transaction_from
-                )
+                transaction_from = max(transaction_from, *relation_transaction_from)
                 if relation_transaction_to:
                     transaction_to_us = min(
                         value
@@ -1564,27 +1589,14 @@ class SQLiteRetrievalRepository:
                     fact_supersession,
                     fact_contradiction,
                 ) = fact_state
-                valid_at_us = _datetime_us(
-                    query.as_of_valid_time or snapshot_time
+                valid_at_us = _datetime_us(query.as_of_valid_time or snapshot_time)
+                document_valid_at = _plain_int(document[1]) <= valid_at_us and (
+                    document[2] is None or valid_at_us < _plain_int(document[2])
                 )
-                document_valid_at = (
-                    _plain_int(document[1]) <= valid_at_us
-                    and (
-                        document[2] is None
-                        or valid_at_us < _plain_int(document[2])
-                    )
+                fact_valid_at = fact_valid_from <= valid_at_us and (
+                    fact_valid_to is None or valid_at_us < fact_valid_to
                 )
-                fact_valid_at = (
-                    fact_valid_from <= valid_at_us
-                    and (
-                        fact_valid_to is None
-                        or valid_at_us < fact_valid_to
-                    )
-                )
-                if (
-                    fact_supersession is not None
-                    or document_valid_at != fact_valid_at
-                ):
+                if fact_supersession is not None or document_valid_at != fact_valid_at:
                     valid_from_us = fact_valid_from
                     valid_to_us = fact_valid_to
                     transaction_from = fact_transaction_from
@@ -1613,9 +1625,7 @@ class SQLiteRetrievalRepository:
         try:
             allowed = self._visibility_authorizer(query, visibility)
         except Exception as exc:
-            raise RetrievalRepositoryError(
-                "POLICY_STATE_UNAVAILABLE"
-            ) from exc
+            raise RetrievalRepositoryError("POLICY_STATE_UNAVAILABLE") from exc
         if not isinstance(allowed, bool):
             raise RetrievalRepositoryError("POLICY_STATE_UNAVAILABLE")
         del snapshot_time
@@ -1630,18 +1640,14 @@ class SQLiteRetrievalRepository:
             archived=bool(archived_value),
             category=category,
             tags=frozenset(tags_json),
-            valid_from=_to_datetime(
-                valid_from_us
-            ),
+            valid_from=_to_datetime(valid_from_us),
             valid_to=_to_datetime(valid_to_us),
             transaction_from=_to_datetime(transaction_from),
             transaction_to=_to_datetime(transaction_to_us),
             superseded_by_version_id=superseded_by_version_id,
             has_unresolved_contradiction=has_unresolved_contradiction,
             projection_content_hashes=tuple(sorted(projection_hashes.items())),
-            active_manifest_generations=tuple(
-                sorted(active_generations.items())
-            ),
+            active_manifest_generations=tuple(sorted(active_generations.items())),
         )
 
     def _graph_edge_state(
@@ -1671,9 +1677,7 @@ class SQLiteRetrievalRepository:
             valid_from = _plain_int(row[4])
             valid_to = None if row[5] is None else _plain_int(row[5])
             transaction_from = _plain_int(row[6])
-            transaction_to = (
-                None if row[7] is None else _plain_int(row[7])
-            )
+            transaction_to = None if row[7] is None else _plain_int(row[7])
             asserted_event_id = str(row[8])
             retracted_event_id = None if row[9] is None else str(row[9])
             _safe_hash(row[10])
@@ -1692,9 +1696,7 @@ class SQLiteRetrievalRepository:
             try:
                 target = json.loads(str(row[4]))
             except (TypeError, ValueError, RecursionError) as exc:
-                raise RetrievalRepositoryError(
-                    "POLICY_STATE_UNAVAILABLE"
-                ) from exc
+                raise RetrievalRepositoryError("POLICY_STATE_UNAVAILABLE") from exc
             if (
                 not isinstance(target, str)
                 or canonical_json_bytes(target).decode("utf-8") != row[4]
@@ -1708,9 +1710,7 @@ class SQLiteRetrievalRepository:
             valid_from = _plain_int(row[5])
             valid_to = None if row[6] is None else _plain_int(row[6])
             transaction_from = _plain_int(row[7])
-            transaction_to = (
-                None if row[8] is None else _plain_int(row[8])
-            )
+            transaction_to = None if row[8] is None else _plain_int(row[8])
             asserted_event_id = str(row[9])
             retracted_event_id = None if row[10] is None else str(row[10])
             _safe_hash(row[11])
@@ -1735,9 +1735,7 @@ class SQLiteRetrievalRepository:
         ).fetchone()
         if active_endpoints is None or active_endpoints[0] != 2:
             raise RetrievalRepositoryError("POLICY_STATE_UNAVAILABLE")
-        asserted = self._source_event(
-            connection, workspace_id, asserted_event_id
-        )
+        asserted = self._source_event(connection, workspace_id, asserted_event_id)
         if not (
             asserted.stream_id == stream_id
             and asserted.stream_kind == stream_kind
@@ -1746,9 +1744,7 @@ class SQLiteRetrievalRepository:
         ):
             raise RetrievalRepositoryError("POLICY_STATE_UNAVAILABLE")
         if retracted_event_id is not None:
-            retracted = self._source_event(
-                connection, workspace_id, retracted_event_id
-            )
+            retracted = self._source_event(connection, workspace_id, retracted_event_id)
             if not (
                 retracted.stream_id == stream_id
                 and retracted.stream_kind == stream_kind
@@ -1783,9 +1779,7 @@ class SQLiteRetrievalRepository:
         snapshot_time: datetime,
     ) -> tuple[int, int | None, int, int | None, str | None, bool] | None:
         valid_at_us = _datetime_us(query.as_of_valid_time or snapshot_time)
-        transaction_at_us = _datetime_us(
-            query.as_of_transaction_time or snapshot_time
-        )
+        transaction_at_us = _datetime_us(query.as_of_transaction_time or snapshot_time)
         rows = connection.execute(
             "SELECT fact_version_id,fact_id,version,object_kind,object_json,"
             "evidence_json,metadata_json,content_hash,valid_from_us,"
@@ -1823,38 +1817,27 @@ class SQLiteRetrievalRepository:
                 evidence_value = json.loads(str(row[5]))
                 metadata = json.loads(str(row[6]))
             except (TypeError, ValueError, RecursionError) as exc:
-                raise RetrievalRepositoryError(
-                    "POLICY_STATE_UNAVAILABLE"
-                ) from exc
+                raise RetrievalRepositoryError("POLICY_STATE_UNAVAILABLE") from exc
             if (
                 not isinstance(row[3], str)
                 or not row[3]
-                or canonical_json_bytes(object_value).decode("utf-8")
-                != row[4]
+                or canonical_json_bytes(object_value).decode("utf-8") != row[4]
                 or not isinstance(evidence_value, list)
-                or canonical_json_bytes(evidence_value).decode("utf-8")
-                != row[5]
+                or canonical_json_bytes(evidence_value).decode("utf-8") != row[5]
                 or not isinstance(metadata, dict)
-                or canonical_json_bytes(metadata).decode("utf-8")
-                != row[6]
+                or canonical_json_bytes(metadata).decode("utf-8") != row[6]
             ):
                 raise RetrievalRepositoryError("POLICY_STATE_UNAVAILABLE")
             _safe_hash(row[7])
-            contradiction_value = metadata.get(
-                "has_unresolved_contradiction", False
-            )
+            contradiction_value = metadata.get("has_unresolved_contradiction", False)
             if not isinstance(contradiction_value, bool):
                 raise RetrievalRepositoryError("POLICY_STATE_UNAVAILABLE")
             contradiction = contradiction or contradiction_value
             valid_from = _plain_int(row[8])
             valid_to = None if row[9] is None else _plain_int(row[9])
             transaction_from = _plain_int(row[10])
-            transaction_to = (
-                None if row[11] is None else _plain_int(row[11])
-            )
-            asserted = self._source_event(
-                connection, query.workspace_id, str(row[12])
-            )
+            transaction_to = None if row[11] is None else _plain_int(row[11])
+            asserted = self._source_event(connection, query.workspace_id, str(row[12]))
             if not (
                 asserted.stream_id == fact_id
                 and asserted.stream_kind == "fact"
@@ -1871,9 +1854,7 @@ class SQLiteRetrievalRepository:
                     and retracted.stream_kind == "fact"
                     and retracted.stream_version >= version
                 ):
-                    raise RetrievalRepositoryError(
-                        "POLICY_STATE_UNAVAILABLE"
-                    )
+                    raise RetrievalRepositoryError("POLICY_STATE_UNAVAILABLE")
             valid_from_values.append(valid_from)
             if valid_to is not None:
                 valid_to_values.append(valid_to)
@@ -1901,9 +1882,7 @@ class SQLiteRetrievalRepository:
         snapshot_time: datetime,
     ) -> tuple[str | None, bool]:
         valid_at_us = _datetime_us(query.as_of_valid_time or snapshot_time)
-        transaction_at_us = _datetime_us(
-            query.as_of_transaction_time or snapshot_time
-        )
+        transaction_at_us = _datetime_us(query.as_of_transaction_time or snapshot_time)
         interval_parameters = (
             valid_at_us,
             valid_at_us,
@@ -1946,8 +1925,7 @@ class SQLiteRetrievalRepository:
                 and str(source_workspace[0]) == query.workspace_id
                 and event.stream_id == str(relationship[1])
                 and event.stream_kind == "relationship"
-                and event.stream_version
-                == _plain_int(relationship[2], minimum=1)
+                and event.stream_version == _plain_int(relationship[2], minimum=1)
                 and event.recorded_at_us == _plain_int(relationship[4])
             ):
                 raise RetrievalRepositoryError("POLICY_STATE_UNAVAILABLE")
@@ -1989,8 +1967,7 @@ class SQLiteRetrievalRepository:
                 and endpoints[0] == 2
                 and event.stream_id == str(relationship[0])
                 and event.stream_kind == "relationship"
-                and event.stream_version
-                == _plain_int(relationship[1], minimum=1)
+                and event.stream_version == _plain_int(relationship[1], minimum=1)
                 and event.recorded_at_us == _plain_int(relationship[5])
             ):
                 raise RetrievalRepositoryError("POLICY_STATE_UNAVAILABLE")
@@ -2005,9 +1982,7 @@ class SQLiteRetrievalRepository:
         for decision in decisions:
             created_at = _plain_int(decision[1])
             if decision[0] == "proposed":
-                active_decision = (
-                    active_decision or created_at <= transaction_at_us
-                )
+                active_decision = active_decision or created_at <= transaction_at_us
                 continue
             if decision[0] != "accepted" or decision[2] is None:
                 raise RetrievalRepositoryError("POLICY_STATE_UNAVAILABLE")

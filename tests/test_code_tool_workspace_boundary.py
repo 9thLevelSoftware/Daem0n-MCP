@@ -94,7 +94,12 @@ def _load_code_tools(project_root: Path, helper_result: Path):
     sys.modules.update(fake_modules)
     module_name = "daem0nmcp.tools._code_tool_workspace_boundary_test"
     try:
-        source = Path(__file__).resolve().parents[1] / "daem0nmcp" / "tools" / "code_tools.py"
+        source = (
+            Path(__file__).resolve().parents[1]
+            / "daem0nmcp"
+            / "tools"
+            / "code_tools.py"
+        )
         spec = importlib.util.spec_from_file_location(module_name, source)
         assert spec is not None and spec.loader is not None
         module = importlib.util.module_from_spec(spec)
@@ -137,15 +142,15 @@ class CodeToolWorkspaceBoundaryTests(unittest.IsolatedAsyncioTestCase):
             ),
         )
         gate.record_briefing(scope)
-        with _load_code_tools(self.project, helper_approved) as code_tools:
-            with installed_invocation(
-                scope, gate, workspace_resolver=registry.resolve
-            ):
-                response = await code_tools.index_project(
-                    path="requested",
-                    patterns=["**/*.py"],
-                    project_path=str(self.project),
-                )
+        with (
+            _load_code_tools(self.project, helper_approved) as code_tools,
+            installed_invocation(scope, gate, workspace_resolver=registry.resolve),
+        ):
+            response = await code_tools.index_project(
+                path="requested",
+                patterns=["**/*.py"],
+                project_path=str(self.project),
+            )
 
         result = response["result"]
         self.assertEqual(result["project"], str(helper_approved.resolve()))

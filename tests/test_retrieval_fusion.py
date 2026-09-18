@@ -85,11 +85,15 @@ class WeightedReciprocalRankFusionTests(unittest.TestCase):
             },
             dict(DEFAULT_RRF_WEIGHTS),
         )
-        self.assertEqual([_record_id("1"), _record_id("2")], [item.record_id for item in fused])
+        self.assertEqual(
+            [_record_id("1"), _record_id("2")], [item.record_id for item in fused]
+        )
         self.assertAlmostEqual(1.0 / 61.0 + 0.7 / 62.0, fused[0].score)
         self.assertAlmostEqual(1.0 / 61.0, fused[1].score)
         self.assertEqual(frozenset({"graph", "lexical"}), fused[0].channels)
-        self.assertEqual(("lexical", "graph"), tuple(ref.provider for ref in fused[0].evidence_refs))
+        self.assertEqual(
+            ("lexical", "graph"), tuple(ref.provider for ref in fused[0].evidence_refs)
+        )
 
         changed_diagnostics = weighted_reciprocal_rank_fusion(
             (
@@ -114,9 +118,7 @@ class WeightedReciprocalRankFusionTests(unittest.TestCase):
 
         self.assertEqual(forward, reverse)
         self.assertEqual(1, len(forward))
-        self.assertEqual(
-            (("dense", 1), ("lexical", 3)), forward[0].channel_ranks
-        )
+        self.assertEqual((("dense", 1), ("lexical", 3)), forward[0].channel_ranks)
         self.assertEqual(
             (("dense", 9), ("lexical", 7)), forward[0].manifest_generations
         )

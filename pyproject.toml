@@ -23,7 +23,7 @@ classifiers = [
 ]
 
 dependencies = [
-    "fastmcp==3.0.0b2",
+    "fastmcp==3.4.7",
     "sqlalchemy>=2.0.0",
     "aiosqlite>=0.19.0",
     "greenlet>=3.0.0",  # Required for SQLAlchemy async
@@ -33,7 +33,7 @@ dependencies = [
 
 [project.optional-dependencies]
 tasks = [
-    "fastmcp[tasks]==3.0.0b2",
+    "fastmcp[tasks]==3.4.7",
 ]
 local = [
     "qdrant-client>=1.7.0",
@@ -56,16 +56,17 @@ apps = [
     "tree-sitter-language-pack>=0.13.0",
 ]
 models-local = [
-    "sentence-transformers>=3.0.0",
-    "onnxruntime>=1.24.1",
-    "numpy>=1.24.0",
-    "llmlingua>=0.2.2",
+    # Secure ONNX runtime wheels start at CPython 3.11.
+    "sentence-transformers[onnx]>=3.2.0; python_version >= '3.11'",
+    "onnxruntime>=1.24.1; python_version >= '3.11'",
+    "numpy>=1.24.0; python_version >= '3.11'",
+    "llmlingua>=0.2.2; python_version >= '3.11'",
 ]
 models-hosted = [
     "tiktoken>=0.5.0",
 ]
 agency-e2b = [
-    "e2b-code-interpreter>=1.0.0",
+    "e2b-code-interpreter==2.10.0",
 ]
 observability = [
     "opentelemetry-api>=1.20.0",
@@ -104,6 +105,7 @@ include = ["daem0nmcp*"]
     "static/*.js",
     "static/renderers/*.js",
 ]
+"daem0nmcp.opencode_assets" = ["*.ts"]
 
 # Ruff configuration
 [tool.ruff]
@@ -115,6 +117,7 @@ select = ["E", "F", "I", "N", "W", "UP", "B", "C4", "SIM"]
 ignore = ["E501"]  # line too long (handled by formatter)
 
 [tool.ruff.format]
+exclude = ["tests/fixtures/retrieval/qdrant_fake.py"] # Frozen, checksum-verified fixture.
 quote-style = "double"
 indent-style = "space"
 skip-magic-trailing-comma = false

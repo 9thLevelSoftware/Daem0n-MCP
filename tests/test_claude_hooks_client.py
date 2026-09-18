@@ -2,6 +2,7 @@
 
 import json
 import sys
+from io import BytesIO, TextIOWrapper
 
 import pytest
 
@@ -11,6 +12,7 @@ from daem0nmcp.claude_hooks._client import (
     get_file_path_from_input,
     get_project_path,
     get_tool_input,
+    read_hook_event,
     run_hook_safely,
     succeed,
 )
@@ -81,6 +83,31 @@ class TestBlockSucceed:
 
 
 class TestToolInputParsing:
+    def test_reads_bounded_claude_json_stdin_event(self, monkeypatch):
+        payload = {
+            "session_id": "native-session",
+            "cwd": "C:/workspace",
+            "hook_event_name": "PreToolUse",
+            "tool_name": "Edit",
+            "tool_input": {"file_path": "relative.py"},
+        }
+        monkeypatch.setattr(
+            sys,
+            "stdin",
+            TextIOWrapper(BytesIO(json.dumps(payload).encode("utf-8"))),
+        )
+        assert read_hook_event() == payload
+
+    def test_rejects_oversized_or_non_object_stdin_event(self, monkeypatch):
+        monkeypatch.setattr(
+            sys,
+            "stdin",
+            TextIOWrapper(BytesIO(b"x" * (256 * 1024 + 1))),
+        )
+        assert read_hook_event() == {}
+        monkeypatch.setattr(sys, "stdin", TextIOWrapper(BytesIO(b"[]")))
+        assert read_hook_event() == {}
+
     def test_file_path_from_edit(self, monkeypatch):
         monkeypatch.setenv("TOOL_INPUT", json.dumps({"file_path": "/foo/bar.py"}))
         assert get_file_path_from_input() == "/foo/bar.py"

@@ -13,7 +13,6 @@ from daem0nmcp.covenant import (
     InvocationScope,
 )
 
-
 PINNED_TOOLS = frozenset(
     {
         "session_brief",
@@ -86,7 +85,11 @@ GRANULAR_TOOLS = frozenset(
         "workspace_unlink",
         "workspace_links_list",
         "workspace_consolidate",
+        "workspace_consolidation_preview",
         "workspace_consolidate_and_archive_sources",
+        "edit_preflight",
+        "memory_capture_list",
+        "memory_capture_promote",
         "dream_duplicates_preview",
         "dream_duplicates_purge",
         "decision_simulate",
@@ -170,12 +173,13 @@ class V7PolicyTests(unittest.TestCase):
 
         policy = V7CovenantPolicy({"memory_store": CovenantLevel.COUNSEL})
         normalizer = V7ArgumentNormalizer({"memory_store": _StoreArguments})
-        clock = lambda: 1_000
+
+        def clock():
+            return 1_000
+
         gate = CovenantGate(
             state_store=CovenantStateStore(clock=clock),
-            authority=CapabilityAuthority(
-                secret=b"s" * 32, kid="test", clock=clock
-            ),
+            authority=CapabilityAuthority(secret=b"s" * 32, kid="test", clock=clock),
             policy=policy,
             argument_normalizer=normalizer,
         )
@@ -232,7 +236,9 @@ class V7PolicyTests(unittest.TestCase):
             TokenValidationError,
         )
 
-        clock = lambda: 1_000
+        def clock():
+            return 1_000
+
         handles = iter(("cap_" + "a" * 20, "cap_" + "b" * 20))
         authority = OpaqueCapabilityAuthority(
             CapabilityAuthority(secret=b"s" * 32, kid="test", clock=clock),
@@ -246,9 +252,7 @@ class V7PolicyTests(unittest.TestCase):
             ),
             authority=authority,
             policy=V7CovenantPolicy({"memory_store": CovenantLevel.COUNSEL}),
-            argument_normalizer=V7ArgumentNormalizer(
-                {"memory_store": _StoreArguments}
-            ),
+            argument_normalizer=V7ArgumentNormalizer({"memory_store": _StoreArguments}),
         )
         scope = InvocationScope("principal", "session", ".")
         arguments = {

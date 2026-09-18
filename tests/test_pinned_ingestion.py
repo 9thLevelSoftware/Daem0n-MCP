@@ -170,7 +170,7 @@ class ScriptedNetworkStream(httpcore.AsyncNetworkStream):
         ssl_context: ssl.SSLContext,
         server_hostname: str | None = None,
         timeout: float | None = None,
-    ) -> "ScriptedNetworkStream":
+    ) -> ScriptedNetworkStream:
         self.tls_calls.append((ssl_context, server_hostname, timeout))
         return self
 
@@ -237,9 +237,7 @@ class TestPinnedDependencyContract(unittest.TestCase):
     def test_live_httpcore_interfaces_match_the_adapter_contract(self):
         import httpcore
 
-        pool_parameters = inspect.signature(
-            httpcore.AsyncConnectionPool
-        ).parameters
+        pool_parameters = inspect.signature(httpcore.AsyncConnectionPool).parameters
         connect_parameters = tuple(
             inspect.signature(httpcore.AsyncNetworkBackend.connect_tcp).parameters
         )
@@ -277,9 +275,11 @@ class TestPinnedDependencyContract(unittest.TestCase):
             ensure_runtime_compatibility,
         )
 
-        with patch.object(httpx, "__version__", "0.29.0"):
-            with self.assertRaises(PinnedTransportCompatibilityError) as raised:
-                ensure_runtime_compatibility()
+        with (
+            patch.object(httpx, "__version__", "0.29.0"),
+            self.assertRaises(PinnedTransportCompatibilityError) as raised,
+        ):
+            ensure_runtime_compatibility()
 
         self.assertIn("httpx 0.29.0", str(raised.exception))
         self.assertIn("pip install 'daem0nmcp[apps]'", str(raised.exception))
@@ -296,7 +296,7 @@ httpcore = types.ModuleType('httpcore')
 httpcore.__version__ = '1.0.9'
 sys.modules['httpx'] = httpx
 sys.modules['httpcore'] = httpcore
-namespace = runpy.run_path({str(PROJECT_ROOT / 'daem0nmcp' / 'pinned_http.py')!r})
+namespace = runpy.run_path({str(PROJECT_ROOT / "daem0nmcp" / "pinned_http.py")!r})
 try:
     namespace['ensure_runtime_compatibility']()
 except namespace['PinnedTransportCompatibilityError'] as error:
@@ -329,7 +329,7 @@ httpcore.ConnectError = object()
 httpcore.AsyncNetworkBackend = object()
 sys.modules['httpx'] = httpx
 sys.modules['httpcore'] = httpcore
-namespace = runpy.run_path({str(PROJECT_ROOT / 'daem0nmcp' / 'pinned_http.py')!r})
+namespace = runpy.run_path({str(PROJECT_ROOT / "daem0nmcp" / "pinned_http.py")!r})
 try:
     namespace['ensure_runtime_compatibility']()
 except namespace['PinnedTransportCompatibilityError']:
@@ -357,11 +357,12 @@ else:
             ("AsyncConnectionPool", object()),
         )
         for attribute, replacement in invalid_interfaces:
-            with self.subTest(attribute=attribute), patch.object(
-                httpcore, attribute, replacement
+            with (
+                self.subTest(attribute=attribute),
+                patch.object(httpcore, attribute, replacement),
+                self.assertRaises(PinnedTransportCompatibilityError),
             ):
-                with self.assertRaises(PinnedTransportCompatibilityError):
-                    ensure_runtime_compatibility()
+                ensure_runtime_compatibility()
 
         invalid_httpx_interfaces = (
             ("URL", None),
@@ -369,11 +370,12 @@ else:
             ("InvalidURL", object),
         )
         for attribute, replacement in invalid_httpx_interfaces:
-            with self.subTest(attribute=f"httpx.{attribute}"), patch.object(
-                httpx, attribute, replacement
+            with (
+                self.subTest(attribute=f"httpx.{attribute}"),
+                patch.object(httpx, attribute, replacement),
+                self.assertRaises(PinnedTransportCompatibilityError),
             ):
-                with self.assertRaises(PinnedTransportCompatibilityError):
-                    ensure_runtime_compatibility()
+                ensure_runtime_compatibility()
 
     def test_version_gate_accepts_post_local_and_rejects_prereleases(self):
         from daem0nmcp.pinned_http import (
@@ -387,20 +389,23 @@ else:
             ("v0.28.1", "v1.0.9"),
         )
         for httpx_version, httpcore_version in valid_versions:
-            with self.subTest(httpx=httpx_version, httpcore=httpcore_version), patch.object(
-                httpx, "__version__", httpx_version
-            ), patch.object(httpcore, "__version__", httpcore_version):
+            with (
+                self.subTest(httpx=httpx_version, httpcore=httpcore_version),
+                patch.object(httpx, "__version__", httpx_version),
+                patch.object(httpcore, "__version__", httpcore_version),
+            ):
                 self.assertEqual(
                     ensure_runtime_compatibility(),
                     (httpx_version, httpcore_version),
                 )
 
         for prerelease in ("0.28.2rc1", "0.28.2.dev1"):
-            with self.subTest(version=prerelease), patch.object(
-                httpx, "__version__", prerelease
+            with (
+                self.subTest(version=prerelease),
+                patch.object(httpx, "__version__", prerelease),
+                self.assertRaises(PinnedTransportCompatibilityError),
             ):
-                with self.assertRaises(PinnedTransportCompatibilityError):
-                    ensure_runtime_compatibility()
+                ensure_runtime_compatibility()
 
 
 class TestPublicAddressSelection(unittest.TestCase):
@@ -494,9 +499,11 @@ class TestPublicAddressSelection(unittest.TestCase):
         )
 
         for addresses in unsafe_sets:
-            with self.subTest(addresses=addresses):
-                with self.assertRaises(PinnedAddressError):
-                    select_public_address(addresses)
+            with (
+                self.subTest(addresses=addresses),
+                self.assertRaises(PinnedAddressError),
+            ):
+                select_public_address(addresses)
 
     def test_selects_a_deterministic_canonical_literal_from_all_public_answers(self):
         from daem0nmcp.pinned_http import select_public_address
@@ -618,9 +625,7 @@ class TestURLAdmission(unittest.IsolatedAsyncioTestCase):
         from daem0nmcp.pinned_http import validate_public_url
 
         for address in SPECIAL_ADDRESS_CONTROLS:
-            url = (
-                f"http://[{address}]/" if ":" in address else f"http://{address}/"
-            )
+            url = f"http://[{address}]/" if ":" in address else f"http://{address}/"
             with self.subTest(address=address):
                 resolver = SequenceResolver()
                 error = await validate_public_url(
@@ -734,14 +739,10 @@ class TestPinnedBackend(unittest.IsolatedAsyncioTestCase):
 
         for special_address in SPECIAL_ADDRESS_CONTROLS:
             with self.subTest(address=special_address):
-                stream = ScriptedNetworkStream(
-                    server_addr=("93.184.216.34", 443)
-                )
+                stream = ScriptedNetworkStream(server_addr=("93.184.216.34", 443))
                 delegate = RecordingBackend(stream)
                 backend = PinnedPublicNetworkBackend(
-                    resolver=SequenceResolver(
-                        ("93.184.216.34", special_address)
-                    ),
+                    resolver=SequenceResolver(("93.184.216.34", special_address)),
                     delegate=delegate,
                 )
 
@@ -819,9 +820,7 @@ class TestPinnedBackend(unittest.IsolatedAsyncioTestCase):
         calls = 0
         pool = BoundedWorkerPool(max_workers=1, thread_name_prefix="test-dns")
 
-        def blocking_getaddrinfo(
-            host, port, family=0, type=0, proto=0, flags=0
-        ):
+        def blocking_getaddrinfo(host, port, family=0, type=0, proto=0, flags=0):
             nonlocal calls
             calls += 1
             started.set()
@@ -841,9 +840,7 @@ class TestPinnedBackend(unittest.IsolatedAsyncioTestCase):
             ):
                 with self.assertRaises(asyncio.TimeoutError):
                     await asyncio.wait_for(
-                        pinned_http.resolve_host_addresses(
-                            "docs.example.test", 443
-                        ),
+                        pinned_http.resolve_host_addresses("docs.example.test", 443),
                         timeout=0.02,
                     )
 
@@ -953,9 +950,7 @@ class TestPinnedHTTPAdapter(unittest.IsolatedAsyncioTestCase):
         stream = ScriptedNetworkStream(
             server_addr=("93.184.216.34", 443),
             response=(
-                b"HTTP/1.1 200 OK\r\n"
-                b"Content-Length: 2\r\n"
-                b"Connection: close\r\n\r\nOK"
+                b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nOK"
             ),
         )
         delegate = RecordingBackend(stream)
@@ -1058,9 +1053,7 @@ class TestPinnedHTTPAdapter(unittest.IsolatedAsyncioTestCase):
             stream = ScriptedNetworkStream(
                 server_addr=("93.184.216.34", 443),
                 response=(
-                    b"HTTP/1.1 200 OK\r\n"
-                    b"Content-Length: 0\r\n"
-                    b"Connection: close\r\n\r\n"
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
                 ),
             )
             with pinned_dependency_log_scope():
@@ -1324,9 +1317,7 @@ class TestAgencyTotalDeadline(unittest.IsolatedAsyncioTestCase):
                 overflow_url = "https://another.example.test/?token=do-not-log"
                 overflow_started = time.monotonic()
                 with self.assertLogs(module.logger, level="ERROR") as captured_logs:
-                    self.assertIsNone(
-                        await module._fetch_and_extract(overflow_url)
-                    )
+                    self.assertIsNone(await module._fetch_and_extract(overflow_url))
                 self.assertLess(time.monotonic() - overflow_started, 0.05)
                 self.assertEqual(parser_calls, 1)
                 self.assertNotIn(overflow_url, "\n".join(captured_logs.output))

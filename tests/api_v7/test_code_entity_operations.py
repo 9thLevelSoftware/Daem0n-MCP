@@ -14,7 +14,6 @@ from types import MappingProxyType, SimpleNamespace
 
 from daem0nmcp.api.v7.application import AdmittedRequest
 
-
 NOW = datetime(2026, 8, 9, 12, 0, tzinfo=timezone.utc)
 NOW_US = 1_786_276_800_000_000
 PREFLIGHT_TOKEN = "preflight-token-0001"
@@ -24,9 +23,7 @@ def _apply_v7_schema(connection: sqlite3.Connection) -> None:
     from daem0nmcp.migrations.schema import MIGRATIONS
     from daem0nmcp.schema_version import CURRENT_SCHEMA_VERSION
 
-    connection.execute(
-        "CREATE TABLE schema_version (version INTEGER PRIMARY KEY)"
-    )
+    connection.execute("CREATE TABLE schema_version (version INTEGER PRIMARY KEY)")
     for version, _description, statements in MIGRATIONS:
         if 16 <= version <= CURRENT_SCHEMA_VERSION:
             for statement in statements:
@@ -68,14 +65,16 @@ class CodeEntityOperationContractTests(unittest.TestCase):
             build_code_entity_operations,
         )
 
-        dependencies = CodeEntityOperationDependencies(
-            operation_secret=b"s" * 32
-        )
+        dependencies = CodeEntityOperationDependencies(operation_secret=b"s" * 32)
         self.addCleanup(dependencies.close)
         operations = build_code_entity_operations(dependencies)
 
         self.assertEqual(
-            {"code_todos_scan_and_store", "entity_evolution_trace"},
+            {
+                "code_impact_analyze",
+                "code_todos_scan_and_store",
+                "entity_evolution_trace",
+            },
             set(operations),
         )
         with self.assertRaises(TypeError):
@@ -101,9 +100,7 @@ class CodeEntityOperationContractTests(unittest.TestCase):
 
         with self.assertRaises(ValueError):
             CodeEntityOperationDependencies(operation_secret=b"short")
-        dependencies = CodeEntityOperationDependencies(
-            operation_secret=b"s" * 32
-        )
+        dependencies = CodeEntityOperationDependencies(operation_secret=b"s" * 32)
         dependencies.close()
 
 
@@ -128,9 +125,7 @@ class CodeEntityOperationTests(unittest.IsolatedAsyncioTestCase):
             self.storage,
             ActiveDatabasePointer(7, 1, self.database.name, None, None),
         )
-        self.workspace = WorkspaceRegistry(
-            [self.root], default_root=self.root
-        ).default
+        self.workspace = WorkspaceRegistry([self.root], default_root=self.root).default
         self.dependencies: list[object] = []
 
     async def asyncTearDown(self) -> None:
@@ -202,9 +197,7 @@ class CodeEntityOperationTests(unittest.IsolatedAsyncioTestCase):
                     workspace_id=self.workspace.workspace_id,
                     stream_id=record_id,
                     stream_kind="memory",
-                    event_type=(
-                        "memory.created" if version == 1 else "memory.updated"
-                    ),
+                    event_type=("memory.created" if version == 1 else "memory.updated"),
                     occurred_at_us=happened_at_us,
                     recorded_at_us=happened_at_us,
                     actor_type="client",
@@ -251,8 +244,7 @@ class CodeEntityOperationTests(unittest.IsolatedAsyncioTestCase):
                         name=name,
                         entity_type=entity_type,
                         records=tuple(
-                            EntityRecordSeed(record_id)
-                            for record_id in record_ids
+                            EntityRecordSeed(record_id) for record_id in record_ids
                         ),
                     ),
                 ),
@@ -279,21 +271,15 @@ class CodeEntityOperationTests(unittest.IsolatedAsyncioTestCase):
         )
         ignored = source / ".git"
         ignored.mkdir()
-        (ignored / "ignored.py").write_text(
-            "# TODO hidden\n", encoding="utf-8"
-        )
+        (ignored / "ignored.py").write_text("# TODO hidden\n", encoding="utf-8")
         with closing(sqlite3.connect(self.database)) as connection:
             connection.execute(
                 "CREATE TABLE memories (id INTEGER PRIMARY KEY, content TEXT)"
             )
             connection.commit()
-        utility_dependencies = UtilityOperationDependencies(
-            cursor_secret=b"s" * 32
-        )
+        utility_dependencies = UtilityOperationDependencies(cursor_secret=b"s" * 32)
         self.dependencies.append(utility_dependencies)
-        scan = await build_utility_operations(utility_dependencies)[
-            "code_todos_scan"
-        ](
+        scan = await build_utility_operations(utility_dependencies)["code_todos_scan"](
             workspace=self.workspace,
             request=_request(
                 "code_todos_scan",
@@ -339,9 +325,7 @@ class CodeEntityOperationTests(unittest.IsolatedAsyncioTestCase):
                 "WHERE workspace_id=? ORDER BY event_id",
                 (self.workspace.workspace_id,),
             ).fetchall()
-            retained = connection.execute(
-                "SELECT count(*) FROM memories"
-            ).fetchone()[0]
+            retained = connection.execute("SELECT count(*) FROM memories").fetchone()[0]
         self.assertEqual(2, len(events))
         self.assertEqual(0, retained)
         for row in events:
@@ -364,9 +348,7 @@ class CodeEntityOperationTests(unittest.IsolatedAsyncioTestCase):
             "# TODO first\n# FIXME second\n# HACK third\n",
             encoding="utf-8",
         )
-        utility_dependencies = UtilityOperationDependencies(
-            cursor_secret=b"s" * 32
-        )
+        utility_dependencies = UtilityOperationDependencies(cursor_secret=b"s" * 32)
         self.dependencies.append(utility_dependencies)
         first_page = await build_utility_operations(utility_dependencies)[
             "code_todos_scan"
@@ -401,9 +383,7 @@ class CodeEntityOperationTests(unittest.IsolatedAsyncioTestCase):
     ) -> None:
         """A mutable projection cannot rewrite an idempotent response."""
 
-        (self.root / "todo.py").write_text(
-            "# TODO bind time\n", encoding="utf-8"
-        )
+        (self.root / "todo.py").write_text("# TODO bind time\n", encoding="utf-8")
         operation = self._operations()["code_todos_scan_and_store"]
         request = _request(
             "code_todos_scan_and_store",
@@ -429,9 +409,7 @@ class CodeEntityOperationTests(unittest.IsolatedAsyncioTestCase):
         """The immutable v1 batch remains the result after canonical v2."""
         from daem0nmcp.event_store import EventCommand, EventStore
 
-        (self.root / "todo.py").write_text(
-            "# TODO archive later\n", encoding="utf-8"
-        )
+        (self.root / "todo.py").write_text("# TODO archive later\n", encoding="utf-8")
         operation = self._operations()["code_todos_scan_and_store"]
         request = _request(
             "code_todos_scan_and_store",
@@ -486,9 +464,7 @@ class CodeEntityOperationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(1, len(first.stored_records))
         self.assertEqual(1, len(first.event_ids))
         self.assertEqual("archived", first.stored_records[0].current_status)
-        (self.root / "later.py").write_text(
-            "# TODO appeared later\n", encoding="utf-8"
-        )
+        (self.root / "later.py").write_text("# TODO appeared later\n", encoding="utf-8")
 
         second = await operation(workspace=self.workspace, request=request)
 
@@ -507,9 +483,7 @@ class CodeEntityOperationTests(unittest.IsolatedAsyncioTestCase):
             CodeEntityOperationError,
         )
 
-        (self.root / "one.py").write_text(
-            "# TODO first\n", encoding="utf-8"
-        )
+        (self.root / "one.py").write_text("# TODO first\n", encoding="utf-8")
         operation = self._operations()["code_todos_scan_and_store"]
         await operation(
             workspace=self.workspace,
@@ -573,9 +547,7 @@ class CodeEntityOperationTests(unittest.IsolatedAsyncioTestCase):
         self,
     ) -> None:
         """Repeated cancellation cannot detach a worker that later commits."""
-        (self.root / "cancel.py").write_text(
-            "# TODO do not commit\n", encoding="utf-8"
-        )
+        (self.root / "cancel.py").write_text("# TODO do not commit\n", encoding="utf-8")
         resolver = _BlockingStorageResolver(self.database)
         operation = self._operations(storage_resolver=resolver)[
             "code_todos_scan_and_store"
@@ -867,6 +839,98 @@ class CodeEntityOperationTests(unittest.IsolatedAsyncioTestCase):
             resolver.release.set()
         with self.assertRaises(asyncio.CancelledError):
             await task
+
+    async def test_code_impact_traverses_only_active_generation_dependencies(
+        self,
+    ) -> None:
+        from daem0nmcp.discovery_projection import (
+            CodeEdgeProjectionSeed,
+            CodeEntityProjectionSeed,
+            DiscoveryProjectionBuilder,
+        )
+
+        with closing(sqlite3.connect(self.database)) as connection:
+            connection.execute("PRAGMA foreign_keys=ON")
+            DiscoveryProjectionBuilder(connection).rebuild_code(
+                self.workspace.workspace_id,
+                entities=(
+                    CodeEntityProjectionSeed(
+                        "target", "function", "core.target", "src/core.py", 1, 2
+                    ),
+                    CodeEntityProjectionSeed(
+                        "middle", "function", "service.middle", "src/service.py", 3, 4
+                    ),
+                    CodeEntityProjectionSeed(
+                        "entry", "function", "api.entry", "src/api.py", 5, 6
+                    ),
+                ),
+                edges=(
+                    CodeEdgeProjectionSeed("middle", "target", "call", 3),
+                    CodeEdgeProjectionSeed("entry", "middle", "reference", 5),
+                ),
+            )
+            target_id = connection.execute(
+                "SELECT code_entity_id FROM discovery_code_entities "
+                "WHERE workspace_id=? AND qualified_name='core.target'",
+                (self.workspace.workspace_id,),
+            ).fetchone()[0]
+
+        operation = self._operations()["code_impact_analyze"]
+        one = await operation(
+            workspace=self.workspace,
+            request=_request(
+                "code_impact_analyze",
+                workspace_id=self.workspace.workspace_id,
+                code_entity_id=target_id,
+                max_depth=1,
+            ),
+        )
+        self.assertEqual("core.target", one.subject.qualified_name)
+        self.assertEqual(
+            ["service.middle"], [item.qualified_name for item in one.affected]
+        )
+        self.assertEqual(
+            [[target_id, one.affected[0].code_entity_id]],
+            [path.entities for path in one.paths],
+        )
+
+        two = await operation(
+            workspace=self.workspace,
+            request=_request(
+                "code_impact_analyze",
+                workspace_id=self.workspace.workspace_id,
+                qualified_name="core.target",
+                max_depth=2,
+            ),
+        )
+        self.assertEqual(
+            ["service.middle", "api.entry"],
+            [item.qualified_name for item in two.affected],
+        )
+        self.assertEqual(3, len(two.paths[-1].entities))
+
+        with self.assertRaises(Exception) as raised:
+            await operation(
+                workspace=self.workspace,
+                request=_request(
+                    "code_impact_analyze",
+                    workspace_id="ws_0123456789abcdef01234567",
+                    qualified_name="core.target",
+                ),
+            )
+        self.assertEqual("UNAUTHORIZED_WORKSPACE", raised.exception.code)
+
+        missing = "code_" + "f" * 64
+        with self.assertRaises(Exception) as raised:
+            await operation(
+                workspace=self.workspace,
+                request=_request(
+                    "code_impact_analyze",
+                    workspace_id=self.workspace.workspace_id,
+                    code_entity_id=missing,
+                ),
+            )
+        self.assertEqual("NOT_FOUND", raised.exception.code)
 
 
 if __name__ == "__main__":

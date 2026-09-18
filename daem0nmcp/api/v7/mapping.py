@@ -11,10 +11,9 @@ from __future__ import annotations
 import importlib
 import json
 import unicodedata
+from collections.abc import Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from types import MappingProxyType
-from typing import Collection, Iterable, Mapping, Sequence
-
 
 _WORKFLOW_NAMES = (
     "commune",
@@ -148,9 +147,7 @@ def _conditional_entry(
             )
             for branch in branches
         ),
-        replacement_examples=tuple(
-            branch.replacement_example for branch in branches
-        ),
+        replacement_examples=tuple(branch.replacement_example for branch in branches),
         conditional_branches=branches,
     )
 
@@ -637,14 +634,14 @@ _MAPPINGS = (
                 False,
                 "workspace_consolidate",
                 "COUNSEL",
-                f'workspace_consolidate(workspace_id="{_WS}", source_workspace_ids=["{_WS}"], idempotency_key="example-0013", preflight_token="<token>")',
+                f'workspace_consolidate(workspace_id="{_WS}", source_workspace_ids=["{_WS}"], idempotency_key="example-0013", selection_token="<preview-token>", preflight_token="<token>")',
             ),
             _branch(
                 "archive_sources",
                 True,
                 "workspace_consolidate_and_archive_sources",
                 "DESTRUCTIVE",
-                f'workspace_consolidate_and_archive_sources(workspace_id="{_WS}", source_workspace_ids=["{_WS}"], idempotency_key="example-0014", preflight_token="<token>")',
+                f'workspace_consolidate_and_archive_sources(workspace_id="{_WS}", source_workspace_ids=["{_WS}"], idempotency_key="example-0014", selection_token="<preview-token>", preflight_token="<token>")',
             ),
         ),
     ),
@@ -705,12 +702,8 @@ _EXPECTED_CONDITIONS: Mapping[str, frozenset[tuple[str, bool | str]]] = (
             ),
             "explore.graph": frozenset({("format", "json"), ("format", "mermaid")}),
             "maintain.prune": frozenset({("dry_run", True), ("dry_run", False)}),
-            "maintain.cleanup": frozenset(
-                {("dry_run", True), ("dry_run", False)}
-            ),
-            "maintain.compact": frozenset(
-                {("dry_run", True), ("dry_run", False)}
-            ),
+            "maintain.cleanup": frozenset({("dry_run", True), ("dry_run", False)}),
+            "maintain.compact": frozenset({("dry_run", True), ("dry_run", False)}),
             "maintain.consolidate": frozenset(
                 {("archive_sources", False), ("archive_sources", True)}
             ),
@@ -787,9 +780,7 @@ def validate_mapping(
         if missing:
             details.append("missing conditional mappings: " + ", ".join(missing))
         if unexpected:
-            details.append(
-                "unexpected conditional mappings: " + ", ".join(unexpected)
-            )
+            details.append("unexpected conditional mappings: " + ", ".join(unexpected))
         raise MappingCoverageError("; ".join(details))
 
     all_new_tools: list[str] = []
@@ -812,6 +803,7 @@ def validate_mapping(
             entry.new_tools,
             entry.replacement_examples,
             entry.policy_change,
+            strict=True,
         ):
             if not tool or not tool.replace("_", "").isalnum():
                 raise MappingCoverageError(
@@ -895,14 +887,12 @@ def mapping_document(
         rows.append(
             {
                 "conditional_branches": [
-                    _branch_document(branch)
-                    for branch in entry.conditional_branches
+                    _branch_document(branch) for branch in entry.conditional_branches
                 ],
                 "new_tools": list(entry.new_tools),
                 "old_operation": entry.old_operation,
                 "policy_change": [
-                    _policy_change_document(change)
-                    for change in entry.policy_change
+                    _policy_change_document(change) for change in entry.policy_change
                 ],
                 "removed_parameters": list(entry.removed_parameters),
                 "replacement_examples": list(entry.replacement_examples),
@@ -935,9 +925,9 @@ def _normalize_json(value: object) -> object:
     if value is None or isinstance(value, (bool, int, float)):
         return value
     if isinstance(value, str):
-        normalized = unicodedata.normalize("NFC", value)
-        normalized.encode("utf-8")
-        return normalized
+        normalized_text = unicodedata.normalize("NFC", value)
+        normalized_text.encode("utf-8")
+        return normalized_text
     if isinstance(value, list):
         return [_normalize_json(item) for item in value]
     if isinstance(value, dict):

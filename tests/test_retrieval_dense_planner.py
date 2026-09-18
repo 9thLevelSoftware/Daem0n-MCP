@@ -15,7 +15,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
-
 WORKSPACE_ID = "ws_" + "1" * 24
 MODEL_ID = "model-v1"
 PROVIDER_KEY = "qdrant"
@@ -81,6 +80,7 @@ def _dense_manifest_details(
         ).encode("utf-8")
     ).hexdigest()
     encoder_contract = {
+        "artifact_fingerprint": None,
         "backend": backend,
         "document_prefix": None,
         "encoder_type": (
@@ -98,7 +98,7 @@ def _dense_manifest_details(
         json.dumps(
             {
                 "build_config_hash": config_hash,
-                "builder_version": "retrieval-dense-1",
+                "builder_version": "retrieval-dense-2",
                 "encoder_contract": encoder_contract,
                 "projection": "dense",
             },
@@ -113,6 +113,8 @@ def _dense_manifest_details(
         "builder_contract_hash": builder_contract_hash,
         "encoder_contract": encoder_contract,
         "projection": "dense",
+        "vector_format": "qdrant-cosine-f32-le-v1",
+        "vector_space_hash": None,
     }
 
 
@@ -187,9 +189,7 @@ class RetrievalPlannerTests(unittest.TestCase):
             as_of_valid_time=datetime(2026, 1, 1, tzinfo=timezone.utc),
         )
 
-        plan = planner_type().plan(
-            query, ready_providers=frozenset({"temporal"})
-        )
+        plan = planner_type().plan(query, ready_providers=frozenset({"temporal"}))
 
         self.assertEqual(("lexical", "temporal"), plan.provider_names)
 
@@ -200,9 +200,7 @@ class RetrievalPlannerTests(unittest.TestCase):
             text="authentication configuration as of 2025-01-01",
         )
 
-        plan = planner_type().plan(
-            query, ready_providers=frozenset({"temporal"})
-        )
+        plan = planner_type().plan(query, ready_providers=frozenset({"temporal"}))
 
         self.assertEqual(("lexical", "temporal"), plan.provider_names)
 
@@ -296,9 +294,7 @@ class DenseProviderTests(unittest.IsolatedAsyncioTestCase):
         payload_builder = getattr(module, "build_dense_point_payload", None)
         client_builder = getattr(module, "create_qdrant_client", None)
         self.assertIsNotNone(dense_provider, "DenseProvider is missing")
-        self.assertIsNotNone(
-            payload_builder, "build_dense_point_payload is missing"
-        )
+        self.assertIsNotNone(payload_builder, "build_dense_point_payload is missing")
         self.assertIsNotNone(client_builder, "create_qdrant_client is missing")
         return dense_provider, payload_builder, client_builder
 
@@ -326,6 +322,33 @@ class DenseProviderTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertNotEqual(first["encoder_type"], second["encoder_type"])
 
+    def test_query_contract_rejects_changed_artifact_under_same_model_name(self):
+        from daem0nmcp.retrieval.providers import (
+            dense_encoder_contract,
+            dense_query_encoder_matches_contract,
+        )
+
+        document = _ManifestDocumentEncoder()
+        document.artifact_fingerprint = "a" * 64
+        query = _ManifestDocumentEncoder()
+        query.artifact_fingerprint = "b" * 64
+        contract = dense_encoder_contract(
+            encoder=document,
+            model_id=MODEL_ID,
+            dimension=3,
+            query_prefix=None,
+        )
+
+        self.assertFalse(
+            dense_query_encoder_matches_contract(
+                query_encoder=query,
+                encoder_contract=contract,
+                model_id=MODEL_ID,
+                dimension=3,
+                query_prefix=None,
+            )
+        )
+
     def _activate_manifest(
         self,
         *,
@@ -337,9 +360,7 @@ class DenseProviderTests(unittest.IsolatedAsyncioTestCase):
         distance: str = "cosine",
         backend: str | None = None,
     ) -> None:
-        event_root = hashlib.sha256(
-            bytes.fromhex(self._event_hash_a)
-        ).hexdigest()
+        event_root = hashlib.sha256(bytes.fromhex(self._event_hash_a)).hexdigest()
         self.connection.execute(
             "INSERT INTO projection_manifests VALUES (?,?,?,?,?,?,?,?,?)",
             (
@@ -434,9 +455,7 @@ class DenseProviderTests(unittest.IsolatedAsyncioTestCase):
                         SimpleNamespace(
                             id=_dense_point_id(RECORD_A),
                             score=0.91,
-                            payload=DenseProviderTests._payload(
-                                RECORD_A, CONTENT_A
-                            ),
+                            payload=DenseProviderTests._payload(RECORD_A, CONTENT_A),
                         ),
                         SimpleNamespace(
                             id=_dense_point_id(RECORD_B),
@@ -462,9 +481,7 @@ class DenseProviderTests(unittest.IsolatedAsyncioTestCase):
                         SimpleNamespace(
                             id=_dense_point_id(RECORD_B),
                             score=0.87,
-                            payload=DenseProviderTests._payload(
-                                RECORD_B, CONTENT_B
-                            ),
+                            payload=DenseProviderTests._payload(RECORD_B, CONTENT_B),
                         ),
                     ]
                 )
@@ -475,9 +492,7 @@ class DenseProviderTests(unittest.IsolatedAsyncioTestCase):
             provider_key=PROVIDER_KEY,
             model_id=MODEL_ID,
             dimension=3,
-            encoder=_ManifestDocumentEncoder(
-                lambda _text: [0.25, 0.5, 0.75]
-            ),
+            encoder=_ManifestDocumentEncoder(lambda _text: [0.25, 0.5, 0.75]),
             document_encoder=self.document_encoder,
             client=client,
             collection_prefix="daemon",
@@ -501,14 +516,15 @@ class DenseProviderTests(unittest.IsolatedAsyncioTestCase):
             tuple(candidate.evidence.record_id for candidate in result.candidates),
         )
         self.assertEqual((1, 2), tuple(c.rank for c in result.candidates))
-        self.assertEqual((EVENT_A, EVENT_B), tuple(c.evidence.event_id for c in result.candidates))
+        self.assertEqual(
+            (EVENT_A, EVENT_B), tuple(c.evidence.event_id for c in result.candidates)
+        )
         self.assertEqual(changes_before, self.connection.total_changes)
         self.assertEqual(
             [
                 {
                     "collection_name": (
-                        "daemon-ws_111111111111111111111111-"
-                        "qdrant-g4-1a1f4502024d"
+                        "daemon-ws_111111111111111111111111-qdrant-g4-1a1f4502024d"
                     ),
                     "query": [0.25, 0.5, 0.75],
                     "limit": 6,
@@ -538,7 +554,9 @@ class DenseProviderTests(unittest.IsolatedAsyncioTestCase):
         self._activate_manifest(model_id="other-model")
         mismatch = await provider.search(query, 5)
 
-        self.assertEqual(("unavailable", "DENSE_UNAVAILABLE"), (missing.status, missing.reason))
+        self.assertEqual(
+            ("unavailable", "DENSE_UNAVAILABLE"), (missing.status, missing.reason)
+        )
         self.assertEqual(
             ("unavailable", "DENSE_MANIFEST_MISMATCH"),
             (mismatch.status, mismatch.reason),
@@ -748,8 +766,7 @@ class DenseProviderTests(unittest.IsolatedAsyncioTestCase):
             provider_key=PROVIDER_KEY,
             model_id=MODEL_ID,
             dimension=3,
-            encoder=lambda _text: calls.append(("encoder", None))
-            or [0.0, 0.0, 0.0],
+            encoder=lambda _text: calls.append(("encoder", None)) or [0.0, 0.0, 0.0],
             document_encoder=self.document_encoder,
             client=FakeClient(),
         ).search(
@@ -784,8 +801,7 @@ class DenseProviderTests(unittest.IsolatedAsyncioTestCase):
             provider_key=PROVIDER_KEY,
             model_id=MODEL_ID,
             dimension=3,
-            encoder=lambda _text: calls.append(("encoder", None))
-            or [0.0, 0.0, 0.0],
+            encoder=lambda _text: calls.append(("encoder", None)) or [0.0, 0.0, 0.0],
             document_encoder=self.document_encoder,
             client=FakeClient(),
         ).search(
@@ -873,6 +889,60 @@ class DenseProviderTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("degraded", result.status)
         self.assertEqual("DENSE_PROVIDER_TIMEOUT", result.reason)
 
+    async def test_timeout_defers_owned_client_close_until_worker_exits(self):
+        dense_provider, _, _ = self._dense_symbols()
+        self._activate_manifest()
+        started = threading.Event()
+        release = threading.Event()
+        closed = threading.Event()
+
+        class BlockingClient:
+            def __init__(self):
+                self.in_use = False
+                self.closed = 0
+                self.closed_while_in_use = False
+
+            def query_points(self, **_kwargs):
+                self.in_use = True
+                started.set()
+                release.wait(timeout=2)
+                self.in_use = False
+                return SimpleNamespace(points=[])
+
+            def close(self):
+                self.closed_while_in_use = self.in_use
+                self.closed += 1
+                closed.set()
+
+        client = BlockingClient()
+        provider = dense_provider(
+            self.connection,
+            provider_key=PROVIDER_KEY,
+            model_id=MODEL_ID,
+            dimension=3,
+            encoder=_ManifestDocumentEncoder(),
+            document_encoder=self.document_encoder,
+            qdrant_path="unused-local-path",
+            client_factory=lambda **_kwargs: client,
+            timeout_seconds=0.02,
+        )
+        from daem0nmcp.retrieval.types import RetrievalQuery
+
+        result = await provider.search(
+            RetrievalQuery(workspace_id=WORKSPACE_ID, text="query"),
+            5,
+        )
+        self.assertTrue(started.is_set())
+        self.assertEqual("DENSE_PROVIDER_TIMEOUT", result.reason)
+
+        provider.close()
+        provider.close()
+        self.assertEqual(0, client.closed)
+        release.set()
+        self.assertTrue(await asyncio.to_thread(closed.wait, 2))
+        self.assertEqual(1, client.closed)
+        self.assertFalse(client.closed_while_in_use)
+
     async def test_encoder_and_client_failures_degrade_only_the_query(self):
         dense_provider, _, _ = self._dense_symbols()
         self._activate_manifest()
@@ -920,6 +990,72 @@ class DenseProviderTests(unittest.IsolatedAsyncioTestCase):
             (client_failure.status, client_failure.reason),
         )
         self.assertEqual([{"path": "unused-local-path"}], client_factory_calls)
+
+    async def test_lazy_client_initializes_once_and_only_owned_resources_close(self):
+        dense_provider, _, _ = self._dense_symbols()
+        self._activate_manifest()
+        from daem0nmcp.retrieval.types import RetrievalQuery
+
+        class Resource:
+            def __init__(self):
+                self.closed = 0
+
+            def close(self):
+                self.closed += 1
+
+        class Client(Resource):
+            def query_points(self, **_kwargs):
+                return SimpleNamespace(points=[])
+
+        created: list[Client] = []
+        factory_started = threading.Event()
+        factory_release = threading.Event()
+
+        def factory(**_kwargs):
+            factory_started.set()
+            factory_release.wait(timeout=2)
+            client = Client()
+            created.append(client)
+            return client
+
+        external_encoder = _ManifestDocumentEncoder()
+        provider = dense_provider(
+            self.connection,
+            provider_key=PROVIDER_KEY,
+            model_id=MODEL_ID,
+            dimension=3,
+            encoder=external_encoder,
+            document_encoder=self.document_encoder,
+            qdrant_path="unused-local-path",
+            client_factory=factory,
+        )
+        query = RetrievalQuery(workspace_id=WORKSPACE_ID, text="query")
+        first = asyncio.create_task(provider.search(query, 5))
+        await asyncio.to_thread(factory_started.wait, 2)
+        second = asyncio.create_task(provider.search(query, 5))
+        await asyncio.sleep(0.05)
+        factory_release.set()
+        results = await asyncio.gather(first, second)
+        provider.close()
+        provider.close()
+
+        self.assertEqual(["ready", "ready"], [item.status for item in results])
+        self.assertEqual(1, len(created))
+        self.assertEqual(1, created[0].closed)
+        self.assertFalse(hasattr(external_encoder, "closed"))
+
+        external_client = Client()
+        externally_owned = dense_provider(
+            self.connection,
+            provider_key=PROVIDER_KEY,
+            model_id=MODEL_ID,
+            dimension=3,
+            encoder=external_encoder,
+            document_encoder=self.document_encoder,
+            client=external_client,
+        )
+        externally_owned.close()
+        self.assertEqual(0, external_client.closed)
 
     async def test_streaming_client_failure_during_point_iteration_degrades(self):
         dense_provider, _, _ = self._dense_symbols()

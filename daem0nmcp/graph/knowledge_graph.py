@@ -287,7 +287,9 @@ class KnowledgeGraph:
         """
         result = []
         for node_id, attrs in self._graph.nodes(data=True):
-            if attrs.get("node_type") == "entity" and (entity_type is None or attrs.get("entity_type") == entity_type):
+            if attrs.get("node_type") == "entity" and (
+                entity_type is None or attrs.get("entity_type") == entity_type
+            ):
                 result.append(node_id)
         return result
 

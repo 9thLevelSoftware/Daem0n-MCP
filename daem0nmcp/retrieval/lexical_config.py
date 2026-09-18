@@ -6,7 +6,6 @@ import hashlib
 import json
 import re
 
-
 LEXICAL_BM25_WEIGHTS = (1.0, 0.7, 1.5)
 LEXICAL_TOKENIZER = "unicode61 remove_diacritics 2"
 LEXICAL_BUILD_CONFIG = {
@@ -20,9 +19,7 @@ LEXICAL_BUILD_CONFIG = {
 }
 
 _WORKSPACE_ID = re.compile(r"^ws_[0-9a-f]{24}$")
-_FTS_PARTITION = re.compile(
-    r"^retrieval_fts_[0-9a-f]{24}_g[1-9][0-9]*$"
-)
+_FTS_PARTITION = re.compile(r"^retrieval_fts_[0-9a-f]{24}_g[1-9][0-9]*$")
 
 
 def lexical_build_config_hash() -> str:

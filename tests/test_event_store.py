@@ -2,14 +2,14 @@
 
 from __future__ import annotations
 
-import math
 import importlib.util
+import math
 import sqlite3
 import tempfile
 import threading
+import unittest
 from dataclasses import replace
 from pathlib import Path
-import unittest
 
 
 class CanonicalEventGoldenTests(unittest.TestCase):
@@ -89,9 +89,7 @@ class CanonicalEventGoldenTests(unittest.TestCase):
         self.assertEqual(expected_payload_hash, sha256_json(payload))
         self.assertEqual(
             expected_record_id,
-            deterministic_id(
-                "mem", "memory", workspace_id, "legacy", "memories", "42"
-            ),
+            deterministic_id("mem", "memory", workspace_id, "legacy", "memories", "42"),
         )
         self.assertEqual(expected_event_hash, event_hash_for(event_columns))
         self.assertEqual(
@@ -122,13 +120,17 @@ class CanonicalEventGoldenTests(unittest.TestCase):
             {1: "non-string-key"},
             {"unsupported": {"set"}},
         ):
-            with self.subTest(value=repr(value)):
-                with self.assertRaises((TypeError, ValueError)):
-                    canonical_json_bytes(value)
+            with (
+                self.subTest(value=repr(value)),
+                self.assertRaises((TypeError, ValueError)),
+            ):
+                canonical_json_bytes(value)
 
 
 def _migration_16_statements():
-    path = Path(__file__).resolve().parents[1] / "daem0nmcp" / "migrations" / "schema.py"
+    path = (
+        Path(__file__).resolve().parents[1] / "daem0nmcp" / "migrations" / "schema.py"
+    )
     spec = importlib.util.spec_from_file_location("event_test_schema", path)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
@@ -183,11 +185,11 @@ class SQLiteEventStoreTests(unittest.TestCase):
 
     def test_append_projects_contiguous_hash_chained_memory_state(self):
         """Two commands become immutable versions 1/2 and one current record."""
-        Command, Store = self._api()
+        command_type, store_type = self._api()
         record_id = "mem_" + "1" * 64
-        store = Store(self.connection)
+        store = store_type(self.connection)
         first = store.append_and_project(
-            Command(
+            command_type(
                 workspace_id=self.workspace_id,
                 stream_id=record_id,
                 stream_kind="memory",
@@ -199,7 +201,7 @@ class SQLiteEventStoreTests(unittest.TestCase):
             )
         )
         second = store.append_and_project(
-            Command(
+            command_type(
                 workspace_id=self.workspace_id,
                 stream_id=record_id,
                 stream_kind="memory",
@@ -227,12 +229,12 @@ class SQLiteEventStoreTests(unittest.TestCase):
 
     def test_expected_version_is_exactly_idempotent_or_conflicts(self):
         """Same event is reusable; changed fields at one version fail closed."""
-        Command, Store = self._api()
+        command_type, store_type = self._api()
         from daem0nmcp.event_store import EventStreamConflict
 
         record_id = "mem_" + "2" * 64
-        store = Store(self.connection)
-        command = Command(
+        store = store_type(self.connection)
+        command = command_type(
             workspace_id=self.workspace_id,
             stream_id=record_id,
             stream_kind="memory",
@@ -251,18 +253,19 @@ class SQLiteEventStoreTests(unittest.TestCase):
                 replace(command, payload={"record": self._state("changed")})
             )
         self.assertEqual(
-            1, self.connection.execute("SELECT count(*) FROM memory_events").fetchone()[0]
+            1,
+            self.connection.execute("SELECT count(*) FROM memory_events").fetchone()[0],
         )
 
     def test_projection_failure_rolls_back_event_with_savepoint(self):
         """No immutable event may survive a failed projection in caller transaction."""
-        Command, Store = self._api()
+        command_type, store_type = self._api()
         record_id = "mem_" + "3" * 64
         self.connection.execute("BEGIN IMMEDIATE")
-        store = Store(self.connection)
+        store = store_type(self.connection)
         with self.assertRaises(ValueError):
             store.append_and_project(
-                Command(
+                command_type(
                     workspace_id=self.workspace_id,
                     stream_id=record_id,
                     stream_kind="memory",
@@ -274,14 +277,15 @@ class SQLiteEventStoreTests(unittest.TestCase):
                 )
             )
         self.assertEqual(
-            0, self.connection.execute("SELECT count(*) FROM memory_events").fetchone()[0]
+            0,
+            self.connection.execute("SELECT count(*) FROM memory_events").fetchone()[0],
         )
         self.connection.rollback()
 
     def test_event_times_reject_values_outside_signed_64_bit_range(self):
         """SQLite time columns have one portable integer domain, not host coercion."""
-        Command, Store = self._api()
-        command = Command(
+        command_type, store_type = self._api()
+        command = command_type(
             self.workspace_id,
             "mem_" + "b" * 64,
             "memory",
@@ -295,17 +299,20 @@ class SQLiteEventStoreTests(unittest.TestCase):
             replace(command, occurred_at_us=2**63),
             replace(command, recorded_at_us=-(2**63) - 1),
         ):
-            with self.subTest(changed=changed):
-                with self.assertRaisesRegex(ValueError, "signed 64-bit"):
-                    Store(self.connection).append_and_project(changed)
+            with (
+                self.subTest(changed=changed),
+                self.assertRaisesRegex(ValueError, "signed 64-bit"),
+            ):
+                store_type(self.connection).append_and_project(changed)
         self.assertEqual(
-            0, self.connection.execute("SELECT count(*) FROM memory_events").fetchone()[0]
+            0,
+            self.connection.execute("SELECT count(*) FROM memory_events").fetchone()[0],
         )
 
     def test_memory_projection_rejects_lossy_scalar_coercions(self):
         """Canonical state and SQLite TEXT/REAL columns must never diverge."""
-        Command, Store = self._api()
-        store = Store(self.connection)
+        command_type, store_type = self._api()
+        store = store_type(self.connection)
         cases = (
             {"file_path": 7},
             {"source_client": ["client"]},
@@ -314,33 +321,33 @@ class SQLiteEventStoreTests(unittest.TestCase):
             {"deleted_at_us": "now"},
         )
         for index, changes in enumerate(cases):
-            with self.subTest(changes=changes):
-                with self.assertRaises(ValueError):
-                    store.append_and_project(
-                        Command(
-                            self.workspace_id,
-                            "mem_" + str(index) * 64,
-                            "memory",
-                            "memory.created",
-                            1,
-                            1,
-                            "system",
-                            {"record": {**self._state(), **changes}},
-                        )
+            with self.subTest(changes=changes), self.assertRaises(ValueError):
+                store.append_and_project(
+                    command_type(
+                        self.workspace_id,
+                        "mem_" + str(index) * 64,
+                        "memory",
+                        "memory.created",
+                        1,
+                        1,
+                        "system",
+                        {"record": {**self._state(), **changes}},
                     )
+                )
         self.assertEqual(
-            0, self.connection.execute("SELECT count(*) FROM memory_events").fetchone()[0]
+            0,
+            self.connection.execute("SELECT count(*) FROM memory_events").fetchone()[0],
         )
 
     def test_fact_and_relationship_streams_create_typed_versions(self):
         """Non-memory streams project versioned typed assertions, not mutable rows."""
-        Command, Store = self._api()
-        store = Store(self.connection)
+        command_type, store_type = self._api()
+        store = store_type(self.connection)
         left = "mem_" + "4" * 64
         right = "mem_" + "5" * 64
         for record_id in (left, right):
             store.append_and_project(
-                Command(
+                command_type(
                     workspace_id=self.workspace_id,
                     stream_id=record_id,
                     stream_kind="memory",
@@ -354,7 +361,7 @@ class SQLiteEventStoreTests(unittest.TestCase):
         fact_id = "fact_" + "6" * 64
         relationship_id = "rel_" + "7" * 64
         fact_event = store.append_and_project(
-            Command(
+            command_type(
                 workspace_id=self.workspace_id,
                 stream_id=fact_id,
                 stream_kind="fact",
@@ -381,7 +388,7 @@ class SQLiteEventStoreTests(unittest.TestCase):
             )
         )
         relationship_event = store.append_and_project(
-            Command(
+            command_type(
                 workspace_id=self.workspace_id,
                 stream_id=relationship_id,
                 stream_kind="relationship",
@@ -412,19 +419,17 @@ class SQLiteEventStoreTests(unittest.TestCase):
         self.assertEqual(fact_event.event_id, fact["asserted_by_event_id"])
         self.assertEqual('"SQLite"', fact["object_json"])
         self.assertEqual(relationship_id, relation["relationship_id"])
-        self.assertEqual(
-            relationship_event.event_id, relation["asserted_by_event_id"]
-        )
+        self.assertEqual(relationship_event.event_id, relation["asserted_by_event_id"])
 
     def test_relationship_removal_preserves_history_and_closes_prior_version(self):
         """Removal appends history and closes the prior open transaction."""
-        Command, Store = self._api()
-        store = Store(self.connection)
+        command_type, store_type = self._api()
+        store = store_type(self.connection)
         left = "mem_" + "8" * 64
         right = "mem_" + "9" * 64
         for record_id in (left, right):
             store.append_and_project(
-                Command(
+                command_type(
                     workspace_id=self.workspace_id,
                     stream_id=record_id,
                     stream_kind="memory",
@@ -448,15 +453,27 @@ class SQLiteEventStoreTests(unittest.TestCase):
             "valid_to_us": None,
         }
         store.append_and_project(
-            Command(
-                self.workspace_id, relation_id, "relationship", "relationship.created",
-                10, 11, "system", {"relationship": state}
+            command_type(
+                self.workspace_id,
+                relation_id,
+                "relationship",
+                "relationship.created",
+                10,
+                11,
+                "system",
+                {"relationship": state},
             )
         )
         removed = store.append_and_project(
-            Command(
-                self.workspace_id, relation_id, "relationship", "relationship.removed",
-                30, 31, "system", {"relationship": {**state, "valid_to_us": 30}}
+            command_type(
+                self.workspace_id,
+                relation_id,
+                "relationship",
+                "relationship.removed",
+                30,
+                31,
+                "system",
+                {"relationship": {**state, "valid_to_us": 30}},
             )
         )
         versions = self.connection.execute(
@@ -469,13 +486,13 @@ class SQLiteEventStoreTests(unittest.TestCase):
 
     def test_extended_typed_relationship_vocabulary_projects(self):
         """Schema-supported evidence/derivation/invalidation edges are canonical."""
-        Command, Store = self._api()
-        store = Store(self.connection)
+        command_type, store_type = self._api()
+        store = store_type(self.connection)
         left = "mem_" + "b" * 64
         right = "mem_" + "c" * 64
         for record_id in (left, right):
             store.append_and_project(
-                Command(
+                command_type(
                     self.workspace_id,
                     record_id,
                     "memory",
@@ -490,7 +507,7 @@ class SQLiteEventStoreTests(unittest.TestCase):
             ("evidence_for", "derived_from", "invalidates"), 1
         ):
             store.append_and_project(
-                Command(
+                command_type(
                     self.workspace_id,
                     "rel_" + str(index) * 64,
                     "relationship",
@@ -526,7 +543,7 @@ class SQLiteEventStoreTests(unittest.TestCase):
 
     def test_concurrent_default_appends_serialize_without_stream_gap(self):
         """BEGIN IMMEDIATE makes two head reads become versions one and two."""
-        Command, Store = self._api()
+        command_type, store_type = self._api()
         with tempfile.TemporaryDirectory() as raw:
             path = Path(raw) / "events.db"
             setup = sqlite3.connect(path)
@@ -543,8 +560,8 @@ class SQLiteEventStoreTests(unittest.TestCase):
                 connection = sqlite3.connect(path, timeout=5)
                 try:
                     barrier.wait()
-                    result = Store(connection).append_and_project(
-                        Command(
+                    result = store_type(connection).append_and_project(
+                        command_type(
                             self.workspace_id,
                             stream_id,
                             "memory",

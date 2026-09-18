@@ -2,14 +2,14 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, working_branch, "v7/**"]
   pull_request:
-    branches: [main]
+    branches: [main, working_branch, "v7/**"]
 
 jobs:
   test:
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 15
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -28,7 +28,7 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -e ".[dev,apps]"
+          pip install -e ".[dev,apps,graph]"
 
       - name: Run tests
         run: |
@@ -59,6 +59,27 @@ jobs:
         run: |
           ruff format --check daem0nmcp/ tests/
 
+  release-inventory:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.10"
+          cache: 'pip'
+
+      - name: Install inventory dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Check v7 release inventory and frozen fixtures
+        run: |
+          python scripts/v7_release_inventory.py --check
+
   type-check:
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -77,6 +98,11 @@ jobs:
           pip install -e ".[dev]"
           pip install mypy
 
-      - name: Type check
+      - name: Type check v7 production surface
         run: |
-          mypy daem0nmcp/ --ignore-missing-imports || true
+          mypy daem0nmcp/api/v7 --ignore-missing-imports --follow-imports=silent
+
+      - name: Report legacy repository type errors
+        continue-on-error: true
+        run: |
+          mypy daem0nmcp/ --ignore-missing-imports

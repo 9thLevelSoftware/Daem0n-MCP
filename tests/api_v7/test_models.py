@@ -15,7 +15,6 @@ from datetime import datetime, timedelta, timezone
 
 from pydantic import TypeAdapter, ValidationError
 
-
 WORKSPACE_ID = "ws_0123456789abcdef01234567"
 RECORD_ID = "mem_" + "1" * 64
 EVENT_ID = "evt_" + "2" * 64
@@ -120,11 +119,7 @@ class ErrorRegistryTests(unittest.TestCase):
 
         unsafe_cases = (
             {"message": "sqlite failed at D:/secret/project.db"},
-            {
-                "field_errors": [
-                    {"field": "query", "code": "BAD", "message": "bad"}
-                ]
-            },
+            {"field_errors": [{"field": "query", "code": "BAD", "message": "bad"}]},
             {
                 "remedy": {
                     "tool": "session_brief",
@@ -169,7 +164,9 @@ class PrimitiveBoundaryTests(unittest.TestCase):
                     with self.assertRaises(ValidationError):
                         adapter.validate_python(invalid, strict=True)
 
-    def test_relative_path_fails_closed_and_preserves_normalized_posix_form(self) -> None:
+    def test_relative_path_fails_closed_and_preserves_normalized_posix_form(
+        self,
+    ) -> None:
         _, models = _load(self)
         adapter = TypeAdapter(models.RelativePath)
         for valid in (".", "src", "src/api/models.py", ".hidden/config"):
@@ -250,7 +247,9 @@ class PrimitiveBoundaryTests(unittest.TestCase):
                 '{"tool":"memory_store","arguments":{"x":NaN}}'
             )
 
-    def test_every_wire_model_rejects_absolute_paths_in_free_text_and_json(self) -> None:
+    def test_every_wire_model_rejects_absolute_paths_in_free_text_and_json(
+        self,
+    ) -> None:
         _, models = _load(self)
 
         with self.assertRaises(ValidationError):

@@ -27,7 +27,7 @@
           decision: p.count(categories.decision), warning: p.count(categories.warning),
           pattern: p.count(categories.pattern), learning: p.count(categories.learning),
         },
-        outcome_rates: { success_rate: p.ratio(rates.success_rate) },
+        outcome_rates: { success_rate: typeof rates.success_rate === "number" && Number.isFinite(rates.success_rate) ? p.ratio(rates.success_rate) : null },
       },
       recent_decisions: p.list(data.recent_decisions, 20).map(value => {
         const item = p.object(value);
@@ -42,7 +42,7 @@
         total: p.count(git.total, Array.isArray(rawFiles) ? rawFiles.length : 0),
         files: p.list(rawFiles, 20).map(value => {
           const item = p.object(value);
-          return { status: ["A", "M", "D"].includes(item.status) ? item.status : "?", path: p.text(item.path || item.file, 4096) };
+          return { status: ["A", "M", "D", "R", "U"].includes(item.status) ? item.status : "?", path: p.text(item.path || item.file, 4096) };
         }),
       },
       focus_areas: p.list(rawFocus, 20).map(value => ({ topic: p.text(p.object(value).topic) })),
@@ -69,7 +69,7 @@
       [data.statistics.by_category.decision, "Decisions"],
       [data.statistics.by_category.warning, "Warnings"],
       [data.statistics.by_category.pattern, "Patterns"],
-      [Math.round(data.statistics.outcome_rates.success_rate * 100) + "%", "Success Rate"],
+      [data.statistics.outcome_rates.success_rate === null ? "—" : Math.round(data.statistics.outcome_rates.success_rate * 100) + "%", "Success Rate"],
     ];
     for (const value of values) {
       const card = ui.element("div", "daemon-stat");
@@ -92,18 +92,18 @@
     const failed = data.failed_approaches.map(item => ui.element("p", "briefing-row", item.content));
     const files = data.git_changes.files.map(item => {
       const row = ui.element("p", "briefing-row");
-      row.append(ui.element("span", gitClasses[item.status], item.status), ui.element("code", "git-path", item.path));
+      row.append(ui.element("span", gitClasses[item.status] || "git-status", item.status), ui.element("code", "git-path", item.path));
       return row;
     });
     const focus = data.focus_areas.map(item => {
       const button = ui.element("button", "daemon-btn daemon-btn--secondary", item.topic || "Focus area");
       button.type = "button";
-      button.addEventListener("click", function () { ui.sendHost(ui.actions.briefingFocus.method, { tool: ui.actions.briefingFocus.tool, args: { topic: item.topic } }); });
+      button.addEventListener("click", function () { ui.callTool(ui.actions.briefingFocus.tool, { query: item.topic, limit: 10 }); });
       return button;
     });
     const check = ui.element("button", "daemon-btn", "Check Context");
     check.type = "button";
-    check.addEventListener("click", function () { ui.sendHost(ui.actions.contextCheck.method, { tool: ui.actions.contextCheck.tool, args: {} }); });
+    check.addEventListener("click", function () { ui.callTool(ui.actions.contextCheck.tool, {}); });
     mount.replaceChildren(
       header,
       stats,

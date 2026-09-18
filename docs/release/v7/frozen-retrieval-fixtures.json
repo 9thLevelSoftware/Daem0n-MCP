@@ -1,0 +1,14 @@
+{
+  "baseline_commit": "cc08b4f696b6226e88cca1f83104ce870dd62ae6",
+  "fixture_digest": "7aa535e9a2d80add4e179d70bade096600d09e2039c320c3e4bf466df412d269",
+  "record_count": 12,
+  "event_count": 18,
+  "query_count": 12,
+  "files": {
+    "events.jsonl": "57e965b8d585667f778ca5fc4fe6605ccfe22e52e0a457dff815ca8fdfbfff00",
+    "qdrant_fake.py": "5adfd784a014adf65722017e6cc240b512d06c41c9b81c60941b84547c4c008d",
+    "queries.jsonl": "cdbc30ae2b908f05825e9913a1796b973104517c17bfe13d4ea7b227e5ca17eb",
+    "records.jsonl": "07e78d6829c213e744cb2e76976773aa2304062268b142950e282650c9371369"
+  },
+  "scope": "Frozen small contract corpus; not 100,000-memory relevance certification"
+}

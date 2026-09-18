@@ -53,6 +53,24 @@ def _root_key(root: Path) -> str:
     return os.path.normcase(str(root))
 
 
+def normalize_resolved_path(path: Path) -> Path:
+    """Normalize equivalent resolved Windows spellings for identity checks.
+
+    Callers must resolve and perform their normal link/reparse validation first;
+    this helper changes only Windows' extended-length spelling returned
+    intermittently by the runtime, not the selected filesystem object.
+    """
+
+    if os.name != "nt":
+        return path
+    value = str(path)
+    if value.startswith("\\\\?\\UNC\\"):
+        return Path("\\\\" + value[8:])
+    if value.startswith("\\\\?\\"):
+        return Path(value[4:])
+    return path
+
+
 def _workspace_id(root: Path) -> str:
     digest = hashlib.sha256(_root_key(root).encode("utf-8")).hexdigest()[:24]
     return f"ws_{digest}"
@@ -107,12 +125,10 @@ class WorkspaceRegistry:
     @classmethod
     def from_environment(
         cls, environ: Mapping[str, str] | None = None
-    ) -> "WorkspaceRegistry":
+    ) -> WorkspaceRegistry:
         env = os.environ if environ is None else environ
         project_root = env.get("DAEM0NMCP_PROJECT_ROOT")
-        extra_roots = _parse_workspace_roots(
-            env.get("DAEM0NMCP_WORKSPACE_ROOTS")
-        )
+        extra_roots = _parse_workspace_roots(env.get("DAEM0NMCP_WORKSPACE_ROOTS"))
         return cls(extra_roots, default_root=project_root)
 
     @classmethod
@@ -121,11 +137,11 @@ class WorkspaceRegistry:
         *,
         project_root: str | None,
         workspace_roots: Sequence[str] = (),
-    ) -> "WorkspaceRegistry":
+    ) -> WorkspaceRegistry:
         return cls(workspace_roots, default_root=project_root)
 
     @classmethod
-    def from_settings(cls, loaded_settings: object) -> "WorkspaceRegistry":
+    def from_settings(cls, loaded_settings: object) -> WorkspaceRegistry:
         """Build a registry from Pydantic-loaded settings, including `.env`."""
         project_root = getattr(loaded_settings, "project_root", ".")
         workspace_roots = getattr(loaded_settings, "workspace_roots", ())
@@ -183,12 +199,13 @@ def resolve_derived_path(
     """Resolve a workspace-derived path and fail closed on links or traversal."""
     try:
         registered_root = Path(workspace_root)
-        current_root = registered_root.resolve(strict=True)
-        if _root_key(current_root) != _root_key(registered_root):
+        current_root = normalize_resolved_path(registered_root.resolve(strict=True))
+        comparable_registered = normalize_resolved_path(registered_root)
+        if _root_key(current_root) != _root_key(comparable_registered):
             raise WorkspacePathError()
 
         candidate = registered_root.joinpath(*relative_parts)
-        resolved = candidate.resolve(strict=False)
+        resolved = normalize_resolved_path(candidate.resolve(strict=False))
         resolved.relative_to(current_root)
     except WorkspacePathError:
         raise
@@ -205,8 +222,9 @@ def resolve_index_target(workspace: Workspace, target_path: str | None) -> Path:
         raise IndexPathError("index roots must be relative workspace paths")
 
     try:
-        resolved = (workspace.root / target_path).resolve()
-        resolved.relative_to(workspace.root)
+        root = normalize_resolved_path(workspace.root.resolve(strict=True))
+        resolved = normalize_resolved_path((root / target_path).resolve())
+        resolved.relative_to(root)
     except (OSError, RuntimeError, ValueError) as exc:
         raise IndexPathError("index root must remain inside the workspace") from exc
     return resolved
@@ -227,8 +245,8 @@ def validate_index_patterns(patterns: Sequence[str]) -> list[str]:
 def resolve_index_file(project_root: Path, file_path: Path) -> Path:
     """Resolve a matched file immediately before reading it."""
     try:
-        root = project_root.resolve(strict=True)
-        resolved = file_path.resolve(strict=True)
+        root = normalize_resolved_path(project_root.resolve(strict=True))
+        resolved = normalize_resolved_path(file_path.resolve(strict=True))
         resolved.relative_to(root)
     except (OSError, RuntimeError, ValueError) as exc:
         raise IndexPathError("matched file resolves outside the workspace") from exc

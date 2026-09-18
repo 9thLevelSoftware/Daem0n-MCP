@@ -11,7 +11,15 @@ import json
 import posixpath
 import re
 from datetime import datetime, timezone
-from typing import Any, Generic, Literal, TypeVar, Union
+from typing import (
+    TYPE_CHECKING,
+    Annotated,
+    Any,
+    Generic,
+    Literal,
+    TypeAlias,
+    TypeVar,
+)
 
 from pydantic import (
     AfterValidator,
@@ -23,10 +31,9 @@ from pydantic import (
     ValidationError,
     model_validator,
 )
-from typing_extensions import Annotated, TypeAliasType
+from typing_extensions import Self, TypeAliasType
 
-from .errors import ErrorCode, INTERNAL_ERROR_MESSAGE
-
+from .errors import INTERNAL_ERROR_MESSAGE, ErrorCode
 
 MAX_JSON_COLLECTION_ITEMS = 4096
 MAX_JSON_KEY_CHARS = 256
@@ -43,9 +50,7 @@ _WINDOWS_DRIVE = re.compile(r"^[A-Za-z]:")
 _WINDOWS_ABSOLUTE_PATH = re.compile(
     r"(?<![A-Za-z0-9])(?:[A-Za-z]:[\\/]|\\\\[^\s\\/]+[\\/])"
 )
-_POSIX_ABSOLUTE_PATH = re.compile(
-    r"(?<![A-Za-z0-9:/])/(?!/)[A-Za-z0-9_.-]"
-)
+_POSIX_ABSOLUTE_PATH = re.compile(r"(?<![A-Za-z0-9:/])/(?!/)[A-Za-z0-9_.-]")
 _FILE_URI = re.compile(r"(?i)\bfile:(?://)?/")
 _CONTROL_CHAR = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 
@@ -91,7 +96,8 @@ def _relative_path(value: str) -> str:
     return value
 
 
-def _rfc3339(value: object) -> object:
+def parse_wire_datetime(value: object) -> datetime:
+    """Restore an aware schema timestamp from normalized MCP JSON arguments."""
     if isinstance(value, datetime):
         if value.tzinfo is None or value.utcoffset() is None:
             raise ValueError("timestamp must include an RFC 3339 offset")
@@ -99,7 +105,9 @@ def _rfc3339(value: object) -> object:
     if not isinstance(value, str) or _RFC3339.fullmatch(value) is None:
         raise ValueError("timestamp must be an RFC 3339 date-time with an offset")
     try:
-        parsed = datetime.fromisoformat(value[:-1] + "+00:00" if value.endswith("Z") else value)
+        parsed = datetime.fromisoformat(
+            value[:-1] + "+00:00" if value.endswith("Z") else value
+        )
     except ValueError as exc:
         raise ValueError("timestamp must be a valid RFC 3339 date-time") from exc
     if parsed.tzinfo is None or parsed.utcoffset() is None:
@@ -276,7 +284,7 @@ RelativePath = Annotated[
     StringConstraints(strict=True, min_length=1, max_length=1024),
     AfterValidator(_relative_path),
 ]
-AwareDateTime = Annotated[datetime, BeforeValidator(_rfc3339)]
+AwareDateTime = Annotated[datetime, BeforeValidator(parse_wire_datetime)]
 UtcDateTime = Annotated[AwareDateTime, AfterValidator(_utc)]
 
 JsonKey = Annotated[
@@ -293,28 +301,31 @@ JsonInteger = Annotated[
     Field(strict=True, ge=-(2**63), le=2**63 - 1),
 ]
 JsonNumber = Annotated[float, Field(strict=True, allow_inf_nan=False)]
-JsonValue = TypeAliasType(
-    "JsonValue",
-    Union[
-        None,
-        JsonBoolean,
-        JsonInteger,
-        JsonNumber,
-        JsonString,
-        Annotated[list["JsonValue"], Field(max_length=MAX_JSON_COLLECTION_ITEMS)],
+if TYPE_CHECKING:
+    JsonValue: TypeAlias = (
+        None | bool | int | float | str | list["JsonValue"] | dict[str, "JsonValue"]
+    )
+    JsonObject: TypeAlias = dict[str, JsonValue]
+else:
+    JsonValue = TypeAliasType(
+        "JsonValue",
+        None
+        | JsonBoolean
+        | JsonInteger
+        | JsonNumber
+        | JsonString
+        | Annotated[list["JsonValue"], Field(max_length=MAX_JSON_COLLECTION_ITEMS)]
+        | Annotated[
+            dict[JsonKey, "JsonValue"], Field(max_length=MAX_JSON_COLLECTION_ITEMS)
+        ],
+    )
+    JsonObject = TypeAliasType(
+        "JsonObject",
         Annotated[
-            dict[JsonKey, "JsonValue"],
+            dict[JsonKey, JsonValue],
             Field(max_length=MAX_JSON_COLLECTION_ITEMS),
         ],
-    ],
-)
-JsonObject = TypeAliasType(
-    "JsonObject",
-    Annotated[
-        dict[JsonKey, JsonValue],
-        Field(max_length=MAX_JSON_COLLECTION_ITEMS),
-    ],
-)
+    )
 ContextJsonObject = Annotated[JsonObject, AfterValidator(_context_size)]
 
 ErrorCodeValue = Annotated[ErrorCode, BeforeValidator(_error_code)]
@@ -377,19 +388,19 @@ CapabilityStatus = Literal["ready", "disabled", "degraded", "failed"]
 ProviderStatus = Literal["ready", "degraded", "unavailable", "failed"]
 EvidenceStatus = Literal["current", "superseded"]
 
-PublicObjectId = Union[
-    WorkspaceId,
-    RecordId,
-    EventId,
-    FactId,
-    RelationshipId,
-    RuleId,
-    TriggerId,
-    EntityId,
-    CommunityId,
-    CodeEntityId,
-    ActiveContextId,
-]
+PublicObjectId = (
+    WorkspaceId
+    | RecordId
+    | EventId
+    | FactId
+    | RelationshipId
+    | RuleId
+    | TriggerId
+    | EntityId
+    | CommunityId
+    | CodeEntityId
+    | ActiveContextId
+)
 
 CountName = Annotated[
     str,
@@ -418,7 +429,7 @@ class WireModel(BaseModel):
     )
 
     @model_validator(mode="after")
-    def reject_absolute_filesystem_paths(self) -> "WireModel":
+    def reject_absolute_filesystem_paths(self) -> WireModel:
         if contains_absolute_filesystem_path(self.__dict__):
             raise ValueError("absolute filesystem paths are forbidden on the v7 wire")
         return self
@@ -428,7 +439,7 @@ class WireModel(BaseModel):
         cls,
         json_data: str | bytes | bytearray,
         **kwargs: Any,
-    ) -> "WireModel":
+    ) -> Self:
         try:
             decoded = _duplicate_safe_json(json_data)
         except (TypeError, UnicodeDecodeError, ValueError) as exc:
@@ -476,7 +487,7 @@ class ApiError(WireModel):
     correlation_id: RequestId
 
     @model_validator(mode="after")
-    def protect_internal_details(self) -> "ApiError":
+    def protect_internal_details(self) -> ApiError:
         if self.code == ErrorCode.INTERNAL_ERROR and (
             self.message != INTERNAL_ERROR_MESSAGE
             or self.retryable
@@ -515,7 +526,7 @@ class ResponseMeta(WireModel):
     )
 
 
-def _api_response_schema(schema: dict[str, object]) -> None:
+def _api_response_schema(schema: dict[str, Any]) -> None:
     schema["type"] = "object"
     required = set(schema.get("required", []))
     required.update({"api_version", "ok", "data", "error", "meta"})
@@ -557,7 +568,7 @@ class ApiResponse(WireModel, Generic[T]):
     meta: ResponseMeta
 
     @model_validator(mode="after")
-    def enforce_one_branch(self) -> "ApiResponse[T]":
+    def enforce_one_branch(self) -> ApiResponse[T]:
         valid_success = self.ok and self.data is not None and self.error is None
         valid_failure = not self.ok and self.data is None and self.error is not None
         if not (valid_success or valid_failure):
@@ -590,13 +601,14 @@ class RecordSummary(WireModel):
     updated_at: AwareDateTime
 
     @model_validator(mode="after")
-    def validate_timeline(self) -> "RecordSummary":
+    def validate_timeline(self) -> RecordSummary:
         if self.updated_at < self.created_at:
             raise ValueError("updated_at cannot precede created_at")
         return self
 
 
 class EvidenceRef(WireModel):
+    origin_workspace_id: WorkspaceId | None = None
     record_id: RecordId
     event_id: EventId
     content_hash: ContentHash
@@ -622,7 +634,7 @@ class EvidenceItem(WireModel):
     evidence_refs: list[EvidenceRef] = Field(min_length=1, max_length=32)
 
     @model_validator(mode="after")
-    def validate_providers(self) -> "EvidenceItem":
+    def validate_providers(self) -> EvidenceItem:
         channels = set(self.channels)
         if any(ref.provider not in channels for ref in self.evidence_refs):
             raise ValueError("every evidence provider must be a selected channel")
@@ -638,7 +650,7 @@ class CitationManifestEntry(WireModel):
     )
 
     @model_validator(mode="after")
-    def validate_providers(self) -> "CitationManifestEntry":
+    def validate_providers(self) -> CitationManifestEntry:
         channels = set(self.channels)
         if any(ref.provider not in channels for ref in self.evidence_refs):
             raise ValueError("every citation provider must be a selected channel")
@@ -654,7 +666,7 @@ class ProviderDiagnostic(WireModel):
     returned_count: Annotated[int, Field(ge=0, le=200)]
 
     @model_validator(mode="after")
-    def validate_status(self) -> "ProviderDiagnostic":
+    def validate_status(self) -> ProviderDiagnostic:
         if self.status != "ready" and self.reason is None:
             raise ValueError("a non-ready provider requires a reason")
         if self.status in {"unavailable", "failed"} and self.returned_count:
@@ -670,7 +682,7 @@ class TokenUsage(WireModel):
     dropped: Annotated[int, Field(ge=0, le=1_000_000)]
 
     @model_validator(mode="after")
-    def validate_counts(self) -> "TokenUsage":
+    def validate_counts(self) -> TokenUsage:
         if self.selected > self.requested:
             raise ValueError("selected tokens cannot exceed requested tokens")
         if self.rendered > self.budget:
@@ -680,10 +692,13 @@ class TokenUsage(WireModel):
 
 class RetrievalData(WireModel):
     items: list[EvidenceItem] = Field(default_factory=list, max_length=50)
-    rendered_context: Annotated[
-        str,
-        StringConstraints(strict=True, min_length=1, max_length=500_000),
-    ] | None = None
+    rendered_context: (
+        Annotated[
+            str,
+            StringConstraints(strict=True, min_length=1, max_length=500_000),
+        ]
+        | None
+    ) = None
     citation_manifest: list[CitationManifestEntry] = Field(
         default_factory=list,
         max_length=50,
@@ -697,7 +712,7 @@ class RetrievalData(WireModel):
     token_usage: TokenUsage
 
     @model_validator(mode="after")
-    def validate_abstention(self) -> "RetrievalData":
+    def validate_abstention(self) -> RetrievalData:
         if self.abstained:
             if (
                 self.abstention_reason is None
@@ -710,7 +725,9 @@ class RetrievalData(WireModel):
         if self.abstention_reason is not None:
             raise ValueError("non-abstaining retrieval cannot contain a reason")
         if not self.items or self.rendered_context is None:
-            raise ValueError("retrieval requires selected evidence and rendered context")
+            raise ValueError(
+                "retrieval requires selected evidence and rendered context"
+            )
         item_citations = [item.citation for item in self.items]
         manifest_citations = [entry.citation for entry in self.citation_manifest]
         if item_citations != manifest_citations or len(item_citations) != len(
@@ -734,7 +751,7 @@ class DestructiveMutationReceipt(MutationReceipt):
     skipped_count: Annotated[int, Field(ge=0)]
 
     @model_validator(mode="after")
-    def validate_bulk_counts(self) -> "DestructiveMutationReceipt":
+    def validate_bulk_counts(self) -> DestructiveMutationReceipt:
         if self.changed_count + self.skipped_count > self.selected_count:
             raise ValueError("bulk result counts exceed the selected count")
         return self
@@ -783,6 +800,7 @@ __all__ = [
     "MutationReceipt",
     "OperationId",
     "Page",
+    "parse_wire_datetime",
     "Preview",
     "ProviderDiagnostic",
     "ProviderName",

@@ -1,10 +1,14 @@
 from __future__ import annotations
 
 import re
-import tomllib
 import unittest
 from pathlib import Path
 from typing import Any
+
+try:
+    import tomllib
+except ImportError:  # pragma: no cover - exercised on Python 3.10
+    import tomli as tomllib
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -20,7 +24,8 @@ def _canonical_name(value: str) -> str:
 
 
 def _parse_requirement(value: str) -> tuple[str, tuple[str, ...], str]:
-    match = _REQUIREMENT_RE.fullmatch(value.strip())
+    requirement, _, _marker = value.strip().partition(";")
+    match = _REQUIREMENT_RE.fullmatch(requirement.strip())
     if match is None:
         raise AssertionError(f"unsupported project requirement: {value!r}")
     extras = tuple(
@@ -35,6 +40,19 @@ def _parse_requirement(value: str) -> tuple[str, tuple[str, ...], str]:
         extras,
         match.group("specifier").strip(),
     )
+
+
+def _project_marker(value: str, extra: str | None = None) -> str | None:
+    """Normalize PEP 508 markers to the form emitted in uv.lock metadata."""
+    _requirement, separator, marker = value.strip().partition(";")
+    normalized = re.sub(r"\bpython_version\b", "python_full_version", marker.strip())
+    if extra:
+        normalized = (
+            f"{normalized} and extra == '{extra}'"
+            if separator and normalized
+            else f"extra == '{extra}'"
+        )
+    return normalized or None
 
 
 def _locked_requirement(
@@ -56,16 +74,14 @@ class PackagingContractTests(unittest.TestCase):
         cls.project = tomllib.loads(
             (PROJECT_ROOT / "pyproject.toml").read_text(encoding="utf-8")
         )["project"]
-        cls.lock = tomllib.loads(
-            (PROJECT_ROOT / "uv.lock").read_text(encoding="utf-8")
-        )
+        cls.lock = tomllib.loads((PROJECT_ROOT / "uv.lock").read_text(encoding="utf-8"))
 
     def test_v7_manifest_pins_supported_fastmcp_profiles(self) -> None:
         self.assertEqual(self.project["version"], "7.0.0.dev0")
-        self.assertIn("fastmcp==3.0.0b2", self.project["dependencies"])
+        self.assertIn("fastmcp==3.4.7", self.project["dependencies"])
         self.assertEqual(
             self.project["optional-dependencies"]["tasks"],
-            ["fastmcp[tasks]==3.0.0b2"],
+            ["fastmcp[tasks]==3.4.7"],
         )
 
     def test_lock_editable_root_matches_project_metadata(self) -> None:
@@ -85,8 +101,7 @@ class PackagingContractTests(unittest.TestCase):
             for requirement in self.project["dependencies"]
         }
         locked_base = {
-            _canonical_name(requirement["name"])
-            for requirement in root["dependencies"]
+            _canonical_name(requirement["name"]) for requirement in root["dependencies"]
         }
         self.assertEqual(locked_base, expected_base)
 
@@ -95,10 +110,7 @@ class PackagingContractTests(unittest.TestCase):
         self.assertEqual(set(locked_extras), set(project_extras))
         for extra, requirements in project_extras.items():
             self.assertEqual(
-                {
-                    _locked_requirement(value)[:2]
-                    for value in locked_extras[extra]
-                },
+                {_locked_requirement(value)[:2] for value in locked_extras[extra]},
                 {_parse_requirement(value)[:2] for value in requirements},
                 extra,
             )
@@ -109,12 +121,15 @@ class PackagingContractTests(unittest.TestCase):
             set(project_extras),
         )
         expected_requires_dist = {
-            (*_parse_requirement(requirement), None)
+            (*_parse_requirement(requirement), _project_marker(requirement))
             for requirement in self.project["dependencies"]
         }
         expected_requires_dist.update(
             {
-                (*_parse_requirement(requirement), f"extra == '{extra}'")
+                (
+                    *_parse_requirement(requirement),
+                    _project_marker(requirement, extra),
+                )
                 for extra, requirements in project_extras.items()
                 for requirement in requirements
             }

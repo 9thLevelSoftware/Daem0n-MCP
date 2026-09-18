@@ -42,12 +42,19 @@ def sample_briefing():
             "outcome_rates": {"success_rate": 0.73},
         },
         "recent_decisions": [
-            {"content": "Use PostgreSQL", "worked": True, "created_at": "2026-01-15T10:30:00Z"},
+            {
+                "content": "Use PostgreSQL",
+                "worked": True,
+                "created_at": "2026-01-15T10:30:00Z",
+            },
             {"content": "Try Redis", "worked": False},
         ],
         "active_warnings": [{"content": "Rate limit risk", "severity": "high"}],
         "failed_approaches": [{"content": "SQLite concurrency"}],
-        "git_changes": {"total": 2, "files": [{"status": "M", "path": "src/config.py"}]},
+        "git_changes": {
+            "total": 2,
+            "files": [{"status": "M", "path": "src/config.py"}],
+        },
         "focus_areas": [{"topic": "authentication"}],
         "message": "One warning requires attention.",
     }
@@ -71,8 +78,12 @@ class BriefingUIContractTests(unittest.TestCase):
                 {
                     "recent_decisions": [{"summary": "Lean decision", "id": 9}],
                     "active_warnings": [{"summary": "Lean warning", "id": 10}],
-                    "failed_approaches": [{"summary": "Lean failure", "outcome": "bad"}],
-                    "git_changes": {"uncommitted_changes": [{"status": "M", "file": "src/a.py"}]},
+                    "failed_approaches": [
+                        {"summary": "Lean failure", "outcome": "bad"}
+                    ],
+                    "git_changes": {
+                        "uncommitted_changes": [{"status": "M", "file": "src/a.py"}]
+                    },
                     "focus_areas": {"security": {"found": 2}},
                     "bootstrap": {"project_path": "private"},
                 }
@@ -81,7 +92,9 @@ class BriefingUIContractTests(unittest.TestCase):
         self.assertEqual(model["recent_decisions"][0]["content"], "Lean decision")
         self.assertEqual(model["active_warnings"][0]["content"], "Lean warning")
         self.assertEqual(model["failed_approaches"][0]["content"], "Lean failure")
-        self.assertEqual(model["git_changes"]["files"], [{"path": "src/a.py", "status": "M"}])
+        self.assertEqual(
+            model["git_changes"]["files"], [{"path": "src/a.py", "status": "M"}]
+        )
         self.assertEqual(model["focus_areas"], [{"topic": "security"}])
         self.assertNotIn("bootstrap", model)
 

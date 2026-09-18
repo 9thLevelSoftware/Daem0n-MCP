@@ -10,8 +10,7 @@ from daem0nmcp.covenant import (
     CovenantGate,
     CovenantStateStore,
 )
-from daem0nmcp.workspace import Workspace, WorkspaceRegistry
-
+from daem0nmcp.workspace import Workspace
 
 WORKSPACE = Workspace(
     workspace_id="ws_0123456789abcdef01234567",
@@ -87,9 +86,7 @@ class V7CompositionTests(unittest.TestCase):
             recall_service=_Service(),
             memory_event_writer=_Service(),
             health_service=_Service(),
-            response_factory=ResponseFactory(
-                request_id=lambda: "req_composition_test"
-            ),
+            response_factory=ResponseFactory(request_id=lambda: "req_composition_test"),
             scope_provider=lambda: None,
             clock=lambda: datetime(2026, 8, 8, tzinfo=timezone.utc),
         )
@@ -98,8 +95,10 @@ class V7CompositionTests(unittest.TestCase):
     def test_surface_has_one_gate_resolver_and_exact_manifest(self) -> None:
         from daem0nmcp.api.v7.composition import build_v7_surface
         from daem0nmcp.api.v7.policy import V7_TOOL_LEVELS
-        from daem0nmcp.api.v7.registry import PINNED_TOOL_NAMES
-        from daem0nmcp.api.v7.resources import RESOURCE_URI_TEMPLATES
+        from daem0nmcp.api.v7.registry import (
+            FULL_V7_RESOURCE_URI_TEMPLATES,
+            PINNED_TOOL_NAMES,
+        )
 
         pinned, resolver, gate = self._dependencies()
         surface = build_v7_surface(
@@ -123,11 +122,13 @@ class V7CompositionTests(unittest.TestCase):
         )
         self.assertEqual(
             {resource.uri_template for resource in surface.manifest.resources},
-            set(RESOURCE_URI_TEMPLATES),
+            set(FULL_V7_RESOURCE_URI_TEMPLATES),
         )
         self.assertEqual(len(surface.middleware), 1)
 
-    def test_surface_rejects_pinned_operation_bypass_and_builds_fresh_server(self) -> None:
+    def test_surface_rejects_pinned_operation_bypass_and_builds_fresh_server(
+        self,
+    ) -> None:
         from daem0nmcp.api.v7.composition import build_v7_surface
 
         pinned, _, _ = self._dependencies()
@@ -154,16 +155,16 @@ class V7CompositionTests(unittest.TestCase):
         )
         first = surface.build_server(
             fastmcp_cls=_FakeFastMCP,
-            distribution_version="3.0.0b2",
+            distribution_version="3.4.7",
         )
         second = surface.build_server(
             fastmcp_cls=_FakeFastMCP,
-            distribution_version="3.0.0b2",
+            distribution_version="3.4.7",
         )
         self.assertIsNot(first, second)
         self.assertEqual(len(first.middlewares), 1)
-        self.assertEqual(len(first.tools), 71)
-        self.assertEqual(len(first.resources), 4)
+        self.assertEqual(len(first.tools), 75)
+        self.assertEqual(len(first.resources), 10)
 
 
 if __name__ == "__main__":

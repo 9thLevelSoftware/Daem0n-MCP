@@ -16,7 +16,6 @@ from daem0nmcp.schema_version import CURRENT_SCHEMA_VERSION
 from daem0nmcp.storage_activation import ResolvedActiveDatabase
 from daem0nmcp.workspace import Workspace
 
-
 WORKSPACE_ID = "ws_0123456789abcdef01234567"
 OTHER_WORKSPACE_ID = "ws_89abcdef0123456701234567"
 NOW = datetime(2026, 8, 8, 12, 0, tzinfo=timezone.utc)
@@ -89,7 +88,8 @@ class _DatabaseFixture:
             CREATE TABLE memory_events (
                 event_id TEXT PRIMARY KEY,
                 workspace_id TEXT NOT NULL,
-                stream_kind TEXT NOT NULL
+                stream_kind TEXT NOT NULL,
+                event_hash TEXT NOT NULL
             );
 
             CREATE TABLE memory_records (
@@ -161,7 +161,7 @@ class _DatabaseFixture:
         )
         from daem0nmcp.migrations.schema import MIGRATIONS
 
-        for version in (19, 20, 21):
+        for version in (19, 20, 21, 30):
             migration = next(item for item in MIGRATIONS if item[0] == version)
             for statement in migration[2]:
                 self.connection.execute(statement)
@@ -245,9 +245,9 @@ class _DatabaseFixture:
                 "[]",
                 priority,
                 enabled,
-                (NOW + timedelta(minutes=rule_id)).replace(tzinfo=None).isoformat(
-                    sep=" "
-                ),
+                (NOW + timedelta(minutes=rule_id))
+                .replace(tzinfo=None)
+                .isoformat(sep=" "),
             ),
         )
         public_id = self.add_public_mapping("rule", "rule", rule_id)
@@ -370,7 +370,39 @@ class SQLiteResourceRepositoryTests(unittest.IsolatedAsyncioTestCase):
 
         return SQLiteResourceRepository(resolve, clock=lambda: NOW)
 
-    async def test_warning_and_failure_reads_are_scoped_bounded_and_path_safe(self) -> None:
+    def test_briefing_record_queries_use_bounded_order_indexes(self) -> None:
+        workspace_id = self.fixture.workspace.workspace_id
+        warning_plan = self.fixture.connection.execute(
+            "EXPLAIN QUERY PLAN SELECT record_id FROM memory_records "
+            "WHERE workspace_id=? AND record_type='warning' AND archived=0 "
+            "AND deleted_at_us IS NULL "
+            "ORDER BY updated_at_us DESC,record_id DESC LIMIT 50",
+            (workspace_id,),
+        ).fetchall()
+        failure_plan = self.fixture.connection.execute(
+            "EXPLAIN QUERY PLAN SELECT record_id FROM memory_records "
+            "WHERE workspace_id=? AND worked=0 AND archived=0 "
+            "AND deleted_at_us IS NULL "
+            "ORDER BY updated_at_us DESC,record_id DESC LIMIT 50",
+            (workspace_id,),
+        ).fetchall()
+
+        self.assertIn(
+            "idx_memory_records_briefing_type",
+            " ".join(str(row[3]) for row in warning_plan),
+        )
+        self.assertIn(
+            "idx_memory_records_briefing_outcome",
+            " ".join(str(row[3]) for row in failure_plan),
+        )
+        self.assertNotIn(
+            "USE TEMP B-TREE",
+            " ".join(str(row[3]) for row in (*warning_plan, *failure_plan)),
+        )
+
+    async def test_warning_and_failure_reads_are_scoped_bounded_and_path_safe(
+        self,
+    ) -> None:
         # Catches cross-workspace rows, post-limit filtering, raw paths, and wrong order.
         newest = self.fixture.add_record(1, content="x" * 5000)
         second = self.fixture.add_record(2, updated_at=NOW + timedelta(hours=2))
@@ -392,15 +424,11 @@ class SQLiteResourceRepositoryTests(unittest.IsolatedAsyncioTestCase):
 
         warnings = await repository.read_warnings(
             self.fixture.workspace,
-            ResourceReadRequest(
-                kind="warnings", limit=2, order_by="updated_at_desc"
-            ),
+            ResourceReadRequest(kind="warnings", limit=2, order_by="updated_at_desc"),
         )
         failures = await repository.read_failures(
             self.fixture.workspace,
-            ResourceReadRequest(
-                kind="failures", limit=2, order_by="updated_at_desc"
-            ),
+            ResourceReadRequest(kind="failures", limit=2, order_by="updated_at_desc"),
         )
 
         self.assertEqual(
@@ -458,7 +486,9 @@ class SQLiteResourceRepositoryTests(unittest.IsolatedAsyncioTestCase):
                 ),
             )
 
-    async def test_rules_use_canonical_ids_and_highest_priority_enabled_order(self) -> None:
+    async def test_rules_use_canonical_ids_and_highest_priority_enabled_order(
+        self,
+    ) -> None:
         # Catches integer IDs, mapping bypass, disabled rows, and ascending priority.
         low = self.fixture.add_rule(21, priority=2)
         high = self.fixture.add_rule(22, priority=9)
@@ -494,12 +524,12 @@ class SQLiteResourceRepositoryTests(unittest.IsolatedAsyncioTestCase):
             ),
         )
         self.assertEqual([row.rule_id for row in repeated], [high, low])
-        self.assertTrue(
-            all(row.trigger.startswith("rule trigger") for row in repeated)
-        )
+        self.assertTrue(all(row.trigger.startswith("rule trigger") for row in repeated))
         self.assertEqual(rows[0].created_at.tzinfo, timezone.utc)
 
-    async def test_active_context_is_scoped_unexpired_and_maps_legacy_memory(self) -> None:
+    async def test_active_context_is_scoped_unexpired_and_maps_legacy_memory(
+        self,
+    ) -> None:
         # Catches project-path bleed, raw legacy memory IDs, expiry, and bad ordering.
         low_record = self.fixture.add_record(31, record_type="decision")
         high_record = self.fixture.add_record(32, record_type="pattern")
@@ -551,7 +581,9 @@ class SQLiteResourceRepositoryTests(unittest.IsolatedAsyncioTestCase):
             )
         )
 
-    async def test_active_context_merges_canonical_and_legacy_with_canonical_shadowing(self) -> None:
+    async def test_active_context_merges_canonical_and_legacy_with_canonical_shadowing(
+        self,
+    ) -> None:
         # Catches duplicate records, public-ID mapping requirements for fresh
         # rows, and removed canonical rows accidentally reviving legacy state.
         legacy_only_record = self.fixture.add_record(81, record_type="warning")
@@ -600,12 +632,14 @@ class SQLiteResourceRepositoryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len({row.item.record.record_id for row in rows}), 3)
         self.assertNotIn(removed_record, {row.item.record.record_id for row in rows})
 
-    async def test_shared_storage_lock_covers_resolution_and_row_materialization(self) -> None:
+    async def test_shared_storage_lock_covers_resolution_and_row_materialization(
+        self,
+    ) -> None:
         # Catches pointer selection and SQLite reads occurring in different
         # storage-generation lock windows.
         self.fixture.add_record(94)
-        from daem0nmcp.storage_activation import DatabaseFileLock, DatabaseInUseError
         from daem0nmcp.api.v7.resource_repository import SQLiteResourceRepository
+        from daem0nmcp.storage_activation import DatabaseFileLock, DatabaseInUseError
 
         resolution_observations: list[str] = []
 
@@ -636,9 +670,7 @@ class SQLiteResourceRepositoryTests(unittest.IsolatedAsyncioTestCase):
         repository._record_summary = materialize
         rows = await repository.read_warnings(
             self.fixture.workspace,
-            ResourceReadRequest(
-                kind="warnings", limit=1, order_by="updated_at_desc"
-            ),
+            ResourceReadRequest(kind="warnings", limit=1, order_by="updated_at_desc"),
         )
 
         self.assertEqual(len(rows), 1)
@@ -741,13 +773,13 @@ class SQLiteResourceRepositoryTests(unittest.IsolatedAsyncioTestCase):
                     await read
             pool.shutdown()
 
-    async def test_briefing_snapshot_holds_one_generation_lock_across_sections(self) -> None:
+    async def test_briefing_snapshot_holds_one_generation_lock_across_sections(
+        self,
+    ) -> None:
         # Catches four individually safe reads mixing pointer generations in
         # the gaps between warning/failure/rule/active-context sections.
         warning = self.fixture.add_record(101, record_type="warning")
-        failure = self.fixture.add_record(
-            102, record_type="decision", worked=0
-        )
+        failure = self.fixture.add_record(102, record_type="decision", worked=0)
         rule = self.fixture.add_rule(103, priority=4)
         active_record = self.fixture.add_record(104, record_type="pattern")
         active = self.fixture.add_canonical_active_context(
@@ -826,8 +858,7 @@ class SQLiteResourceRepositoryTests(unittest.IsolatedAsyncioTestCase):
             if calls == 1:
                 with closing(sqlite3.connect(self.fixture.database_path)) as writer:
                     writer.execute(
-                        "INSERT INTO memory_records VALUES "
-                        "(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                        "INSERT INTO memory_records VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
                         (
                             f"mem_{112:064x}",
                             WORKSPACE_ID,
@@ -859,7 +890,9 @@ class SQLiteResourceRepositoryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([row.item.record_id for row in snapshot.warnings], [warning])
         self.assertEqual(snapshot.failures, [])
 
-    async def test_retained_unmapped_rule_is_ignored_and_active_context_fails_closed(self) -> None:
+    async def test_retained_unmapped_rule_is_ignored_and_active_context_fails_closed(
+        self,
+    ) -> None:
         # Catches silent row drops or freshly invented IDs during a read-only call.
         self.fixture.connection.execute(
             "INSERT INTO rules VALUES (?,?,?,?,?,?,?,?,?)",
@@ -879,9 +912,7 @@ class SQLiteResourceRepositoryTests(unittest.IsolatedAsyncioTestCase):
 
         rules = await repository.read_rules(
             self.fixture.workspace,
-            ResourceReadRequest(
-                kind="rules", limit=10, order_by="priority_desc"
-            ),
+            ResourceReadRequest(kind="rules", limit=10, order_by="priority_desc"),
         )
         self.assertEqual(rules, [])
 
@@ -905,8 +936,7 @@ class SQLiteResourceRepositoryTests(unittest.IsolatedAsyncioTestCase):
         rule_id = self.fixture.add_rule(61, priority=1)
         self.fixture.connection.execute("PRAGMA ignore_check_constraints=ON")
         self.fixture.connection.execute(
-            "UPDATE governance_rules SET must_do_json='[\"ok\", NaN]' "
-            "WHERE rule_id=?",
+            "UPDATE governance_rules SET must_do_json='[\"ok\", NaN]' WHERE rule_id=?",
             (rule_id,),
         )
         self.fixture.connection.execute("PRAGMA ignore_check_constraints=OFF")
@@ -917,9 +947,7 @@ class SQLiteResourceRepositoryTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(ResourceRepositoryError) as malformed:
             await repository.read_rules(
                 self.fixture.workspace,
-                ResourceReadRequest(
-                    kind="rules", limit=10, order_by="priority_desc"
-                ),
+                ResourceReadRequest(kind="rules", limit=10, order_by="priority_desc"),
             )
 
         self.fixture.connection.execute("UPDATE schema_version SET version=18")
@@ -968,9 +996,7 @@ class SQLiteResourceRepositoryTests(unittest.IsolatedAsyncioTestCase):
         repository = self._repository()
         rows = await repository.read_warnings(
             self.fixture.workspace,
-            ResourceReadRequest(
-                kind="warnings", limit=1, order_by="updated_at_desc"
-            ),
+            ResourceReadRequest(kind="warnings", limit=1, order_by="updated_at_desc"),
         )
         self.assertEqual(len(rows), 1)
         self.assertEqual(self.resolver_workspaces, [self.fixture.workspace])
@@ -994,18 +1020,10 @@ class SQLiteResourceRepositoryTests(unittest.IsolatedAsyncioTestCase):
         # Catches reader mix-ups and unbounded limits reaching SQLite.
         repository = self._repository()
         invalid = (
-            ResourceReadRequest(
-                kind="failures", limit=1, order_by="updated_at_desc"
-            ),
-            ResourceReadRequest(
-                kind="warnings", limit=0, order_by="updated_at_desc"
-            ),
-            ResourceReadRequest(
-                kind="warnings", limit=52, order_by="updated_at_desc"
-            ),
-            ResourceReadRequest(
-                kind="warnings", limit=1, order_by="priority_desc"
-            ),
+            ResourceReadRequest(kind="failures", limit=1, order_by="updated_at_desc"),
+            ResourceReadRequest(kind="warnings", limit=0, order_by="updated_at_desc"),
+            ResourceReadRequest(kind="warnings", limit=52, order_by="updated_at_desc"),
+            ResourceReadRequest(kind="warnings", limit=1, order_by="priority_desc"),
         )
         for request in invalid:
             with self.subTest(request=request), self.assertRaises(ValueError):

@@ -28,7 +28,10 @@ class StorageActivationTests(unittest.TestCase):
         )
 
     def _lock_api(self):
-        from daem0nmcp.storage_activation import DatabaseFileLock, PointerValidationError
+        from daem0nmcp.storage_activation import (
+            DatabaseFileLock,
+            PointerValidationError,
+        )
 
         return DatabaseFileLock, PointerValidationError
 
@@ -51,9 +54,7 @@ class StorageActivationTests(unittest.TestCase):
     def test_pointer_link_check_precedes_absence_fallback(self):
         """A dangling pointer symlink must never be interpreted as no pointer."""
         source = (
-            Path(__file__).resolve().parents[1]
-            / "daem0nmcp"
-            / "storage_activation.py"
+            Path(__file__).resolve().parents[1] / "daem0nmcp" / "storage_activation.py"
         ).read_text(encoding="utf-8")
         link_check = source.index("if pointer_path.is_symlink()")
         absent_fallback = source.index("if not pointer_path.exists()")
@@ -61,7 +62,7 @@ class StorageActivationTests(unittest.TestCase):
 
     def test_pointer_has_exact_canonical_bytes_and_round_trips(self):
         """Pointer replacement must publish the decision-complete wire format."""
-        Pointer, _, resolve_active_database, write_pointer = self._api()
+        pointer_type, _, resolve_active_database, write_pointer = self._api()
         run_id = "mig_" + "a" * 64
         with tempfile.TemporaryDirectory() as raw:
             storage = Path(raw)
@@ -69,7 +70,7 @@ class StorageActivationTests(unittest.TestCase):
             target.parent.mkdir(parents=True)
             target.write_bytes(b"candidate")
             (storage / "daem0nmcp.db").write_bytes(b"legacy")
-            pointer = Pointer(
+            pointer = pointer_type(
                 format_version=7,
                 generation=2,
                 active_db=f"migrations/v7/{run_id}/candidate.db",
@@ -93,7 +94,7 @@ class StorageActivationTests(unittest.TestCase):
 
     def test_unsafe_or_noncanonical_pointer_fails_closed(self):
         """Unknown fields, traversal, absolute paths and symlinks never fall back."""
-        _, PointerError, resolve_active_database, _ = self._api()
+        _, pointer_error_type, resolve_active_database, _ = self._api()
         run_id = "mig_" + "b" * 64
         with tempfile.TemporaryDirectory() as raw:
             storage = Path(raw)
@@ -118,7 +119,7 @@ class StorageActivationTests(unittest.TestCase):
                     (storage / "active-db.json").write_text(
                         json.dumps(value, separators=(",", ":")), encoding="utf-8"
                     )
-                    with self.assertRaises(PointerError):
+                    with self.assertRaises(pointer_error_type):
                         resolve_active_database(storage)
             link = storage / "linked.db"
             try:
@@ -129,41 +130,44 @@ class StorageActivationTests(unittest.TestCase):
                 json.dumps({**base, "active_db": "linked.db"}, separators=(",", ":")),
                 encoding="utf-8",
             )
-            with self.assertRaises(PointerError):
+            with self.assertRaises(pointer_error_type):
                 resolve_active_database(storage)
 
     def test_fresh_pointer_requires_null_migration_fields(self):
         """Only generation-one daem0nmcp.db may represent a fresh v7 database."""
-        Pointer, PointerError, _, write_pointer = self._api()
+        pointer_type, pointer_error_type, _, write_pointer = self._api()
         with tempfile.TemporaryDirectory() as raw:
             storage = Path(raw)
             (storage / "daem0nmcp.db").write_bytes(b"fresh")
-            fresh = Pointer(7, 1, "daem0nmcp.db", None, None)
+            fresh = pointer_type(7, 1, "daem0nmcp.db", None, None)
             write_pointer(storage, fresh)
             self.assertTrue((storage / "active-db.json").is_file())
-            invalid = Pointer(7, 2, "daem0nmcp.db", None, None)
-            with self.assertRaises(PointerError):
+            invalid = pointer_type(7, 2, "daem0nmcp.db", None, None)
+            with self.assertRaises(pointer_error_type):
                 write_pointer(storage, invalid)
 
     def test_pointer_temp_is_exclusively_owned_and_never_follows_links(self):
         """A stale/non-regular/link temp cannot redirect the pointer write."""
-        Pointer, PointerError, _, write_pointer = self._api()
+        pointer_type, pointer_error_type, _, write_pointer = self._api()
         with tempfile.TemporaryDirectory() as raw:
             storage = Path(raw)
             (storage / "daem0nmcp.db").write_bytes(b"fresh")
             temporary = storage / "active-db.json.tmp"
             temporary.mkdir()
-            with self.assertRaises(PointerError):
-                write_pointer(storage, Pointer(7, 1, "daem0nmcp.db", None, None))
+            with self.assertRaises(pointer_error_type):
+                write_pointer(storage, pointer_type(7, 1, "daem0nmcp.db", None, None))
 
         with tempfile.TemporaryDirectory() as raw:
             storage = Path(raw)
             (storage / "daem0nmcp.db").write_bytes(b"fresh")
             (storage / "active-db.json.tmp").write_bytes(b"unowned-stale-temp")
-            with self.assertRaises(PointerError):
-                write_pointer(storage, Pointer(7, 1, "daem0nmcp.db", None, None))
+            with self.assertRaises(pointer_error_type):
+                write_pointer(storage, pointer_type(7, 1, "daem0nmcp.db", None, None))
 
-        with tempfile.TemporaryDirectory() as raw, tempfile.TemporaryDirectory() as outside:
+        with (
+            tempfile.TemporaryDirectory() as raw,
+            tempfile.TemporaryDirectory() as outside,
+        ):
             storage = Path(raw)
             victim = Path(outside) / "victim.json"
             victim.write_bytes(b"do-not-touch")
@@ -172,20 +176,23 @@ class StorageActivationTests(unittest.TestCase):
                 os.symlink(victim, storage / "active-db.json.tmp")
             except (OSError, NotImplementedError):
                 self.skipTest("symlinks unavailable in this test environment")
-            with self.assertRaises(PointerError):
-                write_pointer(storage, Pointer(7, 1, "daem0nmcp.db", None, None))
+            with self.assertRaises(pointer_error_type):
+                write_pointer(storage, pointer_type(7, 1, "daem0nmcp.db", None, None))
             self.assertEqual(b"do-not-touch", victim.read_bytes())
 
     def test_lock_rejects_non_regular_or_symlink_path_without_touching_target(self):
         """The advisory lock path is an untrusted filesystem boundary."""
-        Lock, PointerError = self._lock_api()
+        lock_type, pointer_error_type = self._lock_api()
         with tempfile.TemporaryDirectory() as raw:
             storage = Path(raw)
             (storage / ".migrate-v7.lock").mkdir()
-            with self.assertRaises(PointerError):
-                Lock(storage, "exclusive").acquire()
+            with self.assertRaises(pointer_error_type):
+                lock_type(storage, "exclusive").acquire()
 
-        with tempfile.TemporaryDirectory() as raw, tempfile.TemporaryDirectory() as outside:
+        with (
+            tempfile.TemporaryDirectory() as raw,
+            tempfile.TemporaryDirectory() as outside,
+        ):
             storage = Path(raw)
             victim = Path(outside) / "victim.lock"
             victim.write_bytes(b"external")
@@ -193,26 +200,26 @@ class StorageActivationTests(unittest.TestCase):
                 os.symlink(victim, storage / ".migrate-v7.lock")
             except (OSError, NotImplementedError):
                 self.skipTest("symlinks unavailable in this test environment")
-            with self.assertRaises(PointerError):
-                Lock(storage, "exclusive").acquire()
+            with self.assertRaises(pointer_error_type):
+                lock_type(storage, "exclusive").acquire()
             self.assertEqual(b"external", victim.read_bytes())
 
     def test_shared_lifetime_lock_excludes_migration_then_releases(self):
         """Many managers may coexist, while apply requires exclusive ownership."""
         from daem0nmcp.storage_activation import DatabaseInUseError
 
-        Lock, _ = self._lock_api()
+        lock_type, _ = self._lock_api()
         with tempfile.TemporaryDirectory() as raw:
             storage = Path(raw)
-            first = Lock(storage, "shared").acquire()
-            second = Lock(storage, "shared").acquire()
+            first = lock_type(storage, "shared").acquire()
+            second = lock_type(storage, "shared").acquire()
             try:
                 with self.assertRaises(DatabaseInUseError):
-                    Lock(storage, "exclusive").acquire()
+                    lock_type(storage, "exclusive").acquire()
             finally:
                 second.release()
                 first.release()
-            exclusive = Lock(storage, "exclusive").acquire()
+            exclusive = lock_type(storage, "exclusive").acquire()
             exclusive.release()
 
 

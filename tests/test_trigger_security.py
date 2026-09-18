@@ -2,18 +2,18 @@
 
 from __future__ import annotations
 
-import asyncio
 import ast
-from contextlib import contextmanager
+import asyncio
 import importlib.util
 import json
 import os
-from pathlib import Path
 import sys
 import threading
 import time
 import types
 import unittest
+from contextlib import contextmanager
+from pathlib import Path
 
 
 class _CompiledPattern:
@@ -32,9 +32,7 @@ class _RecordingCompiler:
         return _CompiledPattern(source)
 
 
-def _faithful_search(
-    compiled: _CompiledPattern, value: str, *, timeout: float
-) -> bool:
+def _faithful_search(compiled: _CompiledPattern, value: str, *, timeout: float) -> bool:
     """Small deterministic stand-in for the documented legacy patterns."""
     if timeout != 0.025:
         raise AssertionError(f"unexpected timeout: {timeout}")
@@ -159,9 +157,7 @@ class TestSafeUserPattern(unittest.TestCase):
         compiler = _RecordingCompiler()
         calls: list[str] = []
 
-        def search(
-            compiled: _CompiledPattern, value: str, *, timeout: float
-        ) -> bool:
+        def search(compiled: _CompiledPattern, value: str, *, timeout: float) -> bool:
             calls.append(value)
             return False
 
@@ -181,9 +177,7 @@ class TestSafeUserPattern(unittest.TestCase):
         compiler = _RecordingCompiler()
         calls: list[str] = []
 
-        def search(
-            compiled: _CompiledPattern, value: str, *, timeout: float
-        ) -> bool:
+        def search(compiled: _CompiledPattern, value: str, *, timeout: float) -> bool:
             calls.append(value)
             return False
 
@@ -203,9 +197,7 @@ class TestSafeUserPattern(unittest.TestCase):
         compiler = _RecordingCompiler()
         calls: list[str] = []
 
-        def search(
-            compiled: _CompiledPattern, value: str, *, timeout: float
-        ) -> bool:
+        def search(compiled: _CompiledPattern, value: str, *, timeout: float) -> bool:
             calls.append(value)
             return False
 
@@ -229,9 +221,7 @@ class TestSafeUserPattern(unittest.TestCase):
 
         calls: list[str] = []
 
-        def search(
-            compiled: _CompiledPattern, value: str, *, timeout: float
-        ) -> bool:
+        def search(compiled: _CompiledPattern, value: str, *, timeout: float) -> bool:
             calls.append(value)
             if value == "slow":
                 raise TimeoutError("simulated regex timeout")
@@ -496,9 +486,7 @@ class TestContextTriggerManagerWiring(unittest.IsolatedAsyncioTestCase):
         from daem0nmcp.trigger_security import SafeUserPattern
 
         compiler = _RecordingCompiler()
-        pattern_matcher = SafeUserPattern(
-            compiler=compiler, search=_faithful_search
-        )
+        pattern_matcher = SafeUserPattern(compiler=compiler, search=_faithful_search)
         cases = (
             ("tag_match", "   ", "TRIGGER_PATTERN_EMPTY"),
             ("tag_match", "auth\ud800", "TRIGGER_PATTERN_INVALID_UNICODE"),
@@ -537,9 +525,7 @@ class TestContextTriggerManagerWiring(unittest.IsolatedAsyncioTestCase):
 
         searches: list[str] = []
 
-        def search(
-            compiled: _CompiledPattern, value: str, *, timeout: float
-        ) -> bool:
+        def search(compiled: _CompiledPattern, value: str, *, timeout: float) -> bool:
             searches.append(value)
             return False
 
@@ -563,9 +549,7 @@ class TestContextTriggerManagerWiring(unittest.IsolatedAsyncioTestCase):
             manager._list_active_triggers_for_evaluation = list_triggers
             manager._update_trigger_stats = update_stats
 
-            result = await manager.check_triggers(
-                "workspace", tags=["tag"] * 33
-            )
+            result = await manager.check_triggers("workspace", tags=["tag"] * 33)
 
         self.assertEqual(result["error"]["code"], "TRIGGER_CANDIDATE_LIMIT")
         self.assertEqual(list_calls, [])
@@ -608,9 +592,7 @@ class TestContextTriggerManagerWiring(unittest.IsolatedAsyncioTestCase):
 
         searches: list[str] = []
 
-        def search(
-            compiled: _CompiledPattern, value: str, *, timeout: float
-        ) -> bool:
+        def search(compiled: _CompiledPattern, value: str, *, timeout: float) -> bool:
             searches.append(value)
             return False
 
@@ -673,7 +655,9 @@ class TestContextTriggerManagerWiring(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result, [])
         self.assertEqual(requested_limits, [101])
 
-    async def test_timeout_through_manager_never_updates_trigger_statistics(self) -> None:
+    async def test_timeout_through_manager_never_updates_trigger_statistics(
+        self,
+    ) -> None:
         """A regex timeout is a clean non-match with no success-stat write."""
         from daem0nmcp.trigger_security import SafeUserPattern
 
@@ -750,9 +734,7 @@ class TestContextTriggerManagerWiring(unittest.IsolatedAsyncioTestCase):
             trigger["pattern"] = "UserService|AuthService"
             await manager.check_triggers("workspace", entities=["BillingService"])
 
-        self.assertEqual(
-            compiler.sources, [".*Repository$", "UserService|AuthService"]
-        )
+        self.assertEqual(compiler.sources, [".*Repository$", "UserService|AuthService"])
 
     async def test_get_triggered_context_propagates_error_without_memory_import(
         self,
@@ -934,9 +916,7 @@ class TestRealRegexIntegration(unittest.TestCase):
                 2, "UserService|AuthService", ["BillingService", "AuthService"]
             ).matched
         )
-        self.assertTrue(
-            matcher.matches(3, ".*Repository$", ["UserRepository"]).matched
-        )
+        self.assertTrue(matcher.matches(3, ".*Repository$", ["UserRepository"]).matched)
 
 
 if __name__ == "__main__":

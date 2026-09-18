@@ -25,10 +25,11 @@ from benchmarks.retrieval_benchmark import (
     serialize_benchmark_report,
 )
 
-
 FIXTURE_ROOT = Path(__file__).parent / "fixtures" / "retrieval"
 FIXTURE_FILES = ("events.jsonl", "qdrant_fake.py", "queries.jsonl", "records.jsonl")
-EXPECTED_FIXTURE_DIGEST = "7aa535e9a2d80add4e179d70bade096600d09e2039c320c3e4bf466df412d269"
+EXPECTED_FIXTURE_DIGEST = (
+    "7aa535e9a2d80add4e179d70bade096600d09e2039c320c3e4bf466df412d269"
+)
 
 
 def _raw_fixture_digest(root: Path) -> str:
@@ -113,7 +114,9 @@ class RetrievalFixtureTests(unittest.TestCase):
         self.assertEqual(EXPECTED_FIXTURE_DIGEST, fixtures.digest)
         self.assertRegex(fixtures.digest, r"^[0-9a-f]{64}$")
 
-        traits = [trait for record in fixtures.records for trait in record["fixture_traits"]]
+        traits = [
+            trait for record in fixtures.records for trait in record["fixture_traits"]
+        ]
         self.assertEqual(1, traits.count("lexical_synonym_miss"))
         self.assertEqual(1, traits.count("dense_semantic_match"))
         self.assertEqual(1, traits.count("tag_match"))
@@ -140,7 +143,9 @@ class RetrievalFixtureTests(unittest.TestCase):
             query for query in fixtures.queries if query["contradiction"] is not None
         ]
         self.assertEqual(2, len(contradiction_queries))
-        self.assertEqual(2, sum(query["expected_abstention"] for query in fixtures.queries))
+        self.assertEqual(
+            2, sum(query["expected_abstention"] for query in fixtures.queries)
+        )
         lexical_unavailable = next(
             query
             for query in fixtures.queries
@@ -157,18 +162,24 @@ class RetrievalFixtureTests(unittest.TestCase):
             for name in FIXTURE_FILES:
                 shutil.copyfile(FIXTURE_ROOT / name, root / name)
 
-            record_lines = (root / "records.jsonl").read_text(encoding="utf-8").splitlines()
+            record_lines = (
+                (root / "records.jsonl").read_text(encoding="utf-8").splitlines()
+            )
             record = json.loads(record_lines[0])
             record["content"] += " tampered"
             record_lines[0] = json.dumps(record, sort_keys=True, separators=(",", ":"))
             (root / "records.jsonl").write_text(
                 "\n".join(record_lines) + "\n", encoding="utf-8", newline="\n"
             )
-            with self.assertRaisesRegex(FixtureValidationError, "CONTENT_HASH_MISMATCH"):
+            with self.assertRaisesRegex(
+                FixtureValidationError, "CONTENT_HASH_MISMATCH"
+            ):
                 load_retrieval_fixtures(root)
 
             shutil.copyfile(FIXTURE_ROOT / "records.jsonl", root / "records.jsonl")
-            query_lines = (root / "queries.jsonl").read_text(encoding="utf-8").splitlines()
+            query_lines = (
+                (root / "queries.jsonl").read_text(encoding="utf-8").splitlines()
+            )
             query = json.loads(query_lines[0])
             query["unexpected"] = True
             query_lines[0] = json.dumps(query, sort_keys=True, separators=(",", ":"))
@@ -178,7 +189,9 @@ class RetrievalFixtureTests(unittest.TestCase):
             with self.assertRaisesRegex(FixtureValidationError, "UNKNOWN_FIELDS"):
                 load_retrieval_fixtures(root)
 
-    def test_loader_rejects_trait_metadata_that_disagrees_with_record_state(self) -> None:
+    def test_loader_rejects_trait_metadata_that_disagrees_with_record_state(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as raw_temp:
             root = Path(raw_temp)
             for name in FIXTURE_FILES:
@@ -194,7 +207,10 @@ class RetrievalFixtureTests(unittest.TestCase):
 
     def test_loader_rejects_unknown_event_semantics_and_forward_causation(self) -> None:
         for mutation in ("unknown_type", "forward_causation"):
-            with self.subTest(mutation=mutation), tempfile.TemporaryDirectory() as raw_temp:
+            with (
+                self.subTest(mutation=mutation),
+                tempfile.TemporaryDirectory() as raw_temp,
+            ):
                 root = Path(raw_temp)
                 for name in FIXTURE_FILES:
                     shutil.copyfile(FIXTURE_ROOT / name, root / name)
@@ -209,13 +225,19 @@ class RetrievalFixtureTests(unittest.TestCase):
                 _rehash_event(relationship)
                 _rewrite_jsonl_row(events_path, 15, relationship)
 
-                code = "INVALID_EVENT_TYPE" if mutation == "unknown_type" else "FORWARD_CAUSATION"
+                code = (
+                    "INVALID_EVENT_TYPE"
+                    if mutation == "unknown_type"
+                    else "FORWARD_CAUSATION"
+                )
                 with self.assertRaisesRegex(FixtureValidationError, code):
                     load_retrieval_fixtures(root)
 
     def test_qdrant_rank_fake_is_repeatable_and_has_minimal_payload(self) -> None:
         fake_path = FIXTURE_ROOT / "qdrant_fake.py"
-        spec = importlib.util.spec_from_file_location("retrieval_qdrant_fake", fake_path)
+        spec = importlib.util.spec_from_file_location(
+            "retrieval_qdrant_fake", fake_path
+        )
         self.assertIsNotNone(spec)
         self.assertIsNotNone(spec.loader if spec else None)
         module = importlib.util.module_from_spec(spec)
@@ -243,7 +265,9 @@ class RetrievalFixtureTests(unittest.TestCase):
     def test_events_replay_exactly_through_the_task_seven_event_store(self) -> None:
         from daem0nmcp.event_store import EventCommand, EventStore
 
-        schema_path = Path(__file__).parents[1] / "daem0nmcp" / "migrations" / "schema.py"
+        schema_path = (
+            Path(__file__).parents[1] / "daem0nmcp" / "migrations" / "schema.py"
+        )
         spec = importlib.util.spec_from_file_location("benchmark_schema", schema_path)
         self.assertIsNotNone(spec)
         self.assertIsNotNone(spec.loader if spec else None)
@@ -287,12 +311,17 @@ class RetrievalFixtureTests(unittest.TestCase):
             ).fetchall()
         }
         self.assertEqual(
-            {record["record_id"]: record["content_hash"] for record in fixtures.records},
+            {
+                record["record_id"]: record["content_hash"]
+                for record in fixtures.records
+            },
             projected,
         )
         self.assertEqual(
             3,
-            connection.execute("SELECT count(*) FROM memory_fact_versions").fetchone()[0],
+            connection.execute("SELECT count(*) FROM memory_fact_versions").fetchone()[
+                0
+            ],
         )
         self.assertEqual(
             1,
@@ -360,7 +389,9 @@ class ExactMetricTests(unittest.TestCase):
         self.assertEqual(1, metrics["queries_without_relevant"])
         self.assertEqual(0.5, metrics["mrr_at_10"])
 
-    def test_quality_metrics_cover_temporal_contradiction_abstention_and_tokens(self) -> None:
+    def test_quality_metrics_cover_temporal_contradiction_abstention_and_tokens(
+        self,
+    ) -> None:
         queries = (
             {
                 "query_id": "exclude",
@@ -401,9 +432,7 @@ class ExactMetricTests(unittest.TestCase):
         )
         results = {
             "exclude": _result(["current"], tokens=20),
-            "label": _result(
-                ["old"], statuses={"old": "superseded"}, tokens=10
-            ),
+            "label": _result(["old"], statuses={"old": "superseded"}, tokens=10),
             "no-answer-hit": _result([], abstained=True),
             "no-answer-missed": _result(["noise"]),
         }
@@ -414,8 +443,14 @@ class ExactMetricTests(unittest.TestCase):
         self.assertEqual(1.0, metrics["temporal"]["invalidated_exclusion_rate"])
         self.assertEqual(1.0, metrics["contradiction_handling"])
         self.assertEqual(
-            {"false_negative": 1, "false_positive": 0, "precision": 1.0, "recall": 0.5,
-             "true_negative": 2, "true_positive": 1},
+            {
+                "false_negative": 1,
+                "false_positive": 0,
+                "precision": 1.0,
+                "recall": 0.5,
+                "true_negative": 2,
+                "true_positive": 1,
+            },
             metrics["abstention"],
         )
         self.assertEqual(30, metrics["tokens"]["rendered_tokens"])
@@ -438,9 +473,7 @@ class ExactMetricTests(unittest.TestCase):
             },
         )
         results = {
-            "temporal": _result(
-                ["current"], citations=["current", "old"], tokens=5
-            )
+            "temporal": _result(["current"], citations=["current", "old"], tokens=5)
         }
 
         metrics = calculate_quality_metrics(queries, results)
@@ -459,16 +492,16 @@ class ExactMetricTests(unittest.TestCase):
                 "contradiction": None,
             },
         )
-        metrics = calculate_quality_metrics(
-            queries, {"no-answer": _result(["noise"])}
-        )
+        metrics = calculate_quality_metrics(queries, {"no-answer": _result(["noise"])})
 
         self.assertEqual(0.0, metrics["abstention"]["precision"])
         self.assertEqual(0.0, metrics["abstention"]["recall"])
 
 
 class BenchmarkRunnerTests(unittest.TestCase):
-    def test_runner_uses_five_warmups_and_thirty_timed_iterations_per_mode(self) -> None:
+    def test_runner_uses_five_warmups_and_thirty_timed_iterations_per_mode(
+        self,
+    ) -> None:
         fixtures = load_retrieval_fixtures(FIXTURE_ROOT)
         calls = {"fully_enabled": 0, "lexical_only": 0}
 
@@ -490,7 +523,7 @@ class BenchmarkRunnerTests(unittest.TestCase):
                 contradiction = query["contradiction"]
                 if contradiction and contradiction["mode"] == "label":
                     statuses.update(
-                        {record_id: "superseded" for record_id in contradiction["record_ids"]}
+                        dict.fromkeys(contradiction["record_ids"], "superseded")
                     )
                 return _result(
                     returned,
@@ -670,7 +703,9 @@ class BenchmarkRunnerTests(unittest.TestCase):
 
         self.assertEqual(0, exit_code)
         report = json.loads(output.getvalue())
-        self.assertEqual("7.0.0.dev0+cli-test", report["metadata"]["version_identifier"])
+        self.assertEqual(
+            "7.0.0.dev0+cli-test", report["metadata"]["version_identifier"]
+        )
         self.assertEqual(EXPECTED_FIXTURE_DIGEST, report["metadata"]["fixture_digest"])
         self.assertEqual(30, report["benchmark"]["timed_iterations"])
 
@@ -707,7 +742,9 @@ class BenchmarkRunnerTests(unittest.TestCase):
                 report["modes"][mode]["latency_ns"]["end_to_end"],
             )
 
-    def test_runner_requires_lexical_status_and_abstains_when_lexical_is_down(self) -> None:
+    def test_runner_requires_lexical_status_and_abstains_when_lexical_is_down(
+        self,
+    ) -> None:
         fixtures = load_retrieval_fixtures(FIXTURE_ROOT)
         record_id = fixtures.records[0]["record_id"]
         cases = (

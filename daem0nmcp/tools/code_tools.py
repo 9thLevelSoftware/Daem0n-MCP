@@ -9,7 +9,6 @@ from typing import Any
 try:
     from .. import __version__
     from ..config import settings
-    from ..covenant import legacy_entrypoint
     from ..context_manager import (
         _default_project_path,
         _missing_project_path_error,
@@ -17,6 +16,7 @@ try:
         get_project_context,
         workspace_registry,
     )
+    from ..covenant import legacy_entrypoint
     from ..logging_config import with_request_id
     from ..mcp_instance import mcp
     from ..models import Memory
@@ -28,7 +28,6 @@ try:
 except ImportError:
     from daem0nmcp import __version__
     from daem0nmcp.config import settings
-    from daem0nmcp.covenant import legacy_entrypoint
     from daem0nmcp.context_manager import (
         _default_project_path,
         _missing_project_path_error,
@@ -36,6 +35,7 @@ except ImportError:
         get_project_context,
         workspace_registry,
     )
+    from daem0nmcp.covenant import legacy_entrypoint
     from daem0nmcp.logging_config import with_request_id
     from daem0nmcp.mcp_instance import mcp
     from daem0nmcp.models import Memory

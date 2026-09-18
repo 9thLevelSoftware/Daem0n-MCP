@@ -1,9 +1,9 @@
 # tests/test_fastmcp3_compat.py
-"""Test FastMCP 3.0 compatibility."""
+"""Test FastMCP 3.4.7 compatibility."""
 
 
 def test_fastmcp_import():
-    """Verify FastMCP 3.0 import works."""
+    """Verify the pinned FastMCP import works."""
     from fastmcp import FastMCP
 
     assert FastMCP is not None
@@ -14,11 +14,11 @@ def test_fastmcp_version():
     import fastmcp
 
     version = getattr(fastmcp, "__version__", "0.0.0")
-    assert version == "3.0.0b2", f"Expected FastMCP 3.0.0b2, got {version}"
+    assert version == "3.4.7", f"Expected FastMCP 3.4.7, got {version}"
 
 
 def test_server_import():
-    """Verify server module imports correctly with FastMCP 3.0."""
+    """Verify server module imports correctly with pinned FastMCP."""
     from daem0nmcp import server
 
     assert server.mcp is not None
@@ -30,7 +30,7 @@ async def test_tools_have_version_metadata():
 
     mcp = server.mcp
 
-    # Get all registered tools via FastMCP 3.0 async API
+    # Get all registered tools via the reviewed FastMCP async API.
     tools = await mcp.list_tools()
 
     assert tools, "No tools registered - server may not have initialized correctly"
@@ -54,7 +54,7 @@ async def test_tools_version_matches_package():
 
     mcp = server.mcp
 
-    # Get all registered tools via FastMCP 3.0 async API
+    # Get all registered tools via the reviewed FastMCP async API.
     tools = await mcp.list_tools()
 
     mismatched_versions = []

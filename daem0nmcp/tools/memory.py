@@ -6,12 +6,12 @@ from typing import Any
 
 try:
     from .. import __version__
-    from ..covenant import legacy_entrypoint
     from ..context_manager import (
         _default_project_path,
         _missing_project_path_error,
         get_project_context,
     )
+    from ..covenant import legacy_entrypoint
     from ..event_store import (
         apply_compatibility_memory_update,
         delete_compatibility_memory,
@@ -21,12 +21,12 @@ try:
     from ..models import Memory, MemoryVersion
 except ImportError:
     from daem0nmcp import __version__
-    from daem0nmcp.covenant import legacy_entrypoint
     from daem0nmcp.context_manager import (
         _default_project_path,
         _missing_project_path_error,
         get_project_context,
     )
+    from daem0nmcp.covenant import legacy_entrypoint
     from daem0nmcp.event_store import (
         apply_compatibility_memory_update,
         delete_compatibility_memory,
@@ -783,9 +783,11 @@ async def cleanup_memories(
                 # Pick the most recent outcome across duplicates (if any)
                 outcome_source = None
                 for candidate in mems:
-                    if candidate.outcome and (outcome_source is None or _outcome_timestamp(
-                        candidate
-                    ) > _outcome_timestamp(outcome_source)):
+                    if candidate.outcome and (
+                        outcome_source is None
+                        or _outcome_timestamp(candidate)
+                        > _outcome_timestamp(outcome_source)
+                    ):
                         outcome_source = candidate
 
                 changes: dict[str, Any] = {}
@@ -851,7 +853,10 @@ async def cleanup_memories(
                         session,
                         dupe,
                         "memory.deleted",
-                        extra_payload={"reason": "duplicate_cleanup", "keeper_id": keeper.id},
+                        extra_payload={
+                            "reason": "duplicate_cleanup",
+                            "keeper_id": keeper.id,
+                        },
                         deleted_at_us=deleted_at_us,
                     )
                     await delete_compatibility_memory(session, dupe)
@@ -960,9 +965,7 @@ async def pin_memory(
         if not memory:
             return {"error": f"Memory {memory_id} not found"}
 
-        apply_compatibility_memory_update(
-            memory, pinned=pinned, is_permanent=pinned
-        )
+        apply_compatibility_memory_update(memory, pinned=pinned, is_permanent=pinned)
         max_version = await session.execute(
             select(func.max(MemoryVersion.version_number)).where(
                 MemoryVersion.memory_id == memory.id

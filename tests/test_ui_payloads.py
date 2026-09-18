@@ -12,14 +12,18 @@ class UIPayloadProjectionTests(unittest.TestCase):
         self.payloads = payloads
 
     def test_rejects_unknown_app_and_non_object_roots_without_echoing_input(self):
-        with self.assertRaisesRegex(self.payloads.InvalidAppPayload, "invalid app payload"):
+        with self.assertRaisesRegex(
+            self.payloads.InvalidAppPayload, "invalid app payload"
+        ):
             self.payloads.normalize_app_payload("secret-app", {"password": "hunter2"})
         for value in (None, [], "object", 1):
-            with self.subTest(value=value):
-                with self.assertRaisesRegex(
+            with (
+                self.subTest(value=value),
+                self.assertRaisesRegex(
                     self.payloads.InvalidAppPayload, "invalid app payload"
-                ):
-                    self.payloads.normalize_app_payload("search", value)
+                ),
+            ):
+                self.payloads.normalize_app_payload("search", value)
 
     def test_test_projection_is_empty_and_drops_secrets(self):
         self.assertEqual(
@@ -110,7 +114,8 @@ class UIPayloadProjectionTests(unittest.TestCase):
             },
             "recent_decisions": [
                 {"content": "ok", "worked": False, "created_at": "not-a-date"}
-            ] * 30,
+            ]
+            * 30,
             "active_warnings": [{"content": "w", "severity": "critical"}],
             "failed_approaches": [{"content": "f"}],
             "git_changes": {
@@ -127,12 +132,15 @@ class UIPayloadProjectionTests(unittest.TestCase):
         result = self.payloads.normalize_app_payload("briefing", data)
         self.assertEqual(result["status"], "neutral")
         self.assertEqual(result["statistics"]["total_memories"], 0)
-        self.assertEqual(result["statistics"]["by_category"], {
-            "decision": 2,
-            "warning": 0,
-            "pattern": 0,
-            "learning": 0,
-        })
+        self.assertEqual(
+            result["statistics"]["by_category"],
+            {
+                "decision": 2,
+                "warning": 0,
+                "pattern": 0,
+                "learning": 0,
+            },
+        )
         self.assertEqual(result["statistics"]["outcome_rates"]["success_rate"], 0.78)
         self.assertEqual(len(result["recent_decisions"]), 20)
         self.assertEqual(result["recent_decisions"][0]["created_at"], "")
@@ -186,8 +194,13 @@ class UIPayloadProjectionTests(unittest.TestCase):
                 ],
             },
         )
-        self.assertEqual([item["id"] for item in result["communities"]], [1, "1", 2, 3, 4, 5])
-        parents = {f"{type(item['id']).__name__}:{item['id']}": item["parent_community_id"] for item in result["communities"]}
+        self.assertEqual(
+            [item["id"] for item in result["communities"]], [1, "1", 2, 3, 4, 5]
+        )
+        parents = {
+            f"{type(item['id']).__name__}:{item['id']}": item["parent_community_id"]
+            for item in result["communities"]
+        }
         self.assertEqual(parents["str:1"], 1)
         self.assertIsNone(parents["int:2"])
         self.assertIsNone(parents["int:3"])
@@ -210,7 +223,12 @@ class UIPayloadProjectionTests(unittest.TestCase):
                 {"id": True, "content": "invalid"},
             ],
             "edges": [
-                {"source": 1, "target": "1", "relationship": "led_to", "confidence": 75},
+                {
+                    "source": 1,
+                    "target": "1",
+                    "relationship": "led_to",
+                    "confidence": 75,
+                },
                 {"source": "1", "target": 1, "relationship": "evil", "confidence": -1},
                 {"source": 1, "target": 99, "relationship": "relates_to"},
             ],

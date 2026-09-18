@@ -15,7 +15,7 @@ import threading
 import time
 import warnings
 from collections import OrderedDict
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
@@ -23,7 +23,7 @@ from enum import Enum
 from functools import wraps
 from pathlib import Path
 from types import MappingProxyType
-from typing import Any, Iterator
+from typing import Any, Protocol
 
 COUNSEL_TTL_SECONDS = 300
 MAX_CAPABILITY_TOKEN_BYTES = 8192
@@ -64,7 +64,7 @@ class CovenantLevel(str, Enum):
     DESTRUCTIVE = "destructive"
 
 
-class UnknownCovenantOperation(ValueError):
+class UnknownCovenantOperation(ValueError):  # noqa: N818 -- retained public Python API name
     """Raised when a workflow/action is absent from the authoritative policy."""
 
 
@@ -87,7 +87,7 @@ class CovenantStateCapacityError(RuntimeError):
 
 
 def _fixed(level: CovenantLevel, *operations: str) -> dict[str, CovenantLevel]:
-    return {operation: level for operation in operations}
+    return dict.fromkeys(operations, level)
 
 
 _FIXED_POLICY = {
@@ -193,28 +193,18 @@ class CovenantPolicy:
             auto_remember = args.get("auto_remember", False)
             if type(auto_remember) is not bool:
                 raise ArgumentNormalizationError("auto_remember must be boolean")
-            return (
-                CovenantLevel.COUNSEL
-                if auto_remember
-                else CovenantLevel.COMMUNION
-            )
+            return CovenantLevel.COUNSEL if auto_remember else CovenantLevel.COMMUNION
         if operation == "maintain.consolidate":
             archive_sources = args.get("archive_sources", False)
             if type(archive_sources) is not bool:
                 raise ArgumentNormalizationError("archive_sources must be boolean")
             return (
-                CovenantLevel.DESTRUCTIVE
-                if archive_sources
-                else CovenantLevel.COUNSEL
+                CovenantLevel.DESTRUCTIVE if archive_sources else CovenantLevel.COUNSEL
             )
         dry_run = args.get("dry_run", True)
         if type(dry_run) is not bool:
             raise ArgumentNormalizationError("dry_run must be boolean")
-        return (
-            CovenantLevel.DESTRUCTIVE
-            if not dry_run
-            else CovenantLevel.COMMUNION
-        )
+        return CovenantLevel.DESTRUCTIVE if not dry_run else CovenantLevel.COMMUNION
 
 
 COVENANT_POLICY = CovenantPolicy()
@@ -230,9 +220,7 @@ ACTION_ARGUMENT_DEFAULTS: Mapping[str, Mapping[str, Any]] = MappingProxyType(
     {
         "commune.briefing": _schema(focus_areas=None, visual=False),
         "commune.active_context": _schema(),
-        "commune.triggers": _schema(
-            file_path=None, tags=None, entities=None, limit=5
-        ),
+        "commune.triggers": _schema(file_path=None, tags=None, entities=None, limit=5),
         "commune.health": _schema(),
         "commune.covenant": _schema(visual=False),
         "commune.updates": _schema(since=None, interval_seconds=10),
@@ -285,9 +273,7 @@ ACTION_ARGUMENT_DEFAULTS: Mapping[str, Mapping[str, Any]] = MappingProxyType(
             relationship=None,
             description=None,
         ),
-        "inscribe.unlink": _schema(
-            source_id=None, target_id=None, relationship=None
-        ),
+        "inscribe.unlink": _schema(source_id=None, target_id=None, relationship=None),
         "inscribe.pin": _schema(memory_id=None, pinned=True),
         "inscribe.activate": _schema(
             memory_id=None, reason=None, priority=0, expires_in_hours=None
@@ -295,17 +281,13 @@ ACTION_ARGUMENT_DEFAULTS: Mapping[str, Mapping[str, Any]] = MappingProxyType(
         "inscribe.deactivate": _schema(memory_id=None),
         "inscribe.clear_active": _schema(),
         "inscribe.ingest": _schema(url=None, topic=None, chunk_size=2000),
-        "reflect.outcome": _schema(
-            memory_id=None, outcome_text=None, worked=None
-        ),
+        "reflect.outcome": _schema(memory_id=None, outcome_text=None, worked=None),
         "reflect.verify": _schema(text=None, categories=None, as_of_time=None),
         "reflect.execute": _schema(code=None, timeout_seconds=None),
         "understand.index": _schema(path=None, patterns=None),
         "understand.find": _schema(query=None, limit=20),
         "understand.impact": _schema(entity_name=None),
-        "understand.todos": _schema(
-            path=None, auto_remember=False, types=None
-        ),
+        "understand.todos": _schema(path=None, auto_remember=False, types=None),
         "understand.refactor": _schema(file_path=None),
         "govern.add_rule": _schema(
             trigger=None,
@@ -340,9 +322,7 @@ ACTION_ARGUMENT_DEFAULTS: Mapping[str, Mapping[str, Any]] = MappingProxyType(
             direction="both",
             max_depth=2,
         ),
-        "explore.chain": _schema(
-            start_memory_id=None, end_memory_id=None, max_depth=2
-        ),
+        "explore.chain": _schema(start_memory_id=None, end_memory_id=None, max_depth=2),
         "explore.graph": _schema(
             memory_ids=None,
             topic=None,
@@ -355,9 +335,7 @@ ACTION_ARGUMENT_DEFAULTS: Mapping[str, Mapping[str, Any]] = MappingProxyType(
             level=None, parent_community_id=None, visual=False
         ),
         "explore.community_detail": _schema(community_id=None),
-        "explore.rebuild_communities": _schema(
-            min_community_size=2, resolution=1.0
-        ),
+        "explore.rebuild_communities": _schema(min_community_size=2, resolution=1.0),
         "explore.entities": _schema(entity_type=None, limit=20),
         "explore.backfill_entities": _schema(),
         "explore.evolution": _schema(
@@ -377,9 +355,7 @@ ACTION_ARGUMENT_DEFAULTS: Mapping[str, Mapping[str, Any]] = MappingProxyType(
         ),
         "maintain.archive": _schema(memory_id=None, archived=True),
         "maintain.cleanup": _schema(dry_run=True, merge_duplicates=True),
-        "maintain.compact": _schema(
-            summary=None, limit=10, topic=None, dry_run=True
-        ),
+        "maintain.compact": _schema(summary=None, limit=10, topic=None, dry_run=True),
         "maintain.rebuild_index": _schema(),
         "maintain.export": _schema(include_vectors=False),
         "maintain.import_data": _schema(data=None, merge=True),
@@ -436,9 +412,7 @@ def _normalize_json(value: Any, _depth: int = 0) -> Any:
         if not all(isinstance(key, str) for key in value):
             raise ArgumentNormalizationError("object keys must be strings")
         return {
-            _normalize_json(key, _depth + 1): _normalize_json(
-                value[key], _depth + 1
-            )
+            _normalize_json(key, _depth + 1): _normalize_json(value[key], _depth + 1)
             for key in sorted(value)
         }
     raise ArgumentNormalizationError(
@@ -478,9 +452,7 @@ def normalize_operation_arguments(
     if separator:
         supplied_action = supplied.pop("action", action)
         if supplied_action != action:
-            raise ArgumentNormalizationError(
-                "action does not match target operation"
-            )
+            raise ArgumentNormalizationError("action does not match target operation")
     for excluded in _EXCLUDED_ARGUMENTS:
         supplied.pop(excluded, None)
     if operation == "consult.preflight":
@@ -493,13 +465,9 @@ def normalize_operation_arguments(
     effective = {**defaults, **supplied}
     if separator:
         effective = {"action": action, **effective}
-    for required_name in ACTION_REQUIRED_ARGUMENTS.get(
-        operation, frozenset()
-    ):
+    for required_name in ACTION_REQUIRED_ARGUMENTS.get(operation, frozenset()):
         if effective.get(required_name) is None:
-            raise ArgumentNormalizationError(
-                "required action argument is missing"
-            )
+            raise ArgumentNormalizationError("required action argument is missing")
     normalized = _normalize_json(effective)
     for key in _PATH_ARGUMENTS:
         value = normalized.get(key)
@@ -546,9 +514,7 @@ class InvocationScope:
 class _ScopeState:
     briefed_at: int | None = None
     last_seen: int = 0
-    issued: OrderedDict[str, tuple[str, str, int]] = field(
-        default_factory=OrderedDict
-    )
+    issued: OrderedDict[str, tuple[str, str, int]] = field(default_factory=OrderedDict)
     consumed: OrderedDict[str, int] = field(default_factory=OrderedDict)
 
 
@@ -907,13 +873,17 @@ class CovenantViolation:
         if workspace:
             response["workspace"] = workspace
         if code == "COMMUNION_REQUIRED":
-            response["message"] = "The Sacred Covenant requires communion in this invocation scope."
+            response["message"] = (
+                "The Sacred Covenant requires communion in this invocation scope."
+            )
             response["remedy"] = {
                 "tool": "commune",
                 "args": {"action": "briefing", "project_path": workspace},
             }
         elif code in {"COUNSEL_REQUIRED", "TOKEN_MISSING"}:
-            response["message"] = "A bound preflight capability is required for this operation."
+            response["message"] = (
+                "A bound preflight capability is required for this operation."
+            )
             response["remedy"] = {
                 "tool": "consult",
                 "args": {
@@ -924,25 +894,25 @@ class CovenantViolation:
                 },
             }
         elif code == "IDENTITY_UNAVAILABLE":
-            response["message"] = "A server-authenticated invocation identity is unavailable."
+            response["message"] = (
+                "A server-authenticated invocation identity is unavailable."
+            )
         elif code == "UNKNOWN_COVENANT_OPERATION":
-            response["message"] = "The workflow/action is not classified by the Covenant policy."
+            response["message"] = (
+                "The workflow/action is not classified by the Covenant policy."
+            )
         else:
             response["message"] = "The preflight capability was rejected."
         return response
 
     @staticmethod
     def communion_required(project_path: str) -> dict[str, Any]:
-        return CovenantViolation.build(
-            "COMMUNION_REQUIRED", "unknown", project_path
-        )
+        return CovenantViolation.build("COMMUNION_REQUIRED", "unknown", project_path)
 
     @staticmethod
     def counsel_required(tool_name: str, project_path: str) -> dict[str, Any]:
         operation = LEGACY_OPERATION_MAP.get(tool_name, tool_name)
-        return CovenantViolation.build(
-            "COUNSEL_REQUIRED", operation, project_path
-        )
+        return CovenantViolation.build("COUNSEL_REQUIRED", operation, project_path)
 
     @staticmethod
     def counsel_expired(
@@ -952,6 +922,38 @@ class CovenantViolation:
         return CovenantViolation.build("TOKEN_EXPIRED", operation, project_path)
 
 
+class WorkspaceAccessDenied(PermissionError):  # noqa: N818 -- retained public Python API name
+    code = "UNAUTHORIZED_WORKSPACE"
+
+
+class IssuedCapability(Protocol):
+    @property
+    def token(self) -> str: ...
+    @property
+    def nonce(self) -> str: ...
+    @property
+    def expires_at(self) -> int: ...
+    @property
+    def args_sha256(self) -> str: ...
+
+
+class CapabilityIssuer(Protocol):
+    @property
+    def ttl_seconds(self) -> int: ...
+    def issue(
+        self, scope: InvocationScope, operation: str, args_sha256: str
+    ) -> IssuedCapability: ...
+    def verify(self, token: str) -> dict[str, Any]: ...
+
+
+class CovenantPolicyResolver(Protocol):
+    @property
+    def operations(self) -> frozenset[str]: ...
+    def resolve(
+        self, operation: str, arguments: Mapping[str, Any] | None = None
+    ) -> CovenantLevel: ...
+
+
 class CovenantGate:
     """Authoritative policy, communion, and one-use capability gate."""
 
@@ -959,16 +961,26 @@ class CovenantGate:
         self,
         *,
         state_store: CovenantStateStore,
-        authority: CapabilityAuthority,
-        policy: CovenantPolicy = COVENANT_POLICY,
+        authority: CapabilityIssuer,
+        policy: CovenantPolicyResolver = COVENANT_POLICY,
         argument_normalizer: Callable[
             [str, Mapping[str, Any] | None, str], dict[str, Any]
         ] = normalize_operation_arguments,
+        workspace_authorizer: Callable[[InvocationScope], bool] | None = None,
     ) -> None:
         self.state_store = state_store
         self.authority = authority
         self.policy = policy
         self._argument_normalizer = argument_normalizer
+        self._workspace_authorizer = workspace_authorizer
+
+    def workspace_authorized(self, scope: InvocationScope) -> bool:
+        if self._workspace_authorizer is None:
+            return True
+        try:
+            return self._workspace_authorizer(scope) is True
+        except Exception:
+            return False
 
     def fingerprint(
         self,
@@ -982,6 +994,8 @@ class CovenantGate:
         return hashlib.sha256(canonical_json(normalized)).hexdigest()
 
     def record_briefing(self, scope: InvocationScope) -> None:
+        if not self.workspace_authorized(scope):
+            raise WorkspaceAccessDenied("UNAUTHORIZED_WORKSPACE")
         self.state_store.mark_briefed(scope)
 
     def issue_preflight(
@@ -990,6 +1004,8 @@ class CovenantGate:
         target_operation: str,
         target_args: Mapping[str, Any] | None,
     ) -> str:
+        if not self.workspace_authorized(scope):
+            raise WorkspaceAccessDenied("UNAUTHORIZED_WORKSPACE")
         if not self.state_store.is_briefed(scope):
             raise PermissionError("COMMUNION_REQUIRED")
         level = self.policy.resolve(target_operation, target_args)
@@ -1031,12 +1047,12 @@ class CovenantGate:
                 operation,
                 None,
             )
+        if scope is not None and not self.workspace_authorized(scope):
+            return CovenantViolation.build("UNAUTHORIZED_WORKSPACE", operation, None)
         if level is CovenantLevel.EXEMPT:
             return None
         if scope is None:
-            return CovenantViolation.build(
-                "IDENTITY_UNAVAILABLE", operation, None
-            )
+            return CovenantViolation.build("IDENTITY_UNAVAILABLE", operation, None)
         workspace = scope.canonical_workspace
         payload: dict[str, Any] | None = None
         if (
@@ -1072,9 +1088,7 @@ class CovenantGate:
             or payload["session"] != scope.transport_session_id
             or os.path.normcase(payload["workspace"]) != workspace
         ):
-            return CovenantViolation.build(
-                "TOKEN_SCOPE_MISMATCH", operation, workspace
-            )
+            return CovenantViolation.build("TOKEN_SCOPE_MISMATCH", operation, workspace)
         if payload["operation"] != operation:
             return CovenantViolation.build(
                 "TOKEN_OPERATION_MISMATCH", operation, workspace
@@ -1223,9 +1237,7 @@ def authorize_operation_call(
             return None
         return CovenantViolation.build("IDENTITY_UNAVAILABLE", operation, None)
     if scope is not None:
-        scope_violation = _workspace_scope_violation(
-            operation, direct_arguments, scope
-        )
+        scope_violation = _workspace_scope_violation(operation, direct_arguments, scope)
         if scope_violation is not None:
             return scope_violation
         admitted = admitted_call_var.get()
@@ -1298,9 +1310,7 @@ def authorize_workflow_call(
     preflight_token: str | None = None,
 ) -> dict[str, Any] | None:
     """Apply the same gate to direct consolidated wrapper calls."""
-    return authorize_operation_call(
-        f"{workflow}.{action}", arguments, preflight_token
-    )
+    return authorize_operation_call(f"{workflow}.{action}", arguments, preflight_token)
 
 
 def authorize_legacy_call(
@@ -1311,9 +1321,7 @@ def authorize_legacy_call(
     """Route a legacy Python entry point through its canonical operation."""
     operation = LEGACY_OPERATION_MAP.get(tool_name)
     if operation is None:
-        return CovenantViolation.build(
-            "UNKNOWN_COVENANT_OPERATION", tool_name, None
-        )
+        return CovenantViolation.build("UNKNOWN_COVENANT_OPERATION", tool_name, None)
     return authorize_operation_call(operation, arguments, preflight_token)
 
 
@@ -1457,15 +1465,9 @@ LEGACY_OPERATION_MAP = LEGACY_ENTRYPOINTS
 class LegacyArgumentAdapter:
     """Explicit translation from a deprecated leaf signature to policy args."""
 
-    renames: Mapping[str, str] = field(
-        default_factory=lambda: MappingProxyType({})
-    )
-    fixed: Mapping[str, Any] = field(
-        default_factory=lambda: MappingProxyType({})
-    )
-    excluded: Mapping[str, str] = field(
-        default_factory=lambda: MappingProxyType({})
-    )
+    renames: Mapping[str, str] = field(default_factory=lambda: MappingProxyType({}))
+    fixed: Mapping[str, Any] = field(default_factory=lambda: MappingProxyType({}))
+    excluded: Mapping[str, str] = field(default_factory=lambda: MappingProxyType({}))
     use_scope_workspace: bool = False
 
 
@@ -1488,13 +1490,9 @@ _DEFAULT_LEGACY_ADAPTER = _legacy_adapter()
 _SPECIAL_LEGACY_ADAPTERS = {
     "recall": _legacy_adapter(fixed={"visual": False}),
     "recall_visual": _legacy_adapter(fixed={"visual": True}),
-    "record_outcome": _legacy_adapter(
-        renames={"outcome": "outcome_text"}
-    ),
+    "record_outcome": _legacy_adapter(renames={"outcome": "outcome_text"}),
     "find_related": _legacy_adapter(
-        excluded={
-            "limit": "semantic result limit has no graph-depth equivalent"
-        }
+        excluded={"limit": "semantic result limit has no graph-depth equivalent"}
     ),
     "check_rules": _legacy_adapter(renames={"action": "action_desc"}),
     "get_briefing": _legacy_adapter(fixed={"visual": False}),
@@ -1508,12 +1506,8 @@ _SPECIAL_LEGACY_ADAPTERS = {
             "target_args": "validated by capability issuance",
         }
     ),
-    "get_graph": _legacy_adapter(
-        fixed={"visual": False, "include_orphans": False}
-    ),
-    "get_graph_visual": _legacy_adapter(
-        fixed={"visual": True, "format": "json"}
-    ),
+    "get_graph": _legacy_adapter(fixed={"visual": False, "include_orphans": False}),
+    "get_graph_visual": _legacy_adapter(fixed={"visual": True, "format": "json"}),
     "list_communities": _legacy_adapter(
         fixed={"parent_community_id": None, "visual": False}
     ),
@@ -1525,9 +1519,7 @@ _SPECIAL_LEGACY_ADAPTERS = {
 }
 LEGACY_ARGUMENT_ADAPTERS: Mapping[str, LegacyArgumentAdapter] = MappingProxyType(
     {
-        name: _SPECIAL_LEGACY_ADAPTERS.get(
-            name, _DEFAULT_LEGACY_ADAPTER
-        )
+        name: _SPECIAL_LEGACY_ADAPTERS.get(name, _DEFAULT_LEGACY_ADAPTER)
         for name in LEGACY_ENTRYPOINTS
     }
 )
@@ -1586,6 +1578,8 @@ def legacy_entrypoint(entrypoint: str) -> Callable[[Callable], Callable]:
         return wrapper
 
     return decorator
+
+
 COVENANT_EXEMPT_TOOLS = frozenset(
     name
     for name, operation in LEGACY_OPERATION_MAP.items()
@@ -1608,7 +1602,7 @@ class PreflightToken:
     """Retired legacy token API retained only as an explicit rejection seam."""
 
     @classmethod
-    def issue(cls, *args: Any, **kwargs: Any) -> "PreflightToken":
+    def issue(cls, *args: Any, **kwargs: Any) -> PreflightToken:
         raise RuntimeError("TOKEN_LEGACY_UNSUPPORTED")
 
     @classmethod
@@ -1626,9 +1620,7 @@ class CovenantEnforcer:
         gate = covenant_gate_var.get()
         scope = invocation_scope_var.get()
         if gate is None or scope is None:
-            return CovenantViolation.build(
-                "IDENTITY_UNAVAILABLE", "unknown", None
-            )
+            return CovenantViolation.build("IDENTITY_UNAVAILABLE", "unknown", None)
         if not gate.state_store.is_briefed(scope):
             return CovenantViolation.build(
                 "COMMUNION_REQUIRED", "unknown", scope.canonical_workspace
@@ -1646,9 +1638,7 @@ class CovenantEnforcer:
             return CovenantViolation.build(
                 "UNKNOWN_COVENANT_OPERATION", tool_name, None
             )
-        return authorize_operation_call(
-            operation, {"project_path": project_path}
-        )
+        return authorize_operation_call(operation, {"project_path": project_path})
 
 
 _get_project_context_callback: Callable[[str], Any] | None = None

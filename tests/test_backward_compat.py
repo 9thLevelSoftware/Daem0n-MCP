@@ -13,7 +13,7 @@ class TestDeprecatedToolsRemovedFromMCP:
 
         tools = {t.name for t in await mcp.list_tools()}
         assert tools == set(V7_TOOL_LEVELS)
-        assert len(tools) == 71
+        assert len(tools) == 75
         assert tools.isdisjoint(
             {
                 "commune",

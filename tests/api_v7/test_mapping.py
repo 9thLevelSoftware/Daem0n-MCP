@@ -19,7 +19,6 @@ from daem0nmcp.api.v7.mapping import (
     validate_mapping,
 )
 
-
 _ROOT = Path(__file__).resolve().parents[2]
 _GENERATED_PATH = _ROOT / "docs" / "v6-to-v7-tools.json"
 _GENERATOR_PATH = _ROOT / "scripts" / "generate_v7_tool_mapping.py"
@@ -118,7 +117,9 @@ class MappingCoverageTests(unittest.TestCase):
             self.assertIsInstance(entry.removed_parameters, tuple)
             self.assertTrue(entry.policy_change)
             self.assertEqual(len(entry.replacement_examples), len(entry.new_tools))
-            self.assertTrue(all(example.strip() for example in entry.replacement_examples))
+            self.assertTrue(
+                all(example.strip() for example in entry.replacement_examples)
+            )
 
     def test_debate_preflight_field_is_reissued_not_removed(self) -> None:
         debate = next(
@@ -172,7 +173,7 @@ class MappingDocumentTests(unittest.TestCase):
         mappings[0] = replace(
             original,
             replacement_examples=(
-                original.replacement_examples[0] + ' # caf\u0065\u0301',
+                original.replacement_examples[0] + " # caf\u0065\u0301",
             ),
         )
 
@@ -182,7 +183,9 @@ class MappingDocumentTests(unittest.TestCase):
         self.assertNotIn("cafe\u0301", rendered)
 
     def test_checked_in_document_matches_the_authoritative_mapping(self) -> None:
-        self.assertEqual(_GENERATED_PATH.read_text(encoding="utf-8"), render_mapping_json())
+        self.assertEqual(
+            _GENERATED_PATH.read_text(encoding="utf-8"), render_mapping_json()
+        )
 
     def test_generator_is_idempotent_and_check_detects_drift(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

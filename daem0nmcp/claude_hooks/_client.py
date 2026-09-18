@@ -13,6 +13,26 @@ import threading
 from pathlib import Path
 from typing import Any, NoReturn
 
+MAX_HOOK_INPUT_BYTES = 256 * 1024
+
+
+def read_hook_event() -> dict[str, Any]:
+    """Read Claude Code's bounded JSON event from standard input.
+
+    Claude passes hook data on stdin; environment variables are retained only
+    for the legacy standalone hooks and test compatibility.  Malformed or
+    oversized data deliberately becomes an empty event so callers can deny a
+    protected edit without echoing client data.
+    """
+    try:
+        raw = sys.stdin.buffer.read(MAX_HOOK_INPUT_BYTES + 1)
+        if len(raw) > MAX_HOOK_INPUT_BYTES:
+            return {}
+        value = json.loads(raw)
+    except (AttributeError, OSError, TypeError, UnicodeError, json.JSONDecodeError):
+        return {}
+    return value if isinstance(value, dict) else {}
+
 
 def get_project_path() -> str | None:
     """

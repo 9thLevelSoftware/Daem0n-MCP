@@ -88,9 +88,7 @@ class TransportLaunchBoundaryTests(unittest.TestCase):
 
     def test_mcp_instance_attaches_configured_fastmcp_jwt_verifier(self):
         environment = {
-            "FASTMCP_SERVER_AUTH": (
-                "fastmcp.server.auth.providers.jwt.JWTVerifier"
-            ),
+            "FASTMCP_SERVER_AUTH": ("fastmcp.server.auth.providers.jwt.JWTVerifier"),
             "FASTMCP_SERVER_AUTH_JWT_JWKS_URI": "https://issuer.example/jwks",
             "FASTMCP_SERVER_AUTH_JWT_ISSUER": "https://issuer.example",
             "FASTMCP_SERVER_AUTH_JWT_AUDIENCE": "daem0nmcp",
@@ -143,11 +141,9 @@ class TransportLaunchBoundaryTests(unittest.TestCase):
             patch.dict(sys.modules, {"daem0nmcp.server": fake_server}),
             patch.object(sys, "argv", argv),
             patch.dict(os.environ, {}, clear=True),
+            self.assertRaisesRegex(TransportSecurityError, "REMOTE_BIND_REQUIRES_AUTH"),
         ):
-            with self.assertRaisesRegex(
-                TransportSecurityError, "REMOTE_BIND_REQUIRES_AUTH"
-            ):
-                start_server.main()
+            start_server.main()
 
         self.assertEqual(calls, [])
 
@@ -175,7 +171,7 @@ class TransportLaunchBoundaryTests(unittest.TestCase):
         self.assertEqual(calls[0]["transport"], "streamable-http")
         self.assertEqual(calls[0]["host"], "127.0.0.1")
         self.assertEqual(calls[0]["port"], 9988)
-        self.assertEqual(len(calls[0]["middleware"]), 2)
+        self.assertEqual(len(calls[0]["middleware"]), 3)
 
     def test_server_main_rejects_remote_sse_bind_before_run(self):
         calls = []
@@ -194,11 +190,11 @@ class TransportLaunchBoundaryTests(unittest.TestCase):
             "0.0.0.0",
         ]
 
-        with patch.object(sys, "argv", argv):
-            with self.assertRaisesRegex(
-                TransportSecurityError, "REMOTE_BIND_REQUIRES_AUTH"
-            ):
-                server.main()
+        with (
+            patch.object(sys, "argv", argv),
+            self.assertRaisesRegex(TransportSecurityError, "REMOTE_BIND_REQUIRES_AUTH"),
+        ):
+            server.main()
 
         self.assertEqual(calls, [])
 

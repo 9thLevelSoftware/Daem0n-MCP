@@ -253,10 +253,10 @@ class _FileChangeHandler(FileSystemEventHandler):
                     return True
 
         # Check extension filter if specified
-        if self._config.watch_extensions and path.suffix.lower() not in self._config.watch_extensions:
-            return True
-
-        return False
+        return bool(
+            self._config.watch_extensions
+            and path.suffix.lower() not in self._config.watch_extensions
+        )
 
     def on_modified(self, event):
         """Handle file modification events."""

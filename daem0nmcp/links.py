@@ -28,9 +28,7 @@ class LinkManager:
         links = await link_mgr.list_linked_projects("/repos/backend")
     """
 
-    def __init__(
-        self, db: DatabaseManager, registry: WorkspaceRegistry | None = None
-    ):
+    def __init__(self, db: DatabaseManager, registry: WorkspaceRegistry | None = None):
         self.db = db
         if registry is None:
             # Import lazily to avoid a module cycle while still using the
@@ -204,9 +202,7 @@ class LinkManager:
             linked = self.registry.resolve(link["workspace_id"])
             linked_path = str(linked.root)
             # Use correct storage path pattern: .daem0nmcp/storage
-            storage_path = resolve_derived_path(
-                linked.root, ".daem0nmcp", "storage"
-            )
+            storage_path = resolve_derived_path(linked.root, ".daem0nmcp", "storage")
 
             if storage_path.exists():
                 try:
@@ -262,9 +258,7 @@ class LinkManager:
             source = self.registry.resolve(source.workspace_id)
             source_path = str(source.root)
             # Use CORRECT storage path pattern: .daem0nmcp/storage
-            source_storage = resolve_derived_path(
-                source.root, ".daem0nmcp", "storage"
-            )
+            source_storage = resolve_derived_path(source.root, ".daem0nmcp", "storage")
 
             if not source_storage.exists():
                 logger.warning(f"No storage found at {source_storage}, skipping")
@@ -306,9 +300,7 @@ class LinkManager:
                 # Archive source if requested
                 if archive_sources:
                     source = self.registry.resolve(source.workspace_id)
-                    daem0nmcp_dir = resolve_derived_path(
-                        source.root, ".daem0nmcp"
-                    )
+                    daem0nmcp_dir = resolve_derived_path(source.root, ".daem0nmcp")
                     archived_path = resolve_derived_path(
                         source.root, ".daem0nmcp.archived"
                     )

@@ -10,7 +10,6 @@ import tempfile
 import unittest
 from pathlib import Path
 
-
 WORKSPACE_A = "ws_0123456789abcdef01234567"
 WORKSPACE_B = "ws_89abcdef0123456701234567"
 RECORD_A = "mem_" + "a" * 64
@@ -64,20 +63,17 @@ class CanonicalActiveContextMigrationTests(unittest.TestCase):
             allow_nan=False,
         ).encode("utf-8")
         expected = "act_" + hashlib.sha256(encoded).hexdigest()
-        self.assertEqual(
-            active_context_id_for_record(WORKSPACE_A, RECORD_A), expected
-        )
-        self.assertEqual(
-            active_context_id_for_record(WORKSPACE_A, RECORD_A), expected
-        )
+        self.assertEqual(active_context_id_for_record(WORKSPACE_A, RECORD_A), expected)
+        self.assertEqual(active_context_id_for_record(WORKSPACE_A, RECORD_A), expected)
         for workspace_id, record_id in (
             ("bad", RECORD_A),
             (WORKSPACE_A, "mem_bad"),
             (WORKSPACE_A, "mem_" + "A" * 64),
         ):
-            with self.subTest(
-                workspace_id=workspace_id, record_id=record_id
-            ), self.assertRaises(ValueError):
+            with (
+                self.subTest(workspace_id=workspace_id, record_id=record_id),
+                self.assertRaises(ValueError),
+            ):
                 active_context_id_for_record(workspace_id, record_id)
 
     def test_resource_repository_imports_in_a_fresh_process(self) -> None:
@@ -99,7 +95,9 @@ class CanonicalActiveContextMigrationTests(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0, result.stderr)
 
-    def test_current_schema_requires_migration_20_without_redefining_format_7(self) -> None:
+    def test_current_schema_requires_migration_20_without_redefining_format_7(
+        self,
+    ) -> None:
         from daem0nmcp.migrations.schema import CURRENT_SCHEMA_VERSION, MIGRATIONS
         from daem0nmcp.migrations.v7 import _V7_TABLE_NAMES
         from daem0nmcp.storage_activation import (
@@ -122,15 +120,10 @@ class CanonicalActiveContextMigrationTests(unittest.TestCase):
             Path(__file__).resolve().parents[2] / "daem0nmcp" / "database.py"
         ).read_text(encoding="utf-8")
         migration_source = (
-            Path(__file__).resolve().parents[2]
-            / "daem0nmcp"
-            / "migrations"
-            / "v7.py"
+            Path(__file__).resolve().parents[2] / "daem0nmcp" / "migrations" / "v7.py"
         ).read_text(encoding="utf-8")
         activation_source = (
-            Path(__file__).resolve().parents[2]
-            / "daem0nmcp"
-            / "storage_activation.py"
+            Path(__file__).resolve().parents[2] / "daem0nmcp" / "storage_activation.py"
         ).read_text(encoding="utf-8")
         self.assertIn("< CURRENT_SCHEMA_VERSION", database_source)
         self.assertIn("< CURRENT_SCHEMA_VERSION", migration_source)
@@ -159,9 +152,7 @@ class CanonicalActiveContextMigrationTests(unittest.TestCase):
             connection.commit()
             connection.close()
 
-            with self.assertRaisesRegex(
-                RuntimeError, "PUBLIC_ID_INTEGRITY_ERROR"
-            ):
+            with self.assertRaisesRegex(RuntimeError, "PUBLIC_ID_INTEGRITY_ERROR"):
                 run_migrations(str(path), workspace_id=WORKSPACE_A)
 
             connection = sqlite3.connect(path)
@@ -181,7 +172,9 @@ class CanonicalActiveContextMigrationTests(unittest.TestCase):
             finally:
                 connection.close()
 
-    def test_retained_public_rows_require_workspace_scope_before_migration_19(self) -> None:
+    def test_retained_public_rows_require_workspace_scope_before_migration_19(
+        self,
+    ) -> None:
         from daem0nmcp.migrations.schema import run_migrations
 
         with tempfile.TemporaryDirectory() as raw:
@@ -226,12 +219,8 @@ class CanonicalActiveContextMigrationTests(unittest.TestCase):
     def test_cli_and_upgrade_entrypoints_supply_workspace_scope(self) -> None:
         root = Path(__file__).resolve().parents[2]
         cli_source = (root / "daem0nmcp" / "cli.py").read_text(encoding="utf-8")
-        upgrade_source = (root / "scripts" / "upgrade.py").read_text(
-            encoding="utf-8"
-        )
-        self.assertIn(
-            "db_path, workspace_id=db.workspace_id", cli_source
-        )
+        upgrade_source = (root / "scripts" / "upgrade.py").read_text(encoding="utf-8")
+        self.assertIn("db_path, workspace_id=db.workspace_id", cli_source)
         self.assertIn("WorkspaceRegistry", upgrade_source)
         self.assertIn(
             "run_migrations(\n                    fp.db_path, workspace_id=workspace_id",
@@ -351,7 +340,9 @@ class CanonicalActiveContextMigrationTests(unittest.TestCase):
         finally:
             connection.close()
 
-    def test_identity_is_immutable_delete_is_soft_and_operational_state_is_mutable(self) -> None:
+    def test_identity_is_immutable_delete_is_soft_and_operational_state_is_mutable(
+        self,
+    ) -> None:
         connection = _connection()
         try:
             connection.execute(

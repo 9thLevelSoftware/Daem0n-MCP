@@ -7,12 +7,12 @@ from typing import Any
 
 try:
     from .. import __version__
-    from ..covenant import legacy_entrypoint
     from ..context_manager import (
         _default_project_path,
         _missing_project_path_error,
         get_project_context,
     )
+    from ..covenant import legacy_entrypoint
     from ..event_store import (
         EventBundleError,
         delete_compatibility_memory,
@@ -27,12 +27,12 @@ try:
     from ..models import Memory, MemoryRecord, MemoryVersion, Rule
 except ImportError:
     from daem0nmcp import __version__
-    from daem0nmcp.covenant import legacy_entrypoint
     from daem0nmcp.context_manager import (
         _default_project_path,
         _missing_project_path_error,
         get_project_context,
     )
+    from daem0nmcp.covenant import legacy_entrypoint
     from daem0nmcp.event_store import (
         EventBundleError,
         delete_compatibility_memory,
@@ -241,8 +241,10 @@ async def import_data(
             if not isinstance(item.get("tags", []), list):
                 raise ValueError("memory tags must be an array")
             for field in ("is_permanent", "pinned", "archived"):
-                if field in item and item[field] is not None and not isinstance(
-                    item[field], bool
+                if (
+                    field in item
+                    and item[field] is not None
+                    and not isinstance(item[field], bool)
                 ):
                     raise ValueError(f"memory {field} must be boolean")
             recall_count = item.get("recall_count", 0)
@@ -274,9 +276,7 @@ async def import_data(
     if v7_bundle is not None and not isinstance(v7_bundle, dict):
         return {"error": "INVALID_EVENT_BUNDLE"}
     import_root = (
-        v7_bundle.get("root_hash")
-        if isinstance(v7_bundle, dict)
-        else sha256_json(data)
+        v7_bundle.get("root_hash") if isinstance(v7_bundle, dict) else sha256_json(data)
     )
     if not isinstance(import_root, str):
         return {"error": "INVALID_IMPORT_DATA"}
@@ -379,9 +379,7 @@ async def import_data(
                     created_at=created_at,
                     updated_at=updated_at,
                     vector_embedding=(
-                        vector_bytes
-                        if ctx.db_manager.format_version != 7
-                        else None
+                        vector_bytes if ctx.db_manager.format_version != 7 else None
                     ),
                 )
                 session.add(memory)

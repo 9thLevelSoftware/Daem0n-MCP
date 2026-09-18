@@ -5,22 +5,22 @@ from typing import Any
 
 try:
     from .. import __version__
-    from ..covenant import legacy_entrypoint
     from ..context_manager import (
         _default_project_path,
         _missing_project_path_error,
         get_project_context,
     )
+    from ..covenant import legacy_entrypoint
     from ..logging_config import with_request_id
     from ..mcp_instance import mcp
 except ImportError:
     from daem0nmcp import __version__
-    from daem0nmcp.covenant import legacy_entrypoint
     from daem0nmcp.context_manager import (
         _default_project_path,
         _missing_project_path_error,
         get_project_context,
     )
+    from daem0nmcp.covenant import legacy_entrypoint
     from daem0nmcp.logging_config import with_request_id
     from daem0nmcp.mcp_instance import mcp
 

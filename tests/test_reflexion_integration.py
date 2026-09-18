@@ -29,6 +29,11 @@ from daem0nmcp.reflexion import (
 )
 
 
+@pytest.fixture(autouse=True)
+def models_local_enabled(monkeypatch):
+    monkeypatch.setenv("DAEM0NMCP_MODELS_LOCAL_ENABLED", "true")
+
+
 @pytest.fixture
 def mock_memory_manager():
     """Create a realistic mock MemoryManager."""
@@ -95,9 +100,7 @@ class TestClaimExtractionToVerification:
                 "daem0nmcp.reflexion.verification.encode_document"
             ) as mock_encode_doc,
             patch("daem0nmcp.reflexion.verification.decode") as mock_decode,
-            patch(
-                "daem0nmcp.reflexion.verification.cosine_similarity"
-            ) as mock_sim,
+            patch("daem0nmcp.reflexion.verification.cosine_similarity") as mock_sim,
         ):
             mock_encode.return_value = b"embedding"
             mock_encode_doc.return_value = b"embedding"
@@ -152,9 +155,7 @@ class TestClaimExtractionToVerification:
                 "daem0nmcp.reflexion.verification.encode_document"
             ) as mock_encode_doc,
             patch("daem0nmcp.reflexion.verification.decode") as mock_decode,
-            patch(
-                "daem0nmcp.reflexion.verification.cosine_similarity"
-            ) as mock_sim,
+            patch("daem0nmcp.reflexion.verification.cosine_similarity") as mock_sim,
         ):
             mock_encode.return_value = b"embedding"
             mock_encode_doc.return_value = b"embedding"
@@ -205,9 +206,7 @@ class TestFullReflexionLoop:
 
         with (
             patch("daem0nmcp.reflexion.nodes.verify_claims") as mock_verify,
-            patch(
-                "daem0nmcp.reflexion.nodes.summarize_verification"
-            ) as mock_summary,
+            patch("daem0nmcp.reflexion.nodes.summarize_verification") as mock_summary,
         ):
             # High quality on first try -> should exit early
             mock_verify.return_value = []
@@ -259,9 +258,7 @@ class TestFullReflexionLoop:
 
         with (
             patch("daem0nmcp.reflexion.nodes.verify_claims") as mock_verify,
-            patch(
-                "daem0nmcp.reflexion.nodes.summarize_verification"
-            ) as mock_summary,
+            patch("daem0nmcp.reflexion.nodes.summarize_verification") as mock_summary,
         ):
             # Always return low quality -> should hit max iterations
             mock_verify.return_value = []
@@ -287,9 +284,7 @@ class TestFullReflexionLoop:
         """Test run_reflexion convenience function."""
         with (
             patch("daem0nmcp.reflexion.nodes.verify_claims") as mock_verify,
-            patch(
-                "daem0nmcp.reflexion.nodes.summarize_verification"
-            ) as mock_summary,
+            patch("daem0nmcp.reflexion.nodes.summarize_verification") as mock_summary,
         ):
             mock_verify.return_value = []
             mock_summary.return_value = {
@@ -554,9 +549,7 @@ class TestVerifyFactsToolIntegration:
                 "daem0nmcp.reflexion.verification.encode_document"
             ) as mock_encode_doc,
             patch("daem0nmcp.reflexion.verification.decode") as mock_decode,
-            patch(
-                "daem0nmcp.reflexion.verification.cosine_similarity"
-            ) as mock_sim,
+            patch("daem0nmcp.reflexion.verification.cosine_similarity") as mock_sim,
         ):
             mock_encode.return_value = b"embedding"
             mock_encode_doc.return_value = b"embedding"

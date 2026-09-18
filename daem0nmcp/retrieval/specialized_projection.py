@@ -16,13 +16,14 @@ from .specialized_contract import (
     specialized_projection_contract,
 )
 
-
 _WORKSPACE_ID = re.compile(r"^ws_[0-9a-f]{24}$")
 _PROJECTIONS = frozenset({"graph", "outcome", "procedure", "temporal"})
 _BUILDER_VERSION = SPECIALIZED_BUILDER_VERSION
 _OUTCOME_ASSERTION_EVENT_TYPES = frozenset(
     {"legacy.memory_state_imported", "memory.outcome_recorded"}
 )
+
+
 class SpecializedProjectionBuildError(RuntimeError):
     """A specialized staging generation failed closed."""
 
@@ -100,17 +101,42 @@ class SpecializedProjectionBuilder:
         projection_name: str,
         *,
         dry_run: bool = False,
+        force: bool = False,
+        expected_snapshot: tuple[int, str, tuple[int, str] | None] | None = None,
+        candidate_populator: Callable[[int], None] | None = None,
+        before_activate: Callable[[], None] | None = None,
+        before_commit: Callable[[SpecializedProjectionBuildResult], None] | None = None,
     ) -> SpecializedProjectionBuildResult:
         self._validate_request(workspace_id, projection_name)
+        if not isinstance(force, bool):
+            raise SpecializedProjectionBuildError(
+                "INVALID_PROJECTION", "force must be boolean"
+            )
+        if candidate_populator is not None and (
+            projection_name != "graph" or not callable(candidate_populator)
+        ):
+            raise SpecializedProjectionBuildError(
+                "INVALID_PROJECTION", "candidate populator is invalid"
+            )
+        if before_activate is not None and not callable(before_activate):
+            raise SpecializedProjectionBuildError(
+                "INVALID_PROJECTION", "activation guard is invalid"
+            )
+        if before_commit is not None and not callable(before_commit):
+            raise SpecializedProjectionBuildError(
+                "INVALID_PROJECTION", "commit callback is invalid"
+            )
         self._require_schema(projection_name)
         owns_transaction = not self.connection.in_transaction
         self._savepoint_number += 1
         savepoint = f"specialized_build_{self._savepoint_number}"
         try:
-            if owns_transaction:
-                self.connection.execute("BEGIN IMMEDIATE")
-            else:
+            # Runtime builders own their connection. Keep their expensive
+            # canonical reads and digest work outside SQLite's single-writer
+            # transaction, then publish from a short validated write phase.
+            if not owns_transaction:
                 self.connection.execute(f"SAVEPOINT {savepoint}")
+            starting_identity = self._event_identity(workspace_id)
             steps: tuple[_ProcedureStep, ...] = ()
             outcomes: tuple[_OutcomeRow, ...] = ()
             typed_rows: tuple[dict[str, object], ...] = ()
@@ -126,11 +152,27 @@ class SpecializedProjectionBuilder:
                 outcomes = self._outcome_rows(workspace_id)
                 row_count = len(outcomes)
             else:
-                typed_rows = self._typed_rows(
-                    workspace_id, projection_name
-                )
+                typed_rows = self._typed_rows(workspace_id, projection_name)
                 row_count = len(typed_rows)
             event_count, event_root, cursor = self._event_snapshot(workspace_id)
+            if (
+                expected_snapshot is not None
+                and (
+                    event_count,
+                    event_root,
+                    cursor,
+                )
+                != expected_snapshot
+            ):
+                raise SpecializedProjectionBuildError(
+                    "PROJECTION_BUILD_SUPERSEDED",
+                    "source event snapshot changed while staging",
+                )
+            if starting_identity != (event_count, cursor):
+                raise SpecializedProjectionBuildError(
+                    "PROJECTION_BUILD_SUPERSEDED",
+                    "source event snapshot changed while staging",
+                )
             active = self._active_manifest(workspace_id, projection_name)
             if projection_name == "procedure":
                 content_digest = self._procedure_digest(steps)
@@ -140,6 +182,7 @@ class SpecializedProjectionBuilder:
                 content_digest = sha256_json(list(typed_rows))
             if (
                 not dry_run
+                and not force
                 and capability_ready
                 and active is not None
                 and self._active_is_current(
@@ -155,13 +198,11 @@ class SpecializedProjectionBuilder:
                     typed_rows,
                 )
             ):
-                storage_target, build_config_hash, details = (
-                    self._projection_contract(
-                        workspace_id,
-                        projection_name,
-                        active[1],
-                        content_digest,
-                    )
+                storage_target, build_config_hash, details = self._projection_contract(
+                    workspace_id,
+                    projection_name,
+                    active[1],
+                    content_digest,
                 )
                 self._rollback(owns_transaction, savepoint)
                 return SpecializedProjectionBuildResult(
@@ -173,14 +214,10 @@ class SpecializedProjectionBuilder:
                     source_event_root_hash=event_root,
                     content_digest=content_digest,
                     build_config_hash=build_config_hash,
-                    builder_contract_hash=str(
-                        details["builder_contract_hash"]
-                    ),
+                    builder_contract_hash=str(details["builder_contract_hash"]),
                     staging_manifest_id=active[0],
                     storage_target=storage_target,
-                    cursor_recorded_at_us=(
-                        cursor[0] if cursor is not None else None
-                    ),
+                    cursor_recorded_at_us=(cursor[0] if cursor is not None else None),
                     cursor_event_id=cursor[1] if cursor is not None else None,
                     active_manifest_id=active[0],
                     active_generation=active[1],
@@ -192,13 +229,11 @@ class SpecializedProjectionBuilder:
                     reused=True,
                 )
             generation = self._next_generation(workspace_id, projection_name)
-            storage_target, build_config_hash, details = (
-                self._projection_contract(
-                    workspace_id,
-                    projection_name,
-                    generation,
-                    content_digest,
-                )
+            storage_target, build_config_hash, details = self._projection_contract(
+                workspace_id,
+                projection_name,
+                generation,
+                content_digest,
             )
             manifest_id = deterministic_id(
                 "prj",
@@ -221,15 +256,11 @@ class SpecializedProjectionBuilder:
                 source_event_root_hash=event_root,
                 content_digest=content_digest,
                 build_config_hash=build_config_hash,
-                builder_contract_hash=str(
-                    details["builder_contract_hash"]
-                ),
+                builder_contract_hash=str(details["builder_contract_hash"]),
                 staging_manifest_id=manifest_id,
                 storage_target=storage_target,
                 dry_run=dry_run,
-                capability_status=(
-                    "ready" if capability_ready else "unavailable"
-                ),
+                capability_status=("ready" if capability_ready else "unavailable"),
                 capability_reason=(
                     None if capability_ready else "PROCEDURE_UNAVAILABLE"
                 ),
@@ -241,9 +272,7 @@ class SpecializedProjectionBuilder:
                 active_row_count=active[3] if active is not None else 0,
                 active_content_digest=active[4] if active is not None else None,
                 row_count_delta=row_count - (active[3] if active is not None else 0),
-                content_digest_changed=(
-                    active is None or active[4] != content_digest
-                ),
+                content_digest_changed=(active is None or active[4] != content_digest),
             )
             if dry_run:
                 self._rollback(owns_transaction, savepoint)
@@ -254,6 +283,24 @@ class SpecializedProjectionBuilder:
                     "procedure projection capability is unavailable",
                 )
 
+            self._rollback(owns_transaction, savepoint)
+            if owns_transaction:
+                self.connection.execute("BEGIN IMMEDIATE")
+            else:
+                self.connection.execute(f"SAVEPOINT {savepoint}")
+            if self._event_identity(workspace_id) != (event_count, cursor):
+                raise SpecializedProjectionBuildError(
+                    "PROJECTION_BUILD_SUPERSEDED",
+                    "source event snapshot changed before publication",
+                )
+            if (
+                self._active_manifest(workspace_id, projection_name) != active
+                or self._next_generation(workspace_id, projection_name) != generation
+            ):
+                raise SpecializedProjectionBuildError(
+                    "PROJECTION_BUILD_SUPERSEDED",
+                    "projection generation changed before publication",
+                )
             now = self._clock_value()
             self._insert_manifest(
                 manifest_id,
@@ -275,25 +322,15 @@ class SpecializedProjectionBuilder:
                 )
             elif projection_name == "outcome":
                 self._populate_outcomes(workspace_id, generation, outcomes)
-                self._validate_outcome_staging(
-                    workspace_id, generation, outcomes
-                )
+                self._validate_outcome_staging(workspace_id, generation, outcomes)
             else:
                 if self._typed_rows(workspace_id, projection_name) != typed_rows:
                     raise SpecializedProjectionBuildError(
                         "PROJECTION_VALIDATION_FAILED",
                         "canonical typed projection changed during build",
                     )
-            self._validate_source_snapshot(
-                workspace_id,
-                projection_name,
-                event_count,
-                event_root,
-                cursor,
-                steps,
-                outcomes,
-                typed_rows,
-            )
+                if candidate_populator is not None:
+                    candidate_populator(generation)
             self._validate_manifest(
                 manifest_id,
                 workspace_id,
@@ -305,6 +342,8 @@ class SpecializedProjectionBuilder:
                 details,
                 now,
             )
+            if before_activate is not None:
+                before_activate()
             self._activate(
                 manifest_id,
                 workspace_id,
@@ -312,6 +351,8 @@ class SpecializedProjectionBuilder:
                 row_count,
                 now,
             )
+            if before_commit is not None:
+                before_commit(result)
             if owns_transaction:
                 self.connection.commit()
             else:
@@ -328,9 +369,7 @@ class SpecializedProjectionBuilder:
                 ) from exc
             raise
 
-    def active_is_current(
-        self, workspace_id: str, projection_name: str
-    ) -> bool:
+    def active_is_current(self, workspace_id: str, projection_name: str) -> bool:
         """Return whether the active specialized generation is exact."""
 
         self._validate_request(workspace_id, projection_name)
@@ -377,9 +416,10 @@ class SpecializedProjectionBuilder:
 
     @staticmethod
     def _validate_request(workspace_id: str, projection_name: str) -> None:
-        if not isinstance(workspace_id, str) or _WORKSPACE_ID.fullmatch(
-            workspace_id
-        ) is None:
+        if (
+            not isinstance(workspace_id, str)
+            or _WORKSPACE_ID.fullmatch(workspace_id) is None
+        ):
             raise SpecializedProjectionBuildError(
                 "INVALID_WORKSPACE_ID", "workspace identifier is invalid"
             )
@@ -424,9 +464,7 @@ class SpecializedProjectionBuilder:
         if row is None or not isinstance(row[0], str) or not row[0]:
             raise sqlite3.OperationalError("FTS5 is unavailable")
 
-    def _procedure_steps(
-        self, workspace_id: str
-    ) -> tuple[_ProcedureStep, ...]:
+    def _procedure_steps(self, workspace_id: str) -> tuple[_ProcedureStep, ...]:
         steps: list[_ProcedureStep] = []
         rows = self.connection.execute(
             "SELECT record.record_id,record.record_type,record.context_json,"
@@ -488,9 +526,7 @@ class SpecializedProjectionBuilder:
             ) from exc
         return tuple(steps)
 
-    def _outcome_rows(
-        self, workspace_id: str
-    ) -> tuple[_OutcomeRow, ...]:
+    def _outcome_rows(self, workspace_id: str) -> tuple[_OutcomeRow, ...]:
         outcomes: list[_OutcomeRow] = []
         rows = self.connection.execute(
             "SELECT record.record_id,record.outcome,record.worked,"
@@ -671,10 +707,7 @@ class SpecializedProjectionBuilder:
                     parsed_json: dict[str, object] = {}
                     for column in json_columns:
                         parsed = json.loads(str(row[column]))
-                        if (
-                            canonical_json_bytes(parsed).decode("utf-8")
-                            != row[column]
-                        ):
+                        if canonical_json_bytes(parsed).decode("utf-8") != row[column]:
                             raise ValueError
                         parsed_json[column] = parsed
                 except (
@@ -996,14 +1029,35 @@ class SpecializedProjectionBuilder:
         cursor = None if row is None else (int(row[0]), str(row[1]))
         return count, digest.hexdigest(), cursor
 
-    def _next_generation(self, workspace_id: str, projection_name: str) -> int:
-        return int(
+    def _event_identity(self, workspace_id: str) -> tuple[int, tuple[int, str] | None]:
+        """Return the append-only ledger identity without hashing its body."""
+
+        count = int(
             self.connection.execute(
-                "SELECT COALESCE(MAX(generation),0) FROM projection_manifests "
-                "WHERE workspace_id=? AND projection_name=?",
-                (workspace_id, projection_name),
+                "SELECT count(*) FROM memory_events WHERE workspace_id=?",
+                (workspace_id,),
             ).fetchone()[0]
-        ) + 1
+        )
+        row = self.connection.execute(
+            "SELECT recorded_at_us,event_id FROM memory_events "
+            "WHERE workspace_id=? ORDER BY recorded_at_us DESC,event_id DESC "
+            "LIMIT 1",
+            (workspace_id,),
+        ).fetchone()
+        cursor = None if row is None else (int(row[0]), str(row[1]))
+        return count, cursor
+
+    def _next_generation(self, workspace_id: str, projection_name: str) -> int:
+        return (
+            int(
+                self.connection.execute(
+                    "SELECT COALESCE(MAX(generation),0) FROM projection_manifests "
+                    "WHERE workspace_id=? AND projection_name=?",
+                    (workspace_id, projection_name),
+                ).fetchone()[0]
+            )
+            + 1
+        )
 
     def _active_manifest(
         self, workspace_id: str, projection_name: str
@@ -1091,9 +1145,7 @@ class SpecializedProjectionBuilder:
                     workspace_id, active[1], storage_target, steps
                 )
             elif projection_name == "outcome":
-                self._validate_outcome_staging(
-                    workspace_id, active[1], outcomes
-                )
+                self._validate_outcome_staging(workspace_id, active[1], outcomes)
             elif self._typed_rows(workspace_id, projection_name) != typed_rows:
                 return False
         except Exception:
@@ -1152,9 +1204,7 @@ class SpecializedProjectionBuilder:
         )
         columns = tuple(
             str(row[1])
-            for row in self.connection.execute(
-                f'PRAGMA table_info("{fts_table}")'
-            )
+            for row in self.connection.execute(f'PRAGMA table_info("{fts_table}")')
         )
         if (
             "using fts5" not in normalized_sql
@@ -1189,7 +1239,7 @@ class SpecializedProjectionBuilder:
             for step in expected
         ]
         indexed = self.connection.execute(
-            f'SELECT record_id,CAST(ordinal AS INTEGER),step_text,step_hash,'
+            f"SELECT record_id,CAST(ordinal AS INTEGER),step_text,step_hash,"
             f'source_event_id FROM "{fts_table}" ORDER BY record_id,ordinal'
         ).fetchall()
         if [tuple(row) for row in rows] != expected_rows or [

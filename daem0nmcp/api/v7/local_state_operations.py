@@ -17,6 +17,7 @@ import secrets
 import sqlite3
 import threading
 from collections.abc import Callable, Mapping
+from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from types import MappingProxyType
@@ -40,24 +41,20 @@ from .models import (
     DestructiveMutationReceipt,
     MutationReceipt,
     RecordSummary,
+    parse_wire_datetime,
 )
 from .resources import ActiveContextItem
 from .runtime_services import WorkspaceStorageResolver
 from .tasks import await_task_terminal
 from .tools import ActiveContextPage
 
-
 _EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
 _MAX_ACTIVE_ENTRIES = 500
 _PUBLIC_RECORD_TYPES = frozenset(
     {"decision", "pattern", "warning", "learning", "procedure", "observation"}
 )
-_CURSOR_RE = re.compile(
-    r"^cur_([0-9a-f]{64})_([0-9a-f]{1,16})_([0-9a-f]{64})$"
-)
-_SELECTION_RE = re.compile(
-    r"^sel_([0-9a-f]{64})_([0-9a-f]{1,16})_([0-9a-f]{64})$"
-)
+_CURSOR_RE = re.compile(r"^cur_([0-9a-f]{64})_([0-9a-f]{1,16})_([0-9a-f]{64})$")
+_SELECTION_RE = re.compile(r"^sel_([0-9a-f]{64})_([0-9a-f]{1,16})_([0-9a-f]{64})$")
 _RECORD_COLUMNS = (
     "record.record_id,record.workspace_id,record.record_type,record.content,"
     "record.content_hash,record.tags_json,record.file_path,"
@@ -161,9 +158,7 @@ def _authorize(
         raise LocalStateOperationError("UNAUTHORIZED_WORKSPACE")
     try:
         canonical = workspace.root.resolve(strict=True)
-        registered = WorkspaceRegistry(
-            [canonical], default_root=canonical
-        ).default
+        registered = WorkspaceRegistry([canonical], default_root=canonical).default
         exact_root = os.path.normcase(str(workspace.root)) == os.path.normcase(
             str(canonical)
         )
@@ -220,10 +215,10 @@ def _open_database(path: Any, *, writable: bool) -> sqlite3.Connection:
                 "governance_events",
                 "memory_records",
             }
-            or not _REQUIRED_ENTRY_COLUMNS
-            <= _table_columns(connection, "active_context_entries")
-            or not _REQUIRED_RECORD_COLUMNS
-            <= _table_columns(connection, "memory_records")
+            or not _table_columns(connection, "active_context_entries")
+            >= _REQUIRED_ENTRY_COLUMNS
+            or not _table_columns(connection, "memory_records")
+            >= _REQUIRED_RECORD_COLUMNS
         ):
             raise LocalStateOperationError("CAPABILITY_DEGRADED")
         return connection
@@ -238,14 +233,10 @@ def _open_database(path: Any, *, writable: bool) -> sqlite3.Connection:
 
 
 def _datetime_us(value: object) -> int:
-    if not isinstance(value, datetime) or value.tzinfo is None:
-        raise LocalStateOperationError("INVALID_ARGUMENT")
     try:
+        value = parse_wire_datetime(value)
         delta = value.astimezone(timezone.utc) - _EPOCH
-        result = (
-            (delta.days * 86_400 + delta.seconds) * 1_000_000
-            + delta.microseconds
-        )
+        result = (delta.days * 86_400 + delta.seconds) * 1_000_000 + delta.microseconds
     except (OverflowError, ValueError):
         raise LocalStateOperationError("INVALID_ARGUMENT") from None
     if not 0 <= result <= 2**63 - 1:
@@ -280,9 +271,7 @@ def _json_string_list(value: object) -> list[str]:
         decoded = json.loads(value)
     except (json.JSONDecodeError, RecursionError, UnicodeError):
         raise LocalStateOperationError("CAPABILITY_DEGRADED") from None
-    if not isinstance(decoded, list) or not all(
-        type(item) is str for item in decoded
-    ):
+    if not isinstance(decoded, list) or not all(type(item) is str for item in decoded):
         raise LocalStateOperationError("CAPABILITY_DEGRADED")
     return decoded
 
@@ -310,16 +299,18 @@ def _record_summary(row: sqlite3.Row) -> RecordSummary:
         else "current"
     )
     try:
-        return RecordSummary(
-            record_id=row["record_id"],
-            record_type=record_type,
-            excerpt=content[:4000],
-            tags=_json_string_list(row["tags_json"]),
-            relative_file_path=row["file_path_relative"],
-            current_status=status,
-            content_hash=row["content_hash"],
-            created_at=_datetime_from_us(row["created_at_us"]),
-            updated_at=_datetime_from_us(row["updated_at_us"]),
+        return RecordSummary.model_validate(
+            {
+                "record_id": row["record_id"],
+                "record_type": record_type,
+                "excerpt": content[:4000],
+                "tags": _json_string_list(row["tags_json"]),
+                "relative_file_path": row["file_path_relative"],
+                "current_status": status,
+                "content_hash": row["content_hash"],
+                "created_at": _datetime_from_us(row["created_at_us"]),
+                "updated_at": _datetime_from_us(row["updated_at_us"]),
+            }
         )
     except LocalStateOperationError:
         raise
@@ -563,9 +554,7 @@ def _cursor(
             selection_expires_at_us,
         ],
     )
-    return (
-        f"cur_{active_context_id[4:]}_{selection_expires_at_us:x}_{signature}"
-    )
+    return f"cur_{active_context_id[4:]}_{selection_expires_at_us:x}_{signature}"
 
 
 def _cursor_start(
@@ -577,9 +566,7 @@ def _cursor_start(
     now_us: int,
 ) -> tuple[int, int]:
     if cursor is None:
-        expires_at_us = (
-            now_us + dependencies.selection_ttl_seconds * 1_000_000
-        )
+        expires_at_us = now_us + dependencies.selection_ttl_seconds * 1_000_000
         if expires_at_us > 2**63 - 1:
             raise LocalStateOperationError("CAPABILITY_DEGRADED")
         return 0, expires_at_us
@@ -628,10 +615,8 @@ async def _run_read(operation: Callable[[], Any]) -> Any:
     try:
         return await asyncio.shield(worker)
     except asyncio.CancelledError as cancellation:
-        try:
+        with suppress(asyncio.CancelledError, Exception):
             await await_task_terminal(worker)
-        except (asyncio.CancelledError, Exception):
-            pass
         raise cancellation
     except BoundedWorkerBusyError as exc:
         raise LocalStateOperationError("TASK_REQUIRED") from exc
@@ -641,9 +626,7 @@ async def _run_mutation(
     operation: Callable[[threading.Event], Any],
 ) -> Any:
     cancelled = threading.Event()
-    worker = asyncio.create_task(
-        _LOCAL_STATE_WORKERS.run(lambda: operation(cancelled))
-    )
+    worker = asyncio.create_task(_LOCAL_STATE_WORKERS.run(lambda: operation(cancelled)))
     try:
         return await asyncio.shield(worker)
     except asyncio.CancelledError as cancellation:
@@ -684,9 +667,7 @@ def _add_sync(
 ) -> ActiveContextItem:
     now_us = _now_us(dependencies)
     expires_at_us = (
-        None
-        if request.expires_at is None
-        else _datetime_us(request.expires_at)
+        None if request.expires_at is None else _datetime_us(request.expires_at)
     )
     if expires_at_us is not None and expires_at_us <= now_us:
         raise LocalStateOperationError("INVALID_ARGUMENT")
@@ -1177,9 +1158,7 @@ def build_local_state_operations(
         *, workspace: Workspace, request: AdmittedRequest
     ) -> ActiveContextPage:
         _authorize(workspace, request, "active_context_list")
-        return await _run_read(
-            lambda: _list_sync(dependencies, workspace, request)
-        )
+        return await _run_read(lambda: _list_sync(dependencies, workspace, request))
 
     async def active_context_remove(
         *, workspace: Workspace, request: AdmittedRequest

@@ -234,7 +234,7 @@ def _memory_store_suggestion(
     content = decision["content"]
     relative_path = _relative_record_path(project_path, decision.get("file_path"))
     digest = hashlib.sha256(
-        f"{workspace_id}\0{decision['category']}\0{content}".encode("utf-8")
+        f"{workspace_id}\0{decision['category']}\0{content}".encode()
     ).hexdigest()[:24]
     target_arguments = {
         "record_type": decision["category"],
@@ -247,9 +247,9 @@ def _memory_store_suggestion(
     encoded = json.dumps(target_arguments, ensure_ascii=True, separators=(",", ":"))
     store_fields = [
         f'workspace_id="{workspace_id}"',
-        f'record_type={json.dumps(target_arguments["record_type"])}',
-        f'content={json.dumps(target_arguments["content"])}',
-        f'rationale={json.dumps(target_arguments["rationale"])}',
+        f"record_type={json.dumps(target_arguments['record_type'])}",
+        f"content={json.dumps(target_arguments['content'])}",
+        f"rationale={json.dumps(target_arguments['rationale'])}",
     ]
     if relative_path is not None:
         store_fields.append(f"relative_file_path={json.dumps(relative_path)}")
@@ -320,7 +320,7 @@ async def analyse_and_remember(
 
     workspace_id = _workspace_id(project_path)
     outcome_digest = hashlib.sha256(
-        f"{workspace_id}\0{recent_content}".encode("utf-8")
+        f"{workspace_id}\0{recent_content}".encode()
     ).hexdigest()[:24]
     outcome_key = f"hook-outcome-{outcome_digest}"
     extracted = _extract_decisions(recent_content)

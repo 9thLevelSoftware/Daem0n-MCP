@@ -13,7 +13,6 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Literal, Protocol, runtime_checkable
 
-
 ProviderStatus = Literal["ready", "degraded", "unavailable", "failed"]
 
 _WORKSPACE_ID = re.compile(r"^ws_[0-9a-f]{24}$")
@@ -56,9 +55,7 @@ def _finite_nonnegative(value: object, field_name: str) -> float:
     try:
         result = float(value)
     except (OverflowError, ValueError) as exc:
-        raise ValueError(
-            f"{field_name} must be a finite non-negative number"
-        ) from exc
+        raise ValueError(f"{field_name} must be a finite non-negative number") from exc
     if not math.isfinite(result) or result < 0:
         raise ValueError(f"{field_name} must be a finite non-negative number")
     return result
@@ -126,8 +123,7 @@ def _legacy_metadata(
     worked: object,
 ) -> None:
     if rationale is not None and (
-        not isinstance(rationale, str)
-        or len(rationale) > MAX_LEGACY_RATIONALE_CHARS
+        not isinstance(rationale, str) or len(rationale) > MAX_LEGACY_RATIONALE_CHARS
     ):
         raise ValueError("rationale must be bounded text or null")
     if (
@@ -174,9 +170,7 @@ class RetrievalQuery:
         _opaque(self.workspace_id, _WORKSPACE_ID, "workspace_id")
         if not isinstance(self.text, str) or len(self.text) > _MAX_QUERY_CHARS:
             raise ValueError("text must be a bounded string")
-        _plain_positive_int(
-            self.limit, "limit", maximum=_MAX_RESULT_LIMIT
-        )
+        _plain_positive_int(self.limit, "limit", maximum=_MAX_RESULT_LIMIT)
         _plain_positive_int(
             self.candidate_limit,
             "candidate_limit",
@@ -190,9 +184,7 @@ class RetrievalQuery:
             maximum=MAX_TOKEN_BUDGET,
         )
         _aware_datetime(self.as_of_valid_time, "as_of_valid_time")
-        _aware_datetime(
-            self.as_of_transaction_time, "as_of_transaction_time"
-        )
+        _aware_datetime(self.as_of_transaction_time, "as_of_transaction_time")
         _string_filter(self.categories, "categories")
         _string_filter(self.tags, "tags")
         _string_filter(self.record_ids, "record_ids", pattern=_RECORD_ID)
@@ -247,9 +239,7 @@ class Candidate:
     def __post_init__(self) -> None:
         if not isinstance(self.evidence, EvidenceRef):
             raise ValueError("evidence must be an EvidenceRef")
-        _plain_positive_int(
-            self.rank, "rank", maximum=_MAX_CANDIDATE_LIMIT
-        )
+        _plain_positive_int(self.rank, "rank", maximum=_MAX_CANDIDATE_LIMIT)
         if self.raw_score is not None:
             if isinstance(self.raw_score, bool) or not isinstance(
                 self.raw_score, (int, float)
@@ -311,9 +301,7 @@ class ProviderResult:
             if candidate.evidence.provider not in {"", self.provider}:
                 raise ValueError("evidence provider does not match its emitter")
         if self.manifest_generation is not None:
-            _plain_positive_int(
-                self.manifest_generation, "manifest_generation"
-            )
+            _plain_positive_int(self.manifest_generation, "manifest_generation")
         object.__setattr__(
             self, "elapsed_ms", _finite_nonnegative(self.elapsed_ms, "elapsed_ms")
         )
@@ -330,9 +318,7 @@ class RetrievalProvider(Protocol):
 
     name: str
 
-    async def search(
-        self, query: RetrievalQuery, limit: int
-    ) -> ProviderResult:
+    async def search(self, query: RetrievalQuery, limit: int) -> ProviderResult:
         """Return one ordered provider rank list and sanitized diagnostics."""
         ...
 
@@ -353,9 +339,7 @@ class ProviderDiagnostic:
         if self.status not in {"ready", "degraded", "unavailable", "failed"}:
             raise ValueError("status is invalid")
         if self.manifest_generation is not None:
-            _plain_positive_int(
-                self.manifest_generation, "manifest_generation"
-            )
+            _plain_positive_int(self.manifest_generation, "manifest_generation")
         object.__setattr__(
             self, "elapsed_ms", _finite_nonnegative(self.elapsed_ms, "elapsed_ms")
         )
@@ -374,7 +358,7 @@ class ProviderDiagnostic:
             )
 
     @classmethod
-    def from_result(cls, result: ProviderResult) -> "ProviderDiagnostic":
+    def from_result(cls, result: ProviderResult) -> ProviderDiagnostic:
         if not isinstance(result, ProviderResult):
             raise ValueError("result must be a ProviderResult")
         return cls(
@@ -448,9 +432,7 @@ class FusedCandidate:
             if channel in manifest_channels or (
                 previous_channel is not None and channel < previous_channel
             ):
-                raise ValueError(
-                    "manifest_generations must be unique and sorted"
-                )
+                raise ValueError("manifest_generations must be unique and sorted")
             manifest_channels.add(channel)
             previous_channel = channel
         if manifest_channels != set(self.channels):
@@ -506,7 +488,10 @@ class EvidenceItem:
     relation_paths: tuple[tuple[str, ...], ...] = ()
 
     def __post_init__(self) -> None:
-        if not isinstance(self.citation, str) or _CITATION.fullmatch(self.citation) is None:
+        if (
+            not isinstance(self.citation, str)
+            or _CITATION.fullmatch(self.citation) is None
+        ):
             raise ValueError("citation must be a stable [E#] marker")
         for field_name in ("excerpt", "category"):
             value = getattr(self, field_name)
@@ -520,8 +505,12 @@ class EvidenceItem:
         for channel in self.channels:
             _provider(channel, "channel")
         _plain_positive_int(self.token_count, "token_count")
-        if not isinstance(self.evidence_refs, tuple) or not self.evidence_refs or not all(
-            isinstance(evidence, EvidenceRef) for evidence in self.evidence_refs
+        if (
+            not isinstance(self.evidence_refs, tuple)
+            or not self.evidence_refs
+            or not all(
+                isinstance(evidence, EvidenceRef) for evidence in self.evidence_refs
+            )
         ):
             raise ValueError("evidence_refs must be a non-empty tuple")
         if len(self.evidence_refs) != len(set(self.evidence_refs)):
@@ -536,9 +525,7 @@ class EvidenceItem:
                 _VERSION_ID,
                 "superseded_by_version_id",
             )
-        if (self.status == "superseded") != (
-            self.superseded_by_version_id is not None
-        ):
+        if (self.status == "superseded") != (self.superseded_by_version_id is not None):
             raise ValueError(
                 "superseded evidence requires its invalidating opaque version"
             )
@@ -566,9 +553,10 @@ class EvidenceItem:
         if not normalized_paths and self.relation_path:
             normalized_paths = (self.relation_path,)
             object.__setattr__(self, "relation_paths", normalized_paths)
-        if len(normalized_paths) != len(set(normalized_paths)) or tuple(
-            sorted(normalized_paths)
-        ) != normalized_paths:
+        if (
+            len(normalized_paths) != len(set(normalized_paths))
+            or tuple(sorted(normalized_paths)) != normalized_paths
+        ):
             raise ValueError("relation_paths must be unique and sorted")
         for path in normalized_paths:
             for relation_id in path:
@@ -590,8 +578,12 @@ class CitationEntry:
     def __post_init__(self) -> None:
         if not isinstance(self.marker, str) or _CITATION.fullmatch(self.marker) is None:
             raise ValueError("marker must be a stable [E#] citation")
-        if not isinstance(self.evidence_refs, tuple) or not self.evidence_refs or not all(
-            isinstance(evidence, EvidenceRef) for evidence in self.evidence_refs
+        if (
+            not isinstance(self.evidence_refs, tuple)
+            or not self.evidence_refs
+            or not all(
+                isinstance(evidence, EvidenceRef) for evidence in self.evidence_refs
+            )
         ):
             raise ValueError("evidence_refs must be a non-empty tuple")
         if len(self.evidence_refs) != len(set(self.evidence_refs)):
@@ -743,21 +735,19 @@ class RetrievalResult:
             }
             manifest_citations = set(manifest_by_marker)
             if item_citations != manifest_citations:
-                raise ValueError("every evidence item must resolve in the citation manifest")
+                raise ValueError(
+                    "every evidence item must resolve in the citation manifest"
+                )
             if tuple(item_markers) != tuple(
                 citation.marker for citation in self.context.citations
             ):
-                raise ValueError(
-                    "evidence items must follow rendered citation order"
-                )
+                raise ValueError("evidence items must follow rendered citation order")
             for item in self.items:
                 citation = manifest_by_marker[item.citation]
                 if (
                     set(item.evidence_refs) != set(citation.evidence_refs)
                     or item.channels != citation.channels
-                    or self.context.text[
-                        citation.excerpt_start : citation.excerpt_end
-                    ]
+                    or self.context.text[citation.excerpt_start : citation.excerpt_end]
                     != item.excerpt
                 ):
                     raise ValueError(

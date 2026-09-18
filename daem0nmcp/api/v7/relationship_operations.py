@@ -26,10 +26,12 @@ from ...event_store import (
     sha256_json,
 )
 from ...schema_version import CURRENT_SCHEMA_VERSION
+from ...storage_activation import ResolvedActiveDatabase
 from ...workspace import Workspace, WorkspaceRegistry
 from .application import AdmittedRequest
 from .errors import STABLE_ERROR_CODE_SET
 from .models import EvidenceRef, MutationReceipt, RecordSummary
+from .runtime_protocols import ActiveStorageResolver, WorkerPool
 from .runtime_services import WorkspaceStorageResolver
 from .tasks import await_task_terminal
 from .tools import (
@@ -43,7 +45,6 @@ from .tools import (
     RelationshipPath,
     RelationshipView,
 )
-
 
 _EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
 _REQUIRED_TABLES = frozenset(
@@ -122,9 +123,11 @@ def _default_worker_pool() -> BoundedWorkerPool:
 class RelationshipOperationDependencies:
     """Owned dependencies for canonical relationship operations."""
 
-    storage_resolver: object = field(default_factory=WorkspaceStorageResolver)
+    storage_resolver: ActiveStorageResolver = field(
+        default_factory=WorkspaceStorageResolver
+    )
     clock: Callable[[], datetime] = field(default=_default_clock)
-    worker_pool: object = field(default_factory=_default_worker_pool)
+    worker_pool: WorkerPool = field(default_factory=_default_worker_pool)
 
     def __post_init__(self) -> None:
         if not callable(getattr(self.storage_resolver, "locked_active", None)):
@@ -166,10 +169,10 @@ def _authorize(
         raise RelationshipOperationError("UNAUTHORIZED_WORKSPACE")
 
 
-def _database_path(workspace: Workspace, active: object) -> Path:
+def _database_path(workspace: Workspace, active: ResolvedActiveDatabase) -> Path:
     try:
         root = workspace.root.resolve(strict=True)
-        candidate = Path(getattr(active, "path"))
+        candidate = Path(active.path)
         if candidate.is_symlink():
             raise ValueError
         resolved = candidate.resolve(strict=True)
@@ -230,10 +233,7 @@ def _now_us(dependencies: RelationshipOperationDependencies) -> int:
         if not isinstance(value, datetime) or value.tzinfo is None:
             raise ValueError
         delta = value.astimezone(timezone.utc) - _EPOCH
-        result = (
-            (delta.days * 86_400 + delta.seconds) * 1_000_000
-            + delta.microseconds
-        )
+        result = (delta.days * 86_400 + delta.seconds) * 1_000_000 + delta.microseconds
     except (OverflowError, TypeError, ValueError):
         raise RelationshipOperationError("CAPABILITY_DEGRADED") from None
     if not -(2**63) <= result <= 2**63 - 1:
@@ -251,9 +251,7 @@ def _datetime_from_us(value: object) -> datetime:
 
 
 def _operation_id(*parts: object) -> str:
-    return "op_" + sha256_json(
-        ["daem0nmcp", "v7", "relationship-operation", *parts]
-    )
+    return "op_" + sha256_json(["daem0nmcp", "v7", "relationship-operation", *parts])
 
 
 def _correlation(workspace_id: str, idempotency_key: str) -> str:
@@ -270,8 +268,7 @@ def _verified_payload(row: sqlite3.Row) -> dict[str, Any]:
         payload = json.loads(str(row["payload_json"]))
         if (
             not isinstance(payload, dict)
-            or canonical_json_bytes(payload).decode("utf-8")
-            != str(row["payload_json"])
+            or canonical_json_bytes(payload).decode("utf-8") != str(row["payload_json"])
             or sha256_json(payload) != str(row["payload_hash"])
         ):
             raise ValueError
@@ -365,20 +362,20 @@ def _record_summary(row: sqlite3.Row) -> RecordSummary:
         updated_at = _datetime_from_us(row["updated_at_us"])
         if created_at > updated_at:
             created_at = updated_at
-        return RecordSummary(
-            record_id=str(row["record_id"]),
-            record_type=str(row["record_type"]),
-            excerpt=content[:4000],
-            tags=tags,
-            relative_file_path=(
-                None
+        return RecordSummary.model_validate(
+            {
+                "record_id": str(row["record_id"]),
+                "record_type": str(row["record_type"]),
+                "excerpt": content[:4000],
+                "tags": tags,
+                "relative_file_path": None
                 if row["file_path_relative"] is None
-                else str(row["file_path_relative"])
-            ),
-            current_status="archived" if bool(row["archived"]) else "current",
-            content_hash=str(row["content_hash"]),
-            created_at=created_at,
-            updated_at=updated_at,
+                else str(row["file_path_relative"]),
+                "current_status": "archived" if bool(row["archived"]) else "current",
+                "content_hash": str(row["content_hash"]),
+                "created_at": created_at,
+                "updated_at": updated_at,
+            }
         )
     except RelationshipOperationError:
         raise
@@ -482,8 +479,7 @@ def _verify_relationship_row(row: sqlite3.Row) -> None:
             "valid_to_us": row["valid_to_us"],
         }
         if (
-            canonical_json_bytes(metadata).decode("utf-8")
-            != str(row["metadata_json"])
+            canonical_json_bytes(metadata).decode("utf-8") != str(row["metadata_json"])
             or canonical_json_bytes(payload).decode("utf-8")
             != str(row["source_payload_json"])
             or sha256_json(payload) != str(row["source_payload_hash"])
@@ -500,15 +496,17 @@ def _relationship_view(row: sqlite3.Row) -> RelationshipView:
         relationship_type = str(row["relationship_type"])
         if relationship_type not in _PUBLIC_RELATIONSHIP_TYPES:
             raise ValueError
-        return RelationshipView(
-            relationship_id=str(row["relationship_id"]),
-            source_record_id=str(row["source_record_id"]),
-            target_record_id=str(row["target_record_id"]),
-            relationship_type=relationship_type,
-            description=(
-                None if row["description"] is None else str(row["description"])
-            ),
-            confidence=float(row["confidence"]),
+        return RelationshipView.model_validate(
+            {
+                "relationship_id": str(row["relationship_id"]),
+                "source_record_id": str(row["source_record_id"]),
+                "target_record_id": str(row["target_record_id"]),
+                "relationship_type": relationship_type,
+                "description": None
+                if row["description"] is None
+                else str(row["description"]),
+                "confidence": float(row["confidence"]),
+            }
         )
     except Exception:
         raise RelationshipOperationError("CAPABILITY_DEGRADED") from None
@@ -546,9 +544,7 @@ def _related_sync(
                     workspace.workspace_id,
                     {request.record_id},
                 )
-                rows = _live_relationships(
-                    connection, workspace.workspace_id, now_us
-                )
+                rows = _live_relationships(connection, workspace.workspace_id, now_us)
                 allowed = (
                     None
                     if request.relationship_types is None
@@ -677,9 +673,7 @@ def _chain_sync(
                 adjacency: dict[str, list[sqlite3.Row]] = {}
                 indexed: dict[str, sqlite3.Row] = {}
                 for row in rows:
-                    adjacency.setdefault(
-                        str(row["source_record_id"]), []
-                    ).append(row)
+                    adjacency.setdefault(str(row["source_record_id"]), []).append(row)
                     indexed[str(row["relationship_id"])] = row
                 for entries in adjacency.values():
                     entries.sort(
@@ -793,11 +787,13 @@ def _graph_manifest(
     if built_at is None:
         raise RelationshipOperationError("CAPABILITY_DEGRADED")
     try:
-        return ProjectionManifest(
-            projection=str(row["projection_name"]),
-            generation=int(row["generation"]),
-            built_at=_datetime_from_us(built_at),
-            source_root_hash=str(row["source_event_root_hash"]),
+        return ProjectionManifest.model_validate(
+            {
+                "projection": str(row["projection_name"]),
+                "generation": int(row["generation"]),
+                "built_at": _datetime_from_us(built_at),
+                "source_root_hash": str(row["source_event_root_hash"]),
+            }
         )
     except RelationshipOperationError:
         raise
@@ -854,9 +850,7 @@ def _graph_record_rows(
         "workspace_id=? AND deleted_at_us IS NULL AND file_path IS NULL "
         f"AND record_type IN ({type_placeholders})"
     )
-    requested = (
-        None if request.record_ids is None else set(request.record_ids)
-    )
+    requested = None if request.record_ids is None else set(request.record_ids)
     if requested is not None:
         id_placeholders = ",".join("?" for _ in requested)
         where += f" AND record_id IN ({id_placeholders})"
@@ -870,19 +864,13 @@ def _graph_record_rows(
             for row in edge_rows
             for value in (row["source_record_id"], row["target_record_id"])
         }
-        candidates.update(
-            _record_ref_node_ids(connection, workspace_id, now_us)
-        )
+        candidates.update(_record_ref_node_ids(connection, workspace_id, now_us))
         if not candidates:
             return []
         id_placeholders = ",".join("?" for _ in candidates)
         where += f" AND record_id IN ({id_placeholders})"
         parameters.extend(sorted(candidates))
-    query_limit = (
-        len(requested)
-        if requested is not None
-        else request.max_nodes + 1
-    )
+    query_limit = len(requested) if requested is not None else request.max_nodes + 1
     rows = connection.execute(
         f"SELECT {_RECORD_COLUMNS} FROM memory_records WHERE {where} "
         "ORDER BY record_id LIMIT ?",
@@ -894,11 +882,7 @@ def _graph_record_rows(
             raise RelationshipOperationError("NOT_FOUND")
     if request.query is not None and requested is not None:
         needle = request.query.casefold()
-        rows = [
-            row
-            for row in rows
-            if needle in str(row["content"]).casefold()
-        ]
+        rows = [row for row in rows if needle in str(row["content"]).casefold()]
     return rows[: request.max_nodes]
 
 
@@ -954,9 +938,7 @@ def _graph_snapshot(
                     ],
                     manifest=manifest,
                 )
-                indexed = {
-                    str(row["relationship_id"]): row for row in edge_rows
-                }
+                indexed = {str(row["relationship_id"]): row for row in edge_rows}
                 connection.rollback()
                 return result, indexed
             except RelationshipOperationError:
@@ -1080,7 +1062,10 @@ def _link_sync(
                 ).fetchall()
                 changed = False
                 if existing:
-                    if len(existing) != 1 or str(existing[0]["stream_id"]) != relationship_id:
+                    if (
+                        len(existing) != 1
+                        or str(existing[0]["stream_id"]) != relationship_id
+                    ):
                         raise RelationshipOperationError("CAPABILITY_DEGRADED")
                     payload = _verified_payload(existing[0])
                     if payload.get("idempotency_request_hash") != request_hash:

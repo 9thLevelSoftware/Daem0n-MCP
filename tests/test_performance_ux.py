@@ -81,31 +81,19 @@ class TestExtendedConfig:
         assert settings.index_languages == []
 
 
-@pytest.fixture
-async def covenant_compliant_project(tmp_path):
-    """Create a covenant-compliant project for testing."""
-    from daem0nmcp.database import DatabaseManager
-
-    storage = tmp_path / ".daem0nmcp" / "storage"
-    storage.mkdir(parents=True)
-
-    db = DatabaseManager(str(storage))
-    await db.init_db()
-
-    yield str(tmp_path)
-
-    await db.close()
-
-
 class TestEnhancedHealth:
     """Test enhanced health tool."""
 
     @pytest.mark.asyncio
-    async def test_health_includes_code_entities(self, covenant_compliant_project):
-        """Health should include code entity stats."""
+    async def test_health_includes_code_entities(
+        self, tmp_path, covenant_workspace_factory
+    ):
+        """Health is briefing-exempt but requires an authorized workspace."""
         from daem0nmcp import server
 
-        result = await server.health(project_path=covenant_compliant_project)
+        workspace = covenant_workspace_factory(tmp_path)
+        with workspace.installed():
+            result = await server.health(project_path=workspace)
 
         assert "code_entities_count" in result
         assert "last_indexed_at" in result

@@ -21,6 +21,12 @@ from daem0nmcp.graph import KnowledgeGraph
 from daem0nmcp.memory import MemoryManager
 
 
+@pytest.fixture(autouse=True)
+def graph_enabled(monkeypatch):
+    """Keep the graph optional profile scoped to GraphRAG coverage."""
+    monkeypatch.setenv("DAEM0NMCP_GRAPH_ENABLED", "true")
+
+
 @pytest.fixture
 def temp_storage():
     """Create a temporary storage directory."""
@@ -628,7 +634,8 @@ class TestMCPGraphRAGTools:
 
         result = await covenant_compliant_project.call(
             server.get_related_memories,
-            memory_id=mem["id"], project_path=covenant_compliant_project
+            memory_id=mem["id"],
+            project_path=covenant_compliant_project,
         )
 
         assert "found" in result or "error" in result
@@ -659,8 +666,7 @@ class TestMCPGraphRAGTools:
         )
 
         result = await covenant_compliant_project.call(
-            server.rebuild_communities,
-            project_path=covenant_compliant_project
+            server.rebuild_communities, project_path=covenant_compliant_project
         )
 
         assert "status" in result, "Should return status"

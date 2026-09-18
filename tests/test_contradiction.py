@@ -16,6 +16,12 @@ from daem0nmcp.graph.contradiction import (
 from daem0nmcp.models import Memory, MemoryVersion
 
 
+@pytest.fixture(autouse=True)
+def models_local_enabled(monkeypatch):
+    """This suite exercises real vector similarity, so opt into its profile."""
+    monkeypatch.setenv("DAEM0NMCP_MODELS_LOCAL_ENABLED", "true")
+
+
 @pytest.fixture
 def temp_storage():
     """Create a temporary storage directory."""
@@ -314,36 +320,55 @@ async def test_detect_contradictions_low_similarity_no_contradiction(db_manager)
 @pytest.mark.asyncio
 async def test_invalidate_contradicted_facts(db_manager):
     """invalidate_contradicted_facts should set valid_to and link versions."""
-    async with db_manager.get_session() as session:
-        # Create memories and versions
-        memory1 = Memory(category="decision", content="Old fact")
-        memory2 = Memory(category="decision", content="New fact")
-        session.add_all([memory1, memory2])
-        await session.flush()
+    from sqlalchemy import select
 
-        old_version = MemoryVersion(
-            memory_id=memory1.id,
-            version_number=1,
-            content="Old fact",
-            change_type="created",
-            valid_to=None,
-        )
-        new_version = MemoryVersion(
-            memory_id=memory2.id,
-            version_number=1,
-            content="New contradicting fact",
-            change_type="created",
-            valid_to=None,
-        )
-        session.add_all([old_version, new_version])
-        await session.commit()
+    from daem0nmcp.memory import MemoryManager
+
+    manager = MemoryManager(db_manager)
+    old_record = await manager.remember(
+        category="decision",
+        content="Old fact",
+        project_path=str(db_manager.storage_path),
+    )
+    new_record = await manager.remember(
+        category="decision",
+        content="New contradicting fact",
+        project_path=str(db_manager.storage_path),
+    )
+    async with db_manager.get_session() as session:
+        versions = {
+            version.content: version
+            for version in (
+                await session.execute(
+                    select(MemoryVersion).where(
+                        MemoryVersion.content.in_(
+                            ("Old fact", "New contradicting fact")
+                        )
+                    )
+                )
+            ).scalars()
+        }
+        old_version = versions["Old fact"]
+        new_version = versions["New contradicting fact"]
+        memories = {
+            memory.id: memory
+            for memory in (
+                await session.execute(
+                    select(Memory).where(
+                        Memory.id.in_((old_version.memory_id, new_version.memory_id))
+                    )
+                )
+            ).scalars()
+        }
+        assert old_record["id"]
+        assert new_record["id"]
 
         # Create contradiction manually
         contradiction = Contradiction(
             new_content="New contradicting fact",
             existing_version_id=old_version.id,
             existing_content="Old fact",
-            existing_memory_id=memory1.id,
+            existing_memory_id=memories[old_version.memory_id].id,
             similarity_score=0.9,
         )
 

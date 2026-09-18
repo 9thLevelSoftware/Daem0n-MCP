@@ -14,9 +14,6 @@ from typing import Any
 
 from ..covenant import (
     COUNSEL_TTL_SECONDS,
-    COVENANT_EXEMPT_TOOLS,
-    COMMUNION_REQUIRED_TOOLS,
-    COUNSEL_REQUIRED_TOOLS,
     COVENANT_POLICY,
     ArgumentNormalizationError,
     CovenantGate,
@@ -136,9 +133,7 @@ class CovenantMiddleware(Middleware if _FASTMCP_MIDDLEWARE_AVAILABLE else object
         authority = authority_from_environment(local_stdio=local_stdio)
         if authority is None:
             return None
-        return CovenantGate(
-            state_store=CovenantStateStore(), authority=authority
-        )
+        return CovenantGate(state_store=CovenantStateStore(), authority=authority)
 
     @property
     def gate(self) -> CovenantGate | None:
@@ -160,9 +155,9 @@ class CovenantMiddleware(Middleware if _FASTMCP_MIDDLEWARE_AVAILABLE else object
 
     async def on_initialize(
         self,
-        context: "MiddlewareContext[mt.InitializeRequest]",
-        call_next: "CallNext[mt.InitializeRequest, mt.InitializeResult | None]",
-    ) -> "mt.InitializeResult | None":
+        context: MiddlewareContext[mt.InitializeRequest],
+        call_next: CallNext[mt.InitializeRequest, mt.InitializeResult | None],
+    ) -> mt.InitializeResult | None:
         result = await call_next(context)
         if self._transport_mode == "stdio":
             self._stdio_session_id = secrets.token_urlsafe(24)
@@ -247,9 +242,9 @@ class CovenantMiddleware(Middleware if _FASTMCP_MIDDLEWARE_AVAILABLE else object
 
     async def on_call_tool(
         self,
-        context: "MiddlewareContext[mt.CallToolRequestParams]",
-        call_next: "CallNext[mt.CallToolRequestParams, ToolResult]",
-    ) -> "ToolResult":
+        context: MiddlewareContext[mt.CallToolRequestParams],
+        call_next: CallNext[mt.CallToolRequestParams, ToolResult],
+    ) -> ToolResult:
         if self._dream_scheduler is not None:
             self._dream_scheduler.notify_tool_call()
 
@@ -275,9 +270,7 @@ class CovenantMiddleware(Middleware if _FASTMCP_MIDDLEWARE_AVAILABLE else object
             workspace = self._resolve_workspace(arguments.get("project_path"))
         except (OSError, RuntimeError, ValueError) as exc:
             code = getattr(exc, "code", "UNAUTHORIZED_WORKSPACE")
-            return self._tool_result(
-                CovenantViolation.build(code, operation, None)
-            )
+            return self._tool_result(CovenantViolation.build(code, operation, None))
         scope = self._scope_for(context, workspace)
         preflight_token = arguments.get("preflight_token")
         if self._gate is None:
@@ -312,9 +305,7 @@ class CovenantMiddleware(Middleware if _FASTMCP_MIDDLEWARE_AVAILABLE else object
         admission = None
         if self._gate is not None and scope is not None:
             try:
-                fingerprint = self._gate.fingerprint(
-                    operation, arguments, scope
-                )
+                fingerprint = self._gate.fingerprint(operation, arguments, scope)
             except ArgumentNormalizationError:
                 return self._tool_result(
                     CovenantViolation.build(

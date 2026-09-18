@@ -19,7 +19,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-
 WARMUP_ITERATIONS = 5
 TIMED_ITERATIONS = 30
 BENCHMARK_MODES = ("fully_enabled", "lexical_only")
@@ -286,7 +285,10 @@ def _validate_record_trait_contract(record: Mapping[str, Any], location: str) ->
         ),
         (
             "superseded_fact" not in traits
-            or (record["valid_to_us"] is not None and record["transaction_to_us"] is not None)
+            or (
+                record["valid_to_us"] is not None
+                and record["transaction_to_us"] is not None
+            )
         ),
         (
             "successful_decision" not in traits
@@ -311,7 +313,9 @@ def _validate_record_trait_contract(record: Mapping[str, Any], location: str) ->
 
 def _validate_records(records: Sequence[dict[str, Any]]) -> None:
     if len(records) != 12:
-        raise FixtureValidationError("RECORD_COUNT", "records.jsonl must contain 12 rows")
+        raise FixtureValidationError(
+            "RECORD_COUNT", "records.jsonl must contain 12 rows"
+        )
     ids: set[str] = set()
     trait_counts: dict[str, int] = {}
     workspaces: set[str] = set()
@@ -325,7 +329,9 @@ def _validate_records(records: Sequence[dict[str, Any]]) -> None:
         if record_id in ids:
             raise FixtureValidationError("DUPLICATE_RECORD_ID", record_id)
         ids.add(record_id)
-        if not isinstance(workspace_id, str) or not _WORKSPACE_ID_RE.fullmatch(workspace_id):
+        if not isinstance(workspace_id, str) or not _WORKSPACE_ID_RE.fullmatch(
+            workspace_id
+        ):
             raise FixtureValidationError("INVALID_WORKSPACE_ID", location)
         workspaces.add(workspace_id)
         if record["record_type"] not in {
@@ -349,7 +355,10 @@ def _validate_records(records: Sequence[dict[str, Any]]) -> None:
             raise FixtureValidationError("INVALID_TRAITS", location)
         for trait in record["fixture_traits"]:
             trait_counts[trait] = trait_counts.get(trait, 0) + 1
-        if not isinstance(record["archived"], bool) or record["visibility"] != "workspace":
+        if (
+            not isinstance(record["archived"], bool)
+            or record["visibility"] != "workspace"
+        ):
             raise FixtureValidationError("INVALID_POLICY_METADATA", location)
         for field in ("valid_from_us", "transaction_from_us"):
             if not _plain_int(record[field]):
@@ -364,7 +373,9 @@ def _validate_records(records: Sequence[dict[str, Any]]) -> None:
             ):
                 raise FixtureValidationError("INVALID_TIME", f"{location}:{end}")
         source_event_id = record["source_event_id"]
-        if not isinstance(source_event_id, str) or not _EVENT_ID_RE.fullmatch(source_event_id):
+        if not isinstance(source_event_id, str) or not _EVENT_ID_RE.fullmatch(
+            source_event_id
+        ):
             raise FixtureValidationError("INVALID_EVENT_ID", location)
         outcome = record["outcome"]
         if outcome is not None:
@@ -392,14 +403,18 @@ def _validate_records(records: Sequence[dict[str, Any]]) -> None:
     if len(workspaces) != 1:
         raise FixtureValidationError("MULTIPLE_WORKSPACES", "records")
     if trait_counts != _EXPECTED_TRAIT_COUNTS:
-        raise FixtureValidationError("TRAIT_COVERAGE", json.dumps(trait_counts, sort_keys=True))
+        raise FixtureValidationError(
+            "TRAIT_COVERAGE", json.dumps(trait_counts, sort_keys=True)
+        )
     duplicate_hashes = {
         record["content_hash"]
         for record in records
         if "duplicate_content" in record["fixture_traits"]
     }
     if len(duplicate_hashes) != 1:
-        raise FixtureValidationError("TRAIT_CONTRACT", "duplicate content hashes differ")
+        raise FixtureValidationError(
+            "TRAIT_CONTRACT", "duplicate content hashes differ"
+        )
 
 
 def _validate_events(
@@ -437,7 +452,9 @@ def _validate_events(
         )
         if not _plain_int(event["stream_version"]) or event["stream_version"] < 1:
             raise FixtureValidationError("INVALID_STREAM_VERSION", location)
-        if not _plain_int(event["occurred_at_us"]) or not _plain_int(event["recorded_at_us"]):
+        if not _plain_int(event["occurred_at_us"]) or not _plain_int(
+            event["recorded_at_us"]
+        ):
             raise FixtureValidationError("INVALID_TIME", location)
         if event["recorded_at_us"] < event["occurred_at_us"]:
             raise FixtureValidationError("INVALID_TIME", location)
@@ -448,7 +465,9 @@ def _validate_events(
             raise FixtureValidationError("INVALID_ACTOR", location)
         if not isinstance(event["payload"], dict):
             raise FixtureValidationError("INVALID_PAYLOAD", location)
-        payload_hash = hashlib.sha256(_canonical_json_bytes(event["payload"])).hexdigest()
+        payload_hash = hashlib.sha256(
+            _canonical_json_bytes(event["payload"])
+        ).hexdigest()
         if event["payload_hash"] != payload_hash:
             raise FixtureValidationError("PAYLOAD_HASH_MISMATCH", event_id)
         event_columns = {
@@ -470,7 +489,10 @@ def _validate_events(
                 "workspace_id",
             )
         }
-        if hashlib.sha256(_canonical_json_bytes(event_columns)).hexdigest() != event["event_hash"]:
+        if (
+            hashlib.sha256(_canonical_json_bytes(event_columns)).hexdigest()
+            != event["event_hash"]
+        ):
             raise FixtureValidationError("EVENT_HASH_MISMATCH", event_id)
         causation = event["causation_event_id"]
         if causation is not None and causation not in event_ids:
@@ -479,22 +501,37 @@ def _validate_events(
         previous = stream_heads.get(event["stream_id"])
         expected_version = 1 if previous is None else previous[0] + 1
         expected_hash = None if previous is None else previous[1]
-        if event["stream_version"] != expected_version or event["previous_event_hash"] != expected_hash:
+        if (
+            event["stream_version"] != expected_version
+            or event["previous_event_hash"] != expected_hash
+        ):
             raise FixtureValidationError("BROKEN_EVENT_CHAIN", event["stream_id"])
-        stream_heads[event["stream_id"]] = (event["stream_version"], event["event_hash"])
+        stream_heads[event["stream_id"]] = (
+            event["stream_version"],
+            event["event_hash"],
+        )
         if event["event_type"] == "memory.created":
-            if event["stream_kind"] != "memory" or event["stream_id"] not in record_by_id:
+            if (
+                event["stream_kind"] != "memory"
+                or event["stream_id"] not in record_by_id
+            ):
                 raise FixtureValidationError("INVALID_MEMORY_CREATE", location)
             created_streams.add(event["stream_id"])
     if created_streams != set(record_by_id):
-        raise FixtureValidationError("MISSING_MEMORY_CREATE", "records are not constructed")
+        raise FixtureValidationError(
+            "MISSING_MEMORY_CREATE", "records are not constructed"
+        )
     if event_type_counts != _EXPECTED_EVENT_TYPE_COUNTS:
         raise FixtureValidationError(
             "EVENT_TYPE_COVERAGE", json.dumps(event_type_counts, sort_keys=True)
         )
     for record in records:
         source_event = next(
-            (event for event in events if event["event_id"] == record["source_event_id"]),
+            (
+                event
+                for event in events
+                if event["event_id"] == record["source_event_id"]
+            ),
             None,
         )
         if source_event is None or source_event["stream_id"] != record["record_id"]:
@@ -519,13 +556,22 @@ def _validate_events(
             "tags": record_payload.get("tags", []),
             "worked": record_payload.get("worked"),
         }
-        if hashlib.sha256(_canonical_json_bytes(payload_hash_input)).hexdigest() != record["content_hash"]:
-            raise FixtureValidationError("SOURCE_EVENT_CONTENT_MISMATCH", record["record_id"])
+        if (
+            hashlib.sha256(_canonical_json_bytes(payload_hash_input)).hexdigest()
+            != record["content_hash"]
+        ):
+            raise FixtureValidationError(
+                "SOURCE_EVENT_CONTENT_MISMATCH", record["record_id"]
+            )
+
+
 def _validate_queries(
     queries: Sequence[dict[str, Any]], records: Sequence[dict[str, Any]]
 ) -> None:
     if len(queries) != 12:
-        raise FixtureValidationError("QUERY_COUNT", "queries.jsonl must contain 12 rows")
+        raise FixtureValidationError(
+            "QUERY_COUNT", "queries.jsonl must contain 12 rows"
+        )
     record_ids = {record["record_id"] for record in records}
     query_ids: set[str] = set()
     contradiction_count = 0
@@ -533,7 +579,9 @@ def _validate_queries(
         location = f"queries.jsonl:{index}"
         _require_fields(query, _QUERY_FIELDS, location=location)
         query_id = query["query_id"]
-        if not isinstance(query_id, str) or not re.fullmatch(r"q[0-9]{2}_[a-z0-9_]+", query_id):
+        if not isinstance(query_id, str) or not re.fullmatch(
+            r"q[0-9]{2}_[a-z0-9_]+", query_id
+        ):
             raise FixtureValidationError("INVALID_QUERY_ID", location)
         if query_id in query_ids:
             raise FixtureValidationError("DUPLICATE_QUERY_ID", query_id)
@@ -565,11 +613,17 @@ def _validate_queries(
         for item in relevant:
             if not isinstance(item, dict) or set(item) != {"grade", "record_id"}:
                 raise FixtureValidationError("INVALID_RELEVANCE", query_id)
-            if item["record_id"] not in record_ids or not _plain_int(item["grade"]) or not 0 <= item["grade"] <= 3:
+            if (
+                item["record_id"] not in record_ids
+                or not _plain_int(item["grade"])
+                or not 0 <= item["grade"] <= 3
+            ):
                 raise FixtureValidationError("INVALID_RELEVANCE", query_id)
             relevant_ids.append(item["record_id"])
             grades.append(item["grade"])
-        if len(relevant_ids) != len(set(relevant_ids)) or grades != sorted(grades, reverse=True):
+        if len(relevant_ids) != len(set(relevant_ids)) or grades != sorted(
+            grades, reverse=True
+        ):
             raise FixtureValidationError("INVALID_RELEVANCE_ORDER", query_id)
         required = query["required_citations"]
         excluded = query["expected_excluded_citations"]
@@ -580,7 +634,9 @@ def _validate_queries(
         if set(required) & set(excluded):
             raise FixtureValidationError("CONFLICTING_CITATIONS", query_id)
         degradation = query["expected_provider_degradation"]
-        if not isinstance(degradation, dict) or set(degradation) != set(BENCHMARK_MODES):
+        if not isinstance(degradation, dict) or set(degradation) != set(
+            BENCHMARK_MODES
+        ):
             raise FixtureValidationError("INVALID_DEGRADATION", query_id)
         if any(not _is_text_list(degradation[mode]) for mode in BENCHMARK_MODES):
             raise FixtureValidationError("INVALID_DEGRADATION", query_id)
@@ -598,8 +654,12 @@ def _validate_queries(
             if not isinstance(temporal["include_invalidated"], bool):
                 raise FixtureValidationError("INVALID_TEMPORAL_EXPECTATION", query_id)
             for name in ("known_invalidated_record_ids", "valid_record_ids"):
-                if not _is_text_list(temporal[name]) or not set(temporal[name]).issubset(record_ids):
-                    raise FixtureValidationError("INVALID_TEMPORAL_EXPECTATION", query_id)
+                if not _is_text_list(temporal[name]) or not set(
+                    temporal[name]
+                ).issubset(record_ids):
+                    raise FixtureValidationError(
+                        "INVALID_TEMPORAL_EXPECTATION", query_id
+                    )
         contradiction = query["contradiction"]
         if contradiction is not None:
             contradiction_count += 1
@@ -612,9 +672,13 @@ def _validate_queries(
             ):
                 raise FixtureValidationError("INVALID_CONTRADICTION", query_id)
     if contradiction_count != 2:
-        raise FixtureValidationError("CONTRADICTION_COVERAGE", "exactly two queries required")
+        raise FixtureValidationError(
+            "CONTRADICTION_COVERAGE", "exactly two queries required"
+        )
     if sum(bool(query["expected_abstention"]) for query in queries) != 2:
-        raise FixtureValidationError("ABSTENTION_COVERAGE", "exactly two queries required")
+        raise FixtureValidationError(
+            "ABSTENTION_COVERAGE", "exactly two queries required"
+        )
 
 
 def load_retrieval_fixtures(root: str | Path) -> RetrievalFixtures:
@@ -663,7 +727,11 @@ def calculate_ranking_metrics(
             found = relevant_at_cutoff.intersection(returned[:cutoff])
             recall_values[cutoff].append(len(found) / len(relevant_at_cutoff))
         first_rank = next(
-            (rank for rank, record_id in enumerate(returned[:10], 1) if record_id in grades),
+            (
+                rank
+                for rank, record_id in enumerate(returned[:10], 1)
+                if record_id in grades
+            ),
             None,
         )
         reciprocal_ranks.append(0.0 if first_rank is None else 1.0 / first_rank)
@@ -683,9 +751,7 @@ def calculate_ranking_metrics(
         "mrr_at_10": _mean(reciprocal_ranks),
         "ndcg_at_10": _mean(ndcg_values),
         "queries_without_relevant": without_relevant,
-        "recall_at": {
-            str(cutoff): _mean(recall_values[cutoff]) for cutoff in cutoffs
-        },
+        "recall_at": {str(cutoff): _mean(recall_values[cutoff]) for cutoff in cutoffs},
     }
 
 
@@ -743,7 +809,8 @@ def calculate_quality_metrics(
                     contradiction_successes += record_id not in returned_evidence
                 else:
                     contradiction_successes += (
-                        record_id in returned and statuses.get(record_id) == "superseded"
+                        record_id in returned
+                        and statuses.get(record_id) == "superseded"
                     )
         expected_abstention = bool(query["expected_abstention"])
         predicted_abstention = bool(result["abstained"])
@@ -818,9 +885,9 @@ def _validate_result(
     citations = raw["citation_record_ids"]
     if not _is_text_list(returned) or not _is_text_list(citations):
         raise BenchmarkInputError("INVALID_RESULT_IDS", query["query_id"])
-    if allowed_record_ids is not None and not (
-        set(returned) | set(citations)
-    ).issubset(allowed_record_ids):
+    if allowed_record_ids is not None and not (set(returned) | set(citations)).issubset(
+        allowed_record_ids
+    ):
         raise BenchmarkInputError("UNKNOWN_RESULT_RECORD", query["query_id"])
     abstained = raw["abstained"]
     if not isinstance(abstained, bool):
@@ -851,22 +918,15 @@ def _validate_result(
     if lexical_status is None:
         raise BenchmarkInputError("LEXICAL_STATUS_REQUIRED", query["query_id"])
     if lexical_status in {"failed", "unavailable"} and not abstained:
-        raise BenchmarkInputError(
-            "LEXICAL_UNAVAILABLE_MUST_ABSTAIN", query["query_id"]
-        )
+        raise BenchmarkInputError("LEXICAL_UNAVAILABLE_MUST_ABSTAIN", query["query_id"])
     timings = raw["provider_timings_ns"]
-    if (
-        not isinstance(timings, Mapping)
-        or any(
-            not isinstance(key, str) or not _plain_int(value) or value < 0
-            for key, value in timings.items()
-        )
+    if not isinstance(timings, Mapping) or any(
+        not isinstance(key, str) or not _plain_int(value) or value < 0
+        for key, value in timings.items()
     ):
         raise BenchmarkInputError("INVALID_PROVIDER_TIMING", query["query_id"])
     if set(timings) != set(provider_statuses):
-        raise BenchmarkInputError(
-            "PROVIDER_TIMING_STATUS_MISMATCH", query["query_id"]
-        )
+        raise BenchmarkInputError("PROVIDER_TIMING_STATUS_MISMATCH", query["query_id"])
     return {
         "abstained": abstained,
         "citation_record_ids": list(citations),
@@ -943,7 +1003,9 @@ def run_benchmark(
     if set(retrievers) != set(BENCHMARK_MODES) or any(
         not callable(retrievers[mode]) for mode in BENCHMARK_MODES
     ):
-        raise BenchmarkInputError("RETRIEVER_MODES", "both benchmark modes are required")
+        raise BenchmarkInputError(
+            "RETRIEVER_MODES", "both benchmark modes are required"
+        )
     if not isinstance(version_identifier, str) or not version_identifier:
         raise BenchmarkInputError("INVALID_METADATA", "version_identifier")
     manifest_values = _text_mapping("manifests", manifests)
@@ -970,7 +1032,11 @@ def run_benchmark(
                 started = clock_ns()
                 raw_result = retrieve(query)
                 finished = clock_ns()
-                if not _plain_int(started) or not _plain_int(finished) or finished < started:
+                if (
+                    not _plain_int(started)
+                    or not _plain_int(finished)
+                    or finished < started
+                ):
                     raise BenchmarkInputError("INVALID_CLOCK", query["query_id"])
                 result = _validate_result(
                     query, raw_result, allowed_record_ids=allowed_record_ids
@@ -1032,7 +1098,9 @@ def serialize_benchmark_report(report: Mapping[str, Any]) -> str:
             sort_keys=True,
         )
     except (TypeError, ValueError, RecursionError) as exc:
-        raise BenchmarkInputError("REPORT_NOT_JSON", "report is not canonical JSON") from exc
+        raise BenchmarkInputError(
+            "REPORT_NOT_JSON", "report is not canonical JSON"
+        ) from exc
 
 
 def _assignment_mapping(values: Sequence[str], option: str) -> dict[str, str]:
@@ -1047,7 +1115,9 @@ def _assignment_mapping(values: Sequence[str], option: str) -> dict[str, str]:
     return result
 
 
-def _load_retriever(specification: str) -> Callable[[dict[str, Any]], Mapping[str, Any]]:
+def _load_retriever(
+    specification: str,
+) -> Callable[[dict[str, Any]], Mapping[str, Any]]:
     module_name, separator, attribute_name = specification.partition(":")
     if not separator or not module_name or not attribute_name:
         raise BenchmarkInputError(
@@ -1067,7 +1137,8 @@ def _load_retriever(specification: str) -> Callable[[dict[str, Any]], Mapping[st
 def main(
     argv: Sequence[str] | None = None,
     *,
-    retrievers: Mapping[str, Callable[[dict[str, Any]], Mapping[str, Any]]] | None = None,
+    retrievers: Mapping[str, Callable[[dict[str, Any]], Mapping[str, Any]]]
+    | None = None,
     clock_ns: Callable[[], int] = time.perf_counter_ns,
 ) -> int:
     """Run the benchmark and emit one deterministic JSON document."""
@@ -1077,7 +1148,9 @@ def main(
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--fixture-root", type=Path, default=default_fixtures)
     parser.add_argument("--version-identifier", required=True)
-    parser.add_argument("--manifest", action="append", required=True, metavar="KEY=VALUE")
+    parser.add_argument(
+        "--manifest", action="append", required=True, metavar="KEY=VALUE"
+    )
     parser.add_argument(
         "--config-hash", action="append", required=True, metavar="KEY=SHA256"
     )
@@ -1093,9 +1166,7 @@ def main(
     arguments = parser.parse_args(argv)
     if retrievers is None:
         if not arguments.lexical_adapter or not arguments.fully_enabled_adapter:
-            parser.error(
-                "--lexical-adapter and --fully-enabled-adapter are required"
-            )
+            parser.error("--lexical-adapter and --fully-enabled-adapter are required")
         retrievers = {
             "fully_enabled": _load_retriever(arguments.fully_enabled_adapter),
             "lexical_only": _load_retriever(arguments.lexical_adapter),

@@ -25,9 +25,7 @@ from tests.covenant_test_support import CovenantTestWorkspace
 # ---------------------------------------------------------------------------
 
 
-def _make_mock_context(
-    tool_name="consult", action="recall", project_path="/test"
-):
+def _make_mock_context(tool_name="consult", action="recall", project_path="/test"):
     """Create a mock MiddlewareContext for on_call_tool."""
     context = MagicMock()
     context.message.name = tool_name
@@ -93,9 +91,7 @@ class TestMiddlewareOnCallToolNotify:
         mock_scheduler = MagicMock(spec=IdleDreamScheduler)
         mock_scheduler.notify_tool_call = MagicMock()
 
-        mw, workspace = _make_scoped_middleware(
-            dream_scheduler=mock_scheduler
-        )
+        mw, workspace = _make_scoped_middleware(dream_scheduler=mock_scheduler)
 
         context = _make_mock_context(project_path=workspace)
         call_next = AsyncMock(return_value=MagicMock())

@@ -34,9 +34,11 @@ class OpaqueCapabilityAuthorityTests(unittest.TestCase):
 
         self.assertEqual("cap_public_handle_0001", issued.token)
         self.assertNotIn(".", issued.token)
-        encoded = base64.urlsafe_b64encode(
-            self.scope.canonical_workspace.encode("utf-8")
-        ).rstrip(b"=").decode("ascii")
+        encoded = (
+            base64.urlsafe_b64encode(self.scope.canonical_workspace.encode("utf-8"))
+            .rstrip(b"=")
+            .decode("ascii")
+        )
         self.assertNotIn(encoded, issued.token)
         self.assertNotIn("private", issued.token)
         claims = authority.verify(issued.token)
@@ -51,9 +53,7 @@ class OpaqueCapabilityAuthorityTests(unittest.TestCase):
         )
         from daem0nmcp.covenant import TokenValidationError
 
-        handles = iter(
-            ("cap_public_handle_0001", "cap_public_handle_0002")
-        )
+        handles = iter(("cap_public_handle_0001", "cap_public_handle_0002"))
         authority = OpaqueCapabilityAuthority(
             self.delegate,
             token_factory=lambda: next(handles),

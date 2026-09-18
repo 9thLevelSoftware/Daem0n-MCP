@@ -13,8 +13,8 @@ from pathlib import Path
 
 import daem0nmcp.covenant as covenant
 from daem0nmcp.covenant import (
-    COVENANT_POLICY,
     ACTION_ARGUMENT_DEFAULTS,
+    COVENANT_POLICY,
     CapabilityAuthority,
     CovenantGate,
     CovenantLevel,
@@ -22,8 +22,8 @@ from daem0nmcp.covenant import (
     CovenantStateStore,
     InvocationScope,
     UnknownCovenantOperation,
-    authorize_workflow_call,
     authority_from_environment,
+    authorize_workflow_call,
     canonical_json,
 )
 
@@ -65,15 +65,11 @@ class CovenantPolicyTests(unittest.TestCase):
             for action in module.VALID_ACTIONS
         }
 
-        expected.update(
-            {"simulate_decision", "evolve_rule", "debate_internal"}
-        )
+        expected.update({"simulate_decision", "evolve_rule", "debate_internal"})
         self.assertEqual(expected, COVENANT_POLICY.operations)
         self.assertEqual(expected, set(ACTION_ARGUMENT_DEFAULTS))
         for operation in expected:
-            self.assertIsInstance(
-                COVENANT_POLICY.resolve(operation, {}), CovenantLevel
-            )
+            self.assertIsInstance(COVENANT_POLICY.resolve(operation, {}), CovenantLevel)
 
     def test_standalone_cognitive_tools_have_explicit_policy_and_schemas(self) -> None:
         expected = {
@@ -105,9 +101,9 @@ class CovenantPolicyTests(unittest.TestCase):
                 ),
             },
             {
-                operation: getattr(
-                    covenant, "ACTION_REQUIRED_ARGUMENTS", {}
-                ).get(operation)
+                operation: getattr(covenant, "ACTION_REQUIRED_ARGUMENTS", {}).get(
+                    operation
+                )
                 for operation in expected
             },
         )
@@ -119,9 +115,7 @@ class CovenantPolicyTests(unittest.TestCase):
         )
         self.assertEqual(
             CovenantLevel.COUNSEL,
-            COVENANT_POLICY.resolve(
-                "understand.todos", {"auto_remember": True}
-            ),
+            COVENANT_POLICY.resolve("understand.todos", {"auto_remember": True}),
         )
         for action in ("prune", "cleanup", "compact", "purge_dream_spam"):
             operation = f"maintain.{action}"
@@ -139,9 +133,7 @@ class CovenantPolicyTests(unittest.TestCase):
         )
         self.assertEqual(
             CovenantLevel.DESTRUCTIVE,
-            COVENANT_POLICY.resolve(
-                "maintain.consolidate", {"archive_sources": True}
-            ),
+            COVENANT_POLICY.resolve("maintain.consolidate", {"archive_sources": True}),
         )
 
     def test_unknown_operation_fails_closed(self) -> None:
@@ -154,14 +146,11 @@ class CovenantPolicyTests(unittest.TestCase):
             ("maintain.cleanup", {"dry_run": 0}),
             ("maintain.consolidate", {"archive_sources": "false"}),
         ):
-            with self.subTest(operation=operation):
-                with self.assertRaises(ValueError):
-                    COVENANT_POLICY.resolve(operation, arguments)
+            with self.subTest(operation=operation), self.assertRaises(ValueError):
+                COVENANT_POLICY.resolve(operation, arguments)
 
     def test_remote_secret_has_no_default_and_requires_32_bytes(self) -> None:
-        self.assertIsNone(
-            authority_from_environment(local_stdio=False, environ={})
-        )
+        self.assertIsNone(authority_from_environment(local_stdio=False, environ={}))
         self.assertIsNone(
             authority_from_environment(
                 local_stdio=False,
@@ -267,7 +256,9 @@ class CapabilityGateTests(unittest.TestCase):
         issued_identity = None
         for index in range(3):
             args = {"category": "decision", "content": f"pending-{index}"}
-            tokens.append((gate.issue_preflight(scope, "inscribe.remember", args), args))
+            tokens.append(
+                (gate.issue_preflight(scope, "inscribe.remember", args), args)
+            )
             state = store._states[scope]
             if issued_identity is None:
                 issued_identity = state.issued
@@ -282,13 +273,15 @@ class CapabilityGateTests(unittest.TestCase):
         self.assertEqual(3, len(store._states[scope].issued))
 
         oldest_token, oldest_args = tokens[0]
-        self.assertIsNone(gate.authorize(
-            "inscribe.remember",
-            oldest_args,
-            scope,
-            preflight_token=oldest_token,
-            consume_capability=False,
-        ))
+        self.assertIsNone(
+            gate.authorize(
+                "inscribe.remember",
+                oldest_args,
+                scope,
+                preflight_token=oldest_token,
+                consume_capability=False,
+            )
+        )
         self.assertIsNone(
             gate.authorize(
                 "inscribe.remember",
@@ -302,9 +295,7 @@ class CapabilityGateTests(unittest.TestCase):
             args = {"category": "decision", "content": f"consumed-{index}"}
             token = gate.issue_preflight(scope, "inscribe.remember", args)
             self.assertIsNone(
-                gate.authorize(
-                    "inscribe.remember", args, scope, preflight_token=token
-                )
+                gate.authorize("inscribe.remember", args, scope, preflight_token=token)
             )
         self.assertLessEqual(len(store._states[scope].issued), 3)
         self.assertLessEqual(len(store._states[scope].consumed), 3)
@@ -334,9 +325,7 @@ class CapabilityGateTests(unittest.TestCase):
         )
         for scope in variants:
             with self.subTest(scope=scope):
-                result = self.gate.authorize(
-                    "consult.recall", {"topic": "auth"}, scope
-                )
+                result = self.gate.authorize("consult.recall", {"topic": "auth"}, scope)
                 self.assertEqual("COMMUNION_REQUIRED", result["violation"])
 
     def test_token_is_bound_to_scope_operation_and_arguments(self) -> None:
@@ -386,9 +375,7 @@ class CapabilityGateTests(unittest.TestCase):
         self.assertEqual("TOKEN_ARGUMENT_MISMATCH", result["violation"])
 
     def test_defaulted_arguments_are_canonicalized_consistently(self) -> None:
-        token = self._issue(
-            operation="inscribe.pin", args={"memory_id": 7}
-        )
+        token = self._issue(operation="inscribe.pin", args={"memory_id": 7})
         self.assertIsNone(
             self.gate.authorize(
                 "inscribe.pin",
@@ -397,9 +384,7 @@ class CapabilityGateTests(unittest.TestCase):
                 preflight_token=token,
             )
         )
-        changed_id = self._issue(
-            operation="inscribe.pin", args={"memory_id": 7}
-        )
+        changed_id = self._issue(operation="inscribe.pin", args={"memory_id": 7})
         result = self.gate.authorize(
             "inscribe.pin",
             {"memory_id": 8},
@@ -408,7 +393,9 @@ class CapabilityGateTests(unittest.TestCase):
         )
         self.assertEqual("TOKEN_ARGUMENT_MISMATCH", result["violation"])
 
-    def test_argument_sensitive_capability_cannot_authorize_destructive_variant(self) -> None:
+    def test_argument_sensitive_capability_cannot_authorize_destructive_variant(
+        self,
+    ) -> None:
         token = self._issue(
             operation="maintain.consolidate",
             args={"archive_sources": False},
@@ -429,9 +416,11 @@ class CapabilityGateTests(unittest.TestCase):
             base64.urlsafe_b64decode(payload_segment + "==").decode("utf-8")
         )
         payload["operation"] = "govern.add_rule"
-        tampered_segment = base64.urlsafe_b64encode(
-            canonical_json(payload)
-        ).rstrip(b"=").decode("ascii")
+        tampered_segment = (
+            base64.urlsafe_b64encode(canonical_json(payload))
+            .rstrip(b"=")
+            .decode("ascii")
+        )
         result = self.gate.authorize(
             "inscribe.remember",
             args,
@@ -441,14 +430,20 @@ class CapabilityGateTests(unittest.TestCase):
         self.assertEqual("TOKEN_TAMPERED", result["violation"])
 
         noncanonical = json.dumps(payload, indent=2).encode("utf-8")
-        noncanonical_segment = base64.urlsafe_b64encode(noncanonical).rstrip(b"=").decode("ascii")
-        noncanonical_signature = base64.urlsafe_b64encode(
-            hmac.new(
-                b"test-covenant-key-is-at-least-32-bytes!!",
-                noncanonical,
-                hashlib.sha256,
-            ).digest()
-        ).rstrip(b"=").decode("ascii")
+        noncanonical_segment = (
+            base64.urlsafe_b64encode(noncanonical).rstrip(b"=").decode("ascii")
+        )
+        noncanonical_signature = (
+            base64.urlsafe_b64encode(
+                hmac.new(
+                    b"test-covenant-key-is-at-least-32-bytes!!",
+                    noncanonical,
+                    hashlib.sha256,
+                ).digest()
+            )
+            .rstrip(b"=")
+            .decode("ascii")
+        )
         result = self.gate.authorize(
             "inscribe.remember",
             args,
@@ -458,14 +453,20 @@ class CapabilityGateTests(unittest.TestCase):
         self.assertEqual("TOKEN_TAMPERED", result["violation"])
 
         def signed(payload_bytes: bytes) -> str:
-            payload_part = base64.urlsafe_b64encode(payload_bytes).rstrip(b"=").decode("ascii")
-            signature_part = base64.urlsafe_b64encode(
-                hmac.new(
-                    b"test-covenant-key-is-at-least-32-bytes!!",
-                    payload_bytes,
-                    hashlib.sha256,
-                ).digest()
-            ).rstrip(b"=").decode("ascii")
+            payload_part = (
+                base64.urlsafe_b64encode(payload_bytes).rstrip(b"=").decode("ascii")
+            )
+            signature_part = (
+                base64.urlsafe_b64encode(
+                    hmac.new(
+                        b"test-covenant-key-is-at-least-32-bytes!!",
+                        payload_bytes,
+                        hashlib.sha256,
+                    ).digest()
+                )
+                .rstrip(b"=")
+                .decode("ascii")
+            )
             return f"{payload_part}.{signature_part}"
 
         invalid_payloads = []
@@ -553,14 +554,20 @@ class CapabilityGateTests(unittest.TestCase):
         )
         payload["exp"] = payload["iat"] + 600
         payload_bytes = canonical_json(payload)
-        payload_part = base64.urlsafe_b64encode(payload_bytes).rstrip(b"=").decode("ascii")
-        signature_part = base64.urlsafe_b64encode(
-            hmac.new(
-                b"test-covenant-key-is-at-least-32-bytes!!",
-                payload_bytes,
-                hashlib.sha256,
-            ).digest()
-        ).rstrip(b"=").decode("ascii")
+        payload_part = (
+            base64.urlsafe_b64encode(payload_bytes).rstrip(b"=").decode("ascii")
+        )
+        signature_part = (
+            base64.urlsafe_b64encode(
+                hmac.new(
+                    b"test-covenant-key-is-at-least-32-bytes!!",
+                    payload_bytes,
+                    hashlib.sha256,
+                ).digest()
+            )
+            .rstrip(b"=")
+            .decode("ascii")
+        )
         result = self.gate.authorize(
             "inscribe.remember",
             args,
@@ -614,9 +621,7 @@ class CapabilityGateTests(unittest.TestCase):
         self.assertEqual("TOKEN_TAMPERED", result["violation"])
 
         invalid_args = {"category": "decision", "content": invalid_text}
-        result = self.gate.authorize(
-            "inscribe.remember", invalid_args, self.scope_a
-        )
+        result = self.gate.authorize("inscribe.remember", invalid_args, self.scope_a)
         self.assertEqual("TOKEN_ARGUMENT_MISMATCH", result["violation"])
 
         with covenant.installed_invocation(self.scope_a, self.gate):
@@ -637,14 +642,20 @@ class CapabilityGateTests(unittest.TestCase):
         )
 
         def sign(payload_bytes: bytes) -> str:
-            payload_part = base64.urlsafe_b64encode(payload_bytes).rstrip(b"=").decode("ascii")
-            signature_part = base64.urlsafe_b64encode(
-                hmac.new(
-                    b"test-covenant-key-is-at-least-32-bytes!!",
-                    payload_bytes,
-                    hashlib.sha256,
-                ).digest()
-            ).rstrip(b"=").decode("ascii")
+            payload_part = (
+                base64.urlsafe_b64encode(payload_bytes).rstrip(b"=").decode("ascii")
+            )
+            signature_part = (
+                base64.urlsafe_b64encode(
+                    hmac.new(
+                        b"test-covenant-key-is-at-least-32-bytes!!",
+                        payload_bytes,
+                        hashlib.sha256,
+                    ).digest()
+                )
+                .rstrip(b"=")
+                .decode("ascii")
+            )
             return f"{payload_part}.{signature_part}"
 
         invalid_text = json.loads('"\\ud800"')
@@ -656,9 +667,9 @@ class CapabilityGateTests(unittest.TestCase):
             ensure_ascii=True,
         ).encode("utf-8")
         canonical_payload = canonical_json(payload).decode("utf-8")
-        nonfinite_bytes = canonical_payload.replace(
-            '"iat":1000', '"iat":1e999'
-        ).encode("utf-8")
+        nonfinite_bytes = canonical_payload.replace('"iat":1000', '"iat":1e999').encode(
+            "utf-8"
+        )
         huge_integer_bytes = canonical_payload.replace(
             '"iat":1000', f'"iat":{("9" * 4_400)}'
         ).encode("utf-8")
@@ -680,9 +691,7 @@ class CapabilityGateTests(unittest.TestCase):
         args = {"data": nested}
         self._brief()
 
-        result = self.gate.authorize(
-            "maintain.import_data", args, self.scope_a
-        )
+        result = self.gate.authorize("maintain.import_data", args, self.scope_a)
         self.assertEqual("TOKEN_ARGUMENT_MISMATCH", result["violation"])
 
         with covenant.installed_invocation(self.scope_a, self.gate):
@@ -727,12 +736,12 @@ class CapabilityGateTests(unittest.TestCase):
             result["remedy"]["tool"],
         )
 
-    def test_issued_capability_must_be_present_and_target_must_be_protected(self) -> None:
+    def test_issued_capability_must_be_present_and_target_must_be_protected(
+        self,
+    ) -> None:
         self._brief()
         with self.assertRaisesRegex(ValueError, "PREFLIGHT_TARGET_NOT_PROTECTED"):
-            self.gate.issue_preflight(
-                self.scope_a, "consult.recall", {"topic": "auth"}
-            )
+            self.gate.issue_preflight(self.scope_a, "consult.recall", {"topic": "auth"})
         self.gate.issue_preflight(
             self.scope_a,
             "inscribe.remember",
@@ -794,13 +803,9 @@ class CapabilityGateTests(unittest.TestCase):
         ):
             for operation, arguments in invalid_targets:
                 with self.subTest(operation=operation, arguments=arguments):
-                    result = issue_current_preflight_response(
-                        operation, arguments
-                    )
+                    result = issue_current_preflight_response(operation, arguments)
                     self.assertNotIn("preflight_token", result)
-                    self.assertEqual(
-                        "TOKEN_ARGUMENT_MISMATCH", result.get("violation")
-                    )
+                    self.assertEqual("TOKEN_ARGUMENT_MISMATCH", result.get("violation"))
             valid = issue_current_preflight_response(
                 "debate_internal",
                 {

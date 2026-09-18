@@ -10,8 +10,10 @@ import math
 import os
 import re
 import sqlite3
+import threading
 import uuid
 from collections.abc import Callable, Mapping
+from contextlib import suppress
 from datetime import datetime, timezone
 from time import perf_counter_ns
 
@@ -28,7 +30,7 @@ from .types import (
     ProviderStatus,
     RetrievalQuery,
 )
-
+from .vector_validation import VECTOR_ATTESTATION_FORMAT
 
 _MAX_FTS_TERMS = 64
 _MAX_FTS_TERM_CHARS = 256
@@ -61,7 +63,7 @@ _PROVIDER_KEY = re.compile(r"^[a-z][a-z0-9_-]{0,63}$")
 _COLLECTION_PREFIX = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,31}$")
 _DENSE_DISTANCE = "cosine"
 _DENSE_SCHEMA_VERSION = 1
-DENSE_BUILDER_VERSION = "retrieval-dense-1"
+DENSE_BUILDER_VERSION = "retrieval-dense-2"
 _DENSE_REBUILD_MARKERS = frozenset(
     {"rebuild_required_at_us", "rebuild_required_event_id"}
 )
@@ -79,7 +81,7 @@ _LEXICAL_WORKERS = BoundedWorkerPool(
     thread_name_prefix="daem0nmcp-lexical",
 )
 _DENSE_WORKERS = BoundedWorkerPool(
-    max_workers=2,
+    max_workers=4,
     thread_name_prefix="daem0nmcp-dense",
 )
 
@@ -120,8 +122,7 @@ def _safe_fts_queries(text: str) -> tuple[str, ...] | None:
         )
     else:
         pairs = tuple(
-            f"{quoted[index]} {quoted[index + 1]}"
-            for index in range(len(quoted) - 1)
+            f"{quoted[index]} {quoted[index + 1]}" for index in range(len(quoted) - 1)
         )
     return (conjunctive, " OR ".join(pairs))
 
@@ -146,15 +147,9 @@ class LexicalProvider:
         timeout_seconds: float = 2.0,
         worker_pool: BoundedWorkerPool | None = None,
     ) -> None:
-        self._connection_factory = _sqlite_read_factory(
-            connection, connection_factory
-        )
-        self._timeout_seconds = _positive_timeout(
-            timeout_seconds, "timeout_seconds"
-        )
-        if worker_pool is not None and not isinstance(
-            worker_pool, BoundedWorkerPool
-        ):
+        self._connection_factory = _sqlite_read_factory(connection, connection_factory)
+        self._timeout_seconds = _positive_timeout(timeout_seconds, "timeout_seconds")
+        if worker_pool is not None and not isinstance(worker_pool, BoundedWorkerPool):
             raise ValueError("worker_pool must be a BoundedWorkerPool")
         self._worker_pool = worker_pool or _LEXICAL_WORKERS
 
@@ -168,9 +163,7 @@ class LexicalProvider:
             raise ValueError("limit must be a positive integer")
         try:
             return await asyncio.wait_for(
-                self._worker_pool.run(
-                    lambda: self._search_sync(query, limit, started)
-                ),
+                self._worker_pool.run(lambda: self._search_sync(query, limit, started)),
                 timeout=self._timeout_seconds,
             )
         except asyncio.TimeoutError:
@@ -221,9 +214,7 @@ class LexicalProvider:
                     (query.workspace_id,),
                 ).fetchone()
                 if stale is not None:
-                    return self._unavailable(
-                        started, "LEXICAL_REBUILD_REQUIRED"
-                    )
+                    return self._unavailable(started, "LEXICAL_REBUILD_REQUIRED")
                 return self._unavailable(started)
             generation = int(manifest[0])
             details = json.loads(str(manifest[1]))
@@ -233,26 +224,20 @@ class LexicalProvider:
                 and details.get("rebuild_required_event_id") is not None
                 else None
             )
-            expected_table = lexical_fts_table_name(
-                query.workspace_id, generation
-            )
+            expected_table = lexical_fts_table_name(query.workspace_id, generation)
             if (
                 not isinstance(details, Mapping)
                 or details.get("fts_table") != expected_table
-                or details.get("build_config_hash")
-                != lexical_build_config_hash()
+                or details.get("build_config_hash") != lexical_build_config_hash()
                 or connection.execute(
-                    "SELECT 1 FROM sqlite_master "
-                    "WHERE type='table' AND name=?",
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
                     (expected_table,),
                 ).fetchone()
                 is None
             ):
                 return self._unavailable(started)
             fts_queries = _safe_fts_queries(query.text)
-            result_status = (
-                "degraded" if stale_reason is not None else "ready"
-            )
+            result_status = "degraded" if stale_reason is not None else "ready"
             if fts_queries is None:
                 return ProviderResult(
                     provider=self.name,
@@ -269,9 +254,7 @@ class LexicalProvider:
                     manifest_generation=generation,
                     elapsed_ms=(perf_counter_ns() - started) / 1_000_000,
                 )
-            content_weight, rationale_weight, tags_weight = (
-                LEXICAL_BM25_WEIGHTS
-            )
+            content_weight, rationale_weight, tags_weight = LEXICAL_BM25_WEIGHTS
             rows = []
             for fts_query in fts_queries:
                 rows = connection.execute(
@@ -356,9 +339,7 @@ def _positive_timeout(value: object, field_name: str) -> float:
     try:
         timeout = float(value)
     except (OverflowError, ValueError) as exc:
-        raise ValueError(
-            f"{field_name} must be a positive finite number"
-        ) from exc
+        raise ValueError(f"{field_name} must be a positive finite number") from exc
     if not math.isfinite(timeout) or timeout <= 0 or timeout > 60:
         raise ValueError(f"{field_name} must be a positive finite number")
     return timeout
@@ -376,14 +357,10 @@ def _sqlite_read_factory(
         return connection_factory
     if not isinstance(connection, sqlite3.Connection):
         raise ValueError("a SQLite connection or connection_factory is required")
-    database_row = connection.execute(
-        "PRAGMA database_list"
-    ).fetchone()
+    database_row = connection.execute("PRAGMA database_list").fetchone()
     database_path = "" if database_row is None else str(database_row[2])
     if not database_path:
-        raise ValueError(
-            "in-memory SQLite requires a worker-local connection_factory"
-        )
+        raise ValueError("in-memory SQLite requires a worker-local connection_factory")
 
     def open_connection() -> sqlite3.Connection:
         return sqlite3.connect(database_path, timeout=5.0)
@@ -441,9 +418,7 @@ def build_dense_point_payload(
     _opaque(workspace_id, _WORKSPACE_ID, "workspace_id")
     canonical_record_id = _opaque(record_id, _RECORD_ID, "record_id")
     _opaque(content_hash, _CONTENT_HASH, "content_hash")
-    generation = _positive_integer(
-        projection_generation, "projection_generation"
-    )
+    generation = _positive_integer(projection_generation, "projection_generation")
     selected_model = _nonempty_string(model_id, "model_id")
     point_id = dense_point_id(workspace_id, canonical_record_id)
     return point_id, {
@@ -491,9 +466,7 @@ def create_qdrant_client(
     try:
         timeout = float(timeout_seconds)
     except (OverflowError, ValueError) as exc:
-        raise ValueError(
-            "timeout_seconds must be a positive finite number"
-        ) from exc
+        raise ValueError("timeout_seconds must be a positive finite number") from exc
     if not math.isfinite(timeout) or timeout <= 0:
         raise ValueError("timeout_seconds must be a positive finite number")
     factory = client_factory or _default_qdrant_client_factory
@@ -503,9 +476,7 @@ def create_qdrant_client(
     if qdrant_url is not None:
         url = _nonempty_string(qdrant_url, "qdrant_url", maximum=2048)
         if qdrant_api_key is not None:
-            _nonempty_string(
-                qdrant_api_key, "qdrant_api_key", maximum=4096
-            )
+            _nonempty_string(qdrant_api_key, "qdrant_api_key", maximum=4096)
         return factory(url=url, api_key=qdrant_api_key, timeout=timeout)
     if qdrant_path is None:
         raise RuntimeError("DENSE_PROVIDER_UNCONFIGURED")
@@ -515,6 +486,66 @@ def create_qdrant_client(
         raise ValueError("qdrant_path must be path-like") from exc
     _nonempty_string(path, "qdrant_path", maximum=4096)
     return factory(path=path)
+
+
+def qdrant_collection_exists(client: object, collection_name: str) -> bool:
+    """Check collection presence across the supported Qdrant client range."""
+
+    collection_exists = getattr(client, "collection_exists", None)
+    if callable(collection_exists):
+        result = collection_exists(collection_name)
+        if not isinstance(result, bool):
+            raise TypeError("invalid Qdrant collection existence response")
+        return result
+    get_collections = getattr(client, "get_collections", None)
+    if callable(get_collections):
+        response = get_collections()
+        missing = object()
+        collections = (
+            response.get("collections", missing)
+            if isinstance(response, Mapping)
+            else getattr(response, "collections", missing)
+        )
+        if collections is missing:
+            raise TypeError("invalid Qdrant collections response")
+        if isinstance(collections, (str, bytes, Mapping)):
+            raise TypeError("invalid Qdrant collections response")
+        try:
+            entries = tuple(collections)
+        except TypeError as exc:
+            raise TypeError("invalid Qdrant collections response") from exc
+        names: list[str] = []
+        for item in entries:
+            name = (
+                item.get("name")
+                if isinstance(item, Mapping)
+                else getattr(item, "name", None)
+            )
+            if (
+                not isinstance(name, str)
+                or not name
+                or name != name.strip()
+                or len(name) > 255
+            ):
+                raise TypeError("invalid Qdrant collection entry")
+            names.append(name)
+        return collection_name in names
+    get_collection = getattr(client, "get_collection", None)
+    if not callable(get_collection):
+        raise TypeError("Qdrant client has no collection lookup")
+    try:
+        response = get_collection(collection_name)
+    except Exception as exc:
+        status_code = getattr(exc, "status_code", None)
+        response = getattr(exc, "response", None)
+        response_status = getattr(response, "status_code", None)
+        error_code = getattr(exc, "code", None)
+        if status_code == 404 or response_status == 404 or error_code == 404:
+            return False
+        raise
+    if response is None:
+        raise TypeError("invalid Qdrant collection response")
+    return True
 
 
 def _dense_collection_name(
@@ -528,14 +559,15 @@ def _dense_collection_name(
     if not isinstance(prefix, str) or _COLLECTION_PREFIX.fullmatch(prefix) is None:
         raise ValueError("collection_prefix is invalid")
     _opaque(workspace_id, _WORKSPACE_ID, "workspace_id")
-    if not isinstance(provider_key, str) or _PROVIDER_KEY.fullmatch(provider_key) is None:
+    if (
+        not isinstance(provider_key, str)
+        or _PROVIDER_KEY.fullmatch(provider_key) is None
+    ):
         raise ValueError("provider_key is invalid")
     _positive_integer(generation, "generation")
     _nonempty_string(model_id, "model_id")
     model_digest = hashlib.sha256(model_id.encode("utf-8")).hexdigest()[:12]
-    return (
-        f"{prefix}-{workspace_id}-{provider_key}-g{generation}-{model_digest}"
-    )
+    return f"{prefix}-{workspace_id}-{provider_key}-g{generation}-{model_digest}"
 
 
 def dense_manifest_details(
@@ -593,12 +625,8 @@ def dense_encoder_contract(
         raise ValueError("encoder query prefix is invalid")
     encoder_type = "none"
     if encoder is not None:
-        module_name = getattr(
-            encoder, "__module__", type(encoder).__module__
-        )
-        qualified_name = getattr(
-            encoder, "__qualname__", type(encoder).__qualname__
-        )
+        module_name = getattr(encoder, "__module__", type(encoder).__module__)
+        qualified_name = getattr(encoder, "__qualname__", type(encoder).__qualname__)
         encoder_type = f"{module_name}.{qualified_name}"
     document_prefix = getattr(encoder, "prefix", None)
     backend = getattr(encoder, "backend", None)
@@ -606,17 +634,14 @@ def dense_encoder_contract(
     truncate_dimension = getattr(encoder, "dimension", None)
     max_sequence_length = getattr(encoder, "max_seq_length", None)
     if max_sequence_length is None:
-        max_sequence_length = getattr(
-            encoder, "max_sequence_length", None
-        )
+        max_sequence_length = getattr(encoder, "max_sequence_length", None)
+    artifact_fingerprint = getattr(encoder, "artifact_fingerprint", None)
     if document_prefix is not None and (
         not isinstance(document_prefix, str) or len(document_prefix) > 4_096
     ):
         raise ValueError("encoder document prefix is invalid")
     if backend is not None and (
-        not isinstance(backend, str)
-        or not backend.strip()
-        or len(backend) > 256
+        not isinstance(backend, str) or not backend.strip() or len(backend) > 256
     ):
         raise ValueError("encoder backend is invalid")
     if encoder_model_id != model:
@@ -633,7 +658,13 @@ def dense_encoder_contract(
         or max_sequence_length < 1
     ):
         raise ValueError("encoder maximum sequence length is invalid")
+    if artifact_fingerprint is not None and (
+        not isinstance(artifact_fingerprint, str)
+        or _CONTENT_HASH.fullmatch(artifact_fingerprint) is None
+    ):
+        raise ValueError("encoder artifact fingerprint is invalid")
     return {
+        "artifact_fingerprint": artifact_fingerprint,
         "backend": backend,
         "document_prefix": document_prefix,
         "encoder_type": encoder_type,
@@ -681,9 +712,30 @@ def dense_builder_contract(
             sort_keys=True,
         ).encode("utf-8")
     ).hexdigest()
+    artifact_fingerprint = encoder_contract.get("artifact_fingerprint")
+    vector_space_hash = None
+    if isinstance(artifact_fingerprint, str):
+        vector_space_hash = hashlib.sha256(
+            json.dumps(
+                {
+                    "builder_version": DENSE_BUILDER_VERSION,
+                    "distance": _DENSE_DISTANCE,
+                    "encoder_contract": encoder_contract,
+                    "format": VECTOR_ATTESTATION_FORMAT,
+                    "model_id": model_id,
+                    "output_dimension": dimension,
+                    "provider_representation": "qdrant-cosine",
+                },
+                ensure_ascii=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            ).encode("utf-8")
+        ).hexdigest()
     return {
         "builder_contract_hash": contract_hash,
         "encoder_contract": encoder_contract,
+        "vector_format": VECTOR_ATTESTATION_FORMAT,
+        "vector_space_hash": vector_space_hash,
     }
 
 
@@ -700,15 +752,21 @@ def dense_query_encoder_matches_contract(
     if query_encoder is None or not isinstance(encoder_contract, Mapping):
         return False
     try:
+        prepare = getattr(query_encoder, "prepare_artifact_identity", None)
+        if isinstance(encoder_contract.get("artifact_fingerprint"), str) and callable(
+            prepare
+        ):
+            prepare()
         query_contract = dense_encoder_contract(
             encoder=query_encoder,
             model_id=model_id,
             dimension=dimension,
             query_prefix=query_prefix,
         )
-    except (AttributeError, TypeError, ValueError):
+    except (AttributeError, RuntimeError, TypeError, ValueError):
         return False
     shared_fields = (
+        "artifact_fingerprint",
         "backend",
         "encoder_type",
         "max_sequence_length",
@@ -737,7 +795,9 @@ def _response_points(response: object) -> object:
     if isinstance(response, Mapping):
         return response.get("points", ())
     points = getattr(response, "points", None)
-    return response if points is None and isinstance(response, (list, tuple)) else points
+    return (
+        response if points is None and isinstance(response, (list, tuple)) else points
+    )
 
 
 class DenseProvider:
@@ -764,34 +824,38 @@ class DenseProvider:
         collection_prefix: str = "daem0nmcp",
         client_factory: Callable[..., object] | None = None,
         worker_pool: BoundedWorkerPool | None = None,
+        own_encoder: bool = False,
+        own_document_encoder: bool = False,
     ) -> None:
-        if not isinstance(provider_key, str) or _PROVIDER_KEY.fullmatch(provider_key) is None:
+        if (
+            not isinstance(provider_key, str)
+            or _PROVIDER_KEY.fullmatch(provider_key) is None
+        ):
             raise ValueError("provider_key is invalid")
-        self._connection_factory = _sqlite_read_factory(
-            connection, connection_factory
-        )
+        self._connection_factory = _sqlite_read_factory(connection, connection_factory)
         self.provider_key = provider_key
         self.model_id = _nonempty_string(model_id, "model_id")
         self.dimension = _positive_integer(dimension, "dimension")
-        if not isinstance(collection_prefix, str) or _COLLECTION_PREFIX.fullmatch(
-            collection_prefix
-        ) is None:
+        if (
+            not isinstance(collection_prefix, str)
+            or _COLLECTION_PREFIX.fullmatch(collection_prefix) is None
+        ):
             raise ValueError("collection_prefix is invalid")
         if client_factory is not None and not callable(client_factory):
             raise ValueError("client_factory must be callable")
-        if worker_pool is not None and not isinstance(
-            worker_pool, BoundedWorkerPool
-        ):
+        if worker_pool is not None and not isinstance(worker_pool, BoundedWorkerPool):
             raise ValueError("worker_pool must be a BoundedWorkerPool")
+        if not isinstance(own_encoder, bool) or not isinstance(
+            own_document_encoder, bool
+        ):
+            raise ValueError("resource ownership flags must be boolean")
         self.collection_prefix = collection_prefix
         self._encoder = encoder
         self._document_encoder = (
             encoder if document_encoder is None else document_encoder
         )
         self._query_prefix = (
-            getattr(encoder, "prefix", None)
-            if query_prefix is None
-            else query_prefix
+            getattr(encoder, "prefix", None) if query_prefix is None else query_prefix
         )
         dense_encoder_contract(
             encoder=self._document_encoder,
@@ -803,11 +867,78 @@ class DenseProvider:
         self._qdrant_path = qdrant_path
         self._qdrant_url = qdrant_url
         self._qdrant_api_key = qdrant_api_key
-        self._timeout_seconds = _positive_timeout(
-            timeout_seconds, "timeout_seconds"
-        )
+        self._timeout_seconds = _positive_timeout(timeout_seconds, "timeout_seconds")
         self._client_factory = client_factory
         self._worker_pool = worker_pool or _DENSE_WORKERS
+        self._resource_lock = threading.RLock()
+        self._closed = False
+        self._active_operations = 0
+        self._operation_state = threading.local()
+        self._owns_client = client is None
+        self._owns_encoder = encoder is None or own_encoder
+        self._owns_document_encoder = own_document_encoder
+
+    def close(self) -> None:
+        """Close resources created for this provider, exactly once."""
+
+        with self._resource_lock:
+            if self._closed:
+                return
+            self._closed = True
+            resources = (
+                self._detach_owned_resources_locked()
+                if self._active_operations == 0
+                else ()
+            )
+        for resource in resources:
+            close = getattr(resource, "close", None)
+            if callable(close):
+                close()
+
+    def _detach_owned_resources_locked(self) -> tuple[object, ...]:
+        resources: list[object] = []
+        if self._owns_client and self._client is not None:
+            resources.append(self._client)
+            self._client = None
+        if self._owns_encoder and self._encoder is not None:
+            if all(self._encoder is not item for item in resources):
+                resources.append(self._encoder)
+            self._encoder = None
+        if self._owns_document_encoder and self._document_encoder is not None:
+            if all(self._document_encoder is not item for item in resources):
+                resources.append(self._document_encoder)
+            self._document_encoder = None
+        return tuple(resources)
+
+    def _run_tracked_search(
+        self,
+        query: RetrievalQuery,
+        limit: int,
+        started_ns: int,
+    ) -> ProviderResult:
+        with self._resource_lock:
+            if self._closed:
+                return self._result(
+                    started_ns,
+                    status="unavailable",
+                    reason="DENSE_PROVIDER_CLOSED",
+                )
+            self._active_operations += 1
+            self._operation_state.active = True
+        try:
+            return self._search_sync(query, limit, started_ns)
+        finally:
+            resources: tuple[object, ...] = ()
+            with self._resource_lock:
+                self._operation_state.active = False
+                self._active_operations -= 1
+                if self._closed and self._active_operations == 0:
+                    resources = self._detach_owned_resources_locked()
+            for resource in resources:
+                close = getattr(resource, "close", None)
+                if callable(close):
+                    with suppress(Exception):
+                        close()
 
     async def search(
         self,
@@ -820,7 +951,7 @@ class DenseProvider:
         try:
             return await asyncio.wait_for(
                 self._worker_pool.run(
-                    lambda: self._search_sync(query, limit, started)
+                    lambda: self._run_tracked_search(query, limit, started)
                 ),
                 timeout=self._timeout_seconds,
             )
@@ -874,7 +1005,7 @@ class DenseProvider:
             return self._result(
                 started, status="unavailable", reason="DENSE_UNAVAILABLE"
             )
-        generation, details, manifest_source = manifest
+        generation, details, manifest_source, row_count = manifest
         if not self._manifest_matches(
             query.workspace_id,
             generation,
@@ -894,9 +1025,7 @@ class DenseProvider:
                 generation=generation,
             )
         try:
-            current_source = self._event_snapshot(
-                connection, query.workspace_id
-            )
+            current_source = self._event_snapshot(connection, query.workspace_id)
         except (sqlite3.Error, TypeError, ValueError):
             return self._result(
                 started,
@@ -909,6 +1038,12 @@ class DenseProvider:
                 started,
                 status="degraded",
                 reason="DENSE_REBUILD_REQUIRED",
+                generation=generation,
+            )
+        if row_count == 0:
+            return self._result(
+                started,
+                status="ready",
                 generation=generation,
             )
         if not self._query_encoder_matches(details):
@@ -1023,11 +1158,15 @@ class DenseProvider:
         self,
         connection: sqlite3.Connection,
         workspace_id: str,
-    ) -> tuple[
-        int,
-        Mapping[str, object],
-        tuple[int, str, int | None, str | None],
-    ] | None:
+    ) -> (
+        tuple[
+            int,
+            Mapping[str, object],
+            tuple[int, str, int | None, str | None],
+            int | None,
+        ]
+        | None
+    ):
         try:
             row = connection.execute(
                 "SELECT generation,source_event_count,"
@@ -1042,6 +1181,16 @@ class DenseProvider:
         if row is None:
             return None
         try:
+            count_row = connection.execute(
+                "SELECT row_count FROM projection_manifests "
+                "WHERE workspace_id=? AND projection_name='dense' "
+                "AND status='active' AND generation=?",
+                (workspace_id, row[0]),
+            ).fetchone()
+            row_count = None if count_row is None else int(count_row[0])
+        except (sqlite3.Error, TypeError, ValueError):
+            row_count = None
+        try:
             generation = _positive_integer(int(row[0]), "generation")
             source_count = int(row[1])
             source_root = str(row[2])
@@ -1049,19 +1198,20 @@ class DenseProvider:
             cursor_event = None if row[4] is None else str(row[4])
             details = json.loads(row[5])
         except (TypeError, ValueError):
-            return 1, {}, (0, "", None, None)
+            return 1, {}, (0, "", None, None), row_count
         if (
             source_count < 0
             or _CONTENT_HASH.fullmatch(source_root) is None
             or (cursor_us is None) != (cursor_event is None)
         ):
-            return generation, {}, (source_count, source_root, None, None)
+            return generation, {}, (source_count, source_root, None, None), row_count
         if not isinstance(details, Mapping):
             details = {}
         return (
             generation,
             details,
             (source_count, source_root, cursor_us, cursor_event),
+            row_count,
         )
 
     @staticmethod
@@ -1094,6 +1244,17 @@ class DenseProvider:
         generation: int,
         details: Mapping[str, object],
     ) -> bool:
+        encoder_contract = details.get("encoder_contract")
+        if isinstance(encoder_contract, Mapping) and isinstance(
+            encoder_contract.get("artifact_fingerprint"), str
+        ):
+            prepare = getattr(self._document_encoder, "prepare_artifact_identity", None)
+            if not callable(prepare):
+                return False
+            try:
+                prepare()
+            except (OSError, RuntimeError, TypeError, ValueError):
+                return False
         expected = dense_manifest_details(
             workspace_id=workspace_id,
             provider_key=self.provider_key,
@@ -1112,13 +1273,9 @@ class DenseProvider:
             )
         )
         expected["projection"] = "dense"
-        return all(
-            details.get(key) == value for key, value in expected.items()
-        )
+        return all(details.get(key) == value for key, value in expected.items())
 
-    def _query_encoder_matches(
-        self, details: Mapping[str, object]
-    ) -> bool:
+    def _query_encoder_matches(self, details: Mapping[str, object]) -> bool:
         return dense_query_encoder_matches_contract(
             query_encoder=self._encoder,
             encoder_contract=details.get("encoder_contract"),
@@ -1128,12 +1285,15 @@ class DenseProvider:
         )
 
     def _encode(self, text: str) -> list[float]:
-        encoder = self._encoder
-        if encoder is None:
-            from sentence_transformers import SentenceTransformer
+        with self._resource_lock:
+            if self._closed and not getattr(self._operation_state, "active", False):
+                raise RuntimeError("DENSE_PROVIDER_CLOSED")
+            encoder = self._encoder
+            if encoder is None:
+                from sentence_transformers import SentenceTransformer
 
-            encoder = SentenceTransformer(self.model_id)
-            self._encoder = encoder
+                encoder = SentenceTransformer(self.model_id)
+                self._encoder = encoder
         encode = getattr(encoder, "encode", None)
         if callable(encode):
             vector = encode(text)
@@ -1151,15 +1311,18 @@ class DenseProvider:
         return values
 
     def _get_client(self) -> object:
-        if self._client is None:
-            self._client = create_qdrant_client(
-                qdrant_url=self._qdrant_url,
-                qdrant_api_key=self._qdrant_api_key,
-                qdrant_path=self._qdrant_path,
-                timeout_seconds=self._timeout_seconds,
-                client_factory=self._client_factory,
-            )
-        return self._client
+        with self._resource_lock:
+            if self._closed and not getattr(self._operation_state, "active", False):
+                raise RuntimeError("DENSE_PROVIDER_CLOSED")
+            if self._client is None:
+                self._client = create_qdrant_client(
+                    qdrant_url=self._qdrant_url,
+                    qdrant_api_key=self._qdrant_api_key,
+                    qdrant_path=self._qdrant_path,
+                    timeout_seconds=self._timeout_seconds,
+                    client_factory=self._client_factory,
+                )
+            return self._client
 
     @staticmethod
     def _query_client(
@@ -1222,7 +1385,10 @@ class DenseProvider:
         ):
             return None
         payload_hash = payload.get("content_hash")
-        if not isinstance(payload_hash, str) or _CONTENT_HASH.fullmatch(payload_hash) is None:
+        if (
+            not isinstance(payload_hash, str)
+            or _CONTENT_HASH.fullmatch(payload_hash) is None
+        ):
             return None
         row = connection.execute(
             """
@@ -1286,4 +1452,5 @@ __all__ = [
     "dense_query_encoder_matches_contract",
     "dense_manifest_details",
     "dense_point_id",
+    "qdrant_collection_exists",
 ]

@@ -3,19 +3,19 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import replace
-from datetime import datetime, timezone
-from pathlib import Path
 import sqlite3
 import tempfile
 import threading
 import time
-from types import MappingProxyType
 import unittest
+from dataclasses import replace
+from datetime import datetime, timezone
+from pathlib import Path
+from types import MappingProxyType
+from unittest.mock import MagicMock, patch
 
 from daem0nmcp.api.v7.application import AdmittedRequest
 from daem0nmcp.workspace import Workspace
-
 
 WORKSPACE_ID = "ws_0123456789abcdef01234567"
 OTHER_WORKSPACE_ID = "ws_999999999999999999999999"
@@ -198,7 +198,9 @@ class CoreOperationTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(TypeError):
             operations["extra"] = lambda: None  # type: ignore[index]
 
-    async def test_covenant_status_is_recovery_safe_and_never_exposes_grants(self) -> None:
+    async def test_covenant_status_is_recovery_safe_and_never_exposes_grants(
+        self,
+    ) -> None:
         operation = self._operations()["covenant_status"]
         request = _request("covenant_status", workspace_id=WORKSPACE_ID)
 
@@ -217,13 +219,17 @@ class CoreOperationTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(after.next_step)
         self.assertNotIn("capabil", str(after.model_dump()).casefold())
 
-    async def test_versions_are_hash_bound_path_redacted_and_cursor_bounded(self) -> None:
+    async def test_versions_are_hash_bound_path_redacted_and_cursor_bounded(
+        self,
+    ) -> None:
         first = self.fixture.append(
-            "first decision", occurred_at_us=1_700_000_000_000_000,
+            "first decision",
+            occurred_at_us=1_700_000_000_000_000,
             recorded_at_us=1_700_000_000_000_100,
         )
         second = self.fixture.append(
-            "second decision", occurred_at_us=1_700_000_100_000_000,
+            "second decision",
+            occurred_at_us=1_700_000_100_000_000,
             recorded_at_us=1_700_000_100_000_100,
         )
         operation = self._operations()["memory_versions_list"]
@@ -274,13 +280,17 @@ class CoreOperationTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn(str(self.fixture.root), rendered)
         self.assertNotIn(str(self.fixture.root), rendered)
 
-    async def test_at_time_honors_valid_and_transaction_time_with_evidence(self) -> None:
+    async def test_at_time_honors_valid_and_transaction_time_with_evidence(
+        self,
+    ) -> None:
         first = self.fixture.append(
-            "old truth", occurred_at_us=1_700_000_000_000_000,
+            "old truth",
+            occurred_at_us=1_700_000_000_000_000,
             recorded_at_us=1_700_000_000_000_100,
         )
         self.fixture.append(
-            "new truth", occurred_at_us=1_700_000_100_000_000,
+            "new truth",
+            occurred_at_us=1_700_000_100_000_000,
             recorded_at_us=1_700_000_100_000_100,
         )
         result = await self._operations()["memory_at_time_get"](
@@ -301,7 +311,8 @@ class CoreOperationTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_tampered_event_history_fails_closed(self) -> None:
         self.fixture.append(
-            "trusted", occurred_at_us=1_700_000_000_000_000,
+            "trusted",
+            occurred_at_us=1_700_000_000_000_000,
             recorded_at_us=1_700_000_000_000_100,
         )
         connection = sqlite3.connect(self.fixture.database)
@@ -326,7 +337,8 @@ class CoreOperationTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_projection_rebuild_returns_typed_manifest_counts(self) -> None:
         self.fixture.append(
-            "projection source", occurred_at_us=1_700_000_000_000_000,
+            "projection source",
+            occurred_at_us=1_700_000_000_000_000,
             recorded_at_us=1_700_000_000_000_100,
         )
         result = await self._operations()["projection_rebuild"](
@@ -346,7 +358,8 @@ class CoreOperationTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_projection_retry_reuses_current_unless_force_is_true(self) -> None:
         self.fixture.append(
-            "projection source", occurred_at_us=1_700_000_000_000_000,
+            "projection source",
+            occurred_at_us=1_700_000_000_000_000,
             recorded_at_us=1_700_000_000_000_100,
         )
         operation = self._operations()["projection_rebuild"]
@@ -433,9 +446,12 @@ class CoreOperationTests(unittest.IsolatedAsyncioTestCase):
         finally:
             connection.close()
 
-    async def test_export_round_trip_is_hash_exact_and_import_is_replay_safe(self) -> None:
+    async def test_export_round_trip_is_hash_exact_and_import_is_replay_safe(
+        self,
+    ) -> None:
         event_id = self.fixture.append(
-            "portable", occurred_at_us=1_700_000_000_000_000,
+            "portable",
+            occurred_at_us=1_700_000_000_000_000,
             recorded_at_us=1_700_000_000_000_100,
         )
         operations = self._operations()
@@ -485,10 +501,6 @@ class CoreOperationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((0, 1), (replay.imported, replay.skipped))
         self.assertEqual([event_id], first.event_ids)
 
-        changed_bundle = bundle.model_dump(mode="python")
-        changed_bundle["legacy_projection_included"] = (
-            not changed_bundle["legacy_projection_included"]
-        )
         from daem0nmcp.api.v7.operations import CoreOperationError
 
         with self.assertRaises(CoreOperationError) as caught:
@@ -496,7 +508,7 @@ class CoreOperationTests(unittest.IsolatedAsyncioTestCase):
                 workspace=target.workspace,
                 request=_request(
                     "workspace_import",
-                    **{**arguments, "bundle": changed_bundle},
+                    **{**arguments, "merge": False},
                 ),
             )
         self.assertEqual("IDEMPOTENCY_CONFLICT", caught.exception.code)
@@ -509,7 +521,11 @@ class CoreOperationTests(unittest.IsolatedAsyncioTestCase):
         )
         bundle = await self._operations()["workspace_export"](
             workspace=self.fixture.workspace,
-            request=_request("workspace_export", workspace_id=WORKSPACE_ID),
+            request=_request(
+                "workspace_export",
+                workspace_id=WORKSPACE_ID,
+                include_legacy_projection=False,
+            ),
         )
         target_temp = tempfile.TemporaryDirectory()
         self.addCleanup(target_temp.cleanup)
@@ -535,15 +551,22 @@ class CoreOperationTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(1, result.imported)
 
-    async def test_import_tamper_and_cross_workspace_roll_back_every_write(self) -> None:
+    async def test_import_tamper_and_cross_workspace_roll_back_every_write(
+        self,
+    ) -> None:
         self.fixture.append(
-            "portable", occurred_at_us=1_700_000_000_000_000,
+            "portable",
+            occurred_at_us=1_700_000_000_000_000,
             recorded_at_us=1_700_000_000_000_100,
         )
         operations = self._operations()
         bundle = await operations["workspace_export"](
             workspace=self.fixture.workspace,
-            request=_request("workspace_export", workspace_id=WORKSPACE_ID),
+            request=_request(
+                "workspace_export",
+                workspace_id=WORKSPACE_ID,
+                include_legacy_projection=False,
+            ),
         )
         bad = bundle.model_dump(mode="python")
         bad["events"][0]["payload"]["data"]["record"]["content"] = "tampered"
@@ -552,9 +575,14 @@ class CoreOperationTests(unittest.IsolatedAsyncioTestCase):
 
         for candidate, code in (
             (bad, "IMPORT_INVALID"),
-            (bad_path, "WORKSPACE_PATH_ESCAPE"),
-            ({**bundle.model_dump(mode="python"), "workspace_id": OTHER_WORKSPACE_ID},
-             "CROSS_WORKSPACE_IMPORT_UNSUPPORTED"),
+            (bad_path, "IMPORT_INVALID"),
+            (
+                {
+                    **bundle.model_dump(mode="python"),
+                    "workspace_id": OTHER_WORKSPACE_ID,
+                },
+                "CROSS_WORKSPACE_IMPORT_UNSUPPORTED",
+            ),
         ):
             with self.subTest(code=code):
                 with self.assertRaises(Exception) as caught:
@@ -589,18 +617,24 @@ class CoreOperationTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.fixture.append(
-            "source branch", occurred_at_us=1_700_000_000_000_000,
+            "source branch",
+            occurred_at_us=1_700_000_000_000_000,
             recorded_at_us=1_700_000_000_000_100,
         )
         bundle = await self._operations()["workspace_export"](
             workspace=self.fixture.workspace,
-            request=_request("workspace_export", workspace_id=WORKSPACE_ID),
+            request=_request(
+                "workspace_export",
+                workspace_id=WORKSPACE_ID,
+                include_legacy_projection=False,
+            ),
         )
         target_temp = tempfile.TemporaryDirectory()
         self.addCleanup(target_temp.cleanup)
         target = _Fixture(Path(target_temp.name))
         target.append(
-            "target branch", occurred_at_us=1_700_000_000_000_000,
+            "target branch",
+            occurred_at_us=1_700_000_000_000_000,
             recorded_at_us=1_700_000_000_000_100,
         )
         dependencies = type(self.dependencies)(
@@ -634,18 +668,19 @@ class CoreOperationTests(unittest.IsolatedAsyncioTestCase):
         finally:
             connection.close()
 
-    async def test_export_rejects_vectors_and_raw_paths_without_disclosure(self) -> None:
+    async def test_export_rejects_vectors_and_raw_paths_without_disclosure(
+        self,
+    ) -> None:
         secret = str(self.fixture.root / "private" / "secret.txt")
         self.fixture.append(
-            "path source", occurred_at_us=1_700_000_000_000_000,
-            recorded_at_us=1_700_000_000_000_100, raw_path=secret,
+            "path source",
+            occurred_at_us=1_700_000_000_000_000,
+            recorded_at_us=1_700_000_000_000_100,
+            raw_path=secret,
         )
         operation = self._operations()["workspace_export"]
 
-        cases = (
-            (True, "CAPABILITY_DISABLED"),
-            (False, "WORKSPACE_PATH_ESCAPE"),
-        )
+        cases = ((True, "WORKSPACE_PATH_ESCAPE"), (False, "WORKSPACE_PATH_ESCAPE"))
         for include_vectors, code in cases:
             with self.subTest(include_vectors=include_vectors):
                 with self.assertRaises(Exception) as caught:
@@ -659,6 +694,66 @@ class CoreOperationTests(unittest.IsolatedAsyncioTestCase):
                     )
                 self.assertEqual(code, caught.exception.code)
                 self.assertNotIn(secret, str(caught.exception))
+
+    async def test_oversized_export_uses_paged_snapshot_builder(self) -> None:
+        from contextlib import contextmanager
+
+        connection = MagicMock()
+        connection.execute.return_value.fetchone.return_value = (10_001,)
+
+        @contextmanager
+        def active_connection(*_args, **_kwargs):
+            yield connection
+
+        with (
+            patch(
+                "daem0nmcp.api.v7.operations._active_connection",
+                side_effect=active_connection,
+            ),
+            patch(
+                "daem0nmcp.api.v7.operations.create_export_session",
+                return_value={
+                    "export_session_id": "xpt_" + "1" * 64,
+                    "manifest_hash": "2" * 64,
+                    "manifest": {
+                        "bundle_version": 2,
+                        "workspace_id": WORKSPACE_ID,
+                        "event_root_hash": "3" * 64,
+                        "event_count": 10_001,
+                        "legacy_projection": None,
+                        "vectors": None,
+                        "pages": [
+                            {
+                                "page_index": 0,
+                                "page_kind": "events",
+                                "item_count": 0,
+                                "byte_count": 28,
+                                "page_hash": "4" * 64,
+                            }
+                        ],
+                    },
+                    "page_index": 0,
+                    "page_count": 1,
+                    "page_kind": "events",
+                    "page_hash": "4" * 64,
+                    "next_cursor": None,
+                    "complete": True,
+                    "content": {"kind": "events", "items": []},
+                },
+            ) as snapshot_builder,
+        ):
+            bundle = await self._operations()["workspace_export"](
+                workspace=self.fixture.workspace,
+                request=_request(
+                    "workspace_export",
+                    workspace_id=WORKSPACE_ID,
+                    include_legacy_projection=False,
+                ),
+            )
+
+        self.assertEqual(2, bundle.bundle_version)
+        self.assertEqual(10_001, bundle.manifest["event_count"])
+        snapshot_builder.assert_called_once()
 
     async def test_export_rejects_nested_absolute_path_strings(self) -> None:
         secret = str(self.fixture.root / "private" / "nested-secret.txt")
@@ -678,7 +773,9 @@ class CoreOperationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("WORKSPACE_PATH_ESCAPE", caught.exception.code)
         self.assertNotIn(secret, str(caught.exception))
 
-    async def test_cancelled_sqlite_work_propagates_and_finishes_privately(self) -> None:
+    async def test_cancelled_sqlite_work_propagates_and_finishes_privately(
+        self,
+    ) -> None:
         started = threading.Event()
         released = threading.Event()
         finished = threading.Event()
@@ -749,7 +846,11 @@ class CoreOperationTests(unittest.IsolatedAsyncioTestCase):
         )
         bundle = await self._operations()["workspace_export"](
             workspace=self.fixture.workspace,
-            request=_request("workspace_export", workspace_id=WORKSPACE_ID),
+            request=_request(
+                "workspace_export",
+                workspace_id=WORKSPACE_ID,
+                include_legacy_projection=False,
+            ),
         )
         target_temp = tempfile.TemporaryDirectory()
         self.addCleanup(target_temp.cleanup)
@@ -760,20 +861,21 @@ class CoreOperationTests(unittest.IsolatedAsyncioTestCase):
             storage_path_resolver=lambda _workspace: target.storage,
             clock=lambda: NOW,
         )
-        original_import = operations_module.import_event_bundle
+        original_append = operations_module.EventStore.append_and_project
         staged = threading.Event()
         release = threading.Event()
 
-        def blocking_import(*args, **kwargs):
-            result = original_import(*args, **kwargs)
+        def blocking_append(*args, **kwargs):
+            result = original_append(*args, **kwargs)
             staged.set()
             release.wait(2)
             return result
 
         with patch.object(
-            operations_module,
-            "import_event_bundle",
-            side_effect=blocking_import,
+            operations_module.EventStore,
+            "append_and_project",
+            autospec=True,
+            side_effect=blocking_append,
         ):
             task = asyncio.create_task(
                 build_core_operations(dependencies)["workspace_import"](
@@ -799,9 +901,7 @@ class CoreOperationTests(unittest.IsolatedAsyncioTestCase):
         try:
             self.assertEqual(
                 0,
-                connection.execute(
-                    "SELECT COUNT(*) FROM memory_events"
-                ).fetchone()[0],
+                connection.execute("SELECT COUNT(*) FROM memory_events").fetchone()[0],
             )
             self.assertEqual(
                 0,
@@ -828,7 +928,11 @@ class CoreOperationTests(unittest.IsolatedAsyncioTestCase):
         )
         bundle = await self._operations()["workspace_export"](
             workspace=self.fixture.workspace,
-            request=_request("workspace_export", workspace_id=WORKSPACE_ID),
+            request=_request(
+                "workspace_export",
+                workspace_id=WORKSPACE_ID,
+                include_legacy_projection=False,
+            ),
         )
         target_temp = tempfile.TemporaryDirectory()
         self.addCleanup(target_temp.cleanup)
@@ -878,9 +982,7 @@ class CoreOperationTests(unittest.IsolatedAsyncioTestCase):
         try:
             self.assertEqual(
                 1,
-                connection.execute(
-                    "SELECT COUNT(*) FROM memory_events"
-                ).fetchone()[0],
+                connection.execute("SELECT COUNT(*) FROM memory_events").fetchone()[0],
             )
         finally:
             connection.close()

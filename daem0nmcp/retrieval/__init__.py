@@ -2,9 +2,9 @@
 
 from .composer import CompositionResult, EvidenceComposer, SelectedEvidence
 from .dense_projection import (
+    DenseProjectionBuilder,
     DenseProjectionBuildError,
     DenseProjectionBuildResult,
-    DenseProjectionBuilder,
 )
 from .fusion import (
     DEFAULT_RRF_K,
@@ -50,28 +50,28 @@ from .service import (
     RetrievalService,
 )
 from .specialized import (
-    GraphProvider,
     MAX_GRAPH_BRANCHING,
     MAX_GRAPH_DEPTH,
-    OutcomeProvider,
     PROCEDURE_FTS_BUILD_CONFIG_HASH,
+    GraphProvider,
+    OutcomeProvider,
     ProcedureProvider,
     TemporalProvider,
     procedure_fts_table_name,
 )
 from .specialized_projection import (
+    SpecializedProjectionBuilder,
     SpecializedProjectionBuildError,
     SpecializedProjectionBuildResult,
-    SpecializedProjectionBuilder,
 )
 from .types import (
+    MAX_TOKEN_BUDGET,
     Candidate,
     CitationEntry,
     ContextPackage,
     EvidenceItem,
     EvidenceRef,
     FusedCandidate,
-    MAX_TOKEN_BUDGET,
     ProviderDiagnostic,
     ProviderResult,
     RetrievalProvider,

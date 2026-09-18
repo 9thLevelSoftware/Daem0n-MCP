@@ -6,10 +6,10 @@ import io
 import sys
 import types
 import unittest
+from collections.abc import Iterator
 from contextlib import contextmanager, redirect_stdout
 from pathlib import Path
-from typing import Any, Iterator
-
+from typing import Any
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -67,9 +67,7 @@ class V7ServerCutoverTests(unittest.TestCase):
             self.assertIs(server_module.mcp, calls[0][2])
             self.assertEqual(len(calls), 1)
 
-            remote = server_module.create_server(
-                "streamable-http", host="127.0.0.1"
-            )
+            remote = server_module.create_server("streamable-http", host="127.0.0.1")
 
         self.assertIs(remote, calls[1][2])
         self.assertEqual(calls[1][:2], ("streamable-http", "127.0.0.1"))
@@ -83,9 +81,11 @@ class V7ServerCutoverTests(unittest.TestCase):
             calls.append(transport_mode)
             return _RecordingServer()
 
-        with _import_server_with_factory(create_v7_server) as server_module:
-            with self.assertRaisesRegex(ValueError, "stdio or streamable-http"):
-                server_module.create_server("sse")
+        with (
+            _import_server_with_factory(create_v7_server) as server_module,
+            self.assertRaisesRegex(ValueError, "stdio or streamable-http"),
+        ):
+            server_module.create_server("sse")
 
         self.assertEqual(calls, [])
 
@@ -128,15 +128,20 @@ class V7ServerCutoverTests(unittest.TestCase):
                 "host": "127.0.0.1",
                 "port": 9988,
                 "stateless_http": False,
+                "uvicorn_config": {"proxy_headers": False, "forwarded_allow_ips": ""},
             },
         )
-        self.assertEqual(len(middleware), 2)
+        self.assertEqual(len(middleware), 3)
         self.assertEqual(
             middleware[0].cls.__name__,
+            "HostPolicyMiddleware",
+        )
+        self.assertEqual(
+            middleware[1].cls.__name__,
             "StrictJsonBodyMiddleware",
         )
         self.assertEqual(
-            middleware[1].kwargs["allowed_origins"],
+            middleware[2].kwargs["allowed_origins"],
             ("http://127.0.0.1:9988",),
         )
 

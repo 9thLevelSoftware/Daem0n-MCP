@@ -253,8 +253,7 @@ class TestActiveContextMCPTools:
 
         # Get active context
         context = await covenant_compliant_project.call(
-            server.get_active_context,
-            project_path=covenant_compliant_project
+            server.get_active_context, project_path=covenant_compliant_project
         )
 
         assert context["count"] == 1
@@ -275,21 +274,22 @@ class TestActiveContextMCPTools:
 
         await covenant_compliant_project.call(
             server.set_active_context,
-            memory_id=mem["id"], project_path=covenant_compliant_project
+            memory_id=mem["id"],
+            project_path=covenant_compliant_project,
         )
 
         # Remove from context
         result = await covenant_compliant_project.call(
             server.remove_from_active_context,
-            memory_id=mem["id"], project_path=covenant_compliant_project
+            memory_id=mem["id"],
+            project_path=covenant_compliant_project,
         )
 
         assert result["status"] == "removed"
 
         # Verify it's gone
         context = await covenant_compliant_project.call(
-            server.get_active_context,
-            project_path=covenant_compliant_project
+            server.get_active_context, project_path=covenant_compliant_project
         )
         assert context["count"] == 0
 
@@ -314,17 +314,18 @@ class TestActiveContextMCPTools:
 
         await covenant_compliant_project.call(
             server.set_active_context,
-            memory_id=mem1["id"], project_path=covenant_compliant_project
+            memory_id=mem1["id"],
+            project_path=covenant_compliant_project,
         )
         await covenant_compliant_project.call(
             server.set_active_context,
-            memory_id=mem2["id"], project_path=covenant_compliant_project
+            memory_id=mem2["id"],
+            project_path=covenant_compliant_project,
         )
 
         # Clear all
         result = await covenant_compliant_project.call(
-            server.clear_active_context,
-            project_path=covenant_compliant_project
+            server.clear_active_context, project_path=covenant_compliant_project
         )
 
         assert result["status"] == "cleared"

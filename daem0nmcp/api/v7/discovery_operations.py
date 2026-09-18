@@ -4,8 +4,11 @@ Every handler reads or builds workspace- and generation-scoped v7 projections.
 Retained v6 discovery tables are deliberately not consulted here.
 """
 
+# ruff: noqa: I001 -- preserve the repository's CRLF import block.
+
 from __future__ import annotations
 
+import ast
 import asyncio
 import base64
 import hashlib
@@ -20,16 +23,20 @@ import sqlite3
 import threading
 import unicodedata
 from collections.abc import Callable, Mapping
+from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import MappingProxyType
-from typing import Any
+from typing import Any, Literal, Protocol
 
 from ...bounded_workers import BoundedWorkerBusyError, BoundedWorkerPool
 from ...discovery_projection import (
+    CodeEdgeProjectionSeed,
     CodeEntityProjectionSeed,
+    CodeProjectionIntegrityError,
     DiscoveryProjectionBuilder,
+    verify_code_projection,
 )
 from ...event_store import canonical_json_bytes, parse_canonical_json, sha256_json
 from ...retrieval import RetrievalQuery
@@ -44,7 +51,7 @@ from ...workspace import (
 )
 from .application import AdmittedRequest
 from .errors import STABLE_ERROR_CODE_SET
-from .models import Page, RecordSummary, RetrievalData
+from .models import CapabilityState, Page, RecordSummary, RetrievalData
 from .public_ids import (
     PublicObjectIdNotFound,
     PublicObjectIdRepository,
@@ -52,6 +59,7 @@ from .public_ids import (
     StaleProjectionId,
     derive_public_object_id,
 )
+from .runtime_protocols import ActiveStorageResolver, WorkerPool
 from .runtime_services import RuntimeServiceError, WorkspaceStorageResolver
 from .tools import (
     CodeEntitySummary,
@@ -97,6 +105,8 @@ _MAX_INDEX_FILES = 10_000
 _MAX_INDEX_FILE_BYTES = 5 * 1024 * 1024
 _MAX_INDEX_TOTAL_BYTES = 100 * 1024 * 1024
 _MAX_INDEX_ENTITIES = 200_000
+_MAX_INDEX_EDGES = 200_000
+_MAX_RELATIONSHIPS_PER_FILE = 50_000
 _INDEX_SKIP_PARTS = frozenset(
     {
         ".git",
@@ -119,23 +129,163 @@ _RECORD_COLUMNS = (
     "file_path_relative,archived,deleted_at_us,created_at_us,updated_at_us"
 )
 _QUALIFIED_RECORD_COLUMNS = ",".join(
-    f"record.{column.strip()}"
-    for column in _RECORD_COLUMNS.split(",")
+    f"record.{column.strip()}" for column in _RECORD_COLUMNS.split(",")
 )
 
 
 class DiscoveryOperationError(RuntimeError):
     """Stable, path-free failure understood by the shared v7 router."""
 
-    def __init__(self, code: str) -> None:
+    def __init__(
+        self,
+        code: str,
+        *,
+        capability_states: tuple[CapabilityState, ...] = (),
+    ) -> None:
         if code not in STABLE_ERROR_CODE_SET:
             raise ValueError("discovery operation error code is not stable")
         self.code = code
+        self.capability_states = capability_states
         super().__init__(code)
 
 
-class _DiscoveryMutationCancelled(RuntimeError):
+class _DiscoveryMutationCancelledError(RuntimeError):
     """Internal signal proving a discovery mutation stopped before publish."""
+
+
+class _RecallService(Protocol):
+    def retrieve(
+        self,
+        workspace: Workspace,
+        query: RetrievalQuery,
+        linked_workspace_ids: frozenset[str],
+    ) -> object: ...
+
+
+def _python_symbol(node: ast.AST) -> str | None:
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Attribute):
+        prefix = _python_symbol(node.value)
+        return None if prefix is None else f"{prefix}.{node.attr}"
+    return None
+
+
+def _python_relationships(
+    source: bytes, module_name: str = ""
+) -> tuple[list[dict[str, object]], ...]:
+    try:
+        tree = ast.parse(source.decode("utf-8", errors="strict"))
+    except (SyntaxError, UnicodeDecodeError, ValueError):
+        raise RuntimeError("python relationship parse failed") from None
+    calls: list[dict[str, object]] = []
+    imports: list[dict[str, object]] = []
+    references: list[dict[str, object]] = []
+    # Preserve explicit bindings and conservatively suppress names assigned or
+    # shadowed anywhere in this source. A missing static edge is preferable to
+    # authenticating a guessed receiver as a dependency. This deliberately does
+    # not infer instance types, dynamic imports or runtime monkey-patching.
+    bindings: dict[str, set[str]] = {}
+    shadowed: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                local = alias.asname or alias.name.split(".", 1)[0]
+                target = alias.name if alias.asname else local
+                bindings.setdefault(local, set()).add(target)
+        elif isinstance(node, ast.ImportFrom):
+            prefix = "." * node.level + (node.module or "")
+            for alias in node.names:
+                if alias.name != "*":
+                    target = (
+                        f"{prefix}.{alias.name}"
+                        if node.module
+                        else f"{prefix}{alias.name}"
+                    )
+                    bindings.setdefault(alias.asname or alias.name, set()).add(target)
+        elif isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del)):
+            shadowed.add(node.id)
+        elif isinstance(node, ast.arg):
+            shadowed.add(node.arg)
+        elif isinstance(node, (ast.Global, ast.Nonlocal)):
+            shadowed.update(node.names)
+    local_definitions = {
+        node.name
+        for node in tree.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+    }
+    for definition_name in local_definitions:
+        if definition_name in bindings and module_name:
+            bindings[definition_name].add(f"{module_name}.{definition_name}")
+
+    def resolved_symbol(node: ast.AST) -> str | None:
+        name = _python_symbol(node)
+        if not name:
+            return None
+        head, separator, tail = name.partition(".")
+        if head in shadowed:
+            return None
+        targets = bindings.get(head)
+        if targets is not None:
+            if len(targets) != 1:
+                return None
+            target = next(iter(targets))
+            # Relative imports retain their level and cannot be accidentally
+            # resolved as a similarly named absolute module.
+            return target + (separator + tail if separator else "")
+        if head in local_definitions and module_name:
+            return f"{module_name}.{name}"
+        return None
+
+    for node in ast.walk(tree):
+        line = getattr(node, "lineno", None)
+        if isinstance(line, bool) or not isinstance(line, int) or line < 1:
+            continue
+        if isinstance(node, ast.Call):
+            name = resolved_symbol(node.func)
+            if name:
+                calls.append({"name": name, "line": line})
+        elif isinstance(node, ast.Import):
+            imports.extend({"name": alias.name, "line": line} for alias in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            module = "." * node.level + (node.module or "")
+            imports.extend(
+                {
+                    "name": f"{module}.{alias.name}"
+                    if node.module
+                    else f"{module}{alias.name}",
+                    "line": line,
+                }
+                for alias in node.names
+                if alias.name != "*"
+            )
+        elif isinstance(node, (ast.Name, ast.Attribute)) and isinstance(
+            getattr(node, "ctx", None), ast.Load
+        ):
+            name = resolved_symbol(node)
+            if name:
+                references.append({"name": name, "line": line})
+        if len(calls) + len(imports) + len(references) > _MAX_RELATIONSHIPS_PER_FILE:
+            raise RuntimeError("code relationship extraction exceeded its bound")
+    return calls, imports, references
+
+
+def _relationship_slice(
+    values: list[dict[str, object]], start_line: object, end_line: object
+) -> list[dict[str, object]]:
+    if (
+        isinstance(start_line, bool)
+        or not isinstance(start_line, int)
+        or isinstance(end_line, bool)
+        or not isinstance(end_line, int)
+    ):
+        raise TypeError("tree-sitter entity lines are malformed")
+    result: list[dict[str, object]] = []
+    for value in values:
+        line = value.get("line")
+        if isinstance(line, int) and start_line <= line <= end_line:
+            result.append(value)
+    return result
 
 
 def _default_clock() -> datetime:
@@ -177,18 +327,41 @@ class _StrictTreeSitterProducer:
         get_tree = getattr(self._delegate, "_get_cached_tree", None)
         get_parser = getattr(self._delegate, "get_parser", None)
         extract = getattr(self._delegate, "_extract_entities", None)
-        if not all(callable(value) for value in (get_tree, get_parser, extract)):
+        extract_imports = getattr(self._delegate, "_extract_imports", None)
+        if not callable(get_tree) or not callable(get_parser) or not callable(extract):
             raise TypeError("tree-sitter producer is incomplete")
         tree = get_tree(file_path, source, language_name)
         if tree is None:
             raise RuntimeError("tree-sitter parse failed")
         _parser, language = get_parser(language_name)
         root_node = getattr(tree, "root_node", None)
-        if language is None or root_node is None or bool(
-            getattr(root_node, "has_error", False)
+        if (
+            language is None
+            or root_node is None
+            or bool(getattr(root_node, "has_error", False))
         ):
             raise RuntimeError("tree-sitter parse was incomplete")
         relative = file_path.relative_to(project_path).as_posix()
+        if language_name == "python":
+            module_name = (
+                file_path.parent.name
+                if file_path.stem == "__init__"
+                else file_path.stem
+            )
+            calls, imports, references = _python_relationships(source, module_name)
+        else:
+            calls = []
+            references = []
+            imports = []
+            if callable(extract_imports):
+                raw_imports = extract_imports(tree, language, language_name, source)
+                if not isinstance(raw_imports, list):
+                    raise TypeError("tree-sitter imports are malformed")
+                imports = [
+                    {"name": value, "line": None}
+                    for value in raw_imports
+                    if isinstance(value, str) and value
+                ]
 
         def entities() -> object:
             for entity in extract(
@@ -200,7 +373,32 @@ class _StrictTreeSitterProducer:
             ):
                 if not isinstance(entity, Mapping):
                     raise TypeError("tree-sitter returned a malformed entity")
-                yield dict(entity)
+                value = dict(entity)
+                start_line = value.get("line_start")
+                end_line = value.get("line_end")
+                value["calls"] = _relationship_slice(calls, start_line, end_line)
+                value["references"] = _relationship_slice(
+                    references, start_line, end_line
+                )
+                # A file-level import does not make every function in that
+                # file depend on the imported symbol. Attribute import edges
+                # only to entities that use the binding or contain the import.
+                used_names = {
+                    str(item["name"])
+                    for item in (*value["calls"], *value["references"])
+                }
+                inline_imports = _relationship_slice(imports, start_line, end_line)
+                value["imports"] = [
+                    item
+                    for item in imports
+                    if item in inline_imports
+                    or any(
+                        name == item["name"] or name.startswith(str(item["name"]) + ".")
+                        for name in used_names
+                    )
+                    or language_name != "python"
+                ]
+                yield value
 
         return entities()
 
@@ -215,12 +413,15 @@ def _default_code_indexer_factory() -> object:
 class DiscoveryOperationDependencies:
     """Owned dependencies for canonical discovery reads."""
 
-    storage_resolver: object = field(default_factory=WorkspaceStorageResolver)
+    storage_resolver: ActiveStorageResolver = field(
+        default_factory=WorkspaceStorageResolver
+    )
     clock: Callable[[], datetime] = field(default=_default_clock)
     cursor_secret: bytes = field(default_factory=lambda: secrets.token_bytes(32))
-    worker_pool: object = field(default_factory=_default_worker_pool)
-    recall_service: object | None = None
+    worker_pool: WorkerPool = field(default_factory=_default_worker_pool)
+    recall_service: _RecallService | None = None
     code_indexer_factory: Callable[[], object] = _default_code_indexer_factory
+    capability_statuses: Mapping[str, str] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if not callable(getattr(self.storage_resolver, "locked_active", None)):
@@ -239,6 +440,14 @@ class DiscoveryOperationDependencies:
             raise TypeError("recall_service must provide retrieve")
         if not callable(self.code_indexer_factory):
             raise TypeError("code_indexer_factory must be callable")
+        statuses = dict(self.capability_statuses)
+        if any(
+            not isinstance(name, str)
+            or status not in {"ready", "disabled", "degraded", "failed"}
+            for name, status in statuses.items()
+        ):
+            raise ValueError("capability_statuses contains an invalid status")
+        object.__setattr__(self, "capability_statuses", MappingProxyType(statuses))
 
     def close(self) -> None:
         """Join and release the dependency-owned bounded worker pool."""
@@ -260,9 +469,7 @@ def _authorize(
         raise DiscoveryOperationError("UNAUTHORIZED_WORKSPACE")
     try:
         canonical = workspace.root.resolve(strict=True)
-        registered = WorkspaceRegistry(
-            [canonical], default_root=canonical
-        ).default
+        registered = WorkspaceRegistry([canonical], default_root=canonical).default
         exact_root = os.path.normcase(str(workspace.root)) == os.path.normcase(
             str(canonical)
         )
@@ -272,10 +479,10 @@ def _authorize(
         raise DiscoveryOperationError("UNAUTHORIZED_WORKSPACE")
 
 
-def _database_path(workspace: Workspace, active: object) -> Path:
+def _database_path(workspace: Workspace, active: Any) -> Path:
     try:
         root = workspace.root.resolve(strict=True)
-        candidate = Path(getattr(active, "path"))
+        candidate = Path(active.path)
         if candidate.is_symlink():
             raise ValueError
         resolved = candidate.resolve(strict=True)
@@ -301,10 +508,9 @@ def _verify_database_connection(connection: sqlite3.Connection) -> None:
         }
     except Exception:
         raise DiscoveryOperationError("CAPABILITY_DEGRADED") from None
-    if (
-        not REQUIRED_V7_SCHEMA_VERSIONS <= versions
-        or not _REQUIRED_TABLES.issubset(tables)
-    ):
+    if not versions.issuperset(
+        REQUIRED_V7_SCHEMA_VERSIONS
+    ) or not _REQUIRED_TABLES.issubset(tables):
         raise DiscoveryOperationError("CAPABILITY_DEGRADED")
 
 
@@ -361,10 +567,7 @@ def _datetime_us(value: object) -> int:
         raise DiscoveryOperationError("CAPABILITY_DEGRADED")
     try:
         delta = value.astimezone(timezone.utc) - _EPOCH
-        result = (
-            (delta.days * 86_400 + delta.seconds) * 1_000_000
-            + delta.microseconds
-        )
+        result = (delta.days * 86_400 + delta.seconds) * 1_000_000 + delta.microseconds
     except (OverflowError, ValueError):
         raise DiscoveryOperationError("CAPABILITY_DEGRADED") from None
     if not -(2**63) <= result <= 2**63 - 1:
@@ -601,9 +804,7 @@ def _validate_entity_partition(
     ).fetchall()
     if len(memberships) > _MAX_PARTITION_MEMBERSHIPS:
         raise DiscoveryOperationError("TASK_REQUIRED")
-    indexed: dict[str, list[list[object]]] = {
-        str(row[0]): [] for row in rows
-    }
+    indexed: dict[str, list[list[object]]] = {str(row[0]): [] for row in rows}
     for membership in memberships:
         entity_id = str(membership[0])
         if (
@@ -628,15 +829,13 @@ def _validate_entity_partition(
             or not 1 <= len(name) <= 256
             or name != unicodedata.normalize("NFC", name)
             or _CONTROL_RE.search(name) is not None
-            or normalized_name
-            != unicodedata.normalize("NFC", name.casefold())
+            or normalized_name != unicodedata.normalize("NFC", name.casefold())
             or not isinstance(entity_type, str)
             or _ENTITY_TYPE_RE.fullmatch(entity_type) is None
             or isinstance(mention_count, bool)
             or not isinstance(mention_count, int)
             or mention_count < len(indexed[entity_id])
-            or identity_hash
-            != sha256_json(["entity", entity_type, normalized_name])
+            or identity_hash != sha256_json(["entity", entity_type, normalized_name])
             or row[6] != f"s:{identity_hash}"
             or row[7] != 0
             or _ENTITY_ID_RE.fullmatch(entity_id) is None
@@ -743,10 +942,7 @@ def _validate_community_partition(
             or label != unicodedata.normalize("NFC", label)
             or _CONTROL_RE.search(label) is not None
             or (parent_id is not None and parent_source is None)
-            or (
-                parent_id is not None
-                and level_by_id[str(parent_id)] <= level
-            )
+            or (parent_id is not None and level_by_id[str(parent_id)] <= level)
             or row[4] != len(indexed[str(row[0])])
             or row[5]
             != sha256_json(
@@ -780,91 +976,22 @@ def _validate_code_partition(
     workspace_id: str,
     manifest: ProjectionManifest,
 ) -> None:
-    expected_count, expected_hash = _partition_metadata(
-        connection, workspace_id, "code", manifest.generation, "code"
-    )
-    rows = connection.execute(
-        "SELECT code.code_entity_id,code.kind,code.qualified_name,"
-        "code.normalized_name,code.relative_file_path,code.start_line,"
-        "code.end_line,code.identity_hash,mapping.source_key,"
-        "mapping.projection_generation "
-        "FROM discovery_code_entities AS code "
-        "LEFT JOIN public_object_ids AS mapping "
-        "ON mapping.public_id=code.code_entity_id "
-        "AND mapping.workspace_id=code.workspace_id "
-        "AND mapping.object_kind='code' "
-        "WHERE code.workspace_id=? AND code.code_generation=? "
-        "ORDER BY code.identity_hash LIMIT ?",
-        (workspace_id, manifest.generation, _MAX_PARTITION_ROWS + 1),
-    ).fetchall()
-    if len(rows) > _MAX_PARTITION_ROWS:
-        raise DiscoveryOperationError("TASK_REQUIRED")
-    payload: list[object] = []
-    for row in rows:
-        qualified_name = row[2]
-        normalized_name = row[3]
-        kind = row[1]
-        start_line = row[5]
-        end_line = row[6]
-        identity_hash = row[7]
-        source_key = row[8]
-        if (
-            not isinstance(source_key, str)
-            or not source_key.startswith("s:")
-            or row[9] != manifest.generation
-            or _CODE_ID_RE.fullmatch(str(row[0])) is None
-            or not isinstance(qualified_name, str)
-            or not qualified_name
-            or len(qualified_name) > 256
-            or unicodedata.normalize("NFC", qualified_name) != qualified_name
-            or normalized_name
-            != unicodedata.normalize("NFC", qualified_name.casefold())
-            or kind not in _CODE_KINDS
-            or not _safe_code_path(row[4])
-            or isinstance(start_line, bool)
-            or not isinstance(start_line, int)
-            or start_line < 1
-            or isinstance(end_line, bool)
-            or not isinstance(end_line, int)
-            or end_line < start_line
-            or identity_hash
-            != sha256_json(
-                [
-                    "code",
-                    kind,
-                    normalized_name,
-                    row[4],
-                    start_line,
-                    end_line,
-                ]
-            )
-            or row[0]
-            != derive_public_object_id(
-                workspace_id,
-                PublicObjectKind.CODE,
-                source_key[2:],
-                manifest.generation,
-            )
-        ):
-            raise DiscoveryOperationError("CAPABILITY_DEGRADED")
-        payload.append(
-            {
-                "code_entity_id": row[0],
-                "end_line": row[6],
-                "identity_hash": row[7],
-                "kind": row[1],
-                "normalized_name": row[3],
-                "qualified_name": row[2],
-                "relative_file_path": row[4],
-                "start_line": row[5],
-            }
+    try:
+        verify_code_projection(
+            connection,
+            workspace_id,
+            manifest.generation,
+            expected_root_hash=manifest.source_root_hash,
+            max_entities=_MAX_PARTITION_ROWS,
+            max_edges=_MAX_INDEX_EDGES,
         )
-    if (
-        len(rows) != expected_count
-        or sha256_json(payload) != expected_hash
-        or manifest.source_root_hash != expected_hash
-    ):
-        raise DiscoveryOperationError("CAPABILITY_DEGRADED")
+    except CodeProjectionIntegrityError as exc:
+        code = (
+            "TASK_REQUIRED"
+            if exc.code == "CODE_PROJECTION_TOO_LARGE"
+            else "CAPABILITY_DEGRADED"
+        )
+        raise DiscoveryOperationError(code) from None
 
 
 def _cursor_binding(
@@ -1068,10 +1195,10 @@ def _index_files(
     try:
         for pattern in sorted(set(validate_index_patterns(patterns))):
             if cancelled.is_set():
-                raise _DiscoveryMutationCancelled
+                raise _DiscoveryMutationCancelledError
             for candidate in index_root.glob(pattern):
                 if cancelled.is_set():
-                    raise _DiscoveryMutationCancelled
+                    raise _DiscoveryMutationCancelledError
                 visited += 1
                 if visited > _MAX_INDEX_FILES * 4:
                     raise DiscoveryOperationError("TASK_REQUIRED")
@@ -1105,7 +1232,7 @@ def _index_files(
                 unique[key] = resolved
                 if len(unique) > _MAX_INDEX_FILES:
                     raise DiscoveryOperationError("TASK_REQUIRED")
-    except _DiscoveryMutationCancelled:
+    except _DiscoveryMutationCancelledError:
         raise
     except DiscoveryOperationError:
         raise
@@ -1129,14 +1256,11 @@ def _supported_index_extensions(indexer: object) -> frozenset[str]:
         if not raw or len(raw) > 128:
             raise ValueError
         extensions = frozenset(raw)
-        if (
-            len(extensions) != len(raw)
-            or any(
-                not isinstance(extension, str)
-                or _CODE_EXTENSION_RE.fullmatch(extension) is None
-                or extension != extension.lower()
-                for extension in extensions
-            )
+        if len(extensions) != len(raw) or any(
+            not isinstance(extension, str)
+            or _CODE_EXTENSION_RE.fullmatch(extension) is None
+            or extension != extension.lower()
+            for extension in extensions
         ):
             raise ValueError
         return extensions
@@ -1159,12 +1283,171 @@ def _read_index_source(file_path: Path) -> bytes:
         raise DiscoveryOperationError("CAPABILITY_DEGRADED") from None
 
 
+def _raw_relationships(
+    raw: Mapping[str, object], kind: str
+) -> tuple[tuple[str, int | None], ...]:
+    values = raw.get(f"{kind}s", [])
+    if (
+        not isinstance(values, (list, tuple))
+        or len(values) > _MAX_RELATIONSHIPS_PER_FILE
+    ):
+        raise DiscoveryOperationError("CAPABILITY_DEGRADED")
+    result: list[tuple[str, int | None]] = []
+    for value in values:
+        line: object = None
+        if isinstance(value, str):
+            relationship_name: object = value
+        elif isinstance(value, Mapping):
+            relationship_name = value.get("name")
+            line = value.get("line")
+        else:
+            raise DiscoveryOperationError("CAPABILITY_DEGRADED")
+        if (
+            not isinstance(relationship_name, str)
+            or not 1 <= len(relationship_name) <= 256
+            or relationship_name != unicodedata.normalize("NFC", relationship_name)
+            or _CONTROL_RE.search(relationship_name) is not None
+            or (
+                line is not None
+                and (
+                    isinstance(line, bool)
+                    or not isinstance(line, int)
+                    or line < 1
+                    or line > 2**31 - 1
+                )
+            )
+        ):
+            raise DiscoveryOperationError("CAPABILITY_DEGRADED")
+        result.append((relationship_name, line if isinstance(line, int) else None))
+    return tuple(result)
+
+
+def _resolve_code_edges(
+    seeds: Mapping[str, CodeEntityProjectionSeed],
+    relationships: Mapping[str, list[tuple[str, str, int | None]]],
+) -> tuple[CodeEdgeProjectionSeed, ...]:
+    exact: dict[str, list[str]] = {}
+    leaf: dict[str, list[str]] = {}
+    modules: dict[str, list[str]] = {}
+    for source_key, seed in seeds.items():
+        normalized = unicodedata.normalize("NFC", seed.qualified_name)
+        exact.setdefault(normalized, []).append(source_key)
+        path = Path(seed.relative_file_path)
+        if path.suffix == ".py":
+            module_path = path.with_suffix("")
+            if path.stem == "__init__":
+                module_path = path.parent
+            basename = module_path.name
+            if normalized.startswith(basename + "."):
+                absolute_name = (
+                    ".".join(module_path.parts) + normalized[len(basename) :]
+                )
+                if absolute_name != normalized:
+                    exact.setdefault(absolute_name, []).append(source_key)
+        leaf.setdefault(normalized.rsplit(".", 1)[-1], []).append(source_key)
+        if seed.kind in {"file", "module"}:
+            modules.setdefault(normalized, []).append(source_key)
+    resolved: dict[tuple[str, str, str], int | None] = {}
+    for source_key in sorted(relationships):
+        for kind, raw_name, source_line in relationships[source_key]:
+            normalized = unicodedata.normalize("NFC", raw_name)
+            if normalized.startswith("."):
+                level = len(normalized) - len(normalized.lstrip("."))
+                package = Path(seeds[source_key].relative_file_path).parent.parts
+                if level > len(package):
+                    continue
+                normalized = ".".join(
+                    (*package[: len(package) - level + 1], normalized[level:])
+                )
+            candidates = exact.get(normalized, [])
+            if kind != "import":
+                local_candidates = [
+                    key
+                    for key in candidates
+                    if seeds[key].relative_file_path
+                    == seeds[source_key].relative_file_path
+                ]
+                if local_candidates:
+                    candidates = local_candidates
+            if not candidates and kind != "import" and "." not in normalized:
+                # Unqualified references can only use their source file's
+                # declarations. Cross-file resolution requires an exact name
+                # supplied by an explicit import binding.
+                candidates = [
+                    key
+                    for key in leaf.get(normalized, [])
+                    if seeds[key].relative_file_path
+                    == seeds[source_key].relative_file_path
+                ]
+            if len(candidates) != 1 and kind == "import":
+                candidates = modules.get(normalized, [])
+            if len(candidates) != 1:
+                continue
+            target_key = candidates[0]
+            if target_key == source_key:
+                continue
+            edge_key = (source_key, target_key, kind)
+            prior = resolved.get(edge_key)
+            if prior is None or (source_line is not None and source_line < prior):
+                resolved[edge_key] = source_line
+            if len(resolved) > _MAX_INDEX_EDGES:
+                raise DiscoveryOperationError("TASK_REQUIRED")
+    return tuple(
+        CodeEdgeProjectionSeed(source, target, kind, line)
+        for (source, target, kind), line in sorted(resolved.items())
+    )
+
+
+def _code_capability_error(
+    dependencies: DiscoveryOperationDependencies,
+) -> DiscoveryOperationError | None:
+    status = dependencies.capability_statuses.get("apps")
+    if status is None or status == "ready":
+        return None
+    capability_status: Literal["disabled", "degraded", "failed"]
+    if status == "disabled":
+        capability_status = "disabled"
+    elif status == "degraded":
+        capability_status = "degraded"
+    else:
+        capability_status = "failed"
+    code = (
+        "CAPABILITY_DISABLED"
+        if capability_status == "disabled"
+        else "CAPABILITY_DEGRADED"
+    )
+    reason = (
+        "CAPABILITY_DISABLED"
+        if capability_status == "disabled"
+        else "CAPABILITY_CONFIGURATION_INVALID"
+        if capability_status == "failed"
+        else "CAPABILITY_DEGRADED"
+    )
+    remediation = (
+        "Set DAEM0NMCP_APPS_ENABLED=true and install the apps dependency profile."
+    )
+    return DiscoveryOperationError(
+        code,
+        capability_states=(
+            CapabilityState(
+                name="apps",
+                status=capability_status,
+                reason_code=reason,
+                remediation=remediation,
+            ),
+        ),
+    )
+
+
 def _code_index_sync(
     dependencies: DiscoveryOperationDependencies,
     workspace: Workspace,
     request: AdmittedRequest,
     cancelled: threading.Event,
 ) -> CodeIndexData:
+    capability_error = _code_capability_error(dependencies)
+    if capability_error is not None:
+        raise capability_error
     try:
         indexer = dependencies.code_indexer_factory()
     except Exception:
@@ -1184,29 +1467,41 @@ def _code_index_sync(
         cancelled,
     )
     seeds: dict[str, CodeEntityProjectionSeed] = {}
+    relationships: dict[str, list[tuple[str, str, int | None]]] = {}
+    relationship_count = 0
+    source_digests: dict[str, str] = {}
     indexed_files = 0
     total_source_bytes = 0
     for file_path in files:
         if cancelled.is_set():
-            raise _DiscoveryMutationCancelled
+            raise _DiscoveryMutationCancelledError
         try:
             resolved = resolve_index_file(workspace.root, file_path)
             resolved.relative_to(index_root)
             relative = resolved.relative_to(workspace.root).as_posix()
             source = _read_index_source(resolved)
+            source_digests[relative] = hashlib.sha256(source).hexdigest()
             total_source_bytes += len(source)
             if total_source_bytes > _MAX_INDEX_TOTAL_BYTES:
                 raise DiscoveryOperationError("TASK_REQUIRED")
             raw_entities = index_source(resolved, workspace.root, source)
             for raw in raw_entities:
                 if cancelled.is_set():
-                    raise _DiscoveryMutationCancelled
+                    raise _DiscoveryMutationCancelledError
                 if not isinstance(raw, Mapping):
                     raise DiscoveryOperationError("CAPABILITY_DEGRADED")
                 kind = _index_kind(raw.get("entity_type"))
                 qualified = raw.get("qualified_name") or raw.get("name")
                 start = raw.get("line_start")
                 end = raw.get("line_end")
+                if (
+                    not isinstance(qualified, str)
+                    or isinstance(start, bool)
+                    or not isinstance(start, int)
+                    or isinstance(end, bool)
+                    or not isinstance(end, int)
+                ):
+                    raise DiscoveryOperationError("CAPABILITY_DEGRADED")
                 source_key = sha256_json(
                     ["code-source", kind, qualified, relative, start, end]
                 )
@@ -1222,34 +1517,65 @@ def _code_index_sync(
                 if prior is not None and prior != seed:
                     raise DiscoveryOperationError("CAPABILITY_DEGRADED")
                 seeds[source_key] = seed
+                relation_values = relationships.setdefault(source_key, [])
+                for kind in ("call", "import", "reference"):
+                    values = tuple(
+                        (kind, name, line)
+                        for name, line in _raw_relationships(raw, kind)
+                    )
+                    relationship_count += len(values)
+                    if relationship_count > _MAX_INDEX_EDGES:
+                        raise DiscoveryOperationError("TASK_REQUIRED")
+                    relation_values.extend(values)
+                    if len(relation_values) > _MAX_RELATIONSHIPS_PER_FILE:
+                        raise DiscoveryOperationError("TASK_REQUIRED")
                 if len(seeds) > _MAX_INDEX_ENTITIES:
                     raise DiscoveryOperationError("TASK_REQUIRED")
             indexed_files += 1
-        except _DiscoveryMutationCancelled:
+        except _DiscoveryMutationCancelledError:
             raise
         except DiscoveryOperationError:
             raise
         except (IndexPathError, OSError, RuntimeError, TypeError, ValueError):
             raise DiscoveryOperationError("CAPABILITY_DEGRADED") from None
 
+    edge_seeds = _resolve_code_edges(seeds, relationships)
     try:
         if cancelled.is_set():
-            raise _DiscoveryMutationCancelled
+            raise _DiscoveryMutationCancelledError
         with dependencies.storage_resolver.locked_active(workspace) as active:
-            connection = _open_writable_database(
-                _database_path(workspace, active)
-            )
+            connection = _open_writable_database(_database_path(workspace, active))
             try:
                 if cancelled.is_set():
-                    raise _DiscoveryMutationCancelled
+                    raise _DiscoveryMutationCancelledError
 
                 def before_commit() -> None:
                     if cancelled.is_set():
-                        raise _DiscoveryMutationCancelled
+                        raise _DiscoveryMutationCancelledError
+                    current_files, current_skipped, current_seen = _index_files(
+                        workspace,
+                        index_root,
+                        list(request.patterns),
+                        supported_extensions,
+                        cancelled,
+                    )
+                    if (
+                        current_files != files
+                        or current_skipped != skipped
+                        or current_seen != files_seen
+                    ):
+                        raise DiscoveryOperationError("EVENT_STREAM_CONFLICT")
+                    for source_path in current_files:
+                        current = resolve_index_file(workspace.root, source_path)
+                        relative_path = current.relative_to(workspace.root).as_posix()
+                        digest = hashlib.sha256(_read_index_source(current)).hexdigest()
+                        if source_digests.get(relative_path) != digest:
+                            raise DiscoveryOperationError("EVENT_STREAM_CONFLICT")
 
                 result = DiscoveryProjectionBuilder(connection).rebuild_code(
                     workspace.workspace_id,
                     entities=tuple(seeds[key] for key in sorted(seeds)),
+                    edges=edge_seeds,
                     force=request.force,
                     before_commit=before_commit,
                 )
@@ -1265,7 +1591,7 @@ def _code_index_sync(
                 )
             finally:
                 connection.close()
-    except _DiscoveryMutationCancelled:
+    except _DiscoveryMutationCancelledError:
         raise
     except DiscoveryOperationError:
         raise
@@ -1295,16 +1621,10 @@ def _code_search_sync(
     request: AdmittedRequest,
 ) -> Page[CodeEntitySummary]:
     def reader(connection: sqlite3.Connection) -> Page[CodeEntitySummary]:
-        manifest = _active_projection(
-            connection, workspace.workspace_id, "code"
-        )
+        manifest = _active_projection(connection, workspace.workspace_id, "code")
         _validate_code_partition(connection, workspace.workspace_id, manifest)
         query = unicodedata.normalize("NFC", request.query.casefold())
-        kinds = (
-            None
-            if request.entity_kinds is None
-            else sorted(request.entity_kinds)
-        )
+        kinds = None if request.entity_kinds is None else sorted(request.entity_kinds)
         selector = {"entity_kinds": kinds, "query": query}
         binding = _cursor_binding(
             workspace.workspace_id,
@@ -1348,9 +1668,7 @@ def _code_search_sync(
         truncated = len(rows) > request.limit
         selected = rows[: request.limit]
         return Page[CodeEntitySummary](
-            items=[
-                _code_summary(row, manifest.generation) for row in selected
-            ],
+            items=[_code_summary(row, manifest.generation) for row in selected],
             next_cursor=(
                 _encode_cursor(
                     dependencies.cursor_secret,
@@ -1372,9 +1690,7 @@ def _entity_list_sync(
     request: AdmittedRequest,
 ) -> Page[EntitySummary]:
     def reader(connection: sqlite3.Connection) -> Page[EntitySummary]:
-        manifest = _active_projection(
-            connection, workspace.workspace_id, "graph"
-        )
+        manifest = _active_projection(connection, workspace.workspace_id, "graph")
         _validate_entity_partition(
             connection, workspace.workspace_id, manifest.generation
         )
@@ -1406,17 +1722,13 @@ def _entity_list_sync(
             parameters.append(after_id)
         rows = connection.execute(
             "SELECT entity_id,name,entity_type,mention_count "
-            "FROM discovery_entities WHERE "
-            + where
-            + " ORDER BY entity_id LIMIT ?",
+            "FROM discovery_entities WHERE " + where + " ORDER BY entity_id LIMIT ?",
             (*parameters, request.limit + 1),
         ).fetchall()
         truncated = len(rows) > request.limit
         selected = rows[: request.limit]
         return Page[EntitySummary](
-            items=[
-                _entity_summary(row, manifest.generation) for row in selected
-            ],
+            items=[_entity_summary(row, manifest.generation) for row in selected],
             next_cursor=(
                 _encode_cursor(
                     dependencies.cursor_secret,
@@ -1453,9 +1765,7 @@ def _community_list_sync(
     request: AdmittedRequest,
 ) -> Page[CommunitySummary]:
     def reader(connection: sqlite3.Connection) -> Page[CommunitySummary]:
-        manifest = _active_projection(
-            connection, workspace.workspace_id, "graph"
-        )
+        manifest = _active_projection(connection, workspace.workspace_id, "graph")
         _validate_community_partition(
             connection, workspace.workspace_id, manifest.generation
         )
@@ -1506,9 +1816,7 @@ def _community_list_sync(
         truncated = len(rows) > request.limit
         selected = rows[: request.limit]
         return Page[CommunitySummary](
-            items=[
-                _community_summary(row, manifest.generation) for row in selected
-            ],
+            items=[_community_summary(row, manifest.generation) for row in selected],
             next_cursor=(
                 _encode_cursor(
                     dependencies.cursor_secret,
@@ -1533,9 +1841,7 @@ def _community_get_sync(
     request: AdmittedRequest,
 ) -> CommunityDetail:
     def reader(connection: sqlite3.Connection) -> CommunityDetail:
-        manifest = _active_projection(
-            connection, workspace.workspace_id, "graph"
-        )
+        manifest = _active_projection(connection, workspace.workspace_id, "graph")
         _validate_community_partition(
             connection, workspace.workspace_id, manifest.generation
         )
@@ -1640,9 +1946,7 @@ def _entity_selection_sync(
     request: AdmittedRequest,
 ) -> _EntitySelection:
     def reader(connection: sqlite3.Connection) -> _EntitySelection:
-        manifest = _active_projection(
-            connection, workspace.workspace_id, "graph"
-        )
+        manifest = _active_projection(connection, workspace.workspace_id, "graph")
         _validate_entity_partition(
             connection, workspace.workspace_id, manifest.generation
         )
@@ -1665,12 +1969,8 @@ def _entity_selection_sync(
         else:
             if not isinstance(request.entity_name, str):
                 raise DiscoveryOperationError("INVALID_ARGUMENT")
-            normalized = unicodedata.normalize(
-                "NFC", request.entity_name.casefold()
-            )
-            where = (
-                "workspace_id=? AND graph_generation=? AND normalized_name=?"
-            )
+            normalized = unicodedata.normalize("NFC", request.entity_name.casefold())
+            where = "workspace_id=? AND graph_generation=? AND normalized_name=?"
             parameters: list[object] = [
                 workspace.workspace_id,
                 manifest.generation,
@@ -1752,9 +2052,7 @@ def _generation_is_current_sync(
     generation: int,
 ) -> None:
     def reader(connection: sqlite3.Connection) -> None:
-        manifest = _active_projection(
-            connection, workspace.workspace_id, "graph"
-        )
+        manifest = _active_projection(connection, workspace.workspace_id, "graph")
         if manifest.generation != generation:
             raise DiscoveryOperationError("CAPABILITY_DEGRADED")
 
@@ -1768,14 +2066,10 @@ async def _memory_recall_entity(
 ) -> Page[RecordSummary]:
     selection = await _run_blocking(
         dependencies,
-        lambda: _entity_selection_sync(
-            dependencies, workspace, request
-        ),
+        lambda: _entity_selection_sync(dependencies, workspace, request),
     )
     if not selection.record_ids:
-        return Page[RecordSummary](
-            items=[], next_cursor=None, truncated=False
-        )
+        return Page[RecordSummary](items=[], next_cursor=None, truncated=False)
     service = dependencies.recall_service
     if service is None:
         raise DiscoveryOperationError("CAPABILITY_DEGRADED")
@@ -1834,9 +2128,9 @@ def _stats_sync(
                     SpecializedProjectionBuilder,
                 )
 
-                if not SpecializedProjectionBuilder(
-                    connection
-                ).active_is_current(workspace.workspace_id, "graph"):
+                if not SpecializedProjectionBuilder(connection).active_is_current(
+                    workspace.workspace_id, "graph"
+                ):
                     raise DiscoveryOperationError("CAPABILITY_DEGRADED")
                 manifest = _manifest(connection, workspace.workspace_id)
                 try:
@@ -1891,10 +2185,8 @@ async def _run_blocking(
             except Exception:
                 break
         if worker.done():
-            try:
+            with suppress(Exception):
                 worker.result()
-            except Exception:
-                pass
         raise cancellation
     except BoundedWorkerBusyError:
         raise DiscoveryOperationError("TASK_REQUIRED") from None
@@ -1921,12 +2213,12 @@ async def _run_mutation(
                 break
         try:
             result = worker.result()
-        except (_DiscoveryMutationCancelled, BoundedWorkerBusyError):
+        except (_DiscoveryMutationCancelledError, BoundedWorkerBusyError):
             raise cancellation from None
         except Exception:
             raise cancellation from None
         return result
-    except _DiscoveryMutationCancelled:
+    except _DiscoveryMutationCancelledError:
         raise DiscoveryOperationError("CANCELLED") from None
     except BoundedWorkerBusyError:
         raise DiscoveryOperationError("TASK_REQUIRED") from None
@@ -2003,9 +2295,7 @@ def build_discovery_operations(
         *, workspace: Workspace, request: AdmittedRequest
     ) -> Page[RecordSummary]:
         _authorize(workspace, request, "memory_recall_entity")
-        return await _memory_recall_entity(
-            dependencies, workspace, request
-        )
+        return await _memory_recall_entity(dependencies, workspace, request)
 
     return MappingProxyType(
         {

@@ -31,21 +31,20 @@ from ...event_store import (
     sha256_json,
 )
 from ...schema_version import CURRENT_SCHEMA_VERSION
+from ...storage_activation import ResolvedActiveDatabase
 from ...workspace import Workspace, WorkspaceRegistry
 from .application import AdmittedRequest
 from .errors import STABLE_ERROR_CODE_SET
 from .models import DestructiveMutationReceipt, Preview, RecordSummary
+from .runtime_protocols import ActiveStorageResolver, WorkerPool
 from .runtime_services import WorkspaceStorageResolver
 from .tasks import await_task_terminal
 from .tools import MemoryCompactData
 
-
 _EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
 _MAX_SELECTION = 500
 _MAX_GROUP_SCAN = 2_000
-_REQUIRED_TABLES = frozenset(
-    {"memory_events", "memory_records", "schema_version"}
-)
+_REQUIRED_TABLES = frozenset({"memory_events", "memory_records", "schema_version"})
 _RECORD_COLUMNS = (
     "record.record_id,record.workspace_id,record.record_type,"
     "record.legacy_type,record.content,record.content_hash,record.rationale,"
@@ -120,20 +119,23 @@ def _default_worker_pool() -> BoundedWorkerPool:
 class MaintenanceOperationDependencies:
     """Owned dependencies for canonical maintenance operations."""
 
-    storage_resolver: object = field(default_factory=WorkspaceStorageResolver)
+    storage_resolver: ActiveStorageResolver = field(
+        default_factory=WorkspaceStorageResolver
+    )
     clock: Callable[[], datetime] = field(default=_default_clock)
     selection_secret: bytes = field(default_factory=lambda: secrets.token_bytes(32))
     selection_ttl_seconds: int = 300
-    worker_pool: object = field(default_factory=_default_worker_pool)
+    worker_pool: WorkerPool = field(default_factory=_default_worker_pool)
 
     def __post_init__(self) -> None:
         if not callable(getattr(self.storage_resolver, "locked_active", None)):
             raise TypeError("storage_resolver must provide locked_active")
         if not callable(self.clock):
             raise TypeError("clock must be callable")
-        if not isinstance(self.selection_secret, bytes) or len(
-            self.selection_secret
-        ) < 32:
+        if (
+            not isinstance(self.selection_secret, bytes)
+            or len(self.selection_secret) < 32
+        ):
             raise ValueError("selection_secret must contain at least 32 bytes")
         ttl = self.selection_ttl_seconds
         if isinstance(ttl, bool) or not isinstance(ttl, int) or not 1 <= ttl <= 3600:
@@ -173,10 +175,10 @@ def _authorize(
         raise MaintenanceOperationError("UNAUTHORIZED_WORKSPACE")
 
 
-def _database_path(workspace: Workspace, active: object) -> Path:
+def _database_path(workspace: Workspace, active: ResolvedActiveDatabase) -> Path:
     try:
         root = workspace.root.resolve(strict=True)
-        candidate = Path(getattr(active, "path"))
+        candidate = Path(active.path)
         if candidate.is_symlink():
             raise ValueError
         resolved = candidate.resolve(strict=True)
@@ -235,10 +237,7 @@ def _datetime_us(value: datetime) -> int:
         raise MaintenanceOperationError("CAPABILITY_DEGRADED")
     try:
         delta = value.astimezone(timezone.utc) - _EPOCH
-        result = (
-            (delta.days * 86_400 + delta.seconds) * 1_000_000
-            + delta.microseconds
-        )
+        result = (delta.days * 86_400 + delta.seconds) * 1_000_000 + delta.microseconds
     except (OverflowError, TypeError, ValueError):
         raise MaintenanceOperationError("CAPABILITY_DEGRADED") from None
     if not -(2**63) <= result <= 2**63 - 1:
@@ -306,8 +305,7 @@ def _verified_snapshot(row: sqlite3.Row) -> _RecordSnapshot:
             or row["workspace_id"] != row["event_workspace_id"]
             or row["record_id"] != row["event_stream_id"]
             or payload.get("record") != state
-            or canonical_json_bytes(payload).decode("utf-8")
-            != str(row["payload_json"])
+            or canonical_json_bytes(payload).decode("utf-8") != str(row["payload_json"])
             or sha256_json(payload) != str(row["payload_hash"])
             or memory_content_hash(state) != str(row["content_hash"])
             or memory_state_hash(state) != str(row["state_hash"])
@@ -329,9 +327,7 @@ def _verified_snapshot(row: sqlite3.Row) -> _RecordSnapshot:
         raise MaintenanceOperationError("CAPABILITY_DEGRADED") from None
 
 
-def _source_high_water(
-    connection: sqlite3.Connection, workspace_id: str
-) -> str:
+def _source_high_water(connection: sqlite3.Connection, workspace_id: str) -> str:
     row = connection.execute(
         "SELECT count(*),COALESCE(max(recorded_at_us),0),"
         "COALESCE(max(event_id),'') FROM memory_events WHERE workspace_id=?",
@@ -569,9 +565,7 @@ def _duplicate_groups(
         )
         grouped.setdefault(key, []).append(snapshot)
     duplicate_items = [
-        (key, members)
-        for key, members in grouped.items()
-        if len(members) > 1
+        (key, members) for key, members in grouped.items() if len(members) > 1
     ]
     duplicate_items.sort(key=lambda item: item[0])
     eligible = sum(len(members) - 1 for _key, members in duplicate_items)
@@ -639,9 +633,7 @@ def _compaction_candidates(
         ):
             continue
         tags = record.state["tags"]
-        if not isinstance(tags, list) or not all(
-            isinstance(tag, str) for tag in tags
-        ):
+        if not isinstance(tags, list) or not all(isinstance(tag, str) for tag in tags):
             raise MaintenanceOperationError("CAPABILITY_DEGRADED")
         if query_text is not None:
             searchable = [
@@ -664,24 +656,28 @@ def _record_summary(record: _RecordSnapshot) -> RecordSummary:
     tags = record.state["tags"]
     if not isinstance(content, str) or not content or not isinstance(tags, list):
         raise MaintenanceOperationError("CAPABILITY_DEGRADED")
-    status = "invalidated" if record.state["deleted_at_us"] is not None else (
-        "archived" if record.state["archived"] else "current"
+    status = (
+        "invalidated"
+        if record.state["deleted_at_us"] is not None
+        else ("archived" if record.state["archived"] else "current")
     )
     created_at = _datetime_from_us(record.created_at_us)
     updated_at = _datetime_from_us(record.updated_at_us)
     if created_at > updated_at:
         created_at = updated_at
     try:
-        return RecordSummary(
-            record_id=record.record_id,
-            record_type=record.state["record_type"],
-            excerpt=content[:4000],
-            tags=tags,
-            relative_file_path=record.state["file_path_relative"],
-            current_status=status,
-            content_hash=record.content_hash,
-            created_at=created_at,
-            updated_at=updated_at,
+        return RecordSummary.model_validate(
+            {
+                "record_id": record.record_id,
+                "record_type": record.state["record_type"],
+                "excerpt": content[:4000],
+                "tags": tags,
+                "relative_file_path": record.state["file_path_relative"],
+                "current_status": status,
+                "content_hash": record.content_hash,
+                "created_at": created_at,
+                "updated_at": updated_at,
+            }
         )
     except Exception:
         raise MaintenanceOperationError("CAPABILITY_DEGRADED") from None
@@ -726,9 +722,7 @@ def _dream_candidates(
     for row in rows:
         record = _verified_snapshot(row)
         tags = record.state["tags"]
-        if not isinstance(tags, list) or not all(
-            isinstance(tag, str) for tag in tags
-        ):
+        if not isinstance(tags, list) or not all(isinstance(tag, str) for tag in tags):
             raise MaintenanceOperationError("CAPABILITY_DEGRADED")
         tag_set = set(tags)
         if "dream" not in tag_set:
@@ -775,9 +769,7 @@ def _dream_candidates(
     )
 
 
-def _selection_correlation(
-    workspace_id: str, claims: _SelectionClaims
-) -> str:
+def _selection_correlation(workspace_id: str, claims: _SelectionClaims) -> str:
     return deterministic_id(
         "job",
         "maintenance-selection",
@@ -807,8 +799,7 @@ def _verified_payload(row: sqlite3.Row) -> dict[str, Any]:
         payload = json.loads(str(row["payload_json"]))
         if (
             not isinstance(payload, dict)
-            or canonical_json_bytes(payload).decode("utf-8")
-            != str(row["payload_json"])
+            or canonical_json_bytes(payload).decode("utf-8") != str(row["payload_json"])
             or sha256_json(payload) != str(row["payload_hash"])
         ):
             raise ValueError
@@ -1017,8 +1008,7 @@ def _prune_sync(
                 )
                 if (
                     len(records) != claims.selected_count
-                    or sha256_json(_selection_pairs(records))
-                    != claims.selection_hash
+                    or sha256_json(_selection_pairs(records)) != claims.selection_hash
                 ):
                     raise MaintenanceOperationError("CONFLICT")
                 store = EventStore(connection, assume_transaction=True)
@@ -1181,9 +1171,7 @@ def _duplicates_replay(
             keeper_count += 1
         elif role == "candidate":
             state_hash = maintenance.get("selected_state_hash")
-            if row["event_type"] != "memory.deleted" or not isinstance(
-                state_hash, str
-            ):
+            if row["event_type"] != "memory.deleted" or not isinstance(state_hash, str):
                 raise MaintenanceOperationError("CAPABILITY_DEGRADED")
             candidate_pairs.append([record_id, state_hash])
         else:
@@ -1287,8 +1275,7 @@ def _duplicates_sync(
                 records = _duplicate_candidates(groups)
                 if (
                     len(records) != claims.selected_count
-                    or sha256_json(_selection_pairs(records))
-                    != claims.selection_hash
+                    or sha256_json(_selection_pairs(records)) != claims.selection_hash
                 ):
                     raise MaintenanceOperationError("CONFLICT")
                 store = EventStore(connection, assume_transaction=True)
@@ -1551,9 +1538,7 @@ def _compaction_replay(
         or len(rows) != 1 + claims.selected_count * 2
     ):
         raise MaintenanceOperationError("CAPABILITY_DEGRADED")
-    summary = _record_summary(
-        _load_snapshot(connection, workspace_id, summary_id)
-    )
+    summary = _record_summary(_load_snapshot(connection, workspace_id, summary_id))
     receipt = DestructiveMutationReceipt(
         operation_id=_operation_id(workspace_id, claims),
         affected_ids=affected_ids,
@@ -1652,8 +1637,7 @@ def _compaction_sync(
                 )
                 if (
                     len(records) != claims.selected_count
-                    or sha256_json(_selection_pairs(records))
-                    != claims.selection_hash
+                    or sha256_json(_selection_pairs(records)) != claims.selection_hash
                 ):
                     raise MaintenanceOperationError("CONFLICT")
                 source_event_ids = [record.source_event_id for record in records]
@@ -1775,9 +1759,7 @@ def _compaction_sync(
                     summary_record=summary,
                     source_event_ids=source_event_ids,
                     receipt=DestructiveMutationReceipt(
-                        operation_id=_operation_id(
-                            workspace.workspace_id, claims
-                        ),
+                        operation_id=_operation_id(workspace.workspace_id, claims),
                         affected_ids=affected_ids,
                         event_ids=event_ids,
                         counts={
@@ -1874,7 +1856,7 @@ def _dream_sync(
 ) -> DestructiveMutationReceipt:
     if cancelled.is_set():
         raise _WorkerCancelledError()
-    criteria = _dream_criteria(request)
+    _dream_criteria(request)
     correlation_id = _selection_correlation(workspace.workspace_id, claims)
     recorded_at_us = _now_us(dependencies)
     try:
@@ -1904,8 +1886,7 @@ def _dream_sync(
                 )
                 if (
                     len(records) != claims.selected_count
-                    or sha256_json(_selection_pairs(records))
-                    != claims.selection_hash
+                    or sha256_json(_selection_pairs(records)) != claims.selection_hash
                 ):
                     raise MaintenanceOperationError("CONFLICT")
                 store = EventStore(connection, assume_transaction=True)

@@ -13,7 +13,6 @@ from types import MappingProxyType
 
 from daem0nmcp.api.v7.application import AdmittedRequest
 
-
 NOW = datetime(2026, 8, 9, 18, 0, tzinfo=timezone.utc)
 
 
@@ -21,9 +20,7 @@ def _apply_v7_schema(connection: sqlite3.Connection) -> None:
     from daem0nmcp.migrations.schema import MIGRATIONS
     from daem0nmcp.schema_version import CURRENT_SCHEMA_VERSION
 
-    connection.execute(
-        "CREATE TABLE schema_version (version INTEGER PRIMARY KEY)"
-    )
+    connection.execute("CREATE TABLE schema_version (version INTEGER PRIMARY KEY)")
     for version, _description, statements in MIGRATIONS:
         if 16 <= version <= CURRENT_SCHEMA_VERSION:
             for statement in statements:
@@ -66,9 +63,7 @@ class FederationOperationTests(unittest.IsolatedAsyncioTestCase):
                 storage,
                 ActiveDatabasePointer(7, 1, database.name, None, None),
             )
-        self.registry = WorkspaceRegistry(
-            self.roots[1:], default_root=self.roots[0]
-        )
+        self.registry = WorkspaceRegistry(self.roots[1:], default_root=self.roots[0])
         self.target = self.registry.resolve(str(self.roots[0]))
         self.source_a = self.registry.resolve(str(self.roots[1]))
         self.source_b = self.registry.resolve(str(self.roots[2]))
@@ -101,7 +96,6 @@ class FederationOperationTests(unittest.IsolatedAsyncioTestCase):
         from daem0nmcp.migrations.schema import MIGRATIONS
         from daem0nmcp.schema_version import CURRENT_SCHEMA_VERSION
 
-        self.assertEqual(23, CURRENT_SCHEMA_VERSION)
         self.assertEqual(CURRENT_SCHEMA_VERSION, MIGRATIONS[-1][0])
         with closing(sqlite3.connect(self._database())) as connection:
             columns = {
@@ -125,7 +119,9 @@ class FederationOperationTests(unittest.IsolatedAsyncioTestCase):
         for handler in operations.values():
             parameters = inspect.signature(handler).parameters
             self.assertEqual(["workspace", "request"], list(parameters))
-            self.assertTrue(all(item.kind is item.KEYWORD_ONLY for item in parameters.values()))
+            self.assertTrue(
+                all(item.kind is item.KEYWORD_ONLY for item in parameters.values())
+            )
 
     async def test_link_list_update_unlink_and_replays_are_append_only(self) -> None:
         operations = self._operations()
@@ -231,9 +227,7 @@ class FederationOperationTests(unittest.IsolatedAsyncioTestCase):
                 )
             )
             with self.assertRaisesRegex(sqlite3.IntegrityError, "IMMUTABLE"):
-                connection.execute(
-                    "UPDATE workspace_link_events SET label='changed'"
-                )
+                connection.execute("UPDATE workspace_link_events SET label='changed'")
 
     async def test_list_cursor_is_hmac_bound_to_workspace_and_anchor(self) -> None:
         operations = self._operations()
@@ -304,13 +298,9 @@ class FederationOperationTests(unittest.IsolatedAsyncioTestCase):
         )
         with closing(sqlite3.connect(self._database())) as connection:
             connection.execute("DROP TRIGGER workspace_link_events_no_update")
-            connection.execute(
-                "UPDATE workspace_link_events SET label='tampered'"
-            )
+            connection.execute("UPDATE workspace_link_events SET label='tampered'")
             connection.commit()
-        with self.assertRaisesRegex(
-            FederationOperationError, "CAPABILITY_DEGRADED"
-        ):
+        with self.assertRaisesRegex(FederationOperationError, "CAPABILITY_DEGRADED"):
             await operations["workspace_links_list"](
                 workspace=self.target,
                 request=_request(
@@ -320,17 +310,15 @@ class FederationOperationTests(unittest.IsolatedAsyncioTestCase):
                 ),
             )
 
-    async def test_linked_workspace_must_resolve_to_exact_registered_identity(self) -> None:
+    async def test_linked_workspace_must_resolve_to_exact_registered_identity(
+        self,
+    ) -> None:
         from daem0nmcp.api.v7.federation_operations import FederationOperationError
         from daem0nmcp.workspace import WorkspaceRegistry
 
-        isolated = WorkspaceRegistry(
-            [self.roots[0]], default_root=self.roots[0]
-        )
+        isolated = WorkspaceRegistry([self.roots[0]], default_root=self.roots[0])
         operations = self._operations(workspace_resolver=isolated)
-        with self.assertRaisesRegex(
-            FederationOperationError, "UNAUTHORIZED_WORKSPACE"
-        ):
+        with self.assertRaisesRegex(FederationOperationError, "UNAUTHORIZED_WORKSPACE"):
             await operations["workspace_link"](
                 workspace=self.target,
                 request=_request(
@@ -350,14 +338,17 @@ class FederationOperationTests(unittest.IsolatedAsyncioTestCase):
                 ).fetchone()[0],
             )
 
-    async def test_link_acquires_both_activation_locks_in_workspace_id_order(self) -> None:
+    async def test_link_acquires_both_activation_locks_in_workspace_id_order(
+        self,
+    ) -> None:
         from daem0nmcp.api.v7.runtime_services import WorkspaceStorageResolver
 
         observed: list[tuple[str, str]] = []
 
         class RecordingResolver:
+            @staticmethod
             @contextmanager
-            def locked_active(_self, workspace):
+            def locked_active(workspace):
                 observed.append(("enter", workspace.workspace_id))
                 with WorkspaceStorageResolver().locked_active(workspace) as active:
                     try:
@@ -377,24 +368,25 @@ class FederationOperationTests(unittest.IsolatedAsyncioTestCase):
                 preflight_token="t" * 32,
             ),
         )
-        ordered = sorted(
-            [self.target.workspace_id, self.source_a.workspace_id]
-        )
+        ordered = sorted([self.target.workspace_id, self.source_a.workspace_id])
         self.assertEqual(
             [("enter", value) for value in ordered]
             + [("exit", value) for value in reversed(ordered)],
             observed,
         )
 
-    async def test_cancellation_before_commit_rolls_back_and_repeated_cancel_drains(self) -> None:
+    async def test_cancellation_before_commit_rolls_back_and_repeated_cancel_drains(
+        self,
+    ) -> None:
         from daem0nmcp.api.v7.runtime_services import WorkspaceStorageResolver
 
         entered = threading.Event()
         release = threading.Event()
 
         class BlockingResolver:
+            @staticmethod
             @contextmanager
-            def locked_active(_self, workspace):
+            def locked_active(workspace):
                 entered.set()
                 release.wait(5)
                 with WorkspaceStorageResolver().locked_active(workspace) as active:

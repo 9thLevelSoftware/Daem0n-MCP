@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+# ruff: noqa: I001 -- preserve the repository's CRLF import block.
+
 import asyncio
 import inspect
 import sqlite3
@@ -22,9 +24,7 @@ def _apply_v7_schema(connection: sqlite3.Connection) -> None:
     from daem0nmcp.migrations.schema import MIGRATIONS
     from daem0nmcp.schema_version import CURRENT_SCHEMA_VERSION
 
-    connection.execute(
-        "CREATE TABLE schema_version (version INTEGER PRIMARY KEY)"
-    )
+    connection.execute("CREATE TABLE schema_version (version INTEGER PRIMARY KEY)")
     for version, _description, statements in MIGRATIONS:
         if 16 <= version <= CURRENT_SCHEMA_VERSION:
             for statement in statements:
@@ -66,9 +66,7 @@ class DiscoveryOperationTests(unittest.IsolatedAsyncioTestCase):
             self.storage,
             ActiveDatabasePointer(7, 1, self.database.name, None, None),
         )
-        self.workspace = WorkspaceRegistry(
-            [self.root], default_root=self.root
-        ).default
+        self.workspace = WorkspaceRegistry([self.root], default_root=self.root).default
         self.dependencies = None
 
     async def asyncTearDown(self) -> None:
@@ -216,9 +214,9 @@ class DiscoveryOperationTests(unittest.IsolatedAsyncioTestCase):
             third = self._append_memory(connection, "c", "Third record.")
             self._append_relationship(connection, first, second)
             self._append_record_ref(connection, second, third)
-            SpecializedProjectionBuilder(
-                connection, clock_us=lambda: 900
-            ).rebuild(self.workspace.workspace_id, "graph")
+            SpecializedProjectionBuilder(connection, clock_us=lambda: 900).rebuild(
+                self.workspace.workspace_id, "graph"
+            )
             connection.commit()
 
     def _activate_discovery(self) -> dict[str, object]:
@@ -236,9 +234,7 @@ class DiscoveryOperationTests(unittest.IsolatedAsyncioTestCase):
         third = "mem_" + "c" * 64
         with closing(sqlite3.connect(self.database)) as connection:
             connection.execute("PRAGMA foreign_keys=ON")
-            builder = DiscoveryProjectionBuilder(
-                connection, clock_us=lambda: 1_000
-            )
+            builder = DiscoveryProjectionBuilder(connection, clock_us=lambda: 1_000)
             graph = builder.populate_graph(
                 self.workspace.workspace_id,
                 entities=(
@@ -328,9 +324,7 @@ class DiscoveryOperationTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(TypeError):
             operations["code_search"] = object()
         parameters = tuple(
-            inspect.signature(
-                operations["knowledge_graph_stats"]
-            ).parameters.values()
+            inspect.signature(operations["knowledge_graph_stats"]).parameters.values()
         )
         self.assertEqual(("workspace", "request"), tuple(p.name for p in parameters))
         self.assertTrue(
@@ -365,9 +359,9 @@ class DiscoveryOperationTests(unittest.IsolatedAsyncioTestCase):
                     "line_end": 2,
                 }
 
-        operation = self._operations(
-            code_indexer_factory=lambda: FakeIndexer()
-        )["code_index"]
+        operation = self._operations(code_indexer_factory=lambda: FakeIndexer())[
+            "code_index"
+        ]
         result = await operation(
             workspace=self.workspace,
             request=_request(
@@ -379,7 +373,9 @@ class DiscoveryOperationTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertIsInstance(result, CodeIndexData)
         self.assertEqual("code", result.manifest.projection)
-        self.assertEqual((1, 1, 0), (result.files_seen, result.files_indexed, result.skipped))
+        self.assertEqual(
+            (1, 1, 0), (result.files_seen, result.files_indexed, result.skipped)
+        )
         with closing(sqlite3.connect(self.database)) as connection:
             row = connection.execute(
                 "SELECT relative_file_path,qualified_name FROM discovery_code_entities"
@@ -415,9 +411,9 @@ class DiscoveryOperationTests(unittest.IsolatedAsyncioTestCase):
                         "line_end": 2,
                     }
 
-        result = await self._operations(
-            code_indexer_factory=lambda: FakeIndexer()
-        )["code_index"](
+        result = await self._operations(code_indexer_factory=lambda: FakeIndexer())[
+            "code_index"
+        ](
             workspace=self.workspace,
             request=_request(
                 "code_index",
@@ -433,7 +429,9 @@ class DiscoveryOperationTests(unittest.IsolatedAsyncioTestCase):
             (result.files_seen, result.files_indexed, result.skipped),
         )
 
-    async def test_code_index_strict_producer_failure_preserves_active_index(self) -> None:
+    async def test_code_index_strict_producer_failure_preserves_active_index(
+        self,
+    ) -> None:
         """A swallowed parser failure cannot replace a valid canonical partition."""
         from daem0nmcp.api.v7.discovery_operations import (
             DiscoveryOperationError,
@@ -501,6 +499,63 @@ class DiscoveryOperationTests(unittest.IsolatedAsyncioTestCase):
             ).fetchone()
         self.assertEqual((before, 3), active)
 
+    def test_non_python_strict_producer_contract_is_imports_only(self) -> None:
+        """The legacy multi-language parser does not advertise call/reference facts."""
+        from daem0nmcp.api.v7.discovery_operations import _StrictTreeSitterProducer
+
+        class Root:
+            has_error = False
+
+        class Tree:
+            root_node = Root()
+
+        class JavaScriptDelegate:
+            available = True
+
+            @staticmethod
+            def _get_cached_tree(file_path, source_bytes, language_name):
+                del file_path, source_bytes, language_name
+                return Tree()
+
+            @staticmethod
+            def get_parser(language_name):
+                del language_name
+                return object(), object()
+
+            @staticmethod
+            def _extract_imports(tree, language, language_name, source_bytes):
+                del tree, language, language_name, source_bytes
+                return ["dep"]
+
+            @staticmethod
+            def _extract_entities(*arguments):
+                del arguments
+                return iter(
+                    (
+                        {
+                            "entity_type": "function",
+                            "name": "entry",
+                            "qualified_name": "app.entry",
+                            "line_start": 1,
+                            "line_end": 3,
+                        },
+                    )
+                )
+
+        producer = _StrictTreeSitterProducer(
+            JavaScriptDelegate(), {".js": "javascript"}
+        )
+        entities = tuple(
+            producer.index_source_strict(
+                self.root / "app.js", self.root, b"import dep from 'dep';"
+            )
+        )
+
+        self.assertEqual(1, len(entities))
+        self.assertEqual([], entities[0]["calls"])
+        self.assertEqual([], entities[0]["references"])
+        self.assertEqual([{"name": "dep", "line": None}], entities[0]["imports"])
+
     async def test_code_index_cancellation_rolls_back_before_activation(self) -> None:
         """A cancelled scan cannot publish later from a detached worker."""
         source = self.root / "src" / "auth.py"
@@ -529,9 +584,9 @@ class DiscoveryOperationTests(unittest.IsolatedAsyncioTestCase):
                     "line_end": 2,
                 }
 
-        operation = self._operations(
-            code_indexer_factory=lambda: BlockingIndexer()
-        )["code_index"]
+        operation = self._operations(code_indexer_factory=lambda: BlockingIndexer())[
+            "code_index"
+        ]
         task = asyncio.create_task(
             operation(
                 workspace=self.workspace,
@@ -562,7 +617,9 @@ class DiscoveryOperationTests(unittest.IsolatedAsyncioTestCase):
                 ).fetchone()[0],
             )
 
-    async def test_code_index_cancellation_before_commit_rolls_back_generation(self) -> None:
+    async def test_code_index_cancellation_before_commit_rolls_back_generation(
+        self,
+    ) -> None:
         """Cancellation after row writes but before commit must undo the generation."""
         from daem0nmcp.api.v7.discovery_operations import (
             DiscoveryProjectionBuilder as RealBuilder,
@@ -606,9 +663,9 @@ class DiscoveryOperationTests(unittest.IsolatedAsyncioTestCase):
                     **kwargs,
                 )
 
-        operation = self._operations(
-            code_indexer_factory=lambda: FakeIndexer()
-        )["code_index"]
+        operation = self._operations(code_indexer_factory=lambda: FakeIndexer())[
+            "code_index"
+        ]
         with patch(
             "daem0nmcp.api.v7.discovery_operations.DiscoveryProjectionBuilder",
             BlockingBuilder,
@@ -624,9 +681,7 @@ class DiscoveryOperationTests(unittest.IsolatedAsyncioTestCase):
                     ),
                 )
             )
-            self.assertTrue(
-                await asyncio.to_thread(before_commit_reached.wait, 1)
-            )
+            self.assertTrue(await asyncio.to_thread(before_commit_reached.wait, 1))
             task.cancel()
             await asyncio.sleep(0)
             self.assertFalse(task.done())
@@ -655,7 +710,9 @@ class DiscoveryOperationTests(unittest.IsolatedAsyncioTestCase):
                 ),
             )
 
-    async def test_mutation_boundary_returns_a_result_after_late_cancellation(self) -> None:
+    async def test_mutation_boundary_returns_a_result_after_late_cancellation(
+        self,
+    ) -> None:
         """Once commit wins the race, callers receive its receipt instead of CANCELLED."""
         from daem0nmcp.api.v7.discovery_operations import _run_mutation
 
@@ -680,7 +737,9 @@ class DiscoveryOperationTests(unittest.IsolatedAsyncioTestCase):
         release.set()
         self.assertEqual("committed-receipt", await task)
 
-    async def test_code_search_filters_and_hmac_cursor_bind_to_the_generation(self) -> None:
+    async def test_code_search_filters_and_hmac_cursor_bind_to_the_generation(
+        self,
+    ) -> None:
         """A cursor from another query or code rebuild must never retarget rows."""
         from daem0nmcp.api.v7.discovery_operations import DiscoveryOperationError
         from daem0nmcp.api.v7.models import Page
@@ -790,7 +849,9 @@ class DiscoveryOperationTests(unittest.IsolatedAsyncioTestCase):
             )
         self.assertEqual("INVALID_ARGUMENT", raised.exception.code)
 
-    async def test_code_search_rejects_unsafe_rows_even_with_a_matching_digest(self) -> None:
+    async def test_code_search_rejects_unsafe_rows_even_with_a_matching_digest(
+        self,
+    ) -> None:
         """A forged partition hash cannot turn an absolute/traversal path into wire data."""
         from daem0nmcp.api.v7.discovery_operations import DiscoveryOperationError
         from daem0nmcp.event_store import sha256_json
@@ -799,9 +860,7 @@ class DiscoveryOperationTests(unittest.IsolatedAsyncioTestCase):
         with closing(sqlite3.connect(self.database)) as connection:
             connection.row_factory = sqlite3.Row
             connection.execute("DROP TRIGGER discovery_code_entities_no_update")
-            connection.execute(
-                "DROP TRIGGER discovery_projection_partitions_no_update"
-            )
+            connection.execute("DROP TRIGGER discovery_projection_partitions_no_update")
             connection.execute("PRAGMA ignore_check_constraints=ON")
             connection.execute(
                 "UPDATE discovery_code_entities SET relative_file_path='../secret.py' "
@@ -971,7 +1030,9 @@ class DiscoveryOperationTests(unittest.IsolatedAsyncioTestCase):
             )
         self.assertEqual("STALE_PROJECTION_ID", raised.exception.code)
 
-    async def test_memory_recall_entity_hydrates_exact_members_through_task8(self) -> None:
+    async def test_memory_recall_entity_hydrates_exact_members_through_task8(
+        self,
+    ) -> None:
         """Entity membership selects IDs; Task 8 authenticates the returned records."""
         from daem0nmcp.api.v7.models import (
             CitationManifestEntry,
@@ -983,7 +1044,7 @@ class DiscoveryOperationTests(unittest.IsolatedAsyncioTestCase):
             TokenUsage,
         )
 
-        fixture = self._activate_discovery()
+        self._activate_discovery()
         records: dict[str, RecordSummary] = {}
         with closing(sqlite3.connect(self.database)) as connection:
             connection.row_factory = sqlite3.Row
@@ -1009,14 +1070,16 @@ class DiscoveryOperationTests(unittest.IsolatedAsyncioTestCase):
                     ),
                 )
 
-        class RecallService:
-            def __init__(_self):
-                _self.queries = []
+        test_case = self
 
-            async def retrieve(_self, workspace, query, linked_workspace_ids):
-                self.assertEqual(self.workspace, workspace)
-                self.assertEqual(frozenset(), linked_workspace_ids)
-                _self.queries.append(query)
+        class RecallService:
+            def __init__(self):
+                self.queries = []
+
+            async def retrieve(self, workspace, query, linked_workspace_ids):
+                test_case.assertEqual(test_case.workspace, workspace)
+                test_case.assertEqual(frozenset(), linked_workspace_ids)
+                self.queries.append(query)
                 items = []
                 manifest = []
                 for index, record_id in enumerate(sorted(query.record_ids), 1):
@@ -1070,9 +1133,7 @@ class DiscoveryOperationTests(unittest.IsolatedAsyncioTestCase):
                 )
 
         recall = RecallService()
-        operation = self._operations(recall_service=recall)[
-            "memory_recall_entity"
-        ]
+        operation = self._operations(recall_service=recall)["memory_recall_entity"]
         first = await operation(
             workspace=self.workspace,
             request=_request(
@@ -1121,9 +1182,7 @@ class DiscoveryOperationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("graph", result.manifest.projection)
         self.assertEqual(1, result.manifest.generation)
         self.assertEqual(
-            datetime(1970, 1, 1, tzinfo=timezone.utc).replace(
-                microsecond=900
-            ),
+            datetime(1970, 1, 1, tzinfo=timezone.utc).replace(microsecond=900),
             result.manifest.built_at,
         )
 
@@ -1163,9 +1222,7 @@ class DiscoveryOperationTests(unittest.IsolatedAsyncioTestCase):
         other_record_id = "mem_" + "f" * 64
         with closing(sqlite3.connect(self.database)) as connection:
             connection.execute("PRAGMA foreign_keys=ON")
-            local_record_id = self._append_memory(
-                connection, "a", "Local record."
-            )
+            local_record_id = self._append_memory(connection, "a", "Local record.")
             EventStore(connection).append_and_project(
                 EventCommand(
                     workspace_id=other_workspace_id,
@@ -1201,12 +1258,10 @@ class DiscoveryOperationTests(unittest.IsolatedAsyncioTestCase):
                     },
                 )
             )
-            self._append_relationship(
-                connection, local_record_id, other_record_id
+            self._append_relationship(connection, local_record_id, other_record_id)
+            SpecializedProjectionBuilder(connection, clock_us=lambda: 900).rebuild(
+                self.workspace.workspace_id, "graph"
             )
-            SpecializedProjectionBuilder(
-                connection, clock_us=lambda: 900
-            ).rebuild(self.workspace.workspace_id, "graph")
             connection.commit()
 
         with self.assertRaises(DiscoveryOperationError) as raised:
@@ -1246,18 +1301,20 @@ class DiscoveryOperationTests(unittest.IsolatedAsyncioTestCase):
         self._activate_graph()
         started = threading.Event()
         release = threading.Event()
+        database = self.database
 
         class BlockingResolver:
             @contextmanager
-            def locked_active(_self, workspace):
+            def locked_active(self, workspace):
+                del self
                 del workspace
                 started.set()
                 release.wait(timeout=2)
-                yield SimpleNamespace(path=self.database)
+                yield SimpleNamespace(path=database)
 
-        operation = self._operations(
-            storage_resolver=BlockingResolver()
-        )["knowledge_graph_stats"]
+        operation = self._operations(storage_resolver=BlockingResolver())[
+            "knowledge_graph_stats"
+        ]
         task = asyncio.create_task(
             operation(
                 workspace=self.workspace,
@@ -1297,6 +1354,307 @@ class DiscoveryOperationTests(unittest.IsolatedAsyncioTestCase):
                 ),
             )
         self.assertEqual("CAPABILITY_DEGRADED", raised.exception.code)
+
+    async def test_code_index_publishes_resolved_generation_edges(self) -> None:
+        source = self.root / "src" / "service.py"
+        source.parent.mkdir()
+        source.write_text(
+            "def target(): pass\ndef caller(): target()\n", encoding="utf-8"
+        )
+
+        class FakeIndexer:
+            available = True
+
+            @staticmethod
+            def get_supported_extensions():
+                return [".py"]
+
+            @staticmethod
+            def index_source_strict(file_path, project_path, source_bytes):
+                del file_path, project_path, source_bytes
+                yield {
+                    "entity_type": "function",
+                    "name": "target",
+                    "qualified_name": "service.target",
+                    "line_start": 1,
+                    "line_end": 1,
+                }
+                yield {
+                    "entity_type": "function",
+                    "name": "caller",
+                    "qualified_name": "service.caller",
+                    "line_start": 2,
+                    "line_end": 2,
+                    "calls": [{"name": "target", "line": 2}],
+                    "references": ["target"],
+                }
+
+        await self._operations(code_indexer_factory=lambda: FakeIndexer())[
+            "code_index"
+        ](
+            workspace=self.workspace,
+            request=_request(
+                "code_index",
+                workspace_id=self.workspace.workspace_id,
+                relative_root="src",
+                patterns=["**/*.py"],
+            ),
+        )
+        with closing(sqlite3.connect(self.database)) as connection:
+            edges = connection.execute(
+                "SELECT source.qualified_name,target.qualified_name,edge.edge_kind "
+                "FROM discovery_code_edges AS edge "
+                "JOIN discovery_code_entities AS source ON "
+                "source.workspace_id=edge.workspace_id AND "
+                "source.code_generation=edge.code_generation AND "
+                "source.code_entity_id=edge.source_code_entity_id "
+                "JOIN discovery_code_entities AS target ON "
+                "target.workspace_id=edge.workspace_id AND "
+                "target.code_generation=edge.code_generation AND "
+                "target.code_entity_id=edge.target_code_entity_id "
+                "ORDER BY edge.edge_kind"
+            ).fetchall()
+        self.assertEqual(
+            [
+                ("service.caller", "service.target", "call"),
+                ("service.caller", "service.target", "reference"),
+            ],
+            edges,
+        )
+        with closing(sqlite3.connect(self.database)) as connection:
+            connection.execute("DROP TRIGGER discovery_code_edges_no_update")
+            connection.execute(
+                "UPDATE discovery_code_edges SET edge_kind='import' "
+                "WHERE edge_kind='call'"
+            )
+            connection.commit()
+        from daem0nmcp.api.v7.discovery_operations import DiscoveryOperationError
+
+        with self.assertRaises(DiscoveryOperationError) as raised:
+            await self._operations()["code_search"](
+                workspace=self.workspace,
+                request=_request(
+                    "code_search",
+                    workspace_id=self.workspace.workspace_id,
+                    query="target",
+                ),
+            )
+        self.assertEqual("CAPABILITY_DEGRADED", raised.exception.code)
+
+    def test_code_edge_resolution_skips_ambiguous_symbols_and_module_members(
+        self,
+    ) -> None:
+        from daem0nmcp.api.v7.discovery_operations import _resolve_code_edges
+        from daem0nmcp.discovery_projection import CodeEntityProjectionSeed
+
+        def seed(key: str, kind: str, name: str) -> CodeEntityProjectionSeed:
+            return CodeEntityProjectionSeed(key, kind, name, f"{key}.py", 1, 1)
+
+        seeds = {
+            "a": seed("a", "function", "a.target"),
+            "b": seed("b", "function", "b.target"),
+            "c": seed("c", "function", "c.C.run"),
+            "d": seed("d", "method", "d.D.run"),
+            "duplicate-1": seed("duplicate-1", "function", "same.name"),
+            "duplicate-2": seed("duplicate-2", "function", "same.name"),
+            "pkg": seed("pkg", "module", "pkg"),
+            "pkg-one": seed("pkg-one", "function", "pkg.one"),
+            "pkg-two": seed("pkg-two", "function", "pkg.two"),
+            "caller": seed("caller", "function", "caller.entry"),
+        }
+        edges = _resolve_code_edges(
+            seeds,
+            {
+                "caller": [
+                    ("call", "target", 2),
+                    ("reference", "run", 3),
+                    ("call", "same.name", 4),
+                    ("call", "alias", 5),
+                    ("import", "target", 6),
+                    ("import", "pkg", 7),
+                    ("call", "a.target", 8),
+                ]
+            },
+        )
+
+        self.assertEqual(
+            (
+                ("caller", "a", "call", 8),
+                ("caller", "pkg", "import", 7),
+            ),
+            tuple(
+                (edge.source_key, edge.target_key, edge.kind, edge.source_line)
+                for edge in edges
+            ),
+        )
+
+    def test_code_edges_require_receiver_and_source_scope(self) -> None:
+        from daem0nmcp.api.v7.discovery_operations import _resolve_code_edges
+        from daem0nmcp.discovery_projection import CodeEntityProjectionSeed
+
+        seeds = {
+            "method": CodeEntityProjectionSeed(
+                "method", "method", "service.Service.run", "service.py", 1, 2
+            ),
+            "local": CodeEntityProjectionSeed(
+                "local", "function", "client.target", "client.py", 1, 2
+            ),
+            "remote": CodeEntityProjectionSeed(
+                "remote", "function", "other.target", "other.py", 1, 2
+            ),
+            "caller": CodeEntityProjectionSeed(
+                "caller", "function", "client.entry", "client.py", 3, 9
+            ),
+        }
+        edges = _resolve_code_edges(
+            seeds,
+            {
+                "caller": [
+                    ("call", "unknown.run", 3),
+                    ("call", "other.Service.run", 4),
+                    ("call", "run", 5),
+                    ("reference", "service.Service.RUN", 6),
+                    ("call", "target", 7),
+                    ("call", "service.Service.run", 8),
+                ]
+            },
+        )
+        self.assertEqual(
+            {("local", 7), ("method", 8)},
+            {(edge.target_key, edge.source_line) for edge in edges},
+        )
+
+    def test_python_import_bindings_relative_levels_and_shadowing(self) -> None:
+        from daem0nmcp.api.v7.discovery_operations import (
+            _python_relationships,
+            _resolve_code_edges,
+        )
+        from daem0nmcp.discovery_projection import CodeEntityProjectionSeed
+
+        calls, imports, _references = _python_relationships(
+            b"from .core import target as chosen\n"
+            b"import service as svc\n"
+            b"def entry():\n    chosen(); svc.run(); unknown.run(); factory().run()\n",
+            "client",
+        )
+        self.assertIn({"name": ".core.target", "line": 1}, imports)
+        names = {value["name"] for value in calls}
+        self.assertIn(".core.target", names)
+        self.assertIn("service.run", names)
+        self.assertNotIn("unknown.run", names)
+        self.assertNotIn("run", names)
+        seeds = {
+            "target": CodeEntityProjectionSeed(
+                "target", "function", "core.target", "pkg/core.py", 1, 2
+            ),
+            "wrong": CodeEntityProjectionSeed(
+                "wrong", "function", "core.target", "other/core.py", 1, 2
+            ),
+            "caller": CodeEntityProjectionSeed(
+                "caller", "function", "client.entry", "pkg/client.py", 3, 4
+            ),
+        }
+        edges = _resolve_code_edges(seeds, {"caller": [("call", ".core.target", 4)]})
+        self.assertEqual(["target"], [edge.target_key for edge in edges])
+        shadowed, _, _ = _python_relationships(
+            b"from service import run\ndef entry(run):\n    run()\n", "client"
+        )
+        self.assertEqual([], shadowed)
+
+    async def test_code_index_rejects_disabled_apps_before_loading_parser(self) -> None:
+        from daem0nmcp.api.v7.discovery_operations import DiscoveryOperationError
+
+        loaded = False
+
+        def factory():
+            nonlocal loaded
+            loaded = True
+            raise AssertionError("disabled profile loaded optional parser")
+
+        with self.assertRaises(DiscoveryOperationError) as raised:
+            await self._operations(
+                code_indexer_factory=factory,
+                capability_statuses={"apps": "disabled"},
+            )["code_index"](
+                workspace=self.workspace,
+                request=_request(
+                    "code_index",
+                    workspace_id=self.workspace.workspace_id,
+                    relative_root=".",
+                ),
+            )
+        self.assertFalse(loaded)
+        self.assertEqual("CAPABILITY_DISABLED", raised.exception.code)
+        self.assertEqual("apps", raised.exception.capability_states[0].name)
+
+    async def test_code_index_source_change_rolls_back_before_publish(self) -> None:
+        from daem0nmcp.api.v7.discovery_operations import (
+            DiscoveryOperationError,
+        )
+        from daem0nmcp.api.v7.discovery_operations import (
+            DiscoveryProjectionBuilder as RealBuilder,
+        )
+
+        source = self.root / "src" / "service.py"
+        source.parent.mkdir()
+        source.write_text("def target(): pass\n", encoding="utf-8")
+
+        class FakeIndexer:
+            available = True
+
+            @staticmethod
+            def get_supported_extensions():
+                return [".py"]
+
+            @staticmethod
+            def index_source_strict(file_path, project_path, source_bytes):
+                del file_path, project_path, source_bytes
+                yield {
+                    "entity_type": "function",
+                    "name": "target",
+                    "qualified_name": "service.target",
+                    "line_start": 1,
+                    "line_end": 1,
+                }
+
+        class ChangingBuilder(RealBuilder):
+            def rebuild_code(self, *args, before_commit=None, **kwargs):
+                def change_then_check():
+                    source.write_text("def changed(): pass\n", encoding="utf-8")
+                    if before_commit is not None:
+                        before_commit()
+
+                return super().rebuild_code(
+                    *args, before_commit=change_then_check, **kwargs
+                )
+
+        with (
+            patch(
+                "daem0nmcp.api.v7.discovery_operations.DiscoveryProjectionBuilder",
+                ChangingBuilder,
+            ),
+            self.assertRaises(DiscoveryOperationError) as raised,
+        ):
+            await self._operations(code_indexer_factory=lambda: FakeIndexer())[
+                "code_index"
+            ](
+                workspace=self.workspace,
+                request=_request(
+                    "code_index",
+                    workspace_id=self.workspace.workspace_id,
+                    relative_root="src",
+                    patterns=["**/*.py"],
+                ),
+            )
+        self.assertEqual("EVENT_STREAM_CONFLICT", raised.exception.code)
+        with closing(sqlite3.connect(self.database)) as connection:
+            self.assertEqual(
+                0,
+                connection.execute(
+                    "SELECT count(*) FROM projection_manifests "
+                    "WHERE projection_name='code'"
+                ).fetchone()[0],
+            )
 
 
 if __name__ == "__main__":

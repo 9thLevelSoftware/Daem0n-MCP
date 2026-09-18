@@ -9,19 +9,18 @@ standard-library ``re``/``fnmatch`` implementation.
 from __future__ import annotations
 
 import asyncio
-from collections import OrderedDict
-from collections.abc import Callable, Sequence
-from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
-from functools import partial
 import hashlib
 import importlib
 import logging
 import os
 import threading
 import time
+from collections import OrderedDict
+from collections.abc import Callable, Sequence
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
+from functools import partial
 from typing import Any
-
 
 MAX_PATTERN_CODEPOINTS = 256
 MAX_CANDIDATE_CODEPOINTS = 256
@@ -217,12 +216,8 @@ class SafeUserPattern:
 
         for index, value in enumerate(values, start=1):
             try:
-                if bool(
-                    self._search(compiled, value, timeout=self._timeout_seconds)
-                ):
-                    return PatternMatchResult(
-                        matched=True, candidates_evaluated=index
-                    )
+                if bool(self._search(compiled, value, timeout=self._timeout_seconds)):
+                    return PatternMatchResult(matched=True, candidates_evaluated=index)
             except self._timeout_exceptions:
                 self._warn_timeout(trigger_id, source)
                 return PatternMatchResult(
@@ -234,9 +229,7 @@ class SafeUserPattern:
                     "Trigger pattern evaluation failed safely.",
                 ) from error
 
-        return PatternMatchResult(
-            matched=False, candidates_evaluated=len(values)
-        )
+        return PatternMatchResult(matched=False, candidates_evaluated=len(values))
 
     async def matches_async(
         self,
@@ -297,7 +290,11 @@ class SafeUserPattern:
             raise TriggerPatternError(
                 "TRIGGER_CANDIDATE_LIMIT",
                 "Trigger evaluation accepts at most 32 candidate values.",
-                details={"field": field, "limit": MAX_CANDIDATES, "actual": len(values)},
+                details={
+                    "field": field,
+                    "limit": MAX_CANDIDATES,
+                    "actual": len(values),
+                },
             )
         for index, value in enumerate(values):
             if not isinstance(value, str):
@@ -359,7 +356,9 @@ class SafeUserPattern:
             try:
                 compiled = self._cache.pop(key)
             except KeyError:
-                stale_keys = [cached for cached in self._cache if cached[0] == trigger_id]
+                stale_keys = [
+                    cached for cached in self._cache if cached[0] == trigger_id
+                ]
                 for stale_key in stale_keys:
                     del self._cache[stale_key]
                 compiled = self._compile(source)

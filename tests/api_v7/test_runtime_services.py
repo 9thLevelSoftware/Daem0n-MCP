@@ -8,10 +8,10 @@ import sqlite3
 import tempfile
 import threading
 import unittest
-from contextlib import closing
+from contextlib import closing, contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-
+from types import SimpleNamespace
 
 WORKED_AT = datetime(2026, 8, 8, 12, 0, tzinfo=timezone.utc)
 
@@ -24,17 +24,13 @@ def _apply_v7_schema(
     from daem0nmcp.migrations.schema import MIGRATIONS
     from daem0nmcp.schema_version import CURRENT_SCHEMA_VERSION
 
-    connection.execute(
-        "CREATE TABLE schema_version (version INTEGER PRIMARY KEY)"
-    )
+    connection.execute("CREATE TABLE schema_version (version INTEGER PRIMARY KEY)")
     target = CURRENT_SCHEMA_VERSION if through_version is None else through_version
     for version in range(16, target + 1):
         migration = next(item for item in MIGRATIONS if item[0] == version)
         for statement in migration[2]:
             connection.execute(statement)
-        connection.execute(
-            "INSERT INTO schema_version(version) VALUES (?)", (version,)
-        )
+        connection.execute("INSERT INTO schema_version(version) VALUES (?)", (version,))
     connection.commit()
 
 
@@ -61,14 +57,15 @@ class _RuntimeServiceFixtures:
             self.storage,
             ActiveDatabasePointer(7, 1, "daem0nmcp.db", None, None),
         )
-        self.workspace = WorkspaceRegistry(
-            [self.root], default_root=self.root
-        ).default
+        self.workspace = WorkspaceRegistry([self.root], default_root=self.root).default
         self.writers: list[object] = []
+        self.health_services: list[object] = []
 
     def tearDown(self) -> None:
         for writer in self.writers:
             writer.close()
+        for service in self.health_services:
+            service.close()
         self.temporary.cleanup()
 
     def _writer(self, **changes):
@@ -107,7 +104,6 @@ class WriterServiceTests(
     _RuntimeServiceFixtures,
     unittest.IsolatedAsyncioTestCase,
 ):
-
     async def test_safe_resolver_requires_a_format_7_active_pointer(self) -> None:
         """Accepting pointerless format 6 storage would write the wrong authority."""
         from daem0nmcp.api.v7.runtime_services import (
@@ -128,9 +124,11 @@ class WriterServiceTests(
         other_storage.mkdir(parents=True)
         (other_storage / "daem0nmcp.db").touch()
         pointerless = WorkspaceRegistry([other], default_root=other).default
-        with self.assertRaisesRegex(RuntimeServiceError, "ACTIVE_V7_UNAVAILABLE"):
-            with resolver.locked_active(pointerless):
-                self.fail("pointerless storage was admitted")
+        with (
+            self.assertRaisesRegex(RuntimeServiceError, "ACTIVE_V7_UNAVAILABLE"),
+            resolver.locked_active(pointerless),
+        ):
+            self.fail("pointerless storage was admitted")
         with self.assertRaisesRegex(RuntimeServiceError, "INVALID_WORKSPACE"):
             resolve_workspace_storage(Workspace(self.workspace.workspace_id, other))
 
@@ -194,9 +192,7 @@ class WriterServiceTests(
         with closing(sqlite3.connect(self.database)) as connection:
             self.assertEqual(
                 1,
-                connection.execute(
-                    "SELECT count(*) FROM memory_events"
-                ).fetchone()[0],
+                connection.execute("SELECT count(*) FROM memory_events").fetchone()[0],
             )
 
     async def test_store_projects_procedure_steps_in_canonical_context(self) -> None:
@@ -242,9 +238,9 @@ class WriterServiceTests(
             self.assertEqual(
                 (0, 0),
                 (
-                    connection.execute(
-                        "SELECT count(*) FROM memory_events"
-                    ).fetchone()[0],
+                    connection.execute("SELECT count(*) FROM memory_events").fetchone()[
+                        0
+                    ],
                     connection.execute(
                         "SELECT count(*) FROM memory_records"
                     ).fetchone()[0],
@@ -347,9 +343,7 @@ class WriterServiceTests(
             return WORKED_AT
 
         writer = self._writer(clock=blocked_clock)
-        first = asyncio.create_task(
-            writer.store(self.workspace, self._store_command())
-        )
+        first = asyncio.create_task(writer.store(self.workspace, self._store_command()))
         await asyncio.to_thread(clock_entered.wait, 1.0)
         first.cancel()
         await asyncio.sleep(0)
@@ -364,9 +358,7 @@ class WriterServiceTests(
         with closing(sqlite3.connect(self.database)) as connection:
             self.assertEqual(
                 0,
-                connection.execute(
-                    "SELECT count(*) FROM memory_events"
-                ).fetchone()[0],
+                connection.execute("SELECT count(*) FROM memory_events").fetchone()[0],
             )
 
 
@@ -455,7 +447,8 @@ class RecallAdapterTests(
         expected = self._retrieval_result(stored)
 
         class Service:
-            async def retrieve(_self, query):
+            @staticmethod
+            async def retrieve(query):
                 self.assertEqual(self.workspace.workspace_id, query.workspace_id)
                 return expected
 
@@ -489,6 +482,314 @@ class RecallAdapterTests(
         )
         self.assertEqual(8, result.token_usage.rendered)
         self.assertNotIn(str(self.root), result.model_dump_json())
+
+    async def test_recall_cache_rotates_by_generation_and_configuration(self) -> None:
+        from daem0nmcp.api.v7.runtime_services import Task8RecallService
+
+        writer = self._writer()
+        stored = await writer.store(self.workspace, self._store_command())
+        expected = self._retrieval_result(stored)
+        testcase = self
+
+        class Resolver:
+            generation = 1
+
+            @contextmanager
+            def locked_active(self, _workspace):
+                yield SimpleNamespace(
+                    path=testcase.database, generation=self.generation
+                )
+
+        class Service:
+            def __init__(self):
+                self.closed = 0
+
+            async def retrieve(self, _query):
+                return expected
+
+            def close(self):
+                self.closed += 1
+
+        resolver = Resolver()
+        config = SimpleNamespace(profile="first")
+        created: list[Service] = []
+
+        def factory(_path):
+            service = Service()
+            created.append(service)
+            return service
+
+        adapter = Task8RecallService(
+            storage_resolver=resolver,
+            service_factory=factory,
+            config=config,
+            max_workers=1,
+        )
+        query = self._query(self.workspace.workspace_id)
+        try:
+            await adapter.retrieve(self.workspace, query, frozenset())
+            await adapter.retrieve(self.workspace, query, frozenset())
+            self.assertEqual(1, len(created))
+
+            resolver.generation = 2
+            await adapter.retrieve(self.workspace, query, frozenset())
+            self.assertEqual(2, len(created))
+            self.assertEqual(1, created[0].closed)
+
+            config.profile = "second"
+            await adapter.retrieve(self.workspace, query, frozenset())
+            self.assertEqual(3, len(created))
+            self.assertEqual(1, created[1].closed)
+        finally:
+            adapter.close()
+
+        self.assertEqual([1, 1, 1], [service.closed for service in created])
+
+    async def test_default_hydration_capacity_admits_four_concurrent_recalls(
+        self,
+    ) -> None:
+        from daem0nmcp.api.v7.runtime_services import Task8RecallService
+
+        writer = self._writer()
+        stored = await writer.store(self.workspace, self._store_command())
+        expected = self._retrieval_result(stored)
+
+        class Service:
+            async def retrieve(self, _query):
+                return expected
+
+        adapter = Task8RecallService(service_factory=lambda _path: Service())
+        original_hydrate = adapter._hydrate
+        admitted = threading.Barrier(4)
+
+        def synchronized_hydrate(*args):
+            admitted.wait(timeout=2)
+            return original_hydrate(*args)
+
+        adapter._hydrate = synchronized_hydrate
+        try:
+            results = await asyncio.gather(
+                *(
+                    adapter.retrieve(
+                        self.workspace,
+                        self._query(self.workspace.workspace_id),
+                        frozenset(),
+                    )
+                    for _ in range(4)
+                )
+            )
+        finally:
+            adapter.close()
+
+        self.assertEqual(4, len(results))
+        self.assertTrue(all(not result.abstained for result in results))
+
+    async def test_hydration_over_capacity_is_retryable_unavailable(self) -> None:
+        from daem0nmcp.api.v7.runtime_services import (
+            RuntimeServiceError,
+            Task8RecallService,
+        )
+
+        writer = self._writer()
+        stored = await writer.store(self.workspace, self._store_command())
+        expected = self._retrieval_result(stored)
+
+        class Service:
+            async def retrieve(self, _query):
+                return expected
+
+        adapter = Task8RecallService(
+            service_factory=lambda _path: Service(), max_workers=1
+        )
+        original_hydrate = adapter._hydrate
+        started = threading.Event()
+        release = threading.Event()
+
+        def blocked_hydrate(*args):
+            started.set()
+            release.wait(timeout=2)
+            return original_hydrate(*args)
+
+        adapter._hydrate = blocked_hydrate
+        first = asyncio.create_task(
+            adapter.retrieve(
+                self.workspace,
+                self._query(self.workspace.workspace_id),
+                frozenset(),
+            )
+        )
+        self.assertTrue(await asyncio.to_thread(started.wait, 2))
+        try:
+            with self.assertRaisesRegex(RuntimeServiceError, "RETRIEVAL_UNAVAILABLE"):
+                await adapter.retrieve(
+                    self.workspace,
+                    self._query(self.workspace.workspace_id),
+                    frozenset(),
+                )
+        finally:
+            release.set()
+            await first
+            adapter.close()
+
+    async def test_retired_recall_service_closes_after_in_flight_user(self) -> None:
+        from daem0nmcp.api.v7.runtime_services import Task8RecallService
+
+        writer = self._writer()
+        stored = await writer.store(self.workspace, self._store_command())
+        expected = self._retrieval_result(stored)
+        testcase = self
+
+        class Resolver:
+            generation = 1
+
+            @contextmanager
+            def locked_active(self, _workspace):
+                yield SimpleNamespace(
+                    path=testcase.database, generation=self.generation
+                )
+
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        class Service:
+            def __init__(self, generation):
+                self.generation = generation
+                self.closed = 0
+
+            async def retrieve(self, _query):
+                if self.generation == 1:
+                    started.set()
+                    await release.wait()
+                return expected
+
+            def close(self):
+                self.closed += 1
+
+        resolver = Resolver()
+        created: list[Service] = []
+
+        def factory(_path):
+            service = Service(resolver.generation)
+            created.append(service)
+            return service
+
+        adapter = Task8RecallService(
+            storage_resolver=resolver,
+            service_factory=factory,
+            max_workers=2,
+        )
+        query = self._query(self.workspace.workspace_id)
+        first = asyncio.create_task(
+            adapter.retrieve(self.workspace, query, frozenset())
+        )
+        await started.wait()
+        resolver.generation = 2
+        await adapter.retrieve(self.workspace, query, frozenset())
+        self.assertEqual(0, created[0].closed)
+        release.set()
+        await first
+        self.assertEqual(1, created[0].closed)
+        adapter.close()
+        self.assertEqual(1, created[1].closed)
+
+    async def test_timed_out_dense_worker_outlives_cache_rotation_and_shutdown(
+        self,
+    ) -> None:
+        from daem0nmcp.api.v7.runtime_services import Task8RecallService
+        from daem0nmcp.retrieval.providers import DenseProvider
+
+        writer = self._writer()
+        stored = await writer.store(self.workspace, self._store_command())
+        expected = self._retrieval_result(stored)
+        testcase = self
+
+        class Resolver:
+            generation = 1
+
+            @contextmanager
+            def locked_active(self, _workspace):
+                yield SimpleNamespace(
+                    path=testcase.database, generation=self.generation
+                )
+
+        class OwnedClient:
+            def __init__(self):
+                self.started = threading.Event()
+                self.release = threading.Event()
+                self.closed_event = threading.Event()
+                self.in_use = False
+                self.closed = 0
+                self.closed_while_in_use = False
+
+            def close(self):
+                self.closed_while_in_use = self.in_use
+                self.closed += 1
+                self.closed_event.set()
+
+        def make_provider(client):
+            provider = DenseProvider(
+                connection_factory=lambda: sqlite3.connect(testcase.database),
+                provider_key="qdrant",
+                model_id="test-model",
+                dimension=3,
+                encoder=lambda _text: [0.0, 0.0, 0.0],
+                qdrant_path="unused-local-path",
+                client_factory=lambda **_kwargs: client,
+                timeout_seconds=0.02,
+            )
+
+            def blocking_search(_query, _limit, started_ns):
+                owned = provider._get_client()
+                owned.in_use = True
+                owned.started.set()
+                owned.release.wait(timeout=2)
+                owned.in_use = False
+                return provider._result(started_ns, status="ready")
+
+            provider._search_sync = blocking_search
+            return provider
+
+        class Service:
+            def __init__(self, provider):
+                self.provider = provider
+
+            async def retrieve(self, _query):
+                return expected
+
+            def close(self):
+                self.provider.close()
+
+        clients = {1: OwnedClient(), 2: OwnedClient()}
+        providers = {
+            generation: make_provider(client) for generation, client in clients.items()
+        }
+        resolver = Resolver()
+        adapter = Task8RecallService(
+            storage_resolver=resolver,
+            service_factory=lambda _path: Service(providers[resolver.generation]),
+            max_workers=1,
+        )
+        query = self._query(self.workspace.workspace_id)
+        await adapter.retrieve(self.workspace, query, frozenset())
+
+        timed_out = await providers[1].search(query, 1)
+        self.assertEqual("DENSE_PROVIDER_TIMEOUT", timed_out.reason)
+        resolver.generation = 2
+        await adapter.retrieve(self.workspace, query, frozenset())
+        self.assertEqual(0, clients[1].closed)
+        clients[1].release.set()
+        self.assertTrue(await asyncio.to_thread(clients[1].closed_event.wait, 2))
+        self.assertEqual(1, clients[1].closed)
+        self.assertFalse(clients[1].closed_while_in_use)
+
+        timed_out = await providers[2].search(query, 1)
+        self.assertEqual("DENSE_PROVIDER_TIMEOUT", timed_out.reason)
+        adapter.close()
+        self.assertEqual(0, clients[2].closed)
+        clients[2].release.set()
+        self.assertTrue(await asyncio.to_thread(clients[2].closed_event.wait, 2))
+        self.assertEqual(1, clients[2].closed)
+        self.assertFalse(clients[2].closed_while_in_use)
 
     async def test_recall_rejects_tamper_blank_provider_and_raw_path(
         self,
@@ -566,9 +867,7 @@ class RecallAdapterTests(
             service_factory=lambda _path: Service(), max_workers=1
         )
         try:
-            with self.assertRaisesRegex(
-                RuntimeServiceError, "FEDERATION_UNAVAILABLE"
-            ):
+            with self.assertRaisesRegex(RuntimeServiceError, "FEDERATION_UNAVAILABLE"):
                 await adapter.retrieve(
                     self.workspace,
                     self._query(self.workspace.workspace_id),
@@ -610,6 +909,7 @@ class BasicServiceTests(
             capability_states=(lexical,),
             package_version="7.0.0.dev0",
         )
+        self.health_services.append(service)
         full = await service.inspect(self.workspace, True)
         compact = await service.inspect(None, False)
         with closing(sqlite3.connect(self.database)) as connection:
@@ -633,6 +933,81 @@ class BasicServiceTests(
         )
         self.assertEqual([], compact.capability_states)
         self.assertNotIn(str(self.root), full.model_dump_json())
+
+    async def test_online_health_never_runs_an_unbounded_database_scan(self) -> None:
+        from unittest.mock import patch
+
+        import daem0nmcp.api.v7.runtime_services as runtime_services
+
+        original_connect = sqlite3.connect
+
+        def guarded_connect(*args, **kwargs):
+            connection = original_connect(*args, **kwargs)
+
+            def authorize(action, argument, _second, _database, _trigger):
+                if action == sqlite3.SQLITE_PRAGMA and argument == "quick_check":
+                    return sqlite3.SQLITE_DENY
+                return sqlite3.SQLITE_OK
+
+            connection.set_authorizer(authorize)
+            return connection
+
+        with patch.object(
+            runtime_services.sqlite3, "connect", side_effect=guarded_connect
+        ):
+            schema_version, tables = runtime_services._inspect_database_health(
+                self.database
+            )
+
+        self.assertIsNotNone(schema_version)
+        self.assertTrue(tables >= runtime_services._REQUIRED_V7_TABLES)
+
+    async def test_blocked_health_probe_does_not_stall_loop_and_shutdown_drains(
+        self,
+    ) -> None:
+        from unittest.mock import patch
+
+        import daem0nmcp.api.v7.runtime_services as runtime_services
+        from daem0nmcp.api.v7.models import CapabilityState
+
+        started = threading.Event()
+        release = threading.Event()
+        service = runtime_services.BasicHealthService(
+            auth_mode="process",
+            task_support=CapabilityState(name="tasks", status="ready"),
+        )
+        self.health_services.append(service)
+
+        def blocked_capability(_resolver, _workspace):
+            started.set()
+            release.wait(timeout=2)
+            return (
+                7,
+                runtime_services._SCHEMA_VERSION,
+                CapabilityState(name="storage", status="ready"),
+            )
+
+        with patch.object(
+            runtime_services,
+            "_storage_capability",
+            side_effect=blocked_capability,
+        ):
+            inspection = asyncio.create_task(service.inspect(self.workspace, True))
+            self.assertTrue(await asyncio.to_thread(started.wait, 1))
+            await asyncio.wait_for(asyncio.sleep(0.01), timeout=0.1)
+            inspection.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await inspection
+            self.assertEqual(1, service._workers.in_flight)
+
+            closing = asyncio.create_task(asyncio.to_thread(service.close))
+            await asyncio.sleep(0.01)
+            self.assertFalse(closing.done())
+            release.set()
+            await asyncio.wait_for(closing, timeout=1)
+
+        self.health_services.remove(service)
+        self.assertEqual(0, service._workers.in_flight)
 
     async def test_health_reports_readable_stale_storage_as_degraded(self) -> None:
         """Replacing the real schema version with the server target is a bug."""
@@ -662,13 +1037,17 @@ class BasicServiceTests(
             auth_mode="process",
             task_support=CapabilityState(name="tasks", status="ready"),
         )
+        self.health_services.append(service)
 
         result = await service.inspect(stale_workspace, True)
 
-        self.assertEqual((7, 19), (
-            result.storage_format_version,
-            result.storage_schema_version,
-        ))
+        self.assertEqual(
+            (7, 19),
+            (
+                result.storage_format_version,
+                result.storage_schema_version,
+            ),
+        )
         self.assertEqual(
             CapabilityState(
                 name="storage",
@@ -697,6 +1076,7 @@ class BasicServiceTests(
             auth_mode="process",
             task_support=CapabilityState(name="tasks", status="ready"),
         )
+        self.health_services.append(service)
 
         result = await service.inspect(empty_workspace, True)
 
@@ -727,6 +1107,7 @@ class BasicServiceTests(
             auth_mode="process",
             task_support=CapabilityState(name="tasks", status="ready"),
         )
+        self.health_services.append(service)
 
         result = await service.inspect(self.workspace, True)
 
@@ -742,6 +1123,66 @@ class BasicServiceTests(
             result.capability_states[-1],
         )
         self.assertNotIn(str(self.root), result.model_dump_json())
+
+    async def test_health_fails_closed_for_a_corrupt_database_header(self) -> None:
+        from daem0nmcp.api.v7.models import CapabilityState
+        from daem0nmcp.api.v7.runtime_services import BasicHealthService
+
+        self.database.write_bytes(b"not a sqlite database")
+        service = BasicHealthService(
+            auth_mode="process",
+            task_support=CapabilityState(name="tasks", status="ready"),
+        )
+        self.health_services.append(service)
+
+        result = await service.inspect(self.workspace, True)
+
+        self.assertIsNone(result.storage_format_version)
+        self.assertIsNone(result.storage_schema_version)
+        self.assertEqual("failed", result.capability_states[-1].status)
+        self.assertEqual(
+            "STORAGE_UNAVAILABLE", result.capability_states[-1].reason_code
+        )
+
+    async def test_health_dreaming_is_workspace_scoped_and_component_suppressed(
+        self,
+    ) -> None:
+        from daem0nmcp.api.v7.models import CapabilityState
+        from daem0nmcp.api.v7.runtime_services import BasicHealthService
+
+        seen: list[str | None] = []
+
+        async def dreaming_provider(workspace):
+            seen.append(None if workspace is None else workspace.workspace_id)
+            return {
+                "enabled": True,
+                "running": False,
+                "yielded": False,
+                "strategies": [
+                    {
+                        "strategy": "failed_decision",
+                        "status": "idle",
+                        "pending_count": 1,
+                        "last_success_at": WORKED_AT,
+                        "stable_error_code": None,
+                        "yielded": False,
+                    }
+                ],
+            }
+
+        service = BasicHealthService(
+            auth_mode="process",
+            task_support=CapabilityState(name="tasks", status="ready"),
+            dreaming_provider=dreaming_provider,
+        )
+        self.health_services.append(service)
+        global_result = await service.inspect(None, True)
+        suppressed = await service.inspect(self.workspace, False)
+        scoped = await service.inspect(self.workspace, True)
+        self.assertIsNone(global_result.dreaming)
+        self.assertIsNone(suppressed.dreaming)
+        self.assertEqual(1, scoped.dreaming.strategies[0].pending_count)
+        self.assertEqual([self.workspace.workspace_id], seen)
 
     async def test_briefing_and_preflight_use_injected_readers(
         self,
@@ -776,9 +1217,7 @@ class BasicServiceTests(
             self.workspace,
             SessionBriefInput(workspace_id=self.workspace.workspace_id),
         )
-        guidance = await BasicPreflightService(
-            reader=guidance_reader
-        ).guidance(
+        guidance = await BasicPreflightService(reader=guidance_reader).guidance(
             self.workspace,
             "memory_store",
             {"idempotency_key": "stable-key"},

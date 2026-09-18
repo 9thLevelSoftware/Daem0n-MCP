@@ -9,8 +9,8 @@ from pydantic import ValidationError
 
 from daem0nmcp.api.v7.mapping import V6_TO_V7_MAPPINGS
 from daem0nmcp.api.v7.policy import V7_TOOL_LEVELS
-from daem0nmcp.api.v7.registry import ManifestError, PINNED_TOOL_NAMES
-
+from daem0nmcp.api.v7.registry import PINNED_TOOL_NAMES, ManifestError
+from daem0nmcp.api.v7.tools import V7_NATIVE_TOOL_NAMES
 
 OPTIONAL_TOOLS = frozenset(
     {
@@ -43,6 +43,7 @@ OPTIONAL_TOOLS = frozenset(
         "workspace_export",
         "workspace_import",
         "workspace_consolidate",
+        "workspace_consolidation_preview",
         "workspace_consolidate_and_archive_sources",
         "dream_duplicates_preview",
         "dream_duplicates_purge",
@@ -55,6 +56,7 @@ OPTIONAL_TOOLS = frozenset(
 READ_ONLY_TOOLS = frozenset(
     {
         "session_brief",
+        "memory_capture_list",
         "memory_preflight",
         "memory_recall",
         "system_health",
@@ -91,6 +93,7 @@ READ_ONLY_TOOLS = frozenset(
         "memory_compaction_preview",
         "workspace_export",
         "workspace_links_list",
+        "workspace_consolidation_preview",
         "dream_duplicates_preview",
         "decision_simulate",
         "rule_evolution_analyze",
@@ -176,7 +179,7 @@ async def _handler(**arguments: object) -> object:
 
 
 def _handler_map() -> dict[str, object]:
-    return {name: _handler for name in V7_TOOL_LEVELS}
+    return dict.fromkeys(V7_TOOL_LEVELS, _handler)
 
 
 def _contains_any(annotation: object) -> bool:
@@ -248,14 +251,12 @@ class ToolManifestTests(unittest.TestCase):
 
         specs = build_tool_specs(_handler_map())
         names = [spec.name for spec in specs]
-        mapped_names = {
-            name for row in V6_TO_V7_MAPPINGS for name in row.new_tools
-        }
+        mapped_names = {name for row in V6_TO_V7_MAPPINGS for name in row.new_tools}
 
-        self.assertEqual(len(names), 71)
+        self.assertEqual(len(names), 75)
         self.assertEqual(len(names), len(set(names)))
         self.assertEqual(set(names), set(V7_TOOL_LEVELS))
-        self.assertEqual(set(names), mapped_names)
+        self.assertEqual(set(names), mapped_names | V7_NATIVE_TOOL_NAMES)
         self.assertEqual(names, sorted(names))
         self.assertEqual(
             {spec.name for spec in specs if spec.pinned}, PINNED_TOOL_NAMES
@@ -403,7 +404,12 @@ class ToolManifestTests(unittest.TestCase):
         workspace_id = "ws_" + "a" * 24
         pairs = (
             (MemoryRecallEntityInput, "entity_id", "ent_" + "b" * 64, "entity_name"),
-            (CodeImpactAnalyzeInput, "code_entity_id", "code_" + "c" * 64, "qualified_name"),
+            (
+                CodeImpactAnalyzeInput,
+                "code_entity_id",
+                "code_" + "c" * 64,
+                "qualified_name",
+            ),
             (EntityEvolutionTraceInput, "entity_id", "ent_" + "d" * 64, "entity_name"),
         )
         for model, id_field, identifier, name_field in pairs:
@@ -472,7 +478,9 @@ class ToolManifestTests(unittest.TestCase):
             RulePatch(enabled=None)
         self.assertFalse(RulePatch(enabled=False).enabled)
 
-    def test_split_consolidation_results_and_compaction_receipt_are_truthful(self) -> None:
+    def test_split_consolidation_results_and_compaction_receipt_are_truthful(
+        self,
+    ) -> None:
         # Catches optional fields that blur static destructive/non-destructive results.
         from daem0nmcp.api.v7.models import DestructiveMutationReceipt
         from daem0nmcp.api.v7.tools import build_tool_specs
@@ -484,9 +492,9 @@ class ToolManifestTests(unittest.TestCase):
         archival = by_name[
             "workspace_consolidate_and_archive_sources"
         ].output_model.__pydantic_generic_metadata__["args"][0]
-        compact = by_name[
-            "memory_compact"
-        ].output_model.__pydantic_generic_metadata__["args"][0]
+        compact = by_name["memory_compact"].output_model.__pydantic_generic_metadata__[
+            "args"
+        ][0]
 
         self.assertEqual(set(normal.model_fields), {"sources", "imported", "event_ids"})
         self.assertEqual(

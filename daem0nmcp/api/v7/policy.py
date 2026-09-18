@@ -15,10 +15,8 @@ from ...covenant import (
 )
 
 
-def _levels(
-    level: CovenantLevel, *tool_names: str
-) -> dict[str, CovenantLevel]:
-    return {name: level for name in tool_names}
+def _levels(level: CovenantLevel, *tool_names: str) -> dict[str, CovenantLevel]:
+    return dict.fromkeys(tool_names, level)
 
 
 V7_TOOL_LEVELS: Mapping[str, CovenantLevel] = MappingProxyType(
@@ -68,9 +66,12 @@ V7_TOOL_LEVELS: Mapping[str, CovenantLevel] = MappingProxyType(
             "projection_rebuild",
             "workspace_export",
             "workspace_links_list",
+            "workspace_consolidation_preview",
             "dream_duplicates_preview",
             "decision_simulate",
             "rule_evolution_analyze",
+            "edit_preflight",
+            "memory_capture_list",
         ),
         **_levels(
             CovenantLevel.COUNSEL,
@@ -89,6 +90,7 @@ V7_TOOL_LEVELS: Mapping[str, CovenantLevel] = MappingProxyType(
             "workspace_link",
             "workspace_consolidate",
             "decision_debate",
+            "memory_capture_promote",
         ),
         **_levels(
             CovenantLevel.DESTRUCTIVE,
@@ -113,9 +115,7 @@ V7_TOOL_LEVELS: Mapping[str, CovenantLevel] = MappingProxyType(
 class V7CovenantPolicy:
     """One immutable, argument-insensitive policy keyed by v7 tool name."""
 
-    def __init__(
-        self, levels: Mapping[str, CovenantLevel] = V7_TOOL_LEVELS
-    ) -> None:
+    def __init__(self, levels: Mapping[str, CovenantLevel] = V7_TOOL_LEVELS) -> None:
         copied = dict(levels)
         if not copied or any(
             not isinstance(name, str) or not isinstance(level, CovenantLevel)
@@ -181,9 +181,7 @@ class V7ArgumentNormalizer:
             supplied["preflight_token"] = self._PREFLIGHT_PLACEHOLDER
         try:
             validated = model.model_validate(supplied)
-            normalized = validated.model_dump(
-                mode="json", exclude=self._EXCLUDED
-            )
+            normalized = validated.model_dump(mode="json", exclude=set(self._EXCLUDED))
         except (TypeError, ValueError, ValidationError) as exc:
             raise ArgumentNormalizationError(
                 "v7 arguments do not match the target tool schema"

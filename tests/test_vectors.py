@@ -2,6 +2,8 @@
 
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from daem0nmcp import vectors
 from daem0nmcp.config import settings
 
@@ -54,11 +56,16 @@ class TestHybridSearch:
 class TestEncodeDecode:
     """Test vector encoding and decoding."""
 
-    def test_encode_returns_none_when_unavailable(self):
-        """encode returns None when vectors not available."""
+    def test_encode_reports_models_local_remediation_when_unavailable(self):
+        """The disabled models-local profile exposes its explicit remediation."""
         if not vectors.is_available():
-            result = vectors.encode("test text")
-            assert result is None
+            from daem0nmcp.capabilities import CapabilityUnavailableError
+
+            with pytest.raises(
+                CapabilityUnavailableError, match="models-local"
+            ) as error:
+                vectors.encode("test text")
+            assert "DAEM0NMCP_MODELS_LOCAL_ENABLED" in str(error.value)
 
     def test_decode_empty_returns_none(self):
         """decode returns None for empty bytes."""
@@ -74,12 +81,11 @@ class TestEncodeDecode:
 class TestCosineSimWithoutVectors:
     """Test cosine similarity when numpy not available."""
 
-    def test_cosine_returns_zero_when_unavailable(self):
-        """cosine_similarity returns 0.0 when numpy not available."""
-        if not vectors.is_available():
-            result = vectors.cosine_similarity([1, 2, 3], [1, 2, 3])
-            # Without numpy, should return 0
-            assert result == 0.0
+    def test_cosine_math_does_not_depend_on_model_profile(self):
+        """Cosine remains correct when the embedding model profile is disabled."""
+        assert vectors.cosine_similarity([1, 2, 3], [1, 2, 3]) == pytest.approx(1.0)
+        assert vectors.cosine_similarity([1, 0], [0, 1]) == pytest.approx(0.0)
+        assert vectors.cosine_similarity([0, 0], [1, 0]) == pytest.approx(0.0)
 
 
 class TestGlobalVectorIndex:

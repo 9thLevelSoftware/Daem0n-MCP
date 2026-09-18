@@ -23,8 +23,13 @@ from ...workspace import Workspace
 from .errors import ErrorCode
 from .models import ApiResponse, CapabilityState, RecordSummary, RetrievalData
 from .responses import ResponseContext, ResponseFactory
-from .tasks import task_admission_only_var
+from .tasks import (
+    durable_task_execution_var,
+    is_durable_task_execution,
+    task_admission_only_var,
+)
 from .tools import (
+    HealthData,
     MemoryPreflightInput,
     MemoryPreflightOutput,
     MemoryRecallInput,
@@ -40,10 +45,10 @@ from .tools import (
     SessionBriefData,
     SessionBriefInput,
     SessionBriefOutput,
-    HealthData,
     SystemHealthInput,
     SystemHealthOutput,
 )
+
 PINNED_HANDLER_NAMES = frozenset(
     {
         "session_brief",
@@ -56,19 +61,25 @@ PINNED_HANDLER_NAMES = frozenset(
 )
 
 
-class IdempotencyConflict(RuntimeError):
+class IdempotencyConflictError(RuntimeError):
     """A key was already bound to a different canonical mutation request."""
 
     code = ErrorCode.IDEMPOTENCY_CONFLICT.value
 
 
+IdempotencyConflict = IdempotencyConflictError
 
-_WINDOWS_ABSOLUTE_PATH = re.compile(
-    r"(?<![A-Za-z0-9])(?:[A-Za-z]:[\\/]|\\\\)"
-)
-_POSIX_ABSOLUTE_PATH = re.compile(
-    r"(?:^|[\s\"'=(])/(?!/)[A-Za-z0-9_.-]"
-)
+
+class FederationAuthorizationError(RuntimeError):
+    """A linked workspace failed independent invocation authorization."""
+
+    def __init__(self, code: str) -> None:
+        self.code = code
+        super().__init__(code)
+
+
+_WINDOWS_ABSOLUTE_PATH = re.compile(r"(?<![A-Za-z0-9])(?:[A-Za-z]:[\\/]|\\\\)")
+_POSIX_ABSOLUTE_PATH = re.compile(r"(?:^|[\s\"'=(])/(?!/)[A-Za-z0-9_.-]")
 
 
 def _contains_raw_path(value: object) -> bool:
@@ -121,6 +132,16 @@ _EXPECTED_SERVICE_ERRORS = MappingProxyType(
             "The workspace is unavailable.",
             False,
         ),
+        "UNAUTHORIZED_WORKSPACE": (
+            ErrorCode.UNAUTHORIZED_WORKSPACE,
+            "The workspace is unavailable.",
+            False,
+        ),
+        "COMMUNION_REQUIRED": (
+            ErrorCode.COMMUNION_REQUIRED,
+            "A session briefing is required for this workspace.",
+            False,
+        ),
         "ACTIVE_V7_UNAVAILABLE": (
             ErrorCode.CAPABILITY_DEGRADED,
             "The active v7 workspace is unavailable.",
@@ -164,7 +185,10 @@ def _expected_service_failure(
     response: ResponseContext,
     error: BaseException,
 ) -> ApiResponse[Any] | None:
-    mapped = _EXPECTED_SERVICE_ERRORS.get(getattr(error, "code", None))
+    error_code = getattr(error, "code", None)
+    if not isinstance(error_code, str):
+        return None
+    mapped = _EXPECTED_SERVICE_ERRORS.get(error_code)
     if mapped is None:
         return None
     code, message, retryable = mapped
@@ -212,6 +236,8 @@ class RecallService(Protocol):
         workspace: Workspace,
         query: RetrievalQuery,
         linked_workspace_ids: frozenset[str],
+        federation_authorizer: Callable[[Workspace], object | Awaitable[object]]
+        | None = None,
     ) -> object | Awaitable[object]: ...
 
 
@@ -309,7 +335,7 @@ class PinnedHandlers:
         self,
         workspace_id: str,
         response: ResponseContext,
-    ) -> tuple[Workspace | None, object | None]:
+    ) -> tuple[Workspace | None, ApiResponse[Any] | None]:
         try:
             workspace_value = self._dependencies.workspace_resolver.resolve(
                 workspace_id
@@ -324,7 +350,10 @@ class PinnedHandlers:
                 ErrorCode.UNAUTHORIZED_WORKSPACE,
                 "The requested workspace is unavailable.",
             )
-        if not isinstance(workspace, Workspace) or workspace.workspace_id != workspace_id:
+        if (
+            not isinstance(workspace, Workspace)
+            or workspace.workspace_id != workspace_id
+        ):
             return None, response.internal_error()
         return workspace, None
 
@@ -332,7 +361,7 @@ class PinnedHandlers:
         self,
         workspace: Workspace,
         response: ResponseContext,
-    ) -> tuple[InvocationScope | None, object | None]:
+    ) -> tuple[InvocationScope | None, ApiResponse[Any] | None]:
         scope = self._dependencies.scope_provider()
         if scope is None:
             return None, response.failure(
@@ -347,6 +376,11 @@ class PinnedHandlers:
             return None, response.failure(
                 ErrorCode.TOKEN_SCOPE_MISMATCH,
                 "The invocation scope does not match the requested workspace.",
+            )
+        if not self._dependencies.covenant_gate.workspace_authorized(scope):
+            return None, response.failure(
+                ErrorCode.UNAUTHORIZED_WORKSPACE,
+                "The requested workspace is unavailable.",
             )
         return scope, None
 
@@ -385,7 +419,10 @@ class PinnedHandlers:
             scope,
         )
         if violation is not None:
-            raise PermissionError("session briefing was not admitted")
+            return response.failure(
+                ErrorCode.UNAUTHORIZED_WORKSPACE,
+                "The requested workspace is unavailable.",
+            )
 
         try:
             assembled_value = self._dependencies.briefing_service.assemble(
@@ -575,13 +612,38 @@ class PinnedHandlers:
         if failure is not None:
             return failure
         assert workspace is not None
-        scope, failure = self._scope_for_workspace(workspace, response)
-        if failure is not None:
-            return failure
-        assert scope is not None
+        effective = request.model_dump(mode="json")
+        durable_execution = is_durable_task_execution(
+            "memory_recall",
+            effective,
+        )
+        scope: InvocationScope | None
+        if durable_execution:
+            execution = durable_task_execution_var.get()
+            if (
+                execution is None
+                or not execution.principal_id
+                or not execution.transport_session_id
+            ):
+                return response.failure(
+                    ErrorCode.COMMUNION_REQUIRED,
+                    "A renewed session briefing is required for this task.",
+                    remedy_tool="session_brief",
+                    remedy_arguments={"workspace_id": request.workspace_id},
+                )
+            scope = InvocationScope(
+                execution.principal_id,
+                execution.transport_session_id,
+                str(workspace.root),
+            )
+        else:
+            scope, failure = self._scope_for_workspace(workspace, response)
+            if failure is not None:
+                return failure
+            assert scope is not None
         violation = self._dependencies.covenant_gate.authorize(
             "memory_recall",
-            request.model_dump(),
+            effective,
             scope,
         )
         if violation is not None:
@@ -594,7 +656,7 @@ class PinnedHandlers:
                     remedy_arguments={"workspace_id": request.workspace_id},
                 )
             return response.internal_error()
-        if task_admission_only_var.get():
+        if task_admission_only_var.get() and not durable_execution:
             return response.failure(
                 ErrorCode.TASKS_UNAVAILABLE,
                 "Task execution is unavailable.",
@@ -603,9 +665,7 @@ class PinnedHandlers:
                         name="tasks",
                         status="disabled",
                         reason_code="TASKS_UNAVAILABLE",
-                        remediation=(
-                            "Use a reviewed synchronous fallback profile."
-                        ),
+                        remediation=("Use a reviewed synchronous fallback profile."),
                     ),
                 ),
             )
@@ -633,11 +693,52 @@ class PinnedHandlers:
                 token_budget=request.token_budget,
                 rerank=request.rerank,
             )
-            result_value = self._dependencies.recall_service.retrieve(
-                workspace,
-                retrieval_query,
-                frozenset(request.linked_workspace_ids),
-            )
+            linked_ids = frozenset(request.linked_workspace_ids)
+            if linked_ids:
+
+                async def authorize_linked(selected: Workspace) -> None:
+                    try:
+                        selected_scope = InvocationScope(
+                            scope.principal_id,
+                            scope.transport_session_id,
+                            str(selected.root),
+                        )
+                        selected_request = request.model_copy(
+                            update={
+                                "workspace_id": selected.workspace_id,
+                                "linked_workspace_ids": set(),
+                            }
+                        )
+                        selected_violation = self._dependencies.covenant_gate.authorize(
+                            "memory_recall",
+                            selected_request.model_dump(),
+                            selected_scope,
+                        )
+                    except Exception:
+                        raise FederationAuthorizationError(
+                            "UNAUTHORIZED_WORKSPACE"
+                        ) from None
+                    if selected_violation is None:
+                        return
+                    if (
+                        selected_violation.get("violation")
+                        == ErrorCode.COMMUNION_REQUIRED.value
+                    ):
+                        raise FederationAuthorizationError("COMMUNION_REQUIRED")
+                    raise FederationAuthorizationError("UNAUTHORIZED_WORKSPACE")
+
+                result_value = self._dependencies.recall_service.retrieve(
+                    workspace,
+                    retrieval_query,
+                    linked_ids,
+                    authorize_linked,
+                )
+            else:
+                result_value = self._dependencies.recall_service.retrieve(
+                    workspace,
+                    retrieval_query,
+                    linked_ids,
+                )
             result = (
                 await result_value
                 if inspect.isawaitable(result_value)
@@ -898,13 +999,19 @@ class PinnedHandlers:
             if failure is not None:
                 return failure
             assert workspace is not None
+            _, failure = self._scope_for_workspace(workspace, response)
+            if failure is not None:
+                return failure
         violation = self._dependencies.covenant_gate.authorize(
             "system_health",
             request.model_dump(),
             self._dependencies.scope_provider(),
         )
         if violation is not None:
-            return response.internal_error()
+            return response.failure(
+                ErrorCode.UNAUTHORIZED_WORKSPACE,
+                "The requested workspace is unavailable.",
+            )
         try:
             health_value = self._dependencies.health_service.inspect(
                 workspace,
@@ -916,6 +1023,10 @@ class PinnedHandlers:
                 else health_value
             )
             data = HealthData.model_validate(health)
+            if workspace is not None:
+                _, failure = self._scope_for_workspace(workspace, response)
+                if failure is not None:
+                    return failure
             if not request.include_components and data.capability_states:
                 data = data.model_copy(update={"capability_states": []})
             return _path_safe_success(response, data)
@@ -931,11 +1042,7 @@ def build_pinned_handlers(
     """Bind the pinned vertical handlers to injected runtime dependencies."""
 
     handlers = PinnedHandlers(dependencies)
-    setattr(
-        handlers.memory_recall.__func__,
-        "__daem0nmcp_admission_aware__",
-        True,
-    )
+    PinnedHandlers.memory_recall.__dict__["__daem0nmcp_admission_aware__"] = True
     return MappingProxyType(
         {
             "session_brief": handlers.session_brief,

@@ -199,6 +199,7 @@ async def run_migration(project_path: str | None = None) -> dict:
 
             qdrant = QdrantVectorStore(path=qdrant_path)
             try:
+
                 def progress_reporter(current: int, total: int):
                     percent = (current / total) * 100 if total > 0 else 0
                     logger.info(
