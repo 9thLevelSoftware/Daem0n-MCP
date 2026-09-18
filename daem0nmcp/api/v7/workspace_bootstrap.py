@@ -8,6 +8,7 @@ import os
 import secrets
 import sqlite3
 import stat
+import sys
 import tempfile
 from contextlib import suppress
 from pathlib import Path
@@ -95,7 +96,7 @@ def _open_bootstrap_marker(storage: Path) -> int:
             raise ProtectedPathError("bootstrap marker is not a regular file")
         if not os.path.samestat(opened, named):
             raise ProtectedPathError("bootstrap marker identity changed")
-        if os.name == "nt":
+        if sys.platform == "win32":
             import msvcrt
 
             try:

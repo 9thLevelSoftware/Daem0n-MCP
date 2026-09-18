@@ -17,6 +17,7 @@ import posixpath
 import re
 import sqlite3
 import subprocess
+import sys
 import tempfile
 from collections.abc import Awaitable, Callable, Mapping
 from contextlib import suppress
@@ -46,7 +47,8 @@ class _WindowsKillOnCloseJob:
 
     def __init__(self, process: subprocess.Popen[bytes]) -> None:
         self._handle: object | None = None
-        if os.name != "nt":
+        self._close: Callable[[object], object] | None = None
+        if sys.platform != "win32":
             return
         import ctypes
         from ctypes import wintypes
@@ -110,7 +112,7 @@ class _WindowsKillOnCloseJob:
 
     def resume(self, process_id: int) -> None:
         """Resume the primary thread only after the suspended process is owned."""
-        if os.name != "nt":
+        if sys.platform != "win32":
             return
         import ctypes
         from ctypes import wintypes
@@ -167,8 +169,8 @@ class _WindowsKillOnCloseJob:
             kernel32.CloseHandle(snapshot)
 
     def close(self) -> None:
-        if self._handle is not None:
-            self._close(self._handle)  # type: ignore[attr-defined]
+        if self._handle is not None and self._close is not None:
+            self._close(self._handle)
             self._handle = None
 
 
