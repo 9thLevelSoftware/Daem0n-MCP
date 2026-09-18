@@ -3,6 +3,8 @@
 
 import pytest
 
+pytest.importorskip("rank_bm25")
+
 from daem0nmcp.bm25_index import BM25Index
 from daem0nmcp.fusion import RRFHybridSearch
 from daem0nmcp.vectors import VectorIndex

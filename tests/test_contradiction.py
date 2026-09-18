@@ -3,6 +3,7 @@
 import shutil
 import tempfile
 from datetime import datetime, timezone
+from importlib.util import find_spec
 
 import pytest
 
@@ -14,6 +15,11 @@ from daem0nmcp.graph.contradiction import (
     invalidate_contradicted_facts,
 )
 from daem0nmcp.models import Memory, MemoryVersion
+
+requires_models_local = pytest.mark.skipif(
+    find_spec("sentence_transformers") is None,
+    reason="models-local profile is not installed",
+)
 
 
 @pytest.fixture(autouse=True)
@@ -148,6 +154,7 @@ class TestContradictionDataclass:
         assert c.negation_pattern is None
 
 
+@requires_models_local
 @pytest.mark.asyncio
 async def test_detect_contradictions_high_similarity_with_negation(db_manager):
     """High similarity + negation pattern = contradiction detected."""
@@ -184,6 +191,7 @@ async def test_detect_contradictions_high_similarity_with_negation(db_manager):
         assert contradictions[0].negation_pattern is not None
 
 
+@requires_models_local
 @pytest.mark.asyncio
 async def test_detect_contradictions_no_contradiction_without_negation(db_manager):
     """High similarity without negation = no contradiction."""
@@ -217,6 +225,7 @@ async def test_detect_contradictions_no_contradiction_without_negation(db_manage
         assert len(contradictions) == 0
 
 
+@requires_models_local
 @pytest.mark.asyncio
 async def test_detect_contradictions_skips_invalidated_versions(db_manager):
     """Already invalidated versions should not be checked for contradictions."""
@@ -250,6 +259,7 @@ async def test_detect_contradictions_skips_invalidated_versions(db_manager):
         assert len(contradictions) == 0
 
 
+@requires_models_local
 @pytest.mark.asyncio
 async def test_detect_contradictions_excludes_same_memory(db_manager):
     """Can exclude versions from the same memory (avoid self-contradiction)."""
@@ -284,6 +294,7 @@ async def test_detect_contradictions_excludes_same_memory(db_manager):
         assert len(contradictions) == 0
 
 
+@requires_models_local
 @pytest.mark.asyncio
 async def test_detect_contradictions_low_similarity_no_contradiction(db_manager):
     """Low similarity = no contradiction even with negation patterns."""
@@ -437,6 +448,7 @@ async def test_invalidate_skips_already_invalidated(db_manager):
         assert version.valid_to.day == 1
 
 
+@requires_models_local
 @pytest.mark.asyncio
 async def test_check_and_invalidate_combined(db_manager):
     """check_and_invalidate_contradictions combines detection and invalidation."""

@@ -25,6 +25,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+pytest.importorskip("numpy")
+
 from daem0nmcp.compression.jit import JITCompressor
 from daem0nmcp.recall_planner import QueryComplexity
 from daem0nmcp.retrieval_router import RetrievalRouter

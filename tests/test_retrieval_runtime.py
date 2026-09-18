@@ -12,6 +12,7 @@ import time
 import types
 import unittest
 from datetime import datetime, timezone
+from importlib.util import find_spec
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -435,6 +436,9 @@ class RetrievalRuntimeTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(ValueError):
             normalize_legacy_category_filter(1, True)
 
+    @unittest.skipIf(
+        find_spec("huggingface_hub") is None, "huggingface_hub is not installed"
+    )
     def test_configured_embedding_backend_never_silently_changes_contract(self):
         from unittest.mock import patch
 
@@ -707,7 +711,9 @@ class RetrievalRuntimeTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(finished.is_set())
 
-    async def test_database_close_defers_repeated_cancellation_until_drain_cleanup(self):
+    async def test_database_close_defers_repeated_cancellation_until_drain_cleanup(
+        self,
+    ):
         from unittest.mock import patch
 
         from daem0nmcp.database import DatabaseManager

@@ -1,8 +1,15 @@
 """Tests for compression module."""
 
+from importlib.util import find_spec
+
 import pytest
 
 from daem0nmcp.compression import CompressionConfig, ContextCompressor
+
+requires_tiktoken = pytest.mark.skipif(
+    find_spec("tiktoken") is None,
+    reason="tiktoken ([models-hosted] extra) is not installed",
+)
 
 
 class TestCompressionConfig:
@@ -55,6 +62,7 @@ class TestContextCompressor:
         compressor = ContextCompressor()
         assert compressor._compressor is None
 
+    @requires_tiktoken
     def test_count_tokens_short_text(self):
         """Token counting works for short text."""
         compressor = ContextCompressor()
@@ -62,24 +70,28 @@ class TestContextCompressor:
         assert count > 0
         assert count < 10  # Should be 2-3 tokens
 
+    @requires_tiktoken
     def test_count_tokens_empty_string(self):
         """Token counting works for empty string."""
         compressor = ContextCompressor()
         count = compressor.count_tokens("")
         assert count == 0
 
+    @requires_tiktoken
     def test_count_tokens_unicode(self):
         """Token counting handles unicode text."""
         compressor = ContextCompressor()
         count = compressor.count_tokens("Hello")
         assert count > 0
 
+    @requires_tiktoken
     def test_should_compress_under_threshold(self):
         """should_compress returns False for short text."""
         compressor = ContextCompressor()
         short_text = "This is a short text."
         assert not compressor.should_compress(short_text)
 
+    @requires_tiktoken
     def test_should_compress_over_threshold(self):
         """should_compress returns True for long text."""
         config = CompressionConfig(
@@ -89,6 +101,7 @@ class TestContextCompressor:
         long_text = "This is a longer text that should exceed the threshold. " * 10
         assert compressor.should_compress(long_text)
 
+    @requires_tiktoken
     def test_compress_skips_under_threshold(self):
         """compress() returns unchanged text when under threshold."""
         compressor = ContextCompressor()
@@ -99,6 +112,7 @@ class TestContextCompressor:
         assert result["skipped"] is True
         assert result["ratio"] == 1.0
 
+    @requires_tiktoken
     def test_compress_returns_all_fields(self):
         """compress() returns all expected fields."""
         compressor = ContextCompressor()
@@ -111,6 +125,7 @@ class TestContextCompressor:
         assert "ratio" in result
         assert "skipped" in result
 
+    @requires_tiktoken
     def test_compress_simple_returns_string(self):
         """compress_simple returns just the text."""
         compressor = ContextCompressor()
@@ -126,6 +141,7 @@ class TestContextCompressor:
         compressor = ContextCompressor(config)
         assert compressor.config.compression_threshold == 100
 
+    @requires_tiktoken
     def test_tokenizer_lazy_loaded_on_count(self):
         """Tokenizer is loaded lazily on first count_tokens call."""
         compressor = ContextCompressor()
@@ -204,6 +220,7 @@ class MyClass:
         rate = adaptive.get_rate_for_content(ContentType.NARRATIVE)
         assert rate == 0.2  # 5x compression
 
+    @requires_tiktoken
     def test_compress_includes_content_type(self):
         """Compression result includes detected content type."""
         from daem0nmcp.compression import AdaptiveCompressor
@@ -214,6 +231,7 @@ class MyClass:
         assert "content_type" in result
         assert result["content_type"] == "narrative"
 
+    @requires_tiktoken
     def test_compress_simple_returns_string(self):
         """compress_simple returns just the text."""
         from daem0nmcp.compression import AdaptiveCompressor
@@ -227,6 +245,7 @@ class MyClass:
 class TestContextCompressorIntegration:
     """Integration tests that require model loading."""
 
+    @requires_tiktoken
     @pytest.mark.slow
     def test_compress_actually_compresses(self):
         """Compression achieves target ratio (requires model)."""
@@ -242,6 +261,7 @@ class TestContextCompressorIntegration:
         assert result["compressed_tokens"] < result["original_tokens"]
         assert result["ratio"] > 1.0
 
+    @requires_tiktoken
     @pytest.mark.slow
     def test_force_tokens_preserved(self):
         """Force tokens are preserved in compressed output."""
@@ -260,6 +280,7 @@ class TestContextCompressorIntegration:
 class TestHierarchicalContextManager:
     """Tests for HierarchicalContextManager."""
 
+    @requires_tiktoken
     def test_simple_query_uses_summaries(self):
         """Simple queries prefer community summaries."""
         from daem0nmcp.compression import HierarchicalContextManager
@@ -278,6 +299,7 @@ class TestHierarchicalContextManager:
         assert result["compression_applied"] is False
         assert "Auth system" in result["context"]
 
+    @requires_tiktoken
     def test_simple_query_fallback_to_raw(self):
         """Simple queries fall back to raw if no summaries."""
         from daem0nmcp.compression import HierarchicalContextManager
@@ -294,6 +316,7 @@ class TestHierarchicalContextManager:
         assert result["strategy"] == "raw_fallback"
         assert "Raw memory content" in result["context"]
 
+    @requires_tiktoken
     def test_complex_query_uses_compression(self):
         """Complex queries use compression strategy."""
         from daem0nmcp.compression import HierarchicalContextManager
@@ -337,6 +360,7 @@ class TestHierarchicalContextManager:
         assert "Summary A" in formatted
         assert "Summary B" in formatted
 
+    @requires_tiktoken
     def test_result_includes_token_count(self):
         """All results include token count."""
         from daem0nmcp.compression import HierarchicalContextManager
@@ -353,6 +377,7 @@ class TestHierarchicalContextManager:
         assert "token_count" in result
         assert isinstance(result["token_count"], int)
 
+    @requires_tiktoken
     def test_medium_query_hybrid_strategy(self):
         """Medium complexity queries use hybrid strategy."""
         from daem0nmcp.compression import HierarchicalContextManager
@@ -370,6 +395,7 @@ class TestHierarchicalContextManager:
         # Should be hybrid or hybrid_compressed
         assert result["strategy"] in ["hybrid", "hybrid_compressed"]
 
+    @requires_tiktoken
     def test_empty_memories_handled(self):
         """Empty memory list is handled gracefully."""
         from daem0nmcp.compression import HierarchicalContextManager

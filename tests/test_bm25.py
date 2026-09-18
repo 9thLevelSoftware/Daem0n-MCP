@@ -1,6 +1,10 @@
 # tests/test_bm25.py
 """Tests for BM25 index."""
 
+import pytest
+
+pytest.importorskip("rank_bm25")
+
 from daem0nmcp.bm25_index import BM25Index
 
 

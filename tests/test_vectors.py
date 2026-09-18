@@ -1,11 +1,17 @@
 """Tests for the vector embeddings module."""
 
+from importlib.util import find_spec
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from daem0nmcp import vectors
 from daem0nmcp.config import settings
+
+requires_numpy = pytest.mark.skipif(
+    find_spec("numpy") is None,
+    reason="numpy ([models-local] extra) is not installed",
+)
 
 
 class TestVectorAvailability:
@@ -116,6 +122,7 @@ class TestGlobalVectorIndex:
 class TestEncodeQueryDocument:
     """Test encode_query and encode_document use correct prefixes."""
 
+    @requires_numpy
     @patch("daem0nmcp.vectors._get_model")
     def test_encode_document_prepends_document_prefix(self, mock_get_model):
         import numpy as np
@@ -134,6 +141,7 @@ class TestEncodeQueryDocument:
         call_text = fake_model.encode.call_args[0][0]
         assert call_text == f"{settings.embedding_document_prefix}hello world"
 
+    @requires_numpy
     @patch("daem0nmcp.vectors._get_model")
     def test_encode_query_prepends_query_prefix(self, mock_get_model):
         import numpy as np
@@ -150,6 +158,7 @@ class TestEncodeQueryDocument:
         call_text = fake_model.encode.call_args[0][0]
         assert call_text == f"{settings.embedding_query_prefix}hello world"
 
+    @requires_numpy
     @patch("daem0nmcp.vectors._get_model")
     def test_encode_returns_correct_byte_length(self, mock_get_model):
         import numpy as np

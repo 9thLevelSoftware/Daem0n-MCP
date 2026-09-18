@@ -9,6 +9,15 @@ Verifies all CONTEXT-* requirements:
 - CONTEXT-05: Adaptive compression ratios based on query complexity
 """
 
+from importlib.util import find_spec
+
+import pytest
+
+requires_tiktoken = pytest.mark.skipif(
+    find_spec("tiktoken") is None,
+    reason="tiktoken ([models-hosted] extra) is not installed",
+)
+
 
 class TestContextEngineeringRequirements:
     """Integration tests verifying Phase 4 requirements."""
@@ -92,6 +101,7 @@ class DiscountCalculator:
         assert "calculate_discount" in names
         assert "DiscountCalculator" in names
 
+    @requires_tiktoken
     def test_context_04_hierarchical_summaries(self):
         """CONTEXT-04: Hierarchical compression leverages community structure."""
         from daem0nmcp.compression import HierarchicalContextManager
@@ -179,6 +189,7 @@ from typing import List
 class TestCompressionThreshold:
     """Tests for 4K token compression threshold."""
 
+    @requires_tiktoken
     def test_under_threshold_not_compressed(self):
         """Context under 4K tokens is not compressed."""
         from daem0nmcp.compression import ContextCompressor
@@ -192,6 +203,7 @@ class TestCompressionThreshold:
         assert result["skipped"] is True
         assert result["compressed_prompt"] == short_text
 
+    @requires_tiktoken
     def test_threshold_configurable(self):
         """Compression threshold is configurable."""
         from daem0nmcp.compression import CompressionConfig, ContextCompressor
@@ -207,6 +219,7 @@ class TestCompressionThreshold:
 class TestHierarchicalStrategies:
     """Tests for hierarchical context strategies."""
 
+    @requires_tiktoken
     def test_simple_strategy_prefers_summaries(self):
         """Simple queries prefer community summaries."""
         from daem0nmcp.compression import HierarchicalContextManager
@@ -221,6 +234,7 @@ class TestHierarchicalStrategies:
 
         assert result["strategy"] == "summaries"
 
+    @requires_tiktoken
     def test_complex_strategy_compresses_raw(self):
         """Complex queries compress raw memories."""
         from daem0nmcp.compression import HierarchicalContextManager
@@ -236,6 +250,7 @@ class TestHierarchicalStrategies:
         # Should attempt compression strategy
         assert result["strategy"] in ["compressed", "raw"]
 
+    @requires_tiktoken
     def test_medium_strategy_hybrid(self):
         """Medium queries use hybrid approach."""
         from daem0nmcp.compression import HierarchicalContextManager

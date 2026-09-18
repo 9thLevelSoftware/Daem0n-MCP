@@ -4,6 +4,7 @@ These tests exercise the full reflexion loop, verifying that all components
 work together: claim extraction -> verification -> persistence -> consolidation.
 """
 
+from importlib.util import find_spec
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -26,6 +27,11 @@ from daem0nmcp.reflexion import (
     run_reflexion,
     summarize_verification,
     verify_claims,
+)
+
+requires_models_local = pytest.mark.skipif(
+    find_spec("sentence_transformers") is None,
+    reason="models-local profile is not installed",
 )
 
 
@@ -122,6 +128,7 @@ class TestClaimExtractionToVerification:
         assert pg_result is not None
         assert pg_result.status == "verified"
 
+    @requires_models_local
     @pytest.mark.asyncio
     async def test_unverified_claim_no_evidence(self, mock_memory_manager):
         """Claims with no supporting memories should be unverified."""
@@ -514,6 +521,7 @@ class TestConsolidationIntegration:
 class TestVerifyFactsToolIntegration:
     """Tests for verify_facts MCP tool (via direct import)."""
 
+    @requires_models_local
     @pytest.mark.asyncio
     async def test_verify_facts_returns_structure(self, mock_memory_manager):
         """Test verify_facts returns expected structure."""
@@ -592,6 +600,7 @@ class TestVerifyFactsToolIntegration:
 class TestGraphRAGIntegration:
     """Tests for GraphRAG integration in verification."""
 
+    @requires_models_local
     @pytest.mark.asyncio
     async def test_verification_with_knowledge_graph(
         self, mock_memory_manager, mock_knowledge_graph
@@ -616,6 +625,7 @@ class TestGraphRAGIntegration:
         # Should have called ensure_loaded on knowledge graph
         mock_knowledge_graph.ensure_loaded.assert_called()
 
+    @requires_models_local
     @pytest.mark.asyncio
     async def test_verification_without_knowledge_graph(self, mock_memory_manager):
         """Test verification works without knowledge graph."""
