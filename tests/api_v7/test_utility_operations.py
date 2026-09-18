@@ -12,9 +12,7 @@ class UtilityOperationTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
         self.root = Path(self.temporary.name).resolve()
-        self.workspace = WorkspaceRegistry(
-            [self.root], default_root=self.root
-        ).default
+        self.workspace = WorkspaceRegistry([self.root], default_root=self.root).default
 
     def tearDown(self) -> None:
         self.temporary.cleanup()
@@ -150,9 +148,7 @@ class UtilityOperationTests(unittest.IsolatedAsyncioTestCase):
         )
         dependencies = self._dependencies()
         try:
-            handler = build_utility_operations(dependencies)[
-                "code_refactor_propose"
-            ]
+            handler = build_utility_operations(dependencies)["code_refactor_propose"]
             result = await handler(
                 workspace=self.workspace,
                 request=AdmittedRequest(

@@ -24,11 +24,13 @@ class TransportSecurityTests(unittest.TestCase):
 
     def test_remote_hosts_require_production_authentication(self):
         for host in ("0.0.0.0", "::", "[::]", "203.0.113.10", "mcp.example.com"):
-            with self.subTest(host=host):
-                with self.assertRaisesRegex(
+            with (
+                self.subTest(host=host),
+                self.assertRaisesRegex(
                     TransportSecurityError, "REMOTE_BIND_REQUIRES_AUTH"
-                ):
-                    validate_transport_security(host, environ={})
+                ),
+            ):
+                validate_transport_security(host, environ={})
 
     def test_unrelated_token_does_not_authorize_remote_bind(self):
         with self.assertRaisesRegex(
@@ -61,9 +63,11 @@ class TransportSecurityTests(unittest.TestCase):
         )
 
         for environ in invalid_environments:
-            with self.subTest(environ=environ):
-                with self.assertRaises(TransportSecurityError):
-                    validate_transport_security("mcp.example.com", environ=environ)
+            with (
+                self.subTest(environ=environ),
+                self.assertRaises(TransportSecurityError),
+            ):
+                validate_transport_security("mcp.example.com", environ=environ)
 
     def test_complete_jwt_verifier_configuration_authorizes_remote_bind(self):
         validate_transport_security(
@@ -119,6 +123,7 @@ class TransportSecurityTests(unittest.TestCase):
             headers = [(b"origin", origin.encode("ascii"))]
             if method == "OPTIONS":
                 headers.append((b"access-control-request-method", b"POST"))
+
             async def send(message):
                 sent.append(message)
 
@@ -133,9 +138,7 @@ class TransportSecurityTests(unittest.TestCase):
         self.assertEqual(rejected[0]["status"], 403)
         self.assertEqual(downstream_calls, [])
 
-        preflight = asyncio.run(
-            request("https://console.example.com", "OPTIONS")
-        )
+        preflight = asyncio.run(request("https://console.example.com", "OPTIONS"))
         self.assertEqual(preflight[0]["status"], 204)
         headers = dict(preflight[0]["headers"])
         self.assertEqual(
@@ -155,13 +158,12 @@ class TransportSecurityTests(unittest.TestCase):
             "https://exa\rmple.com",
             "https://exa\tmple.com",
         ):
-            with self.subTest(value=value):
-                with self.assertRaises(TransportSecurityError):
-                    build_http_origin_middleware(
-                        "0.0.0.0",
-                        9876,
-                        environ={"DAEM0NMCP_ALLOWED_ORIGINS": value},
-                    )
+            with self.subTest(value=value), self.assertRaises(TransportSecurityError):
+                build_http_origin_middleware(
+                    "0.0.0.0",
+                    9876,
+                    environ={"DAEM0NMCP_ALLOWED_ORIGINS": value},
+                )
 
     def test_http_json_boundary_rejects_duplicate_keys_before_dispatch(self):
         downstream_bodies: list[bytes] = []

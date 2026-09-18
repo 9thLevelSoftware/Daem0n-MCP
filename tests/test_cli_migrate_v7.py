@@ -11,7 +11,6 @@ from pathlib import Path
 
 from tests.test_migrate_v7 import _create_legacy_database
 
-
 EXPECTED_KEYS = {
     "status",
     "action",
@@ -119,7 +118,9 @@ class MigrateV7CliTests(unittest.TestCase):
             self.assertEqual("rolled_back", json.loads(rolled.stdout)["status"])
             repeated = self._run(root, "--rollback")
             self.assertEqual(0, repeated.returncode, repeated.stderr)
-            self.assertEqual("already_rolled_back", json.loads(repeated.stdout)["action"])
+            self.assertEqual(
+                "already_rolled_back", json.loads(repeated.stdout)["action"]
+            )
 
     def test_apply_resumes_an_interrupted_candidate_and_exits_zero(self):
         from daem0nmcp.migrations.v7 import MigrationInterrupted, MigrationV7Service

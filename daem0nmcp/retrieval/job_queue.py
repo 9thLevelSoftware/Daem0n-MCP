@@ -4,10 +4,9 @@ from __future__ import annotations
 
 import hashlib
 import re
-import sqlite3
+from typing import Any, Protocol
 
 from ..event_store import canonical_json_bytes, deterministic_id
-
 
 _EVENT_ID = re.compile(r"^evt_[0-9a-f]{64}$")
 _WORKSPACE_ID = re.compile(r"^ws_[0-9a-f]{24}$")
@@ -16,22 +15,39 @@ _PROJECTIONS = frozenset(
 )
 
 
+class SQLiteConnectionProtocol(Protocol):
+    """Synchronous SQLite surface shared by stdlib and adapted connections."""
+
+    @property
+    def in_transaction(self) -> bool: ...
+
+    def cursor(self) -> Any: ...
+
+    def execute(self, statement: str, parameters: Any = ()) -> Any: ...
+
+
 def enqueue_projection_rebuild(
-    connection: sqlite3.Connection,
+    connection: SQLiteConnectionProtocol,
     *,
     workspace_id: str,
     projection_name: str,
     source_event_id: str | None,
     recorded_at_us: int,
+    available_at_us: int | None = None,
     requeue_existing: bool = True,
 ) -> None:
     """Queue one bounded rebuild, coalescing later events for the same channel."""
 
-    if not isinstance(connection, sqlite3.Connection):
-        raise ValueError("connection must be a SQLite connection")
-    if not isinstance(workspace_id, str) or _WORKSPACE_ID.fullmatch(
-        workspace_id
-    ) is None:
+    if (
+        not callable(getattr(connection, "execute", None))
+        or not callable(getattr(connection, "cursor", None))
+        or not isinstance(getattr(connection, "in_transaction", None), bool)
+    ):
+        raise ValueError("connection must provide the synchronous SQLite protocol")
+    if (
+        not isinstance(workspace_id, str)
+        or _WORKSPACE_ID.fullmatch(workspace_id) is None
+    ):
         raise ValueError("workspace_id is invalid")
     if projection_name not in _PROJECTIONS:
         raise ValueError("projection_name is invalid")
@@ -46,6 +62,15 @@ def enqueue_projection_rebuild(
         or recorded_at_us < 0
     ):
         raise ValueError("recorded_at_us is invalid")
+    if available_at_us is None:
+        available_at_us = recorded_at_us
+    if (
+        isinstance(available_at_us, bool)
+        or not isinstance(available_at_us, int)
+        or available_at_us < recorded_at_us
+        or available_at_us > 9_223_372_036_854_775_807
+    ):
+        raise ValueError("available_at_us is invalid")
     if not isinstance(requeue_existing, bool):
         raise ValueError("requeue_existing must be boolean")
 
@@ -127,7 +152,7 @@ def enqueue_projection_rebuild(
             payload_text,
             payload_hash,
             priority,
-            recorded_at_us,
+            available_at_us,
             source_event_id,
             recorded_at_us,
             recorded_at_us,
@@ -135,4 +160,4 @@ def enqueue_projection_rebuild(
     )
 
 
-__all__ = ["enqueue_projection_rebuild"]
+__all__ = ["SQLiteConnectionProtocol", "enqueue_projection_rebuild"]

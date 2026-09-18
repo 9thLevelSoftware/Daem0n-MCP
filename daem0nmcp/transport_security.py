@@ -4,15 +4,16 @@ from __future__ import annotations
 
 import ipaddress
 import json
+import math
 import os
-from collections.abc import Mapping
+import re
+from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Any, Iterator
+from typing import Any
 from urllib.parse import urlsplit
 
 from starlette.middleware import Middleware
-
 
 JWT_VERIFIER = "fastmcp.server.auth.providers.jwt.JWTVerifier"
 _PRODUCTION_PROVIDER_CLASSES = frozenset({JWT_VERIFIER})
@@ -181,9 +182,7 @@ class OriginPolicyMiddleware:
             return
 
         method = str(scope.get("method", "")).upper()
-        requested_methods = self._header_values(
-            scope, b"access-control-request-method"
-        )
+        requested_methods = self._header_values(scope, b"access-control-request-method")
         if method == "OPTIONS" and requested_methods:
             if len(requested_methods) != 1:
                 await self._reject(send)
@@ -222,8 +221,7 @@ class OriginPolicyMiddleware:
                     (
                         b"access-control-allow-methods",
                         b", ".join(
-                            value.encode("ascii")
-                            for value in _ALLOWED_CORS_METHODS
+                            value.encode("ascii") for value in _ALLOWED_CORS_METHODS
                         ),
                     ),
                     (
@@ -277,6 +275,37 @@ def _reject_json_constant(_value: str) -> None:
     raise ValueError("non-finite JSON number")
 
 
+def _finite_json_float(value: str) -> float:
+    result = float(value)
+    if not math.isfinite(result):
+        raise ValueError("non-finite JSON number")
+    return result
+
+
+def _validate_json_nesting(text: str) -> None:
+    # Enforce a transport ceiling before the decoder allocates nested objects;
+    # interpreter recursion limits differ across versions and imported packages.
+    depth = 0
+    quoted = False
+    escaped = False
+    for character in text:
+        if quoted:
+            if escaped:
+                escaped = False
+            elif character == "\\":
+                escaped = True
+            elif character == '"':
+                quoted = False
+        elif character == '"':
+            quoted = True
+        elif character in "[{":
+            depth += 1
+            if depth > 64:
+                raise ValueError("JSON nesting exceeds transport limit")
+        elif character in "]}":
+            depth -= 1
+
+
 def _strict_json_value(raw: str | bytes | bytearray, *, max_bytes: int) -> Any:
     if isinstance(raw, str):
         encoded = raw.encode("utf-8")
@@ -288,10 +317,12 @@ def _strict_json_value(raw: str | bytes | bytearray, *, max_bytes: int) -> Any:
         raise TypeError("JSON input must be text or bytes")
     if len(encoded) > max_bytes:
         raise ValueError("JSON input is too large")
+    _validate_json_nesting(text)
     return json.loads(
         text,
         object_pairs_hook=_strict_json_pairs,
         parse_constant=_reject_json_constant,
+        parse_float=_finite_json_float,
     )
 
 
@@ -329,6 +360,7 @@ def strict_stdio_json_boundary(message_model: Any) -> Iterator[None]:
         return original_parser(canonical, *args, **kwargs)
 
     if model_class:
+
         def model_validate_json(
             cls: type[Any],
             raw: str | bytes | bytearray,
@@ -415,7 +447,10 @@ class StrictJsonBodyMiddleware:
         async def replay() -> dict[str, Any]:
             nonlocal delivered
             if delivered:
-                return {"type": "http.disconnect"}
+                # Exhausting the request body does not disconnect the client.
+                # Streaming responses keep listening here until the transport
+                # reports a real disconnect; fabricating one truncates SSE.
+                return await receive()
             delivered = True
             return {
                 "type": "http.request",
@@ -460,9 +495,128 @@ def build_http_transport_middleware(
     """Build the complete reviewed Streamable HTTP parsing/origin boundary."""
 
     return [
+        Middleware(
+            HostPolicyMiddleware, allowed_hosts=_allowed_http_hosts(host, port, environ)
+        ),
         Middleware(StrictJsonBodyMiddleware),
         *build_http_origin_middleware(host, port, environ=environ),
     ]
+
+
+def _normalized_authority(value: str) -> str:
+    if (
+        not value
+        or len(value) > 300
+        or value != value.strip()
+        or "%" in value
+        or any(ord(char) < 32 or ord(char) == 127 for char in value)
+    ):
+        raise ValueError("invalid host authority")
+    parsed = urlsplit("http://" + value)
+    if (
+        parsed.username is not None
+        or parsed.password is not None
+        or parsed.path
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise ValueError("invalid host authority")
+    hostname = parsed.hostname
+    if not hostname or any(character.isspace() for character in value):
+        raise ValueError("invalid host authority")
+    try:
+        address = ipaddress.ip_address(hostname)
+    except ValueError:
+        hostname = hostname.encode("idna").decode("ascii").lower()
+        if len(hostname) > 253 or any(
+            re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", label) is None
+            for label in hostname.split(".")
+        ):
+            raise ValueError("invalid host authority") from None
+    else:
+        hostname = (
+            f"[{address.compressed}]" if address.version == 6 else address.compressed
+        )
+    port = parsed.port
+    if port is not None and not 1 <= port <= 65535:
+        raise ValueError("invalid host authority")
+    if value.endswith(":"):
+        raise ValueError("invalid host authority")
+    return hostname + (f":{port}" if port is not None else "")
+
+
+def _allowed_http_hosts(
+    host: str, port: int, environ: Mapping[str, str] | None
+) -> tuple[str, ...]:
+    env = os.environ if environ is None else environ
+    raw = env.get("DAEM0NMCP_ALLOWED_HOSTS", "")
+    try:
+        if len(raw.encode("utf-8")) > 8192:
+            raise ValueError("host configuration too large")
+        values = raw.split(",") if raw else []
+        if len(values) > 32:
+            raise ValueError("too many hosts")
+        allowed = {_normalized_authority(value) for value in values}
+        if _is_loopback_host(host):
+            normalized = host.strip("[]")
+            authority = f"[{normalized}]" if ":" in normalized else normalized
+            allowed.add(_normalized_authority(f"{authority}:{port}"))
+            allowed.add(_normalized_authority(f"localhost:{port}"))
+            if port == 80:
+                allowed.update({_normalized_authority(authority), "localhost"})
+        if not allowed:
+            raise ValueError("remote listener requires explicit hosts")
+    except (UnicodeError, ValueError) as exc:
+        raise TransportSecurityError(
+            "INVALID_HOST_CONFIGURATION",
+            "configure exact DAEM0NMCP_ALLOWED_HOSTS authorities for this listener",
+        ) from exc
+    return tuple(sorted(allowed))
+
+
+class HostPolicyMiddleware:
+    """Reject ambiguous or unconfigured Host headers before reading bodies."""
+
+    def __init__(self, app: Any, *, allowed_hosts: tuple[str, ...]) -> None:
+        self._app = app
+        self._allowed_hosts = frozenset(allowed_hosts)
+
+    async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
+        if scope.get("type") != "http":
+            await self._app(scope, receive, send)
+            return
+        hosts = OriginPolicyMiddleware._header_values(scope, b"host")
+        try:
+            if len(hosts) != 1:
+                raise ValueError("ambiguous host")
+            authority = _normalized_authority(hosts[0].decode("ascii"))
+            if authority not in self._allowed_hosts:
+                raise ValueError("unconfigured host")
+        except (UnicodeError, ValueError):
+            await OriginPolicyMiddleware._reject(send)
+            return
+        await self._app(scope, receive, send)
+
+
+def build_uvicorn_security_config(
+    environ: Mapping[str, str] | None = None,
+) -> dict[str, Any]:
+    """Forwarding is disabled unless specific reverse-proxy IPs are configured."""
+    env = os.environ if environ is None else environ
+    raw = env.get("DAEM0NMCP_TRUSTED_PROXY_IPS", "")
+    if not raw:
+        return {"proxy_headers": False, "forwarded_allow_ips": ""}
+    try:
+        values = raw.split(",")
+        if len(raw) > 2048 or len(values) > 32:
+            raise ValueError("proxy configuration too large")
+        addresses = sorted({str(ipaddress.ip_address(value)) for value in values})
+    except ValueError as exc:
+        raise TransportSecurityError(
+            "INVALID_PROXY_CONFIGURATION",
+            "trusted proxies must be explicit IP addresses",
+        ) from exc
+    return {"proxy_headers": True, "forwarded_allow_ips": ",".join(addresses)}
 
 
 def _is_loopback_host(host: str) -> bool:
@@ -515,7 +669,11 @@ def build_fastmcp_auth(
 
     from fastmcp.server.auth.providers.jwt import JWTVerifier
 
-    return JWTVerifier(**configuration.kwargs)
+    return JWTVerifier(
+        jwks_uri=configuration.kwargs["jwks_uri"],
+        issuer=configuration.kwargs["issuer"],
+        audience=configuration.kwargs["audience"],
+    )
 
 
 def _provider_class_path(auth_provider: object) -> str:

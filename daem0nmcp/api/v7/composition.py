@@ -10,7 +10,11 @@ from ...covenant import CovenantGate
 from .application import V7ApplicationDependencies, V7ToolRouter
 from .factory import build_v7_manifest, combine_handler_maps
 from .fastmcp import build_fastmcp_server
-from .middleware import ResourceCommunionAuthorizer, V7InvocationMiddleware
+from .middleware import (
+    ResourceCommunionAuthorizer,
+    TransportMode,
+    V7InvocationMiddleware,
+)
 from .pinned import (
     PINNED_HANDLER_NAMES,
     PinnedDependencies,
@@ -56,11 +60,17 @@ def build_v7_surface(
     process_principal: str | None = None,
     session_id_factory: Callable[[], str] | None = None,
     allow_unauthenticated_loopback: bool = False,
+    activity_callback: Callable[[Any, bool], None] | None = None,
 ) -> V7Surface:
     """Compose one exact surface without importing legacy decorator modules."""
 
     if not isinstance(pinned_dependencies, PinnedDependencies):
         raise ValueError("pinned dependencies are required")
+    if transport_mode not in {"stdio", "streamable-http"}:
+        raise ValueError("v7 supports stdio or streamable-http")
+    selected_transport: TransportMode = (
+        "stdio" if transport_mode == "stdio" else "streamable-http"
+    )
     gate = pinned_dependencies.covenant_gate
     if not isinstance(gate, CovenantGate):
         raise ValueError("pinned handlers require the authoritative Covenant gate")
@@ -89,9 +99,7 @@ def build_v7_surface(
     resource_handlers = ResourceHandlers(
         ResourceDependencies(
             workspace_resolver=resolver,
-            communion_authorizer=ResourceCommunionAuthorizer(
-                expected_gate=gate
-            ),
+            communion_authorizer=ResourceCommunionAuthorizer(expected_gate=gate),
             warning_reader=warning_reader,
             failure_reader=failure_reader,
             rule_reader=rule_reader,
@@ -103,11 +111,12 @@ def build_v7_surface(
         V7InvocationMiddleware(
             gate=gate,
             workspace_resolver=resolver,
-            transport_mode=transport_mode,
+            transport_mode=selected_transport,
             access_token_provider=access_token_provider,
             process_principal=process_principal,
             session_id_factory=session_id_factory,
             allow_unauthenticated_loopback=allow_unauthenticated_loopback,
+            activity_callback=activity_callback,
         ),
     )
     manifest = build_v7_manifest(handlers, resource_handlers)

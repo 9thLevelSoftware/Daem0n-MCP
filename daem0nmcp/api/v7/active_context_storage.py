@@ -6,7 +6,6 @@ import re
 
 from ...event_store import sha256_json
 
-
 _WORKSPACE_ID_RE = re.compile(r"^ws_[0-9a-f]{24}$")
 _RECORD_ID_RE = re.compile(r"^mem_[0-9a-f]{64}$")
 

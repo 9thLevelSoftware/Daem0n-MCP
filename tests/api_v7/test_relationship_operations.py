@@ -14,7 +14,6 @@ from types import MappingProxyType
 
 from daem0nmcp.api.v7.application import AdmittedRequest
 
-
 NOW = datetime(2026, 8, 9, 12, 0, tzinfo=timezone.utc)
 NOW_US = 1_786_276_800_000_000
 TOKEN = "preflight-token-0001"
@@ -24,9 +23,7 @@ def _apply_v7_schema(connection: sqlite3.Connection) -> None:
     from daem0nmcp.migrations.schema import MIGRATIONS
     from daem0nmcp.schema_version import CURRENT_SCHEMA_VERSION
 
-    connection.execute(
-        "CREATE TABLE schema_version (version INTEGER PRIMARY KEY)"
-    )
+    connection.execute("CREATE TABLE schema_version (version INTEGER PRIMARY KEY)")
     for version, _description, statements in MIGRATIONS:
         if 16 <= version <= CURRENT_SCHEMA_VERSION:
             for statement in statements:
@@ -67,9 +64,7 @@ class RelationshipOperationTests(unittest.IsolatedAsyncioTestCase):
             self.storage,
             ActiveDatabasePointer(7, 1, self.database.name, None, None),
         )
-        self.workspace = WorkspaceRegistry(
-            [self.root], default_root=self.root
-        ).default
+        self.workspace = WorkspaceRegistry([self.root], default_root=self.root).default
         self.dependencies = None
 
     async def asyncTearDown(self) -> None:
@@ -419,18 +414,10 @@ class RelationshipOperationTests(unittest.IsolatedAsyncioTestCase):
         c = self._append_record("c", "Incoming prerequisite.")
         d = self._append_record("d", "Downstream test.")
         operations = self._operations()
-        ab = await self._link(
-            operations, a, b, "led_to", "related-edge-ab-0001"
-        )
-        ca = await self._link(
-            operations, c, a, "depends_on", "related-edge-ca-0002"
-        )
-        bd = await self._link(
-            operations, b, d, "depends_on", "related-edge-bd-0003"
-        )
-        await self._link(
-            operations, d, a, "conflicts_with", "related-cycle-da-0004"
-        )
+        ab = await self._link(operations, a, b, "led_to", "related-edge-ab-0001")
+        ca = await self._link(operations, c, a, "depends_on", "related-edge-ca-0002")
+        bd = await self._link(operations, b, d, "depends_on", "related-edge-bd-0003")
+        await self._link(operations, d, a, "conflicts_with", "related-cycle-da-0004")
         request = _request(
             "memory_related",
             workspace_id=self.workspace.workspace_id,
@@ -458,11 +445,11 @@ class RelationshipOperationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([a, b], by_target[b].record_ids)
         self.assertEqual([a, c], by_target[c].record_ids)
         self.assertEqual([a, b, d], by_target[d].record_ids)
-        self.assertEqual(
-            first.model_dump_json(), second.model_dump_json()
-        )
+        self.assertEqual(first.model_dump_json(), second.model_dump_json())
 
-    async def test_memory_chain_trace_returns_bounded_directed_simple_paths(self) -> None:
+    async def test_memory_chain_trace_returns_bounded_directed_simple_paths(
+        self,
+    ) -> None:
         """Chain tracing must not reverse edges or loop forever through cycles."""
         from daem0nmcp.api.v7.tools import MemoryChainTraceData
 
@@ -507,7 +494,9 @@ class RelationshipOperationTests(unittest.IsolatedAsyncioTestCase):
             },
         )
 
-    async def test_knowledge_graph_get_uses_current_manifest_and_selectors(self) -> None:
+    async def test_knowledge_graph_get_uses_current_manifest_and_selectors(
+        self,
+    ) -> None:
         """Graph JSON must be a bounded active-generation snapshot, not v6 state."""
         from daem0nmcp.api.v7.tools import KnowledgeGraphData
 
@@ -560,9 +549,7 @@ class RelationshipOperationTests(unittest.IsolatedAsyncioTestCase):
             {a, b, c, orphan},
             {node.record.record_id for node in with_orphans.nodes},
         )
-        self.assertEqual(
-            [c], [node.record.record_id for node in queried.nodes]
-        )
+        self.assertEqual([c], [node.record.record_id for node in queried.nodes])
         self.assertEqual([], queried.edges)
         self.assertNotIn(
             bc,
@@ -588,9 +575,7 @@ class RelationshipOperationTests(unittest.IsolatedAsyncioTestCase):
                 workspace_id=self.workspace.workspace_id,
             ),
         )
-        self.assertEqual(
-            {a, b}, {node.record.record_id for node in current.nodes}
-        )
+        self.assertEqual({a, b}, {node.record.record_id for node in current.nodes})
         await self._link(operations, b, c, "related_to", "stale-bc-0002")
 
         with self.assertRaises(RelationshipOperationError) as raised:
@@ -638,7 +623,9 @@ class RelationshipOperationTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn('Unsafe "]', result.text)
         self.assertNotIn("\nclick ", result.text)
 
-    async def test_graph_record_selector_is_capped_without_false_not_found(self) -> None:
+    async def test_graph_record_selector_is_capped_without_false_not_found(
+        self,
+    ) -> None:
         """max_nodes must bound output without misclassifying valid selected IDs."""
         record_ids = {
             self._append_record(character, f"Record {character}.")
@@ -681,9 +668,7 @@ class RelationshipOperationTests(unittest.IsolatedAsyncioTestCase):
                 with delegate.locked_active(workspace) as active:
                     yield active
 
-        operation = self._operations(
-            storage_resolver=BlockingResolver()
-        )["memory_link"]
+        operation = self._operations(storage_resolver=BlockingResolver())["memory_link"]
         task = asyncio.create_task(
             operation(
                 workspace=self.workspace,
@@ -718,7 +703,9 @@ class RelationshipOperationTests(unittest.IsolatedAsyncioTestCase):
             ).fetchone()[0]
         self.assertEqual((0, 0), (event_count, projection_count))
 
-    async def test_related_refuses_projection_state_that_differs_from_event(self) -> None:
+    async def test_related_refuses_projection_state_that_differs_from_event(
+        self,
+    ) -> None:
         """A mutable projection row must never outrank its append-only event."""
         from daem0nmcp.api.v7.relationship_operations import (
             RelationshipOperationError,
@@ -773,9 +760,9 @@ class RelationshipOperationTests(unittest.IsolatedAsyncioTestCase):
                     if not release.wait(timeout=5):
                         raise RuntimeError("test resolver timed out")
 
-        operation = self._operations(
-            storage_resolver=ExitBlockingResolver()
-        )["memory_link"]
+        operation = self._operations(storage_resolver=ExitBlockingResolver())[
+            "memory_link"
+        ]
         task = asyncio.create_task(
             operation(
                 workspace=self.workspace,
@@ -805,6 +792,7 @@ class RelationshipOperationTests(unittest.IsolatedAsyncioTestCase):
                 (self.workspace.workspace_id,),
             ).fetchone()[0]
         self.assertEqual(1, event_count)
+
 
 if __name__ == "__main__":
     unittest.main()

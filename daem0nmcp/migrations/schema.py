@@ -1754,6 +1754,849 @@ MIGRATIONS: list[tuple[int, str, list[str]]] = [
             """,
         ],
     ),
+    (
+        24,
+        "Add durable portable transfer staging",
+        [
+            """
+            CREATE TABLE IF NOT EXISTS portable_transfer_sessions (
+                session_id TEXT PRIMARY KEY
+                    CONSTRAINT ck_portable_transfer_sessions_id CHECK(
+                        length(session_id)=68
+                        AND substr(session_id,1,4) IN ('xpt_','ipt_')
+                        AND substr(session_id,5) NOT GLOB '*[^0-9a-f]*'
+                    ),
+                workspace_id TEXT NOT NULL
+                    CONSTRAINT ck_portable_transfer_sessions_workspace CHECK(
+                        length(workspace_id)=27
+                        AND substr(workspace_id,1,3)='ws_'
+                        AND substr(workspace_id,4) NOT GLOB '*[^0-9a-f]*'
+                    ),
+                direction TEXT NOT NULL
+                    CONSTRAINT ck_portable_transfer_sessions_direction CHECK(
+                        direction IN ('export','import')
+                    ),
+                status TEXT NOT NULL
+                    CONSTRAINT ck_portable_transfer_sessions_status CHECK(
+                        status IN ('building','ready','staging','finalizing',
+                                   'succeeded','failed','expired')
+                    ),
+                event_root_hash TEXT NOT NULL
+                    CONSTRAINT ck_portable_transfer_sessions_root CHECK(
+                        length(event_root_hash)=64
+                        AND event_root_hash NOT GLOB '*[^0-9a-f]*'
+                    ),
+                manifest_json TEXT NOT NULL
+                    CONSTRAINT ck_portable_transfer_sessions_manifest CHECK(
+                        json_valid(manifest_json)
+                        AND json_type(manifest_json)='object'
+                    ),
+                manifest_hash TEXT NOT NULL
+                    CONSTRAINT ck_portable_transfer_sessions_manifest_hash CHECK(
+                        length(manifest_hash)=64
+                        AND manifest_hash NOT GLOB '*[^0-9a-f]*'
+                    ),
+                page_count INTEGER NOT NULL
+                    CONSTRAINT ck_portable_transfer_sessions_pages CHECK(
+                        typeof(page_count)='integer' AND page_count >= 0
+                    ),
+                staged_page_count INTEGER NOT NULL DEFAULT 0
+                    CONSTRAINT ck_portable_transfer_sessions_staged CHECK(
+                        typeof(staged_page_count)='integer'
+                        AND staged_page_count BETWEEN 0 AND page_count
+                    ),
+                total_bytes INTEGER NOT NULL DEFAULT 0
+                    CONSTRAINT ck_portable_transfer_sessions_bytes CHECK(
+                        typeof(total_bytes)='integer'
+                        AND total_bytes BETWEEN 0 AND 4294967296
+                    ),
+                created_at_us INTEGER NOT NULL,
+                updated_at_us INTEGER NOT NULL,
+                expires_at_us INTEGER NOT NULL
+                    CONSTRAINT ck_portable_transfer_sessions_expiry CHECK(
+                        expires_at_us > created_at_us
+                    ),
+                completed_at_us INTEGER
+            ) WITHOUT ROWID
+            """,
+            "CREATE INDEX IF NOT EXISTS idx_portable_transfer_sessions_live ON portable_transfer_sessions(workspace_id,direction,status,expires_at_us)",
+            """
+            CREATE TABLE IF NOT EXISTS portable_transfer_pages (
+                session_id TEXT NOT NULL REFERENCES portable_transfer_sessions(session_id)
+                    ON DELETE CASCADE,
+                page_index INTEGER NOT NULL
+                    CONSTRAINT ck_portable_transfer_pages_index CHECK(
+                        typeof(page_index)='integer' AND page_index >= 0
+                    ),
+                page_kind TEXT NOT NULL
+                    CONSTRAINT ck_portable_transfer_pages_kind CHECK(
+                        page_kind IN ('events','legacy','vectors')
+                    ),
+                item_count INTEGER NOT NULL
+                    CONSTRAINT ck_portable_transfer_pages_items CHECK(
+                        typeof(item_count)='integer'
+                        AND item_count BETWEEN 0 AND 4096
+                    ),
+                byte_count INTEGER NOT NULL
+                    CONSTRAINT ck_portable_transfer_pages_bytes CHECK(
+                        typeof(byte_count)='integer'
+                        AND byte_count BETWEEN 1 AND 921600
+                    ),
+                page_hash TEXT NOT NULL
+                    CONSTRAINT ck_portable_transfer_pages_hash CHECK(
+                        length(page_hash)=64
+                        AND page_hash NOT GLOB '*[^0-9a-f]*'
+                    ),
+                relative_path TEXT NOT NULL
+                    CONSTRAINT ck_portable_transfer_pages_path CHECK(
+                        length(relative_path) BETWEEN 1 AND 240
+                        AND relative_path NOT LIKE '/%'
+                        AND relative_path NOT LIKE '\\%'
+                        AND relative_path NOT LIKE '%..%'
+                        AND relative_path NOT GLOB '*:*'
+                    ),
+                received_at_us INTEGER NOT NULL,
+                CONSTRAINT pk_portable_transfer_pages PRIMARY KEY(
+                    session_id,page_index
+                )
+            ) WITHOUT ROWID
+            """,
+        ],
+    ),
+    (
+        25,
+        "Add native edit approval and reviewed capture staging",
+        [
+            """
+            CREATE TABLE IF NOT EXISTS native_edit_host_sessions (
+                host_session_id TEXT PRIMARY KEY
+                    CONSTRAINT ck_native_edit_host_session_id CHECK(
+                        length(host_session_id)=68
+                        AND substr(host_session_id,1,4)='hst_'
+                        AND substr(host_session_id,5) NOT GLOB '*[^0-9a-f]*'
+                    ),
+                workspace_id TEXT NOT NULL
+                    CONSTRAINT ck_native_edit_host_workspace CHECK(
+                        length(workspace_id)=27
+                        AND substr(workspace_id,1,3)='ws_'
+                        AND substr(workspace_id,4) NOT GLOB '*[^0-9a-f]*'
+                    ),
+                principal_hash TEXT NOT NULL
+                    CONSTRAINT ck_native_edit_host_principal CHECK(
+                        length(principal_hash)=64
+                        AND principal_hash NOT GLOB '*[^0-9a-f]*'
+                    ),
+                mcp_session_hash TEXT
+                    CONSTRAINT ck_native_edit_host_mcp_session CHECK(
+                        mcp_session_hash IS NULL OR (
+                            length(mcp_session_hash)=64
+                            AND mcp_session_hash NOT GLOB '*[^0-9a-f]*'
+                        )
+                    ),
+                transport TEXT NOT NULL
+                    CONSTRAINT ck_native_edit_host_transport CHECK(
+                        transport IN ('local-ipc','remote-https')
+                    ),
+                credential_id_hash TEXT NOT NULL
+                    CONSTRAINT ck_native_edit_host_credential CHECK(
+                        length(credential_id_hash)=64
+                        AND credential_id_hash NOT GLOB '*[^0-9a-f]*'
+                    ),
+                created_at_us INTEGER NOT NULL,
+                expires_at_us INTEGER NOT NULL
+                    CONSTRAINT ck_native_edit_host_expiry CHECK(
+                        expires_at_us > created_at_us
+                    ),
+                paired_at_us INTEGER,
+                revoked_at_us INTEGER
+            ) WITHOUT ROWID
+            """,
+            "CREATE INDEX IF NOT EXISTS idx_native_edit_host_live ON native_edit_host_sessions(workspace_id,principal_hash,expires_at_us)",
+            """
+            CREATE TRIGGER IF NOT EXISTS trg_native_edit_host_immutable
+            BEFORE UPDATE OF workspace_id,principal_hash,transport,credential_id_hash,
+                created_at_us,expires_at_us ON native_edit_host_sessions
+            BEGIN
+                SELECT RAISE(ABORT,'native edit host identity is immutable');
+            END
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS native_edit_pending (
+                pending_edit_id TEXT PRIMARY KEY
+                    CONSTRAINT ck_native_edit_pending_id CHECK(
+                        length(pending_edit_id)=68
+                        AND substr(pending_edit_id,1,4)='edt_'
+                        AND substr(pending_edit_id,5) NOT GLOB '*[^0-9a-f]*'
+                    ),
+                workspace_id TEXT NOT NULL,
+                host_session_id TEXT NOT NULL REFERENCES native_edit_host_sessions(host_session_id)
+                    ON DELETE RESTRICT,
+                tool_name TEXT NOT NULL
+                    CONSTRAINT ck_native_edit_pending_tool CHECK(
+                        length(tool_name) BETWEEN 1 AND 80
+                        AND tool_name GLOB '[A-Za-z]*'
+                        AND tool_name NOT GLOB '*[^A-Za-z0-9_.:-]*'
+                    ),
+                arguments_hash TEXT NOT NULL,
+                edit_hash TEXT NOT NULL,
+                relative_paths_json TEXT NOT NULL
+                    CONSTRAINT ck_native_edit_pending_paths CHECK(
+                        json_valid(relative_paths_json)
+                        AND json_type(relative_paths_json)='array'
+                    ),
+                preimages_json TEXT NOT NULL
+                    CONSTRAINT ck_native_edit_pending_preimages CHECK(
+                        json_valid(preimages_json)
+                        AND json_type(preimages_json)='array'
+                    ),
+                created_at_us INTEGER NOT NULL,
+                expires_at_us INTEGER NOT NULL
+                    CONSTRAINT ck_native_edit_pending_expiry CHECK(
+                        expires_at_us > created_at_us
+                    ),
+                preflighted_at_us INTEGER,
+                CONSTRAINT ck_native_edit_pending_workspace CHECK(
+                    length(workspace_id)=27
+                    AND substr(workspace_id,1,3)='ws_'
+                    AND substr(workspace_id,4) NOT GLOB '*[^0-9a-f]*'
+                ),
+                CONSTRAINT ck_native_edit_pending_hashes CHECK(
+                    length(arguments_hash)=64
+                    AND arguments_hash NOT GLOB '*[^0-9a-f]*'
+                    AND length(edit_hash)=64
+                    AND edit_hash NOT GLOB '*[^0-9a-f]*'
+                )
+            ) WITHOUT ROWID
+            """,
+            "CREATE INDEX IF NOT EXISTS idx_native_edit_pending_live ON native_edit_pending(workspace_id,host_session_id,expires_at_us)",
+            """
+            CREATE TRIGGER IF NOT EXISTS trg_native_edit_pending_immutable
+            BEFORE UPDATE OF workspace_id,host_session_id,tool_name,arguments_hash,
+                edit_hash,relative_paths_json,preimages_json,created_at_us,expires_at_us
+                ON native_edit_pending
+            BEGIN
+                SELECT RAISE(ABORT,'native edit request is immutable');
+            END
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS native_edit_receipts (
+                receipt_id TEXT PRIMARY KEY
+                    CONSTRAINT ck_native_edit_receipt_id CHECK(
+                        length(receipt_id)=68
+                        AND substr(receipt_id,1,4)='rcp_'
+                        AND substr(receipt_id,5) NOT GLOB '*[^0-9a-f]*'
+                    ),
+                pending_edit_id TEXT NOT NULL UNIQUE REFERENCES native_edit_pending(pending_edit_id)
+                    ON DELETE RESTRICT,
+                workspace_id TEXT NOT NULL,
+                host_session_id TEXT NOT NULL REFERENCES native_edit_host_sessions(host_session_id)
+                    ON DELETE RESTRICT,
+                principal_hash TEXT NOT NULL,
+                mcp_session_hash TEXT NOT NULL,
+                edit_hash TEXT NOT NULL,
+                description_hash TEXT NOT NULL,
+                receipt_token_hash TEXT NOT NULL UNIQUE,
+                issued_at_us INTEGER NOT NULL,
+                expires_at_us INTEGER NOT NULL
+                    CONSTRAINT ck_native_edit_receipt_expiry CHECK(
+                        expires_at_us > issued_at_us
+                    ),
+                staged_at_us INTEGER,
+                consumed_at_us INTEGER,
+                CONSTRAINT ck_native_edit_receipt_workspace CHECK(
+                    length(workspace_id)=27
+                    AND substr(workspace_id,1,3)='ws_'
+                    AND substr(workspace_id,4) NOT GLOB '*[^0-9a-f]*'
+                ),
+                CONSTRAINT ck_native_edit_receipt_host CHECK(
+                    length(host_session_id)=68
+                    AND substr(host_session_id,1,4)='hst_'
+                    AND substr(host_session_id,5) NOT GLOB '*[^0-9a-f]*'
+                ),
+                CONSTRAINT ck_native_edit_receipt_hashes CHECK(
+                    length(principal_hash)=64
+                    AND principal_hash NOT GLOB '*[^0-9a-f]*'
+                    AND length(mcp_session_hash)=64
+                    AND mcp_session_hash NOT GLOB '*[^0-9a-f]*'
+                    AND length(edit_hash)=64
+                    AND edit_hash NOT GLOB '*[^0-9a-f]*'
+                    AND length(description_hash)=64
+                    AND description_hash NOT GLOB '*[^0-9a-f]*'
+                    AND length(receipt_token_hash)=64
+                    AND receipt_token_hash NOT GLOB '*[^0-9a-f]*'
+                ),
+                CONSTRAINT ck_native_edit_receipt_lifecycle CHECK(
+                    consumed_at_us IS NULL OR staged_at_us IS NOT NULL
+                )
+            ) WITHOUT ROWID
+            """,
+            "CREATE INDEX IF NOT EXISTS idx_native_edit_receipt_live ON native_edit_receipts(workspace_id,host_session_id,expires_at_us)",
+            """
+            CREATE TRIGGER IF NOT EXISTS trg_native_edit_receipt_immutable
+            BEFORE UPDATE OF pending_edit_id,workspace_id,host_session_id,
+                principal_hash,mcp_session_hash,edit_hash,description_hash,
+                receipt_token_hash,issued_at_us,expires_at_us ON native_edit_receipts
+            BEGIN
+                SELECT RAISE(ABORT,'native edit receipt binding is immutable');
+            END
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS memory_capture_candidates (
+                candidate_id TEXT PRIMARY KEY
+                    CONSTRAINT ck_memory_capture_candidate_id CHECK(
+                        length(candidate_id)=68
+                        AND substr(candidate_id,1,4)='cap_'
+                        AND substr(candidate_id,5) NOT GLOB '*[^0-9a-f]*'
+                    ),
+                workspace_id TEXT NOT NULL
+                    CONSTRAINT ck_memory_capture_workspace CHECK(
+                        length(workspace_id)=27
+                        AND substr(workspace_id,1,3)='ws_'
+                        AND substr(workspace_id,4) NOT GLOB '*[^0-9a-f]*'
+                    ),
+                idempotency_key TEXT NOT NULL
+                    CONSTRAINT ck_memory_capture_idempotency CHECK(
+                        length(idempotency_key) BETWEEN 8 AND 128
+                        AND idempotency_key NOT GLOB '*[^A-Za-z0-9._~-]*'
+                    ),
+                candidate_hash TEXT NOT NULL,
+                source_kind TEXT NOT NULL
+                    CONSTRAINT ck_memory_capture_source CHECK(
+                        source_kind IN ('native_edit','tool_result','dreaming','system')
+                    ),
+                proposed_record_json TEXT NOT NULL
+                    CONSTRAINT ck_memory_capture_record CHECK(
+                        json_valid(proposed_record_json)
+                        AND json_type(proposed_record_json)='object'
+                    ),
+                provenance_json TEXT NOT NULL
+                    CONSTRAINT ck_memory_capture_provenance CHECK(
+                        json_valid(provenance_json)
+                        AND json_type(provenance_json)='object'
+                    ),
+                status TEXT NOT NULL DEFAULT 'pending'
+                    CONSTRAINT ck_memory_capture_status CHECK(
+                        status IN ('pending','promoted')
+                    ),
+                created_at_us INTEGER NOT NULL,
+                promoted_at_us INTEGER,
+                promoted_event_id TEXT REFERENCES memory_events(event_id)
+                    ON DELETE RESTRICT,
+                promotion_idempotency_key TEXT,
+                promotion_request_hash TEXT,
+                CONSTRAINT uq_memory_capture_hash UNIQUE(workspace_id,candidate_hash),
+                CONSTRAINT uq_memory_capture_idempotency UNIQUE(workspace_id,idempotency_key),
+                CONSTRAINT ck_memory_capture_hash CHECK(
+                    length(candidate_hash)=64
+                    AND candidate_hash NOT GLOB '*[^0-9a-f]*'
+                ),
+                CONSTRAINT ck_memory_capture_promotion CHECK(
+                    (status='pending'
+                     AND promoted_at_us IS NULL
+                     AND promoted_event_id IS NULL
+                     AND promotion_idempotency_key IS NULL
+                     AND promotion_request_hash IS NULL)
+                    OR
+                    (status='promoted'
+                     AND promoted_at_us IS NOT NULL
+                     AND promoted_event_id IS NOT NULL
+                     AND promotion_idempotency_key IS NOT NULL
+                     AND promotion_request_hash IS NOT NULL
+                     AND length(promotion_request_hash)=64
+                     AND promotion_request_hash NOT GLOB '*[^0-9a-f]*')
+                )
+            ) WITHOUT ROWID
+            """,
+            "CREATE INDEX IF NOT EXISTS idx_memory_capture_list ON memory_capture_candidates(workspace_id,status,created_at_us DESC,candidate_id DESC)",
+            "CREATE UNIQUE INDEX IF NOT EXISTS uq_memory_capture_promotion_key ON memory_capture_candidates(workspace_id,promotion_idempotency_key) WHERE promotion_idempotency_key IS NOT NULL",
+            """
+            CREATE TRIGGER IF NOT EXISTS trg_memory_capture_candidate_immutable
+            BEFORE UPDATE OF workspace_id,idempotency_key,candidate_hash,source_kind,
+                proposed_record_json,provenance_json,created_at_us
+                ON memory_capture_candidates
+            BEGIN
+                SELECT RAISE(ABORT,'capture candidate proposal is immutable');
+            END
+            """,
+        ],
+    ),
+    (
+        26,
+        "Add immutable generation-scoped code dependency edges",
+        [
+            """
+            CREATE TABLE IF NOT EXISTS discovery_code_edges (
+                workspace_id TEXT NOT NULL,
+                projection_name TEXT NOT NULL DEFAULT 'code'
+                    CONSTRAINT ck_discovery_code_edges_projection CHECK(
+                        projection_name='code'
+                    ),
+                code_generation INTEGER NOT NULL
+                    CONSTRAINT ck_discovery_code_edges_generation CHECK(
+                        typeof(code_generation)='integer' AND code_generation >= 1
+                    ),
+                source_code_entity_id TEXT NOT NULL,
+                target_code_entity_id TEXT NOT NULL,
+                edge_kind TEXT NOT NULL
+                    CONSTRAINT ck_discovery_code_edges_kind CHECK(
+                        edge_kind IN ('call','import','reference')
+                    ),
+                source_line INTEGER
+                    CONSTRAINT ck_discovery_code_edges_line CHECK(
+                        source_line IS NULL OR (
+                            typeof(source_line)='integer' AND source_line >= 1
+                        )
+                    ),
+                identity_hash TEXT NOT NULL
+                    CONSTRAINT ck_discovery_code_edges_identity CHECK(
+                        length(identity_hash)=64
+                        AND identity_hash NOT GLOB '*[^0-9a-f]*'
+                    ),
+                CONSTRAINT ck_discovery_code_edges_distinct CHECK(
+                    source_code_entity_id<>target_code_entity_id
+                ),
+                CONSTRAINT pk_discovery_code_edges PRIMARY KEY(
+                    workspace_id,code_generation,source_code_entity_id,
+                    target_code_entity_id,edge_kind
+                ),
+                CONSTRAINT uq_discovery_code_edges_identity UNIQUE(
+                    workspace_id,code_generation,identity_hash
+                ),
+                CONSTRAINT fk_discovery_code_edges_manifest FOREIGN KEY(
+                    workspace_id,projection_name,code_generation
+                ) REFERENCES projection_manifests(
+                    workspace_id,projection_name,generation
+                ) ON DELETE RESTRICT,
+                CONSTRAINT fk_discovery_code_edges_source FOREIGN KEY(
+                    workspace_id,code_generation,source_code_entity_id
+                ) REFERENCES discovery_code_entities(
+                    workspace_id,code_generation,code_entity_id
+                ) ON DELETE RESTRICT,
+                CONSTRAINT fk_discovery_code_edges_target FOREIGN KEY(
+                    workspace_id,code_generation,target_code_entity_id
+                ) REFERENCES discovery_code_entities(
+                    workspace_id,code_generation,code_entity_id
+                ) ON DELETE RESTRICT
+            ) WITHOUT ROWID
+            """,
+            "CREATE INDEX IF NOT EXISTS idx_discovery_code_edges_target ON discovery_code_edges(workspace_id,code_generation,target_code_entity_id,source_code_entity_id,edge_kind)",
+            """
+            CREATE TRIGGER IF NOT EXISTS discovery_code_edges_no_update
+            BEFORE UPDATE ON discovery_code_edges
+            BEGIN SELECT RAISE(ABORT, 'IMMUTABLE_DISCOVERY_PROJECTION'); END
+            """,
+            """
+            CREATE TRIGGER IF NOT EXISTS discovery_code_edges_no_delete
+            BEFORE DELETE ON discovery_code_edges
+            BEGIN SELECT RAISE(ABORT, 'IMMUTABLE_DISCOVERY_PROJECTION'); END
+            """,
+        ],
+    ),
+    (
+        27,
+        "Add durable workspace consolidation previews and runs",
+        [
+            """
+            CREATE TABLE IF NOT EXISTS consolidation_previews (
+                preview_id TEXT PRIMARY KEY,
+                target_workspace_id TEXT NOT NULL,
+                principal_hash TEXT NOT NULL,
+                session_hash TEXT NOT NULL,
+                selection_token_hash TEXT NOT NULL,
+                sources_json TEXT NOT NULL CHECK(json_valid(sources_json)),
+                snapshots_json TEXT NOT NULL CHECK(json_valid(snapshots_json)),
+                selection_hash TEXT NOT NULL,
+                selected_count INTEGER NOT NULL CHECK(selected_count BETWEEN 1 AND 10000),
+                total_bytes INTEGER NOT NULL CHECK(total_bytes BETWEEN 1 AND 67108864),
+                created_at_us INTEGER NOT NULL,
+                expires_at_us INTEGER NOT NULL CHECK(expires_at_us>created_at_us),
+                applied_run_id TEXT,
+                CHECK(length(preview_id)=68 AND substr(preview_id,1,4)='cpr_'),
+                CHECK(length(principal_hash)=64 AND length(session_hash)=64
+                      AND length(selection_token_hash)=64 AND length(selection_hash)=64)
+            ) WITHOUT ROWID
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS consolidation_preview_records (
+                preview_id TEXT NOT NULL REFERENCES consolidation_previews(preview_id) ON DELETE RESTRICT,
+                ordinal INTEGER NOT NULL CHECK(ordinal>=0),
+                source_workspace_id TEXT NOT NULL,
+                source_record_id TEXT NOT NULL,
+                source_event_id TEXT NOT NULL,
+                source_state_hash TEXT NOT NULL,
+                source_content_hash TEXT NOT NULL,
+                target_record_id TEXT NOT NULL,
+                PRIMARY KEY(preview_id,ordinal),
+                UNIQUE(preview_id,source_workspace_id,source_record_id),
+                UNIQUE(preview_id,target_record_id)
+            ) WITHOUT ROWID
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS consolidation_runs (
+                run_id TEXT PRIMARY KEY,
+                target_workspace_id TEXT NOT NULL,
+                operation TEXT NOT NULL CHECK(operation IN ('consolidate','consolidate_archive')),
+                idempotency_key TEXT NOT NULL,
+                preview_id TEXT NOT NULL REFERENCES consolidation_previews(preview_id) ON DELETE RESTRICT,
+                request_hash TEXT NOT NULL,
+                status TEXT NOT NULL CHECK(status IN ('target_committed','archiving','completed','recovery_required')),
+                imported_count INTEGER NOT NULL CHECK(imported_count>=0),
+                archived_count INTEGER NOT NULL CHECK(archived_count>=0),
+                event_ids_json TEXT NOT NULL CHECK(json_valid(event_ids_json)),
+                created_at_us INTEGER NOT NULL,
+                updated_at_us INTEGER NOT NULL,
+                UNIQUE(target_workspace_id,operation,idempotency_key)
+            ) WITHOUT ROWID
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS consolidation_mappings (
+                target_workspace_id TEXT NOT NULL,
+                source_workspace_id TEXT NOT NULL,
+                source_record_id TEXT NOT NULL,
+                target_record_id TEXT NOT NULL,
+                source_event_id TEXT NOT NULL,
+                source_state_hash TEXT NOT NULL,
+                target_event_id TEXT NOT NULL,
+                run_id TEXT NOT NULL REFERENCES consolidation_runs(run_id) ON DELETE RESTRICT,
+                PRIMARY KEY(target_workspace_id,source_workspace_id,source_record_id),
+                UNIQUE(target_workspace_id,target_record_id)
+            ) WITHOUT ROWID
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS consolidation_archive_progress (
+                run_id TEXT NOT NULL REFERENCES consolidation_runs(run_id) ON DELETE RESTRICT,
+                source_workspace_id TEXT NOT NULL,
+                source_record_id TEXT NOT NULL,
+                expected_event_id TEXT NOT NULL,
+                expected_state_hash TEXT NOT NULL,
+                status TEXT NOT NULL CHECK(status IN ('pending','archived')),
+                archive_event_id TEXT,
+                PRIMARY KEY(run_id,source_workspace_id,source_record_id),
+                CHECK((status='pending' AND archive_event_id IS NULL)
+                   OR (status='archived' AND archive_event_id IS NOT NULL))
+            ) WITHOUT ROWID
+            """,
+            "CREATE INDEX IF NOT EXISTS idx_consolidation_runs_recovery ON consolidation_runs(target_workspace_id,status,updated_at_us)",
+            """
+            CREATE TRIGGER IF NOT EXISTS consolidation_preview_identity_immutable
+            BEFORE UPDATE OF target_workspace_id,principal_hash,session_hash,selection_token_hash,sources_json,
+                snapshots_json,selection_hash,selected_count,total_bytes,created_at_us,expires_at_us
+                ON consolidation_previews
+            BEGIN SELECT RAISE(ABORT,'consolidation preview identity is immutable'); END
+            """,
+        ],
+    ),
+    (
+        28,
+        "Add bounded durable v7 dreaming strategy state",
+        [
+            """
+            CREATE TABLE IF NOT EXISTS dreaming_strategy_state (
+                workspace_id TEXT NOT NULL
+                    CONSTRAINT ck_dreaming_state_workspace CHECK(
+                        length(workspace_id)=27
+                        AND substr(workspace_id,1,3)='ws_'
+                        AND substr(workspace_id,4) NOT GLOB '*[^0-9a-f]*'
+                    ),
+                strategy TEXT NOT NULL
+                    CONSTRAINT ck_dreaming_state_strategy CHECK(
+                        strategy IN ('failed_decision','pending_outcome',
+                                     'connection_discovery','community_refresh')
+                    ),
+                status TEXT NOT NULL
+                    CONSTRAINT ck_dreaming_state_status CHECK(
+                        status IN ('idle','running','disabled','degraded')
+                    ),
+                cursor TEXT
+                    CONSTRAINT ck_dreaming_state_cursor CHECK(
+                        cursor IS NULL OR length(cursor) BETWEEN 1 AND 128
+                    ),
+                pending_count INTEGER NOT NULL DEFAULT 0
+                    CONSTRAINT ck_dreaming_state_pending CHECK(
+                        typeof(pending_count)='integer'
+                        AND pending_count BETWEEN 0 AND 10000
+                    ),
+                cooldown_until_us INTEGER,
+                last_started_at_us INTEGER,
+                last_success_at_us INTEGER,
+                stable_error_code TEXT
+                    CONSTRAINT ck_dreaming_state_error CHECK(
+                        stable_error_code IS NULL OR (
+                            length(stable_error_code) BETWEEN 1 AND 64
+                            AND stable_error_code NOT GLOB '*[^A-Z0-9_]*'
+                        )
+                    ),
+                yielded INTEGER NOT NULL DEFAULT 0
+                    CONSTRAINT ck_dreaming_state_yielded CHECK(yielded IN (0,1)),
+                updated_at_us INTEGER NOT NULL,
+                CONSTRAINT pk_dreaming_strategy_state PRIMARY KEY(
+                    workspace_id,strategy
+                ),
+                CONSTRAINT ck_dreaming_state_times CHECK(
+                    (cooldown_until_us IS NULL OR cooldown_until_us>=0)
+                    AND (last_started_at_us IS NULL OR last_started_at_us>=0)
+                    AND (last_success_at_us IS NULL OR last_success_at_us>=0)
+                    AND updated_at_us>=0
+                )
+            ) WITHOUT ROWID
+            """,
+            "CREATE INDEX IF NOT EXISTS idx_dreaming_state_status ON dreaming_strategy_state(workspace_id,status,updated_at_us DESC,strategy)",
+            """
+            CREATE TRIGGER IF NOT EXISTS trg_dreaming_state_identity_immutable
+            BEFORE UPDATE OF workspace_id,strategy ON dreaming_strategy_state
+            BEGIN
+                SELECT RAISE(ABORT,'dreaming strategy identity is immutable');
+            END
+            """,
+        ],
+    ),
+    (
+        29,
+        "Add owner-fenced portable import finalization leases",
+        [
+            """
+            CREATE TABLE IF NOT EXISTS portable_transfer_finalization_leases (
+                session_id TEXT PRIMARY KEY
+                    REFERENCES portable_transfer_sessions(session_id)
+                    ON DELETE CASCADE,
+                owner_token TEXT NOT NULL UNIQUE
+                    CONSTRAINT ck_portable_finalization_owner CHECK(
+                        length(owner_token)=64
+                        AND owner_token NOT GLOB '*[^0-9a-f]*'
+                    ),
+                attempt_relative_path TEXT NOT NULL
+                    CONSTRAINT ck_portable_finalization_attempt CHECK(
+                        attempt_relative_path='attempts/' || owner_token
+                    ),
+                acquired_at_us INTEGER NOT NULL
+                    CONSTRAINT ck_portable_finalization_acquired CHECK(
+                        typeof(acquired_at_us)='integer' AND acquired_at_us>=0
+                    ),
+                renewed_at_us INTEGER NOT NULL
+                    CONSTRAINT ck_portable_finalization_renewed CHECK(
+                        typeof(renewed_at_us)='integer'
+                        AND renewed_at_us>=acquired_at_us
+                    ),
+                expires_at_us INTEGER NOT NULL
+                    CONSTRAINT ck_portable_finalization_expiry CHECK(
+                        typeof(expires_at_us)='integer'
+                        AND expires_at_us>renewed_at_us
+                    )
+            ) WITHOUT ROWID
+            """,
+            "CREATE INDEX IF NOT EXISTS idx_portable_finalization_expiry ON portable_transfer_finalization_leases(expires_at_us)",
+            """
+            CREATE TRIGGER IF NOT EXISTS trg_portable_finalization_owner_immutable
+            BEFORE UPDATE OF session_id,owner_token,attempt_relative_path,acquired_at_us
+                ON portable_transfer_finalization_leases
+            BEGIN
+                SELECT RAISE(ABORT,'portable finalization lease identity is immutable');
+            END
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS portable_transfer_attempt_artifacts (
+                session_id TEXT NOT NULL
+                    REFERENCES portable_transfer_sessions(session_id)
+                    ON DELETE CASCADE,
+                owner_token TEXT NOT NULL
+                    CONSTRAINT ck_portable_artifact_owner CHECK(
+                        length(owner_token)=64
+                        AND owner_token NOT GLOB '*[^0-9a-f]*'
+                    ),
+                artifact_kind TEXT NOT NULL
+                    CONSTRAINT ck_portable_artifact_kind CHECK(
+                        artifact_kind='qdrant_collection'
+                    ),
+                artifact_name TEXT NOT NULL
+                    CONSTRAINT ck_portable_artifact_name CHECK(
+                        length(artifact_name) BETWEEN 1 AND 255
+                    ),
+                created_at_us INTEGER NOT NULL
+                    CONSTRAINT ck_portable_artifact_created CHECK(
+                        typeof(created_at_us)='integer' AND created_at_us>=0
+                    ),
+                PRIMARY KEY(session_id,owner_token,artifact_kind,artifact_name)
+            ) WITHOUT ROWID
+            """,
+            "CREATE INDEX IF NOT EXISTS idx_portable_artifact_owner ON portable_transfer_attempt_artifacts(session_id,owner_token)",
+        ],
+    ),
+    (
+        30,
+        "Add bounded briefing record selection indexes",
+        [
+            "CREATE INDEX IF NOT EXISTS idx_memory_records_briefing_type "
+            "ON memory_records(workspace_id,record_type,updated_at_us DESC,record_id DESC)",
+            "CREATE INDEX IF NOT EXISTS idx_memory_records_briefing_outcome "
+            "ON memory_records(workspace_id,worked,updated_at_us DESC,record_id DESC)",
+            "CREATE INDEX IF NOT EXISTS idx_memory_events_root_covering "
+            "ON memory_events(workspace_id,event_id,event_hash)",
+        ],
+    ),
+    (
+        31,
+        "Add dense vector reuse attestations",
+        [
+            "ALTER TABLE dense_projection_refs ADD COLUMN vector_format TEXT "
+            "CONSTRAINT ck_dense_refs_vector_format CHECK(vector_format IS NULL "
+            "OR vector_format='qdrant-cosine-f32-le-v1')",
+            "ALTER TABLE dense_projection_refs ADD COLUMN vector_sha256 TEXT "
+            "CONSTRAINT ck_dense_refs_vector_sha256 CHECK(vector_sha256 IS NULL "
+            "OR (length(vector_sha256)=64 AND "
+            "vector_sha256 NOT GLOB '*[^0-9a-f]*'))",
+        ],
+    ),
+    (
+        32,
+        "Add leased dense generation garbage collection",
+        [
+            """
+            CREATE TABLE IF NOT EXISTS dense_generation_read_leases (
+                workspace_id TEXT NOT NULL
+                    CONSTRAINT ck_dense_generation_leases_workspace CHECK(
+                        length(workspace_id)=27
+                        AND substr(workspace_id,1,3)='ws_'
+                        AND substr(workspace_id,4) NOT GLOB '*[^0-9a-f]*'
+                    ),
+                projection_name TEXT NOT NULL DEFAULT 'dense'
+                    CONSTRAINT ck_dense_generation_leases_projection CHECK(
+                        projection_name='dense'
+                    ),
+                provider_key TEXT NOT NULL
+                    CONSTRAINT ck_dense_generation_leases_provider CHECK(
+                        length(provider_key) BETWEEN 1 AND 64
+                    ),
+                projection_generation INTEGER NOT NULL
+                    CONSTRAINT ck_dense_generation_leases_generation CHECK(
+                        typeof(projection_generation)='integer'
+                        AND projection_generation>=1
+                    ),
+                owner_id TEXT NOT NULL
+                    CONSTRAINT ck_dense_generation_leases_owner CHECK(
+                        length(owner_id) BETWEEN 1 AND 128
+                    ),
+                fencing_token INTEGER NOT NULL
+                    CONSTRAINT ck_dense_generation_leases_fence CHECK(
+                        typeof(fencing_token)='integer' AND fencing_token>=1
+                    ),
+                acquired_at_us INTEGER NOT NULL
+                    CONSTRAINT ck_dense_generation_leases_acquired CHECK(
+                        typeof(acquired_at_us)='integer' AND acquired_at_us>=0
+                    ),
+                renewed_at_us INTEGER NOT NULL
+                    CONSTRAINT ck_dense_generation_leases_renewed CHECK(
+                        typeof(renewed_at_us)='integer'
+                        AND renewed_at_us>=acquired_at_us
+                    ),
+                expires_at_us INTEGER NOT NULL
+                    CONSTRAINT ck_dense_generation_leases_expires CHECK(
+                        typeof(expires_at_us)='integer'
+                        AND expires_at_us>renewed_at_us
+                    ),
+                CONSTRAINT pk_dense_generation_read_leases PRIMARY KEY(
+                    workspace_id,provider_key,projection_generation,owner_id
+                ),
+                CONSTRAINT fk_dense_generation_read_leases_manifest FOREIGN KEY(
+                    workspace_id,projection_name,projection_generation
+                ) REFERENCES projection_manifests(
+                    workspace_id,projection_name,generation
+                ) ON DELETE CASCADE
+            ) WITHOUT ROWID
+            """,
+            "CREATE INDEX IF NOT EXISTS idx_dense_generation_leases_expiry "
+            "ON dense_generation_read_leases(workspace_id,provider_key,"
+            "projection_generation,expires_at_us)",
+            """
+            CREATE TABLE IF NOT EXISTS dense_generation_gc_jobs (
+                workspace_id TEXT NOT NULL
+                    CONSTRAINT ck_dense_generation_gc_workspace CHECK(
+                        length(workspace_id)=27
+                        AND substr(workspace_id,1,3)='ws_'
+                        AND substr(workspace_id,4) NOT GLOB '*[^0-9a-f]*'
+                    ),
+                projection_name TEXT NOT NULL DEFAULT 'dense'
+                    CONSTRAINT ck_dense_generation_gc_projection CHECK(
+                        projection_name='dense'
+                    ),
+                provider_key TEXT NOT NULL
+                    CONSTRAINT ck_dense_generation_gc_provider CHECK(
+                        length(provider_key) BETWEEN 1 AND 64
+                    ),
+                projection_generation INTEGER NOT NULL
+                    CONSTRAINT ck_dense_generation_gc_generation CHECK(
+                        typeof(projection_generation)='integer'
+                        AND projection_generation>=1
+                    ),
+                collection_name TEXT
+                    CONSTRAINT ck_dense_generation_gc_collection CHECK(
+                        collection_name IS NULL
+                        OR length(collection_name) BETWEEN 1 AND 255
+                    ),
+                status TEXT NOT NULL
+                    CONSTRAINT ck_dense_generation_gc_status CHECK(
+                        status IN ('queued','running','dead_letter')
+                    ),
+                attempts INTEGER NOT NULL DEFAULT 0
+                    CONSTRAINT ck_dense_generation_gc_attempts CHECK(
+                        typeof(attempts)='integer' AND attempts>=0
+                    ),
+                max_attempts INTEGER NOT NULL DEFAULT 3
+                    CONSTRAINT ck_dense_generation_gc_max_attempts CHECK(
+                        typeof(max_attempts)='integer' AND max_attempts>=1
+                    ),
+                available_at_us INTEGER NOT NULL
+                    CONSTRAINT ck_dense_generation_gc_available CHECK(
+                        typeof(available_at_us)='integer' AND available_at_us>=0
+                    ),
+                claim_owner TEXT,
+                claim_token TEXT,
+                claim_expires_at_us INTEGER,
+                last_error_code TEXT,
+                created_at_us INTEGER NOT NULL,
+                updated_at_us INTEGER NOT NULL,
+                CONSTRAINT pk_dense_generation_gc_jobs PRIMARY KEY(
+                    workspace_id,provider_key,projection_generation
+                ),
+                CONSTRAINT ck_dense_generation_gc_claim CHECK(
+                    (status='running'
+                     AND claim_owner IS NOT NULL
+                     AND claim_token IS NOT NULL
+                     AND claim_expires_at_us IS NOT NULL)
+                    OR
+                    (status<>'running'
+                     AND claim_owner IS NULL
+                     AND claim_token IS NULL
+                     AND claim_expires_at_us IS NULL)
+                ),
+                CONSTRAINT ck_dense_generation_gc_error CHECK(
+                    last_error_code IS NULL
+                    OR (length(last_error_code) BETWEEN 2 AND 64
+                        AND last_error_code NOT GLOB '*[^A-Z0-9_]*')
+                ),
+                CONSTRAINT fk_dense_generation_gc_manifest FOREIGN KEY(
+                    workspace_id,projection_name,projection_generation
+                ) REFERENCES projection_manifests(
+                    workspace_id,projection_name,generation
+                ) ON DELETE CASCADE
+            ) WITHOUT ROWID
+            """,
+            "CREATE INDEX IF NOT EXISTS idx_dense_generation_gc_ready "
+            "ON dense_generation_gc_jobs(status,available_at_us,workspace_id,"
+            "projection_generation)",
+            """
+            CREATE TRIGGER IF NOT EXISTS dense_generation_gc_blocks_activation
+            BEFORE UPDATE OF status ON projection_manifests
+            WHEN NEW.projection_name='dense' AND NEW.status='active'
+              AND EXISTS (
+                SELECT 1 FROM dense_generation_gc_jobs gc
+                WHERE gc.workspace_id=NEW.workspace_id
+                  AND gc.provider_key=json_extract(NEW.details_json,'$.provider_key')
+                  AND gc.projection_generation=NEW.generation
+              )
+            BEGIN SELECT RAISE(ABORT, 'DENSE_GENERATION_GC_ENROLLED'); END
+            """,
+        ],
+    ),
 ]
 
 if MIGRATIONS[-1][0] != CURRENT_SCHEMA_VERSION:  # pragma: no cover - import guard
@@ -1795,9 +2638,12 @@ def check_column_exists(conn: sqlite3.Connection, table: str, column: str) -> bo
 
 
 def _table_exists(connection: sqlite3.Connection, table: str) -> bool:
-    return connection.execute(
-        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)
-    ).fetchone() is not None
+    return (
+        connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)
+        ).fetchone()
+        is not None
+    )
 
 
 def _retained_public_id(
@@ -1927,9 +2773,8 @@ def _retained_timestamp_us(value: object) -> int:
         epoch = datetime(1970, 1, 1, tzinfo=timezone.utc)
         delta = parsed.astimezone(timezone.utc) - epoch
         timestamp = (
-            (delta.days * 86_400 + delta.seconds) * 1_000_000
-            + delta.microseconds
-        )
+            delta.days * 86_400 + delta.seconds
+        ) * 1_000_000 + delta.microseconds
     except (OverflowError, TypeError, ValueError):
         raise RuntimeError("GOVERNANCE_BACKFILL_INVALID") from None
     if not 0 <= timestamp <= 9_223_372_036_854_775_807:
@@ -1943,8 +2788,7 @@ def _retained_text_list(value: object) -> list[str]:
     except (TypeError, ValueError, RecursionError):
         raise RuntimeError("GOVERNANCE_BACKFILL_INVALID") from None
     if not isinstance(parsed, list) or not all(
-        isinstance(item, str) and 1 <= len(item) <= 2_000
-        for item in parsed
+        isinstance(item, str) and 1 <= len(item) <= 2_000 for item in parsed
     ):
         raise RuntimeError("GOVERNANCE_BACKFILL_INVALID")
     return parsed
@@ -2012,17 +2856,22 @@ def backfill_retained_governance(
             public_id = _retained_public_mapping(
                 connection, workspace_id, "rule", source_id
             )
-            if connection.execute(
-                "SELECT 1 FROM governance_rules WHERE workspace_id=? "
-                "AND rule_id=?",
-                (workspace_id, public_id),
-            ).fetchone() is not None:
+            if (
+                connection.execute(
+                    "SELECT 1 FROM governance_rules WHERE workspace_id=? AND rule_id=?",
+                    (workspace_id, public_id),
+                ).fetchone()
+                is not None
+            ):
                 continue
-            if connection.execute(
-                "SELECT 1 FROM governance_events WHERE workspace_id=? "
-                "AND stream_id=?",
-                (workspace_id, public_id),
-            ).fetchone() is not None:
+            if (
+                connection.execute(
+                    "SELECT 1 FROM governance_events WHERE workspace_id=? "
+                    "AND stream_id=?",
+                    (workspace_id, public_id),
+                ).fetchone()
+                is not None
+            ):
                 raise RuntimeError("GOVERNANCE_BACKFILL_INTEGRITY_ERROR")
             created_at_us = _retained_timestamp_us(row[8])
             if not isinstance(row[1], str) or not 1 <= len(row[1]) <= 2_000:
@@ -2084,17 +2933,23 @@ def backfill_retained_governance(
             public_id = _retained_public_mapping(
                 connection, workspace_id, "trigger", source_id
             )
-            if connection.execute(
-                "SELECT 1 FROM governance_context_triggers "
-                "WHERE workspace_id=? AND trigger_id=?",
-                (workspace_id, public_id),
-            ).fetchone() is not None:
+            if (
+                connection.execute(
+                    "SELECT 1 FROM governance_context_triggers "
+                    "WHERE workspace_id=? AND trigger_id=?",
+                    (workspace_id, public_id),
+                ).fetchone()
+                is not None
+            ):
                 continue
-            if connection.execute(
-                "SELECT 1 FROM governance_events WHERE workspace_id=? "
-                "AND stream_id=?",
-                (workspace_id, public_id),
-            ).fetchone() is not None:
+            if (
+                connection.execute(
+                    "SELECT 1 FROM governance_events WHERE workspace_id=? "
+                    "AND stream_id=?",
+                    (workspace_id, public_id),
+                ).fetchone()
+                is not None
+            ):
                 raise RuntimeError("GOVERNANCE_BACKFILL_INTEGRITY_ERROR")
             trigger_type = public_types.get(row[2])
             if trigger_type is None:
@@ -2142,9 +2997,11 @@ def backfill_retained_governance(
 
 def _has_retained_public_rows(connection: sqlite3.Connection) -> bool:
     for table in ("rules", "context_triggers", "active_context"):
-        if _table_exists(connection, table) and connection.execute(
-            f'SELECT 1 FROM "{table}" LIMIT 1'
-        ).fetchone() is not None:
+        if (
+            _table_exists(connection, table)
+            and connection.execute(f'SELECT 1 FROM "{table}" LIMIT 1').fetchone()
+            is not None
+        ):
             return True
     return False
 
@@ -2247,9 +3104,7 @@ def run_migrations(
                 conn.rollback()
                 raise
 
-        v7_public_migrations_enabled = (
-            maximum_version is None or maximum_version >= 19
-        )
+        v7_public_migrations_enabled = maximum_version is None or maximum_version >= 19
         if (
             v7_public_migrations_enabled
             and workspace_id is None
@@ -2283,6 +3138,7 @@ _V6_VECTOR_MIGRATION_ERROR = (
     "--workspace-id <workspace-id>` instead."
 )
 _LAST_V6_SCHEMA_VERSION = 15
+
 
 def _active_database_selection(db_path: str) -> tuple[Path, int]:
     """Resolve the storage and active format governing ``db_path``."""
@@ -2326,9 +3182,7 @@ def migrate_and_backfill_vectors(
             raise RuntimeError("Active database storage changed during migration.")
         if format_version != 6:
             raise RuntimeError(_V6_VECTOR_MIGRATION_ERROR)
-        return _migrate_and_backfill_vectors_v6(
-            db_path, workspace_id=workspace_id
-        )
+        return _migrate_and_backfill_vectors_v6(db_path, workspace_id=workspace_id)
 
 
 def _migrate_and_backfill_vectors_v6(

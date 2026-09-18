@@ -12,7 +12,7 @@ def _set_env(monkeypatch, project_dir, tool_input):
     monkeypatch.setenv("TOOL_INPUT", json.dumps(tool_input))
 
 
-def test_significant_change_outputs_suggestion(tmp_path, monkeypatch, capsys):
+def test_unapproved_edit_never_emits_a_memory_suggestion(tmp_path, monkeypatch, capsys):
     (tmp_path / ".daem0nmcp").mkdir()
     _set_env(
         monkeypatch,
@@ -29,8 +29,7 @@ def test_significant_change_outputs_suggestion(tmp_path, monkeypatch, capsys):
 
     assert exc_info.value.code == 0
     out = capsys.readouterr().out
-    assert "[Daem0n suggests]" in out
-    assert "server.py" in out
+    assert out == ""
 
 
 def test_trivial_change_no_output(tmp_path, monkeypatch, capsys):
@@ -52,7 +51,9 @@ def test_trivial_change_no_output(tmp_path, monkeypatch, capsys):
     assert capsys.readouterr().out == ""
 
 
-def test_large_change_is_significant(tmp_path, monkeypatch, capsys):
+def test_large_unapproved_change_is_not_captured_from_hook_text(
+    tmp_path, monkeypatch, capsys
+):
     (tmp_path / ".daem0nmcp").mkdir()
     _set_env(
         monkeypatch,
@@ -68,7 +69,7 @@ def test_large_change_is_significant(tmp_path, monkeypatch, capsys):
         main()
 
     assert exc_info.value.code == 0
-    assert "[Daem0n suggests]" in capsys.readouterr().out
+    assert capsys.readouterr().out == ""
 
 
 def test_no_file_path_exits_clean(tmp_path, monkeypatch, capsys):

@@ -17,7 +17,6 @@ from ...covenant import (
     TokenValidationError,
 )
 
-
 _HANDLE_PATTERN = re.compile(r"^cap_[A-Za-z0-9_-]{12,252}$")
 
 

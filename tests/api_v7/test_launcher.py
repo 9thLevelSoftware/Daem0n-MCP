@@ -24,11 +24,15 @@ class LauncherTests(unittest.TestCase):
         self.assertEqual(options.transport, "stdio")
         self.assertEqual(options.host, "127.0.0.1")
         self.assertEqual(options.port, 8765)
-        self.assertEqual(parse_server_options(["--transport", "http"]).transport, "streamable-http")
+        self.assertEqual(
+            parse_server_options(["--transport", "http"]).transport, "streamable-http"
+        )
         with self.assertRaises(SystemExit):
             parse_server_options(["--transport", "sse"])
 
-    def test_stdio_is_protocol_clean_and_http_runs_only_canonical_transport(self) -> None:
+    def test_stdio_is_protocol_clean_and_http_runs_only_canonical_transport(
+        self,
+    ) -> None:
         from daem0nmcp.api.v7.launcher import ServerOptions, run_server
 
         stdio = _Server()
@@ -43,15 +47,11 @@ class LauncherTests(unittest.TestCase):
 
         security: list[tuple[str, object]] = []
         http = _Server()
-        with patch.dict(
-            "os.environ", {"FASTMCP_STATELESS_HTTP": "true"}
-        ):
+        with patch.dict("os.environ", {"FASTMCP_STATELESS_HTTP": "true"}):
             run_server(
                 http,
                 ServerOptions("streamable-http", "0.0.0.0", 9999),
-                validate_security=lambda host, auth: security.append(
-                    (host, auth)
-                ),
+                validate_security=lambda host, auth: security.append((host, auth)),
                 build_origin_middleware=lambda host, port: [
                     ("origin-policy", host, port)
                 ],
@@ -66,6 +66,10 @@ class LauncherTests(unittest.TestCase):
                     "port": 9999,
                     "middleware": [("origin-policy", "0.0.0.0", 9999)],
                     "stateless_http": False,
+                    "uvicorn_config": {
+                        "proxy_headers": False,
+                        "forwarded_allow_ips": "",
+                    },
                 }
             ],
         )
@@ -83,9 +87,7 @@ class LauncherTests(unittest.TestCase):
                 nonlocal duplicate_rejected
                 self.arguments = arguments
                 try:
-                    Message.model_validate_json(
-                        '{"content":"first","content":"last"}'
-                    )
+                    Message.model_validate_json('{"content":"first","content":"last"}')
                 except ValueError:
                     duplicate_rejected = True
 
@@ -97,9 +99,7 @@ class LauncherTests(unittest.TestCase):
             {"transport": "stdio", "show_banner": False},
         )
         self.assertEqual(
-            Message.model_validate_json(
-                '{"content":"first","content":"last"}'
-            ).content,
+            Message.model_validate_json('{"content":"first","content":"last"}').content,
             "last",
         )
 
@@ -113,9 +113,8 @@ class LauncherTests(unittest.TestCase):
             ("streamable-http", "127.0.0.1", 65536),
             ("stdio", "127.0.0.1", True),
         ):
-            with self.subTest(arguments=arguments):
-                with self.assertRaises(ValueError):
-                    ServerOptions(*arguments)
+            with self.subTest(arguments=arguments), self.assertRaises(ValueError):
+                ServerOptions(*arguments)
 
 
 if __name__ == "__main__":

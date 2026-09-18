@@ -94,9 +94,11 @@ class _PinnedDependencyLogFilter(logging.Filter):
     """Suppress dependency records only in the current ingestion context."""
 
     def filter(self, record: logging.LogRecord) -> bool:
-        is_dependency = record.name == "httpx" or record.name.startswith(
-            ("httpx.", "httpcore.")
-        ) or record.name == "httpcore"
+        is_dependency = (
+            record.name == "httpx"
+            or record.name.startswith(("httpx.", "httpcore."))
+            or record.name == "httpcore"
+        )
         return not (is_dependency and _DEPENDENCY_LOG_SCOPE.get())
 
 
@@ -244,9 +246,7 @@ def ensure_runtime_compatibility() -> tuple[str, str]:
 
     if compatible:
         try:
-            pool_parameters = inspect.signature(
-                httpcore.AsyncConnectionPool
-            ).parameters
+            pool_parameters = inspect.signature(httpcore.AsyncConnectionPool).parameters
             connect_parameters = tuple(
                 inspect.signature(httpcore.AsyncNetworkBackend.connect_tcp).parameters
             )
@@ -293,9 +293,7 @@ async def resolve_host_addresses(host: str, port: int) -> tuple[str, ...]:
             )
         )
     except BoundedWorkerBusyError as error:
-        raise PinnedAddressError(
-            "Host resolution capacity is unavailable"
-        ) from error
+        raise PinnedAddressError("Host resolution capacity is unavailable") from error
     except (OSError, UnicodeError) as error:
         raise PinnedAddressError("Host resolution failed") from error
 
@@ -323,16 +321,13 @@ def select_public_address(addresses: Iterable[str]) -> str:
                 raise ValueError
             parsed = ipaddress.ip_address(address)
             explicitly_public = parsed in _PUBLIC_SPECIAL_ADDRESS_EXCEPTIONS
-            if (
-                _is_disallowed_special_address(parsed)
-                or (
-                    not explicitly_public
-                    and (
-                        not parsed.is_global
-                        or parsed.is_multicast
-                        or parsed.is_reserved
-                        or getattr(parsed, "is_site_local", False)
-                    )
+            if _is_disallowed_special_address(parsed) or (
+                not explicitly_public
+                and (
+                    not parsed.is_global
+                    or parsed.is_multicast
+                    or parsed.is_reserved
+                    or getattr(parsed, "is_site_local", False)
                 )
             ):
                 raise ValueError
@@ -343,7 +338,9 @@ def select_public_address(addresses: Iterable[str]) -> str:
     if not parsed_addresses:
         raise PinnedAddressError("Host resolution returned no public addresses")
 
-    selected = min(parsed_addresses, key=lambda address: (address.version, address.packed))
+    selected = min(
+        parsed_addresses, key=lambda address: (address.version, address.packed)
+    )
     return str(selected)
 
 
@@ -424,10 +421,10 @@ async def validate_public_url(
         return "URL port must be between 1 and 65535"
 
     normalized_hostname = hostname.casefold().rstrip(".")
-    if (
-        normalized_hostname in {"localhost", "localhost.localdomain"}
-        or normalized_hostname.endswith(".localhost")
-    ):
+    if normalized_hostname in {
+        "localhost",
+        "localhost.localdomain",
+    } or normalized_hostname.endswith(".localhost"):
         return "Localhost URLs are not allowed"
 
     try:
@@ -582,7 +579,9 @@ async def read_bounded_identity_body(response: object, *, max_bytes: int) -> byt
     if headers is None or not hasattr(headers, "get"):
         raise PinnedResponseError("Response headers are unavailable")
     content_encoding = headers.get("content-encoding", "")
-    if not isinstance(content_encoding, str) or content_encoding.strip().casefold() not in {
+    if not isinstance(
+        content_encoding, str
+    ) or content_encoding.strip().casefold() not in {
         "",
         "identity",
     }:
@@ -645,7 +644,10 @@ class PinnedAsyncHTTPTransport(_TRANSPORT_BASE):  # type: ignore[misc,valid-type
                     scheme=request.url.raw_scheme,
                     host=request.url.raw_host,
                     port=request.url.port,
-                    target=request.url.target,
+                    # HTTPX 0.28 exposes the raw origin-form target as
+                    # ``raw_path`` (including the unmodified query bytes).
+                    # Do not reconstruct it from decoded path/query fields.
+                    target=request.url.raw_path,
                 ),
                 headers=request.headers.raw,
                 content=request.stream,
@@ -660,9 +662,7 @@ class PinnedAsyncHTTPTransport(_TRANSPORT_BASE):  # type: ignore[misc,valid-type
         )
 
     @staticmethod
-    def _validate_sni_extension(
-        raw_host: bytes, extensions: dict[str, object]
-    ) -> None:
+    def _validate_sni_extension(raw_host: bytes, extensions: dict[str, object]) -> None:
         override = extensions.pop("sni_hostname", None)
         if override is None:
             return

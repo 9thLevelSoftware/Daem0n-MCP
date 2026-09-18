@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import sys
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from importlib import metadata
@@ -118,6 +119,8 @@ class CapabilityRegistry:
             return self._failed(profile)
         if not configured:
             return self._disabled(profile)
+        if name == "models-local" and sys.version_info < (3, 11):
+            return self._python_version_unavailable(profile)
 
         missing = [
             distribution
@@ -174,7 +177,11 @@ class CapabilityRegistry:
 
     @staticmethod
     def _ready(profile: CapabilityProfile) -> dict[str, Any]:
-        return {"name": profile.name, "status": "ready", "remediation": {"action": "none"}}
+        return {
+            "name": profile.name,
+            "status": "ready",
+            "remediation": {"action": "none"},
+        }
 
     @staticmethod
     def _disabled(profile: CapabilityProfile) -> dict[str, Any]:
@@ -196,6 +203,18 @@ class CapabilityRegistry:
                 "action": "install_extra",
                 "command": f"pip install 'daem0nmcp[{profile.name}]'",
                 "missing": missing,
+            },
+        }
+
+    @staticmethod
+    def _python_version_unavailable(profile: CapabilityProfile) -> dict[str, Any]:
+        return {
+            "name": profile.name,
+            "status": "degraded",
+            "remediation": {
+                "action": "upgrade_python",
+                "minimum_python": "3.11",
+                "message": "models-local requires Python 3.11 or newer",
             },
         }
 

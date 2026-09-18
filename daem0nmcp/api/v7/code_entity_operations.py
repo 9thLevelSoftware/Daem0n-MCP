@@ -1,5 +1,7 @@
 """Canonical v7 TODO-storage and entity-evolution operations."""
 
+# ruff: noqa: I001 -- preserve the repository's CRLF import block.
+
 from __future__ import annotations
 
 import asyncio
@@ -10,6 +12,7 @@ import sqlite3
 import threading
 import unicodedata
 from collections.abc import Callable, Mapping
+from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -38,6 +41,8 @@ from ...workspace import Workspace, WorkspaceRegistry
 from .application import AdmittedRequest
 from .discovery_operations import (
     _active_projection,
+    _code_summary,
+    _validate_code_partition,
     _validate_entity_partition,
 )
 from .errors import STABLE_ERROR_CODE_SET
@@ -51,26 +56,29 @@ from .public_ids import (
     PublicObjectIdRepository,
     PublicObjectKind,
 )
+from .runtime_protocols import ActiveStorageResolver, WorkerPool
 from .runtime_services import WorkspaceStorageResolver
 from .tools import (
+    CodeImpactData,
+    CodeImpactPath,
     CodeTodosStoreData,
     EntityEvolutionData,
     EntityEvolutionItem,
     EntitySummary,
     TodoFinding,
 )
-from .utility_operations import (
-    _cursor_offset as _todo_cursor_offset,
-    _findings as _todo_findings,
-    _relative_target as _todo_relative_target,
-    _selector_digest as _todo_selector_digest,
-)
+from .utility_operations import _cursor_offset as _todo_cursor_offset
+from .utility_operations import _findings as _todo_findings
+from .utility_operations import _relative_target as _todo_relative_target
+from .utility_operations import _selector_digest as _todo_selector_digest
 
 
 _EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
 _MAX_TODO_RECORDS = 500
 _MAX_ENTITY_RECORDS = 200
 _MAX_ENTITY_EVENTS = 200
+_MAX_IMPACT_ENTITIES = 500
+_MAX_IMPACT_EDGES = 5_000
 _CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 _EVENT_TYPE_RE = re.compile(r"^[a-z][a-z0-9_.-]{2,79}$")
 _EVENT_COLUMNS = (
@@ -82,6 +90,8 @@ _EVENT_COLUMNS = (
 _REQUIRED_TABLES = frozenset(
     {
         "discovery_entities",
+        "discovery_code_edges",
+        "discovery_code_entities",
         "discovery_entity_records",
         "discovery_projection_partitions",
         "memory_events",
@@ -123,11 +133,11 @@ class CodeEntityOperationDependencies:
     """Owned dependencies for the focused canonical operation slice."""
 
     operation_secret: bytes
-    storage_resolver: WorkspaceStorageResolver = field(
+    storage_resolver: ActiveStorageResolver = field(
         default_factory=WorkspaceStorageResolver
     )
     clock: Callable[[], datetime] = _default_clock
-    worker_pool: object = field(default_factory=_default_worker_pool)
+    worker_pool: WorkerPool = field(default_factory=_default_worker_pool)
 
     def __post_init__(self) -> None:
         if (
@@ -163,9 +173,7 @@ def _authorize(
     try:
         root = workspace.root.resolve(strict=True)
         registered = WorkspaceRegistry([root], default_root=root).default
-        exact = os.path.normcase(str(root)) == os.path.normcase(
-            str(workspace.root)
-        )
+        exact = os.path.normcase(str(root)) == os.path.normcase(str(workspace.root))
     except (OSError, RuntimeError, TypeError, ValueError):
         raise CodeEntityOperationError("UNAUTHORIZED_WORKSPACE") from None
     if registered.workspace_id != workspace.workspace_id or not exact:
@@ -173,12 +181,10 @@ def _authorize(
     return root
 
 
-def _database_path(workspace: Workspace, active: object) -> Path:
+def _database_path(workspace: Workspace, active: Any) -> Path:
     try:
-        storage = (workspace.root / ".daem0nmcp" / "storage").resolve(
-            strict=True
-        )
-        path = Path(getattr(active, "path")).resolve(strict=True)
+        storage = (workspace.root / ".daem0nmcp" / "storage").resolve(strict=True)
+        path = Path(active.path).resolve(strict=True)
         path.relative_to(storage)
         if path.is_symlink() or not path.is_file():
             raise ValueError
@@ -237,10 +243,7 @@ def _datetime_us(value: object) -> int:
         raise CodeEntityOperationError("INVALID_ARGUMENT")
     try:
         delta = value.astimezone(timezone.utc) - _EPOCH
-        result = (
-            (delta.days * 86_400 + delta.seconds) * 1_000_000
-            + delta.microseconds
-        )
+        result = (delta.days * 86_400 + delta.seconds) * 1_000_000 + delta.microseconds
     except (OverflowError, ValueError):
         raise CodeEntityOperationError("INVALID_ARGUMENT") from None
     if not -(2**63) <= result <= 2**63 - 1:
@@ -350,8 +353,7 @@ def _validated_record_row(
     expected_version: int,
 ) -> sqlite3.Row:
     rows = connection.execute(
-        "SELECT * FROM memory_records WHERE workspace_id=? AND record_id=? "
-        "LIMIT 2",
+        "SELECT * FROM memory_records WHERE workspace_id=? AND record_id=? LIMIT 2",
         (workspace_id, record_id),
     ).fetchall()
     if len(rows) != 1:
@@ -441,9 +443,7 @@ def _todo_empty_state(
     request: AdmittedRequest,
     request_hash: str,
 ) -> dict[str, Any]:
-    selected_types = sorted(
-        request.types or {"todo", "fixme", "hack", "xxx", "note"}
-    )
+    selected_types = sorted(request.types or {"todo", "fixme", "hack", "xxx", "note"})
     return {
         "record_type": request.record_type,
         "legacy_type": None,
@@ -451,9 +451,7 @@ def _todo_empty_state(
             f"Archived TODO scan receipt for {request.relative_root}: "
             f"no {', '.join(selected_types)} findings."
         ),
-        "rationale": (
-            "Binds an empty canonical v7 TODO scan to its idempotency key."
-        ),
+        "rationale": ("Binds an empty canonical v7 TODO scan to its idempotency key."),
         "context": {
             "code_todo_scan_receipt": {
                 "finding_count": 0,
@@ -482,9 +480,7 @@ def _todo_request_hash(request: AdmittedRequest) -> str:
     return sha256_json(
         {
             "relative_root": request.relative_root,
-            "types": (
-                None if request.types is None else sorted(request.types)
-            ),
+            "types": (None if request.types is None else sorted(request.types)),
             "cursor": request.cursor,
             "limit": request.limit,
             "record_type": request.record_type,
@@ -527,9 +523,7 @@ def _todo_page(
     request: AdmittedRequest,
 ) -> list[TodoFinding]:
     try:
-        scan_root = _todo_relative_target(
-            root, request.relative_root, directory=True
-        )
+        scan_root = _todo_relative_target(root, request.relative_root, directory=True)
         selected_types = frozenset(
             request.types or {"todo", "fixme", "hack", "xxx", "note"}
         )
@@ -584,9 +578,7 @@ def _existing_todo_result(
         if payload.get("idempotency_request_hash") != request_hash:
             raise CodeEntityOperationError("IDEMPOTENCY_CONFLICT")
     empty_rows = [
-        (row, payload)
-        for row, payload in verified
-        if payload.get("empty_scan") is True
+        (row, payload) for row, payload in verified if payload.get("empty_scan") is True
     ]
     if empty_rows:
         if len(verified) != 1 or len(empty_rows) != 1:
@@ -675,9 +667,9 @@ def _existing_todo_result(
             expected_snapshot = snapshot
         elif expected_size != size or expected_snapshot != snapshot:
             raise CodeEntityOperationError("CAPABILITY_DEGRADED")
-        state = payload.get("record")
+        record_state = payload.get("record")
         expected_state = _todo_state(finding, request.record_type)
-        if state != expected_state:
+        if record_state != expected_state:
             raise CodeEntityOperationError("CAPABILITY_DEGRADED")
         indexed[index] = (row, finding, expected_state)
     if expected_size is None or set(indexed) != set(range(expected_size)):
@@ -716,9 +708,7 @@ def _todo_store_sync(
 ) -> CodeTodosStoreData:
     root = _authorize(workspace, request, "code_todos_scan_and_store")
     request_hash = _todo_request_hash(request)
-    correlation = _todo_correlation(
-        workspace.workspace_id, request.idempotency_key
-    )
+    correlation = _todo_correlation(workspace.workspace_id, request.idempotency_key)
     recorded_at_us = _now_us(dependencies)
     if cancelled.is_set():
         raise _WorkerCancelledError()
@@ -925,21 +915,15 @@ def _entity_row(
     else:
         if not isinstance(request.entity_name, str):
             raise CodeEntityOperationError("INVALID_ARGUMENT")
-        normalized = unicodedata.normalize(
-            "NFC", request.entity_name.casefold()
-        )
-        where = (
-            "workspace_id=? AND graph_generation=? AND normalized_name=?"
-        )
+        normalized = unicodedata.normalize("NFC", request.entity_name.casefold())
+        where = "workspace_id=? AND graph_generation=? AND normalized_name=?"
         parameters: list[object] = [workspace_id, generation, normalized]
         if request.entity_type is not None:
             where += " AND entity_type=?"
             parameters.append(request.entity_type)
         rows = connection.execute(
             "SELECT entity_id,name,entity_type,mention_count "
-            "FROM discovery_entities WHERE "
-            + where
-            + " ORDER BY entity_id LIMIT 2",
+            "FROM discovery_entities WHERE " + where + " ORDER BY entity_id LIMIT 2",
             parameters,
         ).fetchall()
     if not rows:
@@ -967,10 +951,7 @@ def _event_summary(
     previous: Mapping[str, Any] | None,
 ) -> str:
     event_type = row["event_type"]
-    if (
-        not isinstance(event_type, str)
-        or _EVENT_TYPE_RE.fullmatch(event_type) is None
-    ):
+    if not isinstance(event_type, str) or _EVENT_TYPE_RE.fullmatch(event_type) is None:
         raise CodeEntityOperationError("CAPABILITY_DEGRADED")
     content = _safe_event_content(state)
     if previous is None:
@@ -1119,9 +1100,7 @@ def _entity_evolution_sync(
                 timeline = [
                     EntityEvolutionItem(
                         happened_at=_datetime_from_us(item.row["occurred_at_us"]),
-                        summary=_event_summary(
-                            item.row, item.state, item.previous
-                        ),
+                        summary=_event_summary(item.row, item.state, item.previous),
                         event_id=str(item.row["event_id"]),
                     )
                     for item in selected
@@ -1145,6 +1124,168 @@ def _entity_evolution_sync(
                     ),
                     timeline=timeline,
                     evidence_refs=evidence_refs,
+                )
+                connection.rollback()
+                return result
+            except CodeEntityOperationError:
+                if connection.in_transaction:
+                    connection.rollback()
+                raise
+            except Exception as error:
+                if connection.in_transaction:
+                    connection.rollback()
+                code = getattr(error, "code", None)
+                if isinstance(code, str) and code in STABLE_ERROR_CODE_SET:
+                    raise CodeEntityOperationError(code) from None
+                raise CodeEntityOperationError("CAPABILITY_DEGRADED") from None
+            finally:
+                if connection.in_transaction:
+                    connection.rollback()
+                connection.close()
+    except CodeEntityOperationError:
+        raise
+    except Exception as error:
+        code = getattr(error, "code", None)
+        if isinstance(code, str) and code in STABLE_ERROR_CODE_SET:
+            raise CodeEntityOperationError(code) from None
+        raise CodeEntityOperationError("CAPABILITY_DEGRADED") from None
+
+
+def _code_impact_sync(
+    dependencies: CodeEntityOperationDependencies,
+    workspace: Workspace,
+    request: AdmittedRequest,
+) -> CodeImpactData:
+    try:
+        with dependencies.storage_resolver.locked_active(workspace) as active:
+            connection = _open_database(
+                _database_path(workspace, active), writable=False
+            )
+            try:
+                connection.execute("BEGIN")
+                manifest = _active_projection(
+                    connection, workspace.workspace_id, "code"
+                )
+                _validate_code_partition(connection, workspace.workspace_id, manifest)
+                if request.code_entity_id is not None:
+                    rows = connection.execute(
+                        "SELECT code_entity_id,kind,qualified_name,"
+                        "relative_file_path,start_line,end_line "
+                        "FROM discovery_code_entities WHERE workspace_id=? "
+                        "AND code_generation=? AND code_entity_id=? LIMIT 2",
+                        (
+                            workspace.workspace_id,
+                            manifest.generation,
+                            request.code_entity_id,
+                        ),
+                    ).fetchall()
+                    if not rows:
+                        historical = connection.execute(
+                            "SELECT 1 FROM discovery_code_entities "
+                            "WHERE workspace_id=? AND code_entity_id=? LIMIT 1",
+                            (workspace.workspace_id, request.code_entity_id),
+                        ).fetchone()
+                        raise CodeEntityOperationError(
+                            "STALE_PROJECTION_ID"
+                            if historical is not None
+                            else "NOT_FOUND"
+                        )
+                else:
+                    normalized = unicodedata.normalize(
+                        "NFC", request.qualified_name.casefold()
+                    )
+                    rows = connection.execute(
+                        "SELECT code_entity_id,kind,qualified_name,"
+                        "relative_file_path,start_line,end_line "
+                        "FROM discovery_code_entities WHERE workspace_id=? "
+                        "AND code_generation=? AND normalized_name=? "
+                        "ORDER BY code_entity_id LIMIT 2",
+                        (workspace.workspace_id, manifest.generation, normalized),
+                    ).fetchall()
+                    if not rows:
+                        raise CodeEntityOperationError("NOT_FOUND")
+                    if len(rows) != 1:
+                        raise CodeEntityOperationError("CONFLICT")
+                if len(rows) != 1:
+                    raise CodeEntityOperationError("CAPABILITY_DEGRADED")
+                subject_row = rows[0]
+                subject_id = str(subject_row["code_entity_id"])
+                paths: dict[str, tuple[str, ...]] = {subject_id: (subject_id,)}
+                frontier = [subject_id]
+                traversed_edges = 0
+                for _depth in range(request.max_depth):
+                    if not frontier:
+                        break
+                    placeholders = ",".join("?" for _ in frontier)
+                    edge_rows = connection.execute(
+                        "SELECT target_code_entity_id,source_code_entity_id "
+                        "FROM discovery_code_edges WHERE workspace_id=? "
+                        "AND code_generation=? AND target_code_entity_id IN ("
+                        + placeholders
+                        + ") ORDER BY target_code_entity_id,source_code_entity_id,"
+                        "edge_kind LIMIT ?",
+                        (
+                            workspace.workspace_id,
+                            manifest.generation,
+                            *frontier,
+                            _MAX_IMPACT_EDGES - traversed_edges + 1,
+                        ),
+                    ).fetchall()
+                    traversed_edges += len(edge_rows)
+                    if traversed_edges > _MAX_IMPACT_EDGES:
+                        raise CodeEntityOperationError("TASK_REQUIRED")
+                    next_frontier: list[str] = []
+                    for edge in edge_rows:
+                        target_id = str(edge[0])
+                        source_id = str(edge[1])
+                        if target_id not in paths:
+                            raise CodeEntityOperationError("CAPABILITY_DEGRADED")
+                        if source_id in paths:
+                            continue
+                        path = (*paths[target_id], source_id)
+                        if len(path) > 32:
+                            raise CodeEntityOperationError("TASK_REQUIRED")
+                        paths[source_id] = path
+                        next_frontier.append(source_id)
+                        if len(paths) - 1 > _MAX_IMPACT_ENTITIES:
+                            raise CodeEntityOperationError("TASK_REQUIRED")
+                    frontier = sorted(set(next_frontier))
+                affected_ids = sorted(
+                    (item for item in paths if item != subject_id),
+                    key=lambda item: (len(paths[item]), item),
+                )
+                summaries: dict[str, Any] = {}
+                if affected_ids:
+                    placeholders = ",".join("?" for _ in affected_ids)
+                    affected_rows = connection.execute(
+                        "SELECT code_entity_id,kind,qualified_name,"
+                        "relative_file_path,start_line,end_line "
+                        "FROM discovery_code_entities WHERE workspace_id=? "
+                        "AND code_generation=? AND code_entity_id IN ("
+                        + placeholders
+                        + ")",
+                        (
+                            workspace.workspace_id,
+                            manifest.generation,
+                            *affected_ids,
+                        ),
+                    ).fetchall()
+                    summaries = {
+                        str(row["code_entity_id"]): _code_summary(
+                            row, manifest.generation
+                        )
+                        for row in affected_rows
+                    }
+                    if set(summaries) != set(affected_ids):
+                        raise CodeEntityOperationError("CAPABILITY_DEGRADED")
+                result = CodeImpactData(
+                    subject=_code_summary(subject_row, manifest.generation),
+                    affected=[summaries[item] for item in affected_ids],
+                    paths=[
+                        CodeImpactPath(entities=list(paths[item]))
+                        for item in affected_ids
+                    ],
+                    evidence_refs=[],
                 )
                 connection.rollback()
                 return result
@@ -1214,10 +1355,8 @@ async def _run_read(
     try:
         return await asyncio.shield(worker)
     except asyncio.CancelledError as cancellation:
-        try:
+        with suppress(asyncio.CancelledError, Exception):
             await _await_worker_uninterruptibly(worker)
-        except (asyncio.CancelledError, Exception):
-            pass
         raise cancellation from None
     except BoundedWorkerBusyError as error:
         raise CodeEntityOperationError("TASK_REQUIRED") from error
@@ -1258,8 +1397,22 @@ def build_code_entity_operations(
             ),
         )
 
+    async def code_impact_analyze(
+        *, workspace: Workspace, request: AdmittedRequest
+    ) -> CodeImpactData:
+        _authorize(workspace, request, "code_impact_analyze")
+        return await _run_read(
+            dependencies,
+            lambda: _code_impact_sync(
+                dependencies,
+                workspace,
+                request,
+            ),
+        )
+
     return MappingProxyType(
         {
+            "code_impact_analyze": code_impact_analyze,
             "code_todos_scan_and_store": code_todos_scan_and_store,
             "entity_evolution_trace": entity_evolution_trace,
         }

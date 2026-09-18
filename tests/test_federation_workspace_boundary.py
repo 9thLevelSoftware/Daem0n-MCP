@@ -266,7 +266,7 @@ class FederationWorkspaceBoundaryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(_LinkedDatabase.constructed_paths, [storage.resolve()])
 
     async def test_derived_storage_escape_fails_before_linked_database_access(self):
-        class DerivedPathEscape(ValueError):
+        class DerivedPathEscapeError(ValueError):
             pass
 
         storage = self.secondary / ".daem0nmcp" / "storage"
@@ -277,10 +277,10 @@ class FederationWorkspaceBoundaryTests(unittest.IsolatedAsyncioTestCase):
             await manager.link_projects(str(self.primary), str(self.secondary))
 
             def reject_derived_path(*args, **kwargs):
-                raise DerivedPathEscape("derived storage escaped")
+                raise DerivedPathEscapeError("derived storage escaped")
 
             links.resolve_derived_path = reject_derived_path
-            with self.assertRaises(DerivedPathEscape):
+            with self.assertRaises(DerivedPathEscapeError):
                 await manager.get_linked_db_managers(str(self.primary))
 
         self.assertEqual(_LinkedDatabase.constructed_paths, [])

@@ -6,11 +6,28 @@ for MCP server connectivity and hook discipline.
 """
 
 import argparse
+import copy
+import importlib.resources
 import json
 import shutil
+import subprocess
 import sys
 from pathlib import Path
 from typing import Any
+
+from .edit_host import BridgeInstallation, provision_client_bridge_installation
+
+
+def select_opencode_interface(version: str, requested: str | None = None) -> str:
+    """Select the contract that exposes native and MCP tool execution hooks."""
+    if requested == "v2":
+        raise ValueError(
+            "OpenCode plugin V2 is released but does not expose tool execution hooks"
+        )
+    if requested not in {None, "v1"} or not version.startswith("1."):
+        raise ValueError("OpenCode version does not support the released V1 interface")
+    return "v1"
+
 
 OPENCODE_JSON_TEMPLATE: dict[str, Any] = {
     "$schema": "https://opencode.ai/config.json",
@@ -27,231 +44,12 @@ OPENCODE_JSON_TEMPLATE: dict[str, Any] = {
 # Subdirectories to scaffold inside .opencode/
 _OPENCODE_SUBDIRS = ["commands", "plugins", "agents"]
 
-# TypeScript plugin installed into .opencode/plugins/daem0n.ts
-# This is the canonical source -- kept in sync with the repo copy.
-PLUGIN_TEMPLATE: str = r"""/**
- * Daem0n Covenant Enforcement Plugin for OpenCode
- *
- * Mirrors the 5-hook discipline from Claude Code's hooks system:
- *   1. System prompt injection (covenant rules in every LLM call)
- *   2. Pre-edit enforcement (preflight token required)
- *   3. Pre-bash enforcement (must_not rule checking)
- *   4. Post-edit suggestions (informational, never blocks)
- *   5. Session lifecycle events (best-effort, never blocks)
- *
- * All enforcement logic lives in Python hook modules.
- * This TypeScript file is ONLY a shell-out wrapper -- zero duplication.
- */
-
-import type { Plugin } from "@opencode-ai/plugin";
-
-// ---------------------------------------------------------------------------
-// Covenant rules injected into every system prompt
-// ---------------------------------------------------------------------------
-
-const COVENANT_RULES_FULL = `<daem0n-covenant>
-## The Daem0n v7 Covenant
-
-This project is bound to Daem0n for persistent AI memory. When daem0nmcp tools
-are available, use the exact workspace-scoped v7 tools. The core names are
-session_brief, memory_preflight, memory_recall, memory_store,
-memory_record_outcome, and system_health.
-
-### 1. SESSION START (Non-Negotiable)
-IMMEDIATELY call:
-daem0nmcp_session_brief(workspace_id="<workspace_id>")
-
-Use daem0nmcp_memory_recall(workspace_id="<workspace_id>", query="...", limit=10)
-for relevant history. Before a protected operation call:
-daem0nmcp_memory_preflight(workspace_id="<workspace_id>", target_tool="<exact-tool>", target_arguments={<exact arguments>})
-Respect warnings, failed approaches, and must_not constraints. A preflight token
-is valid only for the exact workspace, principal, session, tool, and arguments.
-
-### 3. AFTER MAKING DECISIONS
-Call daem0nmcp_memory_store with the same target arguments, a stable
-idempotency_key, and the returned preflight_token. Save its record_id.
-
-### 4. AFTER IMPLEMENTATION
-Call: daem0nmcp_memory_record_outcome(workspace_id="<workspace_id>", record_id="<mem_id>", outcome_text="...", worked=true|false, idempotency_key="<stable-key>")
-Failures are valuable. Record worked=false with an explanation.
-
-Use daem0nmcp_system_health(workspace_id="<workspace_id>") for diagnostics.
-Read-only resources use memory://workspaces/{workspace_id}/warnings, /failures,
-/rules, and /active-context. Supported transports are stdio and Streamable HTTP
-at /mcp. Migration mapping: docs/v6-to-v7-tools.json.
-</daem0n-covenant>`;
-
-const COVENANT_RULES_SIMPLIFIED = `<daem0n-covenant mode="simplified">
-## Memory Protocol (Required Steps)
-
-This project uses Daem0n for persistent AI memory. Follow these 4 steps:
-
-1. START: daem0nmcp_session_brief(workspace_id="<workspace_id>")
-2. RECALL: daem0nmcp_memory_recall(workspace_id="<workspace_id>", query="...", limit=10)
-3. PREFLIGHT: daem0nmcp_memory_preflight(workspace_id="<workspace_id>", target_tool="memory_store", target_arguments={<exact arguments>})
-4. STORE: daem0nmcp_memory_store(workspace_id="<workspace_id>", record_type="decision", content="...", idempotency_key="<stable-key>", preflight_token="<token>")
-5. OUTCOME: daem0nmcp_memory_record_outcome(workspace_id="<workspace_id>", record_id="<mem_id>", outcome_text="...", worked=true|false, idempotency_key="<stable-key>")
-
-Rules:
-- Never use paths as workspace selectors.
-- Reuse an idempotency key when retrying the same write.
-- Use daem0nmcp_system_health for diagnostics.
-- Exact host-prefixed names are accepted; lookalike substrings are not.
-- Migration mapping: docs/v6-to-v7-tools.json.
-</daem0n-covenant>`;
-
-// ---------------------------------------------------------------------------
-// Shell-out helper
-// ---------------------------------------------------------------------------
-
-type HookResult = { exitCode: number; stdout: string; stderr: string };
-
-/**
- * Run a Python hook module via BunShell. Returns a normalized result.
- * On ANY failure (Python missing, timeout, crash), returns exitCode 0
- * so the host IDE is never broken by hook infrastructure.
- */
-async function runHook(
-  $: Parameters<Plugin>[0]["$"],
-  directory: string,
-  module: string,
-  env: Record<string, string>,
-  _timeoutMs?: number,
-): Promise<HookResult> {
-  try {
-    const hookEnv: Record<string, string> = {
-      CLAUDE_PROJECT_DIR: directory,
-      PYTHONUNBUFFERED: "1",
-      PYTHONIOENCODING: "utf-8",
-      ...env,
-    };
-    const shell = $.nothrow().env(hookEnv);
-    // BunShell template literals require static strings for the command.
-    // Build the full module path as a variable and interpolate it.
-    const mod = `daem0nmcp.claude_hooks.${module}`;
-    const result = await shell`python -m ${mod}`.quiet();
-    return {
-      exitCode: result.exitCode,
-      stdout: result.stdout.toString().trim(),
-      stderr: result.stderr.toString().trim(),
-    };
-  } catch {
-    // Graceful degradation: Python not found, timeout, or any other error.
-    // Never crash the host IDE.
-    return { exitCode: 0, stdout: "", stderr: "" };
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Tool name classification helpers
-// ---------------------------------------------------------------------------
-
-function isEditTool(tool: string): boolean {
-  const t = tool.toLowerCase();
-  return t.includes("edit") || t.includes("write") || t.includes("notebookedit");
-}
-
-function isBashTool(tool: string): boolean {
-  const t = tool.toLowerCase();
-  return t.includes("bash") || t.includes("shell");
-}
-
-// ---------------------------------------------------------------------------
-// Plugin export
-// ---------------------------------------------------------------------------
-
-export const Daem0nPlugin: Plugin = async ({ $, directory }) => {
-  return {
-    // -----------------------------------------------------------------------
-    // HOOK 1: System prompt injection
-    // Every LLM call sees the covenant rules.
-    // -----------------------------------------------------------------------
-    "experimental.chat.system.transform": async (input, output) => {
-      const provider = input.model?.providerID ?? "unknown";
-      const modelId = input.model?.id ?? "unknown";
-      const isClaude = provider === "anthropic" || modelId.toLowerCase().includes("claude");
-
-      output.system.push(isClaude ? COVENANT_RULES_FULL : COVENANT_RULES_SIMPLIFIED);
-
-    },
-
-    // -----------------------------------------------------------------------
-    // HOOK 2: Pre-tool enforcement (pre-edit + pre-bash)
-    // Blocks edits without preflight token (exit 2 from Python).
-    // Blocks bash commands matching must_not rules (exit 2 from Python).
-    // -----------------------------------------------------------------------
-    "tool.execute.before": async (input, output) => {
-      if (isEditTool(input.tool)) {
-        const result = await runHook($, directory, "pre_edit", {
-          TOOL_INPUT: JSON.stringify(output.args ?? {}),
-        });
-        if (result.exitCode === 2) {
-          throw new Error(
-            result.stderr || result.stdout || "[Daem0n blocks] Preflight required",
-          );
-        }
-      }
-
-      if (isBashTool(input.tool)) {
-        const result = await runHook($, directory, "pre_bash", {
-          TOOL_INPUT: JSON.stringify(output.args ?? {}),
-        });
-        if (result.exitCode === 2) {
-          throw new Error(
-            result.stderr || result.stdout || "[Daem0n blocks] Rule violation",
-          );
-        }
-      }
-    },
-
-    // -----------------------------------------------------------------------
-    // HOOK 3: Post-edit suggestions (informational, never blocks)
-    // Suggests replay-safe v7 memory calls for significant changes.
-    // -----------------------------------------------------------------------
-    "tool.execute.after": async (input, output) => {
-      try {
-        if (isEditTool(input.tool)) {
-          const result = await runHook(
-            $,
-            directory,
-            "post_edit",
-            { TOOL_INPUT: JSON.stringify({}) },
-            5000,
-          );
-          if (result.stdout) {
-            output.output = (output.output || "") + "\n" + result.stdout;
-          }
-        }
-      } catch {
-        // Never throw from post-edit. Informational only.
-      }
-    },
-
-    // -----------------------------------------------------------------------
-    // HOOK 4: Session lifecycle events (best-effort, never blocks)
-    // session.created  -> session_start hook (auto-briefing)
-    // session.idle     -> stop hook (fail-closed memory suggestions)
-    // -----------------------------------------------------------------------
-    event: async ({ event }) => {
-      try {
-        if (event.type === "session.created") {
-          await runHook($, directory, "session_start", {}, 5000);
-        } else if (event.type === "session.idle") {
-          await runHook(
-            $,
-            directory,
-            "stop",
-            { CLAUDE_TRANSCRIPT_PATH: "" },
-            15000,
-          );
-        }
-      } catch {
-        // Never throw from event hooks. Best-effort only.
-      }
-    },
-  };
-};
-"""
+# The packaged TypeScript resource is the sole installer source of truth.
+PLUGIN_TEMPLATE = (
+    importlib.resources.files("daem0nmcp.opencode_assets")
+    .joinpath("daem0n.ts")
+    .read_text(encoding="utf-8")
+)
 
 
 def detect_clients(project_path: Path) -> dict[str, Any]:
@@ -312,10 +110,90 @@ def _ensure_file(path: Path, content: str, dry_run: bool, force: bool) -> str:
     return "[create]"
 
 
+def _configured_template(
+    installation: BridgeInstallation | None,
+) -> dict[str, Any]:
+    template = copy.deepcopy(OPENCODE_JSON_TEMPLATE)
+    template["mcp"]["daem0nmcp"]["command"] = [
+        sys.executable,
+        "-m",
+        "daem0nmcp",
+    ]
+    if installation is not None:
+        installation_environment = installation.environment()
+        if installation_environment.get("DAEM0NMCP_EDIT_BRIDGE_MODE") != "remote-https":
+            environment = template["mcp"]["daem0nmcp"]["environment"]
+            environment.update(installation_environment)
+            environment["DAEM0NMCP_PYTHON_EXECUTABLE"] = sys.executable
+    return template
+
+
+def _configure_existing_daem0n(
+    path: Path,
+    installation: BridgeInstallation,
+) -> bool:
+    """Add host-only bridge paths when an existing config owns our MCP entry."""
+
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(value, dict):
+            return False
+        server = value["mcp"]["daem0nmcp"]
+        if not isinstance(server, dict):
+            return False
+        installation_environment = installation.environment()
+        if installation_environment.get("DAEM0NMCP_EDIT_BRIDGE_MODE") == "remote-https":
+            return True
+        environment = server.setdefault("environment", {})
+        if not isinstance(environment, dict):
+            return False
+        environment.update(installation_environment)
+        command = server.get("command")
+        executable = (
+            command[0]
+            if isinstance(command, list)
+            and command
+            and isinstance(command[0], str)
+            and command[0]
+            else sys.executable
+        )
+        environment["DAEM0NMCP_PYTHON_EXECUTABLE"] = executable
+        path.write_text(json.dumps(value, indent=2) + "\n", encoding="utf-8")
+        return True
+    except (KeyError, TypeError, OSError, json.JSONDecodeError):
+        return False
+
+
+def _installed_opencode_version() -> str:
+    binary = shutil.which("opencode")
+    if binary is None:
+        return "1.0"
+    try:
+        result = subprocess.run(
+            [binary, "--version"],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=2,
+        )
+        return result.stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        return "1.0"
+
+
 def install_opencode(
     project_path: str,
     dry_run: bool = False,
     force: bool = False,
+    *,
+    bridge_config_root: Path | None = None,
+    interface: str | None = None,
+    opencode_version: str | None = None,
+    remote_workspace_id: str | None = None,
+    remote_credential_path: str | Path | None = None,
+    remote_base_url: str | None = None,
+    remote_ca_file: str | Path | None = None,
+    remote_origin: str | None = None,
 ) -> tuple[bool, str]:
     """Install OpenCode integration for a project.
 
@@ -326,6 +204,28 @@ def install_opencode(
     """
     root = Path(project_path).resolve()
     lines: list[str] = []
+    installation = None
+
+    try:
+        selected_interface = select_opencode_interface(
+            opencode_version or _installed_opencode_version(), interface
+        )
+    except ValueError as exc:
+        return False, f"OpenCode integration unavailable: {exc}"
+
+    if not dry_run:
+        try:
+            installation = provision_client_bridge_installation(
+                root,
+                config_root=bridge_config_root,
+                remote_workspace_id=remote_workspace_id,
+                remote_credential_path=remote_credential_path,
+                remote_base_url=remote_base_url,
+                remote_ca_file=remote_ca_file,
+                remote_origin=remote_origin,
+            )
+        except (OSError, ValueError) as exc:
+            return False, f"Edit bridge pairing failed: {exc}"
 
     if dry_run:
         lines.append("[dry-run] Showing planned changes (no files will be modified)\n")
@@ -347,6 +247,8 @@ def install_opencode(
     lines.append(f"  .opencode/: {'found' if oc['opencode_dir'] else 'not found'}")
     lines.append(f"  AGENTS.md: {'found' if oc['agents_md'] else 'not found'}")
     lines.append("")
+    lines.append(f"Plugin interface: {selected_interface}")
+    lines.append("")
 
     # -- Scaffold .opencode/ directories ---------------------------------
     try:
@@ -362,10 +264,33 @@ def install_opencode(
 
         # -- Ensure opencode.json at project root ------------------------
         lines.append("Configuration:")
-        json_content = json.dumps(OPENCODE_JSON_TEMPLATE, indent=2) + "\n"
+        json_content = json.dumps(_configured_template(installation), indent=2) + "\n"
         json_path = root / "opencode.json"
         status = _ensure_file(json_path, json_content, dry_run, force)
         lines.append(f"  {status} opencode.json")
+        if (
+            installation is not None
+            and status == "[exists]"
+            and _configure_existing_daem0n(json_path, installation)
+            and installation.environment().get("DAEM0NMCP_EDIT_BRIDGE_MODE")
+            != "remote-https"
+        ):
+            lines.append("  [update] opencode.json Daem0n bridge environment")
+
+        if (
+            installation is not None
+            and installation.environment().get("DAEM0NMCP_EDIT_BRIDGE_MODE")
+            == "remote-https"
+        ):
+            host_environment = installation.environment()
+            host_environment["DAEM0NMCP_PYTHON_EXECUTABLE"] = sys.executable
+            host_path = opencode_root / "daem0n-host.json"
+            if not dry_run:
+                host_path.write_text(
+                    json.dumps({"environment": host_environment}, indent=2) + "\n",
+                    encoding="utf-8",
+                )
+            lines.append("  [configure] .opencode/daem0n-host.json")
 
         # -- Ensure plugin file ------------------------------------------
         plugin_path = opencode_root / "plugins" / "daem0n.ts"
@@ -378,6 +303,15 @@ def install_opencode(
         else:
             lines.append("  [skip]   AGENTS.md (create via Phase 18 or manually)")
         lines.append("")
+
+        if installation is not None:
+            state = "created" if installation.created else "reused"
+            lines.append("Native edit bridge:")
+            lines.append(f"  [{state}] host credential: {installation.credential_path}")
+            lines.append(
+                f"  [configured] {installation.environment().get('DAEM0NMCP_EDIT_BRIDGE_MODE', 'local')} pairing environment"
+            )
+            lines.append("")
 
     except OSError as exc:
         return False, f"Installation failed: {exc}"
@@ -421,12 +355,28 @@ if __name__ == "__main__":
         default=".",
         help="Project root path (default: current directory)",
     )
+    parser.add_argument(
+        "--interface",
+        choices=("v1", "v2"),
+        help="Plugin interface (native edit hooks require v1)",
+    )
+    parser.add_argument("--remote-workspace-id")
+    parser.add_argument("--remote-credential-file")
+    parser.add_argument("--remote-url")
+    parser.add_argument("--remote-ca-file")
+    parser.add_argument("--remote-origin")
     args = parser.parse_args()
 
     ok, msg = install_opencode(
         args.project_path,
         dry_run=args.dry_run,
         force=args.force,
+        interface=args.interface,
+        remote_workspace_id=args.remote_workspace_id,
+        remote_credential_path=args.remote_credential_file,
+        remote_base_url=args.remote_url,
+        remote_ca_file=args.remote_ca_file,
+        remote_origin=args.remote_origin,
     )
     print(msg)
     sys.exit(0 if ok else 1)

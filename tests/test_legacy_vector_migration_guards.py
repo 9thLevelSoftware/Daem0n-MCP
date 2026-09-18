@@ -16,7 +16,6 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-
 _OLD_VECTOR = b"o" * (384 * 4)
 _NEW_VECTOR = b"new-vector"
 
@@ -193,13 +192,16 @@ def _installed_fake_vector_modules(calls: list[str], **callbacks):
     import daem0nmcp
 
     vectors, qdrant_store = _fake_vector_modules(calls, **callbacks)
-    with patch.dict(
-        sys.modules,
-        {
-            "daem0nmcp.vectors": vectors,
-            "daem0nmcp.qdrant_store": qdrant_store,
-        },
-    ), patch.object(daem0nmcp, "vectors", vectors, create=True):
+    with (
+        patch.dict(
+            sys.modules,
+            {
+                "daem0nmcp.vectors": vectors,
+                "daem0nmcp.qdrant_store": qdrant_store,
+            },
+        ),
+        patch.object(daem0nmcp, "vectors", vectors, create=True),
+    ):
         yield
 
 
@@ -215,13 +217,17 @@ class EmbeddingModelMigrationGuardTests(unittest.TestCase):
             _add_pointerless_v7_signature(database)
             calls: list[str] = []
 
-            with _installed_fake_vector_modules(calls), patch.object(
-                sys,
-                "argv",
-                ["migrate_embedding_model", "--project-path", str(root)],
-            ), self.assertLogs(migrate_embedding_model.logger, level="ERROR"):
-                with self.assertRaises(SystemExit) as raised:
-                    migrate_embedding_model.main()
+            with (
+                _installed_fake_vector_modules(calls),
+                patch.object(
+                    sys,
+                    "argv",
+                    ["migrate_embedding_model", "--project-path", str(root)],
+                ),
+                self.assertLogs(migrate_embedding_model.logger, level="ERROR"),
+                self.assertRaises(SystemExit) as raised,
+            ):
+                migrate_embedding_model.main()
 
             self.assertEqual(1, raised.exception.code)
             self.assertEqual(_OLD_VECTOR, _read_embedding(database))
@@ -236,19 +242,23 @@ class EmbeddingModelMigrationGuardTests(unittest.TestCase):
             (storage / "qdrant").mkdir()
             calls: list[str] = []
 
-            with _installed_fake_vector_modules(calls), patch.object(
-                sys,
-                "argv",
-                [
-                    "migrate_embedding_model",
-                    "--project-path",
-                    str(root),
-                    "--batch-size",
-                    "1",
-                ],
-            ), self.assertLogs(migrate_embedding_model.logger, level="ERROR") as logs:
-                with self.assertRaises(SystemExit) as raised:
-                    migrate_embedding_model.main()
+            with (
+                _installed_fake_vector_modules(calls),
+                patch.object(
+                    sys,
+                    "argv",
+                    [
+                        "migrate_embedding_model",
+                        "--project-path",
+                        str(root),
+                        "--batch-size",
+                        "1",
+                    ],
+                ),
+                self.assertLogs(migrate_embedding_model.logger, level="ERROR") as logs,
+                self.assertRaises(SystemExit) as raised,
+            ):
+                migrate_embedding_model.main()
 
             self.assertEqual(1, raised.exception.code)
             self.assertIn("format 7", " ".join(logs.output).lower())
@@ -267,25 +277,28 @@ class EmbeddingModelMigrationGuardTests(unittest.TestCase):
             (storage / "qdrant").mkdir()
             calls: list[str] = []
 
-            with _installed_fake_vector_modules(
-                calls,
-                on_encode=lambda: _probe_exclusive_lock(storage, calls, "encode"),
-                on_qdrant_init=lambda: _probe_exclusive_lock(
-                    storage, calls, "qdrant-init"
+            with (
+                _installed_fake_vector_modules(
+                    calls,
+                    on_encode=lambda: _probe_exclusive_lock(storage, calls, "encode"),
+                    on_qdrant_init=lambda: _probe_exclusive_lock(
+                        storage, calls, "qdrant-init"
+                    ),
+                    on_qdrant_upsert=lambda: _probe_exclusive_lock(
+                        storage, calls, "qdrant-upsert"
+                    ),
                 ),
-                on_qdrant_upsert=lambda: _probe_exclusive_lock(
-                    storage, calls, "qdrant-upsert"
+                patch.object(
+                    sys,
+                    "argv",
+                    [
+                        "migrate_embedding_model",
+                        "--project-path",
+                        str(root),
+                        "--batch-size",
+                        "1",
+                    ],
                 ),
-            ), patch.object(
-                sys,
-                "argv",
-                [
-                    "migrate_embedding_model",
-                    "--project-path",
-                    str(root),
-                    "--batch-size",
-                    "1",
-                ],
             ):
                 migrate_embedding_model.main()
 
@@ -335,14 +348,14 @@ class QdrantMigrationGuardTests(unittest.TestCase):
 
         with self.assertRaisesRegex(RuntimeError, "v6-only"):
             asyncio.run(
-                migrate_vectors.migrate_vectors_to_qdrant(
-                    FakeDatabase(), FakeQdrant()
-                )
+                migrate_vectors.migrate_vectors_to_qdrant(FakeDatabase(), FakeQdrant())
             )
 
         self.assertEqual([], calls)
 
-    def test_v7_active_database_refuses_before_optional_imports_or_qdrant_creation(self):
+    def test_v7_active_database_refuses_before_optional_imports_or_qdrant_creation(
+        self,
+    ):
         from daem0nmcp.migrations import migrate_vectors
 
         with tempfile.TemporaryDirectory() as raw:
@@ -355,7 +368,9 @@ class QdrantMigrationGuardTests(unittest.TestCase):
             self.assertEqual(_OLD_VECTOR, _read_embedding(active))
             self.assertFalse((storage / "qdrant").exists())
 
-    def test_post_resolution_format_flip_refuses_before_qdrant_path_or_constructor(self):
+    def test_post_resolution_format_flip_refuses_before_qdrant_path_or_constructor(
+        self,
+    ):
         from daem0nmcp.config import Settings
         from daem0nmcp.migrations import migrate_vectors
 
@@ -387,15 +402,18 @@ class QdrantMigrationGuardTests(unittest.TestCase):
                 calls.append("qdrant-path")
                 return str(storage / "qdrant")
 
-            with patch.dict(
-                sys.modules,
-                {
-                    "daem0nmcp.database": database_module,
-                    "daem0nmcp.qdrant_store": qdrant_module,
-                },
-            ), patch.object(Settings, "get_qdrant_path", qdrant_path):
-                with self.assertRaisesRegex(RuntimeError, "v6-only"):
-                    asyncio.run(migrate_vectors.run_migration(str(root)))
+            with (
+                patch.dict(
+                    sys.modules,
+                    {
+                        "daem0nmcp.database": database_module,
+                        "daem0nmcp.qdrant_store": qdrant_module,
+                    },
+                ),
+                patch.object(Settings, "get_qdrant_path", qdrant_path),
+                self.assertRaisesRegex(RuntimeError, "v6-only"),
+            ):
+                asyncio.run(migrate_vectors.run_migration(str(root)))
 
             self.assertEqual(["database-init", "database-close"], calls)
 
@@ -443,14 +461,17 @@ class QdrantMigrationGuardTests(unittest.TestCase):
                     "errors": [],
                 }
 
-            with patch.dict(
-                sys.modules,
-                {
-                    "daem0nmcp.database": database_module,
-                    "daem0nmcp.qdrant_store": qdrant_module,
-                },
-            ), patch.object(
-                migrate_vectors, "migrate_vectors_to_qdrant", fake_migrate
+            with (
+                patch.dict(
+                    sys.modules,
+                    {
+                        "daem0nmcp.database": database_module,
+                        "daem0nmcp.qdrant_store": qdrant_module,
+                    },
+                ),
+                patch.object(
+                    migrate_vectors, "migrate_vectors_to_qdrant", fake_migrate
+                ),
             ):
                 result = asyncio.run(migrate_vectors.run_migration(str(root)))
 
@@ -555,9 +576,7 @@ class QdrantMigrationGuardTests(unittest.TestCase):
             sqlalchemy_module.select = lambda model: FakeQuery()
 
             vectors_module = types.ModuleType("daem0nmcp.vectors")
-            vectors_module.decode = lambda value: [
-                0.25
-            ] * settings.embedding_dimension
+            vectors_module.decode = lambda value: [0.25] * settings.embedding_dimension
 
             qdrant_module = types.ModuleType("daem0nmcp.qdrant_store")
 
@@ -576,16 +595,19 @@ class QdrantMigrationGuardTests(unittest.TestCase):
 
             qdrant_module.QdrantVectorStore = FakeQdrantVectorStore
 
-            with patch.dict(
-                sys.modules,
-                {
-                    "daem0nmcp.database": database_module,
-                    "daem0nmcp.models": models_module,
-                    "daem0nmcp.qdrant_store": qdrant_module,
-                    "daem0nmcp.vectors": vectors_module,
-                    "sqlalchemy": sqlalchemy_module,
-                },
-            ), patch.object(daem0nmcp, "vectors", vectors_module, create=True):
+            with (
+                patch.dict(
+                    sys.modules,
+                    {
+                        "daem0nmcp.database": database_module,
+                        "daem0nmcp.models": models_module,
+                        "daem0nmcp.qdrant_store": qdrant_module,
+                        "daem0nmcp.vectors": vectors_module,
+                        "sqlalchemy": sqlalchemy_module,
+                    },
+                ),
+                patch.object(daem0nmcp, "vectors", vectors_module, create=True),
+            ):
                 result = asyncio.run(migrate_vectors.run_migration(str(root)))
 
             self.assertEqual(1, result["migrated"])
@@ -740,13 +762,15 @@ class UpgradeVectorPhaseGuardTests(unittest.TestCase):
                 )
 
             calls: list[str] = []
-            with _installed_fake_vector_modules(calls):
-                with self.assertRaisesRegex(RuntimeError, "v6-only"):
-                    upgrade._migrate_embeddings(
-                        fingerprint.db_path,
-                        batch_size=1,
-                        format_version=6,
-                    )
+            with (
+                _installed_fake_vector_modules(calls),
+                self.assertRaisesRegex(RuntimeError, "v6-only"),
+            ):
+                upgrade._migrate_embeddings(
+                    fingerprint.db_path,
+                    batch_size=1,
+                    format_version=6,
+                )
 
             self.assertEqual(_OLD_VECTOR, _read_embedding(active))
             self.assertEqual([], calls)
@@ -855,9 +879,12 @@ class SchemaBackfillGuardTests(unittest.TestCase):
             storage, active = _make_v7_storage(root, None)
             output = io.StringIO()
 
-            with patch.object(
-                type(settings), "get_storage_path", return_value=str(storage)
-            ), contextlib.redirect_stdout(output):
+            with (
+                patch.object(
+                    type(settings), "get_storage_path", return_value=str(storage)
+                ),
+                contextlib.redirect_stdout(output),
+            ):
                 result = schema.main()
 
             self.assertEqual(1, result)
@@ -919,30 +946,35 @@ class CliBackfillGuardTests(unittest.TestCase):
                 raise AssertionError("legacy backfill was dispatched for format 7")
 
             output = io.StringIO()
-            with patch.dict(
-                sys.modules,
-                {
-                    "daem0nmcp.database": database_module,
-                    "daem0nmcp.memory": memory_module,
-                    "daem0nmcp.rules": rules_module,
-                },
-            ), patch.object(
-                migrations,
-                "migrate_and_backfill_vectors",
-                forbidden_backfill,
-            ), patch.object(
-                sys,
-                "argv",
-                [
-                    "daem0nmcp.cli",
-                    "--project-path",
-                    str(root),
-                    "migrate",
-                    "--backfill-vectors",
-                ],
-            ), contextlib.redirect_stdout(output):
-                with self.assertRaises(SystemExit) as raised:
-                    cli.main()
+            with (
+                patch.dict(
+                    sys.modules,
+                    {
+                        "daem0nmcp.database": database_module,
+                        "daem0nmcp.memory": memory_module,
+                        "daem0nmcp.rules": rules_module,
+                    },
+                ),
+                patch.object(
+                    migrations,
+                    "migrate_and_backfill_vectors",
+                    forbidden_backfill,
+                ),
+                patch.object(
+                    sys,
+                    "argv",
+                    [
+                        "daem0nmcp.cli",
+                        "--project-path",
+                        str(root),
+                        "migrate",
+                        "--backfill-vectors",
+                    ],
+                ),
+                contextlib.redirect_stdout(output),
+                self.assertRaises(SystemExit) as raised,
+            ):
+                cli.main()
 
             self.assertEqual(1, raised.exception.code)
             self.assertEqual([], calls)

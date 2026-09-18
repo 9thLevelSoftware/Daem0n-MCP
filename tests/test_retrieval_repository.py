@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import importlib.util
 import json
@@ -12,16 +13,18 @@ import unittest
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
+from unittest.mock import patch
 
+from daem0nmcp.retrieval.policy import apply_retrieval_policy
 from daem0nmcp.retrieval.repository import (
     RetrievalRepositoryError,
     SQLiteRetrievalRepository,
+    _EventRootCacheMissError,
     sqlite_read_connection_factory,
 )
 from daem0nmcp.retrieval.specialized_contract import (
     specialized_projection_contract,
 )
-from daem0nmcp.retrieval.policy import apply_retrieval_policy
 from daem0nmcp.retrieval.types import (
     Candidate,
     EvidenceRef,
@@ -29,7 +32,6 @@ from daem0nmcp.retrieval.types import (
     ProviderResult,
     RetrievalQuery,
 )
-
 
 WORKSPACE_ID = "ws_0123456789abcdef01234567"
 OTHER_WORKSPACE_ID = "ws_89abcdef0123456701234567"
@@ -77,10 +79,7 @@ def _snapshot(offset_us: int = 200) -> datetime:
 
 def _migration_statements(*versions: int) -> tuple[str, ...]:
     schema_path = (
-        Path(__file__).resolve().parents[1]
-        / "daem0nmcp"
-        / "migrations"
-        / "schema.py"
+        Path(__file__).resolve().parents[1] / "daem0nmcp" / "migrations" / "schema.py"
     )
     spec = importlib.util.spec_from_file_location(
         "retrieval_repository_test_schema", schema_path
@@ -195,9 +194,10 @@ class _CanonicalFixture:
     def __init__(self) -> None:
         self.temporary_directory = tempfile.TemporaryDirectory()
         self.database_path = Path(self.temporary_directory.name) / "canonical.db"
+        self.repositories: list[SQLiteRetrievalRepository] = []
         self.connection = sqlite3.connect(self.database_path)
         self.connection.execute("PRAGMA foreign_keys=ON")
-        for statement in _migration_statements(16, 17, 18):
+        for statement in _migration_statements(16, 17, 18, 30):
             self.connection.execute(statement)
         self._insert_events()
         self._insert_records()
@@ -207,6 +207,8 @@ class _CanonicalFixture:
         self.connection.commit()
 
     def close(self) -> None:
+        for repository in self.repositories:
+            repository.close()
         self.connection.close()
         self.temporary_directory.cleanup()
 
@@ -617,7 +619,9 @@ class _CanonicalFixture:
         return RetrievalQuery(**values)
 
     def repository(self, **changes: object) -> SQLiteRetrievalRepository:
-        return SQLiteRetrievalRepository(self.database_path, **changes)
+        repository = SQLiteRetrievalRepository(self.database_path, **changes)
+        self.repositories.append(repository)
+        return repository
 
 
 class SQLiteRetrievalRepositoryConstructionTests(unittest.TestCase):
@@ -675,8 +679,7 @@ class SQLiteRetrievalRepositoryPolicyTests(unittest.IsolatedAsyncioTestCase):
             (BASE_US, BASE_US + 70, _fact_id("e")),
         )
         self.fixture.connection.execute(
-            "UPDATE memory_fact_versions SET valid_to_us=NULL "
-            "WHERE fact_version_id=?",
+            "UPDATE memory_fact_versions SET valid_to_us=NULL WHERE fact_version_id=?",
             (_fact_id("d"),),
         )
         self.fixture.connection.execute(
@@ -690,6 +693,137 @@ class SQLiteRetrievalRepositoryPolicyTests(unittest.IsolatedAsyncioTestCase):
             (BASE_US + 90, WORKSPACE_ID, _record_id("1")),
         )
         self.fixture.connection.commit()
+
+    def test_event_root_scan_uses_the_current_covering_index(self) -> None:
+        plan = self.fixture.connection.execute(
+            "EXPLAIN QUERY PLAN SELECT event_hash FROM memory_events "
+            "WHERE workspace_id=? ORDER BY event_id",
+            (WORKSPACE_ID,),
+        ).fetchall()
+        rendered = " ".join(str(row[3]) for row in plan)
+
+        self.assertIn("idx_memory_events_root_covering", rendered)
+        self.assertNotIn("USE TEMP B-TREE", rendered)
+
+    async def test_event_root_is_single_flight_and_reused_by_warm_reads(self) -> None:
+        repository = self.fixture.repository()
+        candidate = _candidate(
+            record_id=_record_id("1"),
+            content_hash=_hash("1"),
+            channel="lexical",
+            event_id=_event_id("c"),
+        )
+        original = repository._calculate_event_root
+        calls = 0
+
+        def observed(connection, workspace_id):
+            nonlocal calls
+            calls += 1
+            return original(connection, workspace_id)
+
+        with patch.object(repository, "_calculate_event_root", side_effect=observed):
+            results = await asyncio.gather(
+                *(
+                    repository.load_policy_records(
+                        self.fixture.query(),
+                        (candidate,),
+                        snapshot_time=_snapshot(),
+                    )
+                    for _ in range(4)
+                )
+            )
+            selected = await repository.load_selected_evidence(
+                self.fixture.query(),
+                (candidate,),
+                snapshot_time=_snapshot(),
+            )
+
+        self.assertTrue(all(len(result) == 1 for result in results))
+        self.assertEqual(1, len(selected))
+        self.assertEqual(1, calls)
+
+    async def test_external_projection_commit_invalidates_cached_event_root(
+        self,
+    ) -> None:
+        repository = self.fixture.repository()
+        candidate = _candidate(
+            record_id=_record_id("1"),
+            content_hash=_hash("1"),
+            channel="lexical",
+            event_id=_event_id("c"),
+        )
+        original = repository._calculate_event_root
+        calls = 0
+
+        def observed(connection, workspace_id):
+            nonlocal calls
+            calls += 1
+            return original(connection, workspace_id)
+
+        with patch.object(repository, "_calculate_event_root", side_effect=observed):
+            await repository.load_policy_records(
+                self.fixture.query(), (candidate,), snapshot_time=_snapshot()
+            )
+            self.fixture.connection.execute(
+                "UPDATE projection_manifests SET builder_version=? "
+                "WHERE workspace_id=? AND projection_name='lexical'",
+                ("test-after-commit", WORKSPACE_ID),
+            )
+            self.fixture.connection.commit()
+            await repository.load_policy_records(
+                self.fixture.query(), (candidate,), snapshot_time=_snapshot()
+            )
+            await repository.load_policy_records(
+                self.fixture.query(), (candidate,), snapshot_time=_snapshot()
+            )
+
+        self.assertEqual(2, calls)
+
+    def test_revision_change_while_pinning_snapshot_rejects_cached_root(self) -> None:
+        repository = self.fixture.repository()
+        connection = repository._open_connection()
+        try:
+            with (
+                patch.object(
+                    repository,
+                    "_observer_revision_locked",
+                    side_effect=(7, 8),
+                ),
+                self.assertRaises(_EventRootCacheMissError),
+            ):
+                repository._begin_read_snapshot(connection)
+        finally:
+            if connection.in_transaction:
+                connection.rollback()
+            connection.close()
+
+    async def test_external_event_corruption_invalidates_cache_and_fails_closed(
+        self,
+    ) -> None:
+        repository = self.fixture.repository()
+        candidate = _candidate(
+            record_id=_record_id("1"),
+            content_hash=_hash("1"),
+            channel="lexical",
+            event_id=_event_id("c"),
+        )
+        await repository.load_policy_records(
+            self.fixture.query(), (candidate,), snapshot_time=_snapshot()
+        )
+        # Simulate out-of-band database corruption rather than a supported write.
+        self.fixture.connection.execute("DROP TRIGGER memory_events_no_update")
+        self.fixture.connection.execute(
+            "UPDATE memory_events SET event_hash=? WHERE workspace_id=? AND event_id=?",
+            (hashlib.sha256(b"corrupt").hexdigest(), WORKSPACE_ID, _event_id("c")),
+        )
+        self.fixture.connection.commit()
+
+        with self.assertRaises(RetrievalRepositoryError) as raised:
+            await repository.load_policy_records(
+                self.fixture.query(), (candidate,), snapshot_time=_snapshot()
+            )
+
+        self.assertEqual("POLICY_STATE_UNAVAILABLE", raised.exception.code)
 
     async def test_lexical_policy_state_comes_from_canonical_and_active_rows(
         self,
@@ -798,8 +932,7 @@ class SQLiteRetrievalRepositoryPolicyTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_lexical_channel_cannot_bypass_fact_contradiction(self) -> None:
         self.fixture.connection.execute(
-            "UPDATE memory_fact_versions SET metadata_json=? "
-            "WHERE fact_version_id=?",
+            "UPDATE memory_fact_versions SET metadata_json=? WHERE fact_version_id=?",
             (
                 json.dumps(
                     {"has_unresolved_contradiction": True},
@@ -832,9 +965,7 @@ class SQLiteRetrievalRepositoryPolicyTests(unittest.IsolatedAsyncioTestCase):
             snapshot_time=_snapshot(),
         )
 
-        self.assertEqual(
-            "UNRESOLVED_CONTRADICTION", result.rejections[0].reason
-        )
+        self.assertEqual("UNRESOLVED_CONTRADICTION", result.rejections[0].reason)
         self.assertEqual((), result.candidates)
 
     async def test_versionless_record_uses_historical_fact_validity(
@@ -869,9 +1000,9 @@ class SQLiteRetrievalRepositoryPolicyTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(_snapshot(0), states[0].valid_from)
         self.assertEqual(_snapshot(70), states[0].valid_to)
-        self.assertEqual((_record_id("1"),), tuple(
-            item.record_id for item in result.candidates
-        ))
+        self.assertEqual(
+            (_record_id("1"),), tuple(item.record_id for item in result.candidates)
+        )
 
     async def test_dense_policy_requires_the_active_ready_provider_row(self) -> None:
         candidate = _candidate(
@@ -890,9 +1021,7 @@ class SQLiteRetrievalRepositoryPolicyTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(frozenset({_event_id("c")}), records[0].source_event_ids)
-        self.assertEqual(
-            (("dense", _hash("1")),), records[0].projection_content_hashes
-        )
+        self.assertEqual((("dense", _hash("1")),), records[0].projection_content_hashes)
 
     async def test_procedure_policy_authenticates_structured_step_provenance(
         self,
@@ -917,9 +1046,7 @@ class SQLiteRetrievalRepositoryPolicyTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(frozenset({_event_id("a")}), records[0].source_event_ids)
-        self.assertEqual(
-            (("procedure", 1),), records[0].active_manifest_generations
-        )
+        self.assertEqual((("procedure", 1),), records[0].active_manifest_generations)
 
     async def test_outcome_policy_uses_the_active_view_event_and_transaction(
         self,
@@ -1059,9 +1186,7 @@ class SQLiteRetrievalRepositoryPolicyTests(unittest.IsolatedAsyncioTestCase):
             )
         )
 
-        self.assertEqual(
-            _relationship_id("9"), records[0].superseded_by_version_id
-        )
+        self.assertEqual(_relationship_id("9"), records[0].superseded_by_version_id)
 
     async def test_active_conflict_is_an_unresolved_contradiction(self) -> None:
         self.fixture.connection.execute(
@@ -1343,9 +1468,9 @@ class SQLiteRetrievalRepositoryFailClosedTests(unittest.IsolatedAsyncioTestCase)
             snapshot_time=_snapshot(),
         )
 
-        self.assertEqual((_record_id("1"),), tuple(
-            item.record_id for item in result.candidates
-        ))
+        self.assertEqual(
+            (_record_id("1"),), tuple(item.record_id for item in result.candidates)
+        )
         selected = tuple(
             await self.fixture.repository().load_selected_evidence(
                 self.fixture.query(),
@@ -1540,9 +1665,7 @@ class SQLiteRetrievalRepositoryFailClosedTests(unittest.IsolatedAsyncioTestCase)
             content_hash=_hash("1"),
             channel="procedure",
             event_id=_event_id("a"),
-            policy_notes=(
-                f"PROCEDURE_STEP:0:{_json_hash(PROCEDURE_STEP_0)}",
-            ),
+            policy_notes=(f"PROCEDURE_STEP:0:{_json_hash(PROCEDURE_STEP_0)}",),
         )
         main_thread = threading.get_ident()
 
@@ -2210,9 +2333,7 @@ class SQLiteRetrievalRepositoryEvidenceTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertFalse(result.abstained)
         self.assertEqual("superseded", result.items[0].status)
-        self.assertEqual(
-            _fact_id("e"), result.items[0].superseded_by_version_id
-        )
+        self.assertEqual(_fact_id("e"), result.items[0].superseded_by_version_id)
         self.assertEqual(
             {_fact_id("d"), _fact_id("e")},
             {ref.version_id for ref in result.items[0].evidence_refs},
@@ -2272,9 +2393,7 @@ class SQLiteRetrievalRepositoryEvidenceTests(unittest.IsolatedAsyncioTestCase):
                 content_hash=_hash("1"),
                 channel="procedure",
                 event_id=_event_id("f"),
-                policy_notes=(
-                    f"PROCEDURE_STEP:0:{_json_hash(secondary_step)}",
-                ),
+                policy_notes=(f"PROCEDURE_STEP:0:{_json_hash(secondary_step)}",),
             ),
         )
         policy_records = tuple(

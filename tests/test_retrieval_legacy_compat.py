@@ -26,7 +26,6 @@ from daem0nmcp.retrieval.types import (
     RetrievalResult,
 )
 
-
 _WORKSPACE_ID = "ws_0123456789abcdef01234567"
 
 
@@ -96,6 +95,70 @@ def _memory_method_subject(*method_names: str) -> type:
 
 
 class LegacyRecallCompatibilityTests(unittest.IsolatedAsyncioTestCase):
+    async def test_corrupt_event_envelope_omits_legacy_metadata(self) -> None:
+        from daem0nmcp.database import DatabaseManager
+        from daem0nmcp.event_store import canonical_json_bytes
+        from daem0nmcp.memory import MemoryManager
+        from daem0nmcp.retrieval.legacy_compat import (
+            load_legacy_evidence_metadata,
+        )
+
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
+            database = DatabaseManager(str(Path(directory) / "storage"))
+            await database.init_db()
+            manager = MemoryManager(database)
+            created = await manager.remember(
+                category="decision",
+                content="Authenticated event envelope marker",
+                context={"reason": "safe historical context"},
+            )
+            connection = sqlite3.connect(database.db_path)
+            try:
+                row = connection.execute(
+                    "SELECT event_id,stream_id,payload_json FROM memory_events "
+                    "WHERE workspace_id=? AND stream_kind='memory' "
+                    "ORDER BY recorded_at_us DESC,event_id DESC LIMIT 1",
+                    (database.workspace_id,),
+                ).fetchone()
+                record_row = connection.execute(
+                    "SELECT content_hash FROM memory_records WHERE record_id=?",
+                    (row[1],),
+                ).fetchone()
+                payload = json.loads(row[2])
+                payload["compatibility"]["legacy_memory_id"] = created["id"] + 998
+                connection.execute("DROP TRIGGER memory_events_no_update")
+                connection.execute(
+                    "UPDATE memory_events SET payload_json=? WHERE event_id=?",
+                    (canonical_json_bytes(payload).decode("utf-8"), row[0]),
+                )
+                connection.commit()
+            finally:
+                connection.close()
+
+            reference = EvidenceRef(
+                record_id=str(row[1]),
+                event_id=str(row[0]),
+                content_hash=str(record_row[0]),
+                version_id=None,
+                provider="lexical",
+            )
+            item = _item(reference, excerpt="Authenticated event envelope marker")
+            metadata = load_legacy_evidence_metadata(
+                database.db_path, database.workspace_id, (item,)
+            )
+            rendered = build_legacy_recall_categories(
+                (item,),
+                per_category_limit=1,
+                condensed=False,
+                metadata=metadata,
+                origin_workspace_id=database.workspace_id,
+            )["decisions"][0]
+
+            self.assertEqual(reference.record_id, rendered["id"])
+            self.assertIsNone(rendered["context"])
+            self.assertEqual(reference.record_id, rendered["record_id"])
+            await database.close()
+
     async def test_uses_retained_primary_and_only_output_selected_metadata(
         self,
     ) -> None:
@@ -345,9 +408,7 @@ class LegacyRecallCompatibilityTests(unittest.IsolatedAsyncioTestCase):
             _item(second_ref, excerpt="selected second evidence"),
             citation="[E2]",
         )
-        context_text = (
-            f"[E1] {first.excerpt}\n\n[E2] {second.excerpt}"
-        )
+        context_text = f"[E1] {first.excerpt}\n\n[E2] {second.excerpt}"
         second_start = len(f"[E1] {first.excerpt}\n\n[E2] ")
         retrieval = RetrievalResult(
             items=(first, second),

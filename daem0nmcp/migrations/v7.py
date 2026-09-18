@@ -17,10 +17,11 @@ import sqlite3
 import stat
 import sys
 import time
+from collections.abc import Callable, Iterable
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Iterable
+from typing import Any
 from urllib.parse import quote
 
 from ..event_store import (
@@ -43,7 +44,6 @@ from ..storage_activation import (
     write_active_pointer,
 )
 from ..workspace import WorkspaceRegistry, resolve_derived_path
-
 
 TARGET_FORMAT_VERSION = 7
 DEFAULT_BATCH_SIZE = 500
@@ -105,6 +105,7 @@ _V7_TABLE_NAMES = frozenset(
         "discovery_communities",
         "discovery_community_members",
         "discovery_code_entities",
+        "discovery_code_edges",
     }
 )
 
@@ -117,7 +118,7 @@ class MigrationV7Error(RuntimeError):
         super().__init__(f"{code}: {detail}")
 
 
-class MigrationInterrupted(RuntimeError):
+class MigrationInterrupted(RuntimeError):  # noqa: N818 -- retained public Python API name
     """Testable/process-interruption boundary; committed checkpoints remain."""
 
 
@@ -149,11 +150,7 @@ def _readonly_connection(path: Path) -> sqlite3.Connection:
     # connections still mutate shared-memory read marks.  Migration dry-run is a
     # byte-for-byte read-only operation, so it must not touch ``-shm``.
     vfs = "win32-none" if sys.platform == "win32" else "unix-none"
-    uri = (
-        "file:"
-        + quote(path.resolve().as_posix(), safe="/:")
-        + f"?mode=ro&vfs={vfs}"
-    )
+    uri = "file:" + quote(path.resolve().as_posix(), safe="/:") + f"?mode=ro&vfs={vfs}"
     connection = sqlite3.connect(uri, uri=True)
     connection.row_factory = sqlite3.Row
     connection.execute("PRAGMA query_only=ON")
@@ -210,7 +207,9 @@ def _encode_sqlite_value(value: Any, *, table: str, column: str) -> Any:
             "length": len(value),
             "sha256": digest,
         }
-    raise MigrationV7Error("UNREADABLE_SOURCE_ROW", f"unsupported SQLite value in {table}.{column}")
+    raise MigrationV7Error(
+        "UNREADABLE_SOURCE_ROW", f"unsupported SQLite value in {table}.{column}"
+    )
 
 
 def _table_logical_rows(
@@ -222,7 +221,9 @@ def _table_logical_rows(
     columns = [str(row[1]) for row in info]
     primary = [
         str(row[1])
-        for row in sorted((row for row in info if int(row[5]) > 0), key=lambda row: int(row[5]))
+        for row in sorted(
+            (row for row in info if int(row[5]) > 0), key=lambda row: int(row[5])
+        )
     ]
     order = primary or ["rowid"]
     order_sql = ",".join(_quoted_identifier(name) for name in order)
@@ -277,7 +278,10 @@ def _logical_inventory_hash(
 def _distinct(connection: sqlite3.Connection, table: str, column: str) -> list[Any]:
     if not _table_exists(connection, table):
         return []
-    columns = {str(row[1]) for row in connection.execute(f"PRAGMA table_info({_quoted_identifier(table)})")}
+    columns = {
+        str(row[1])
+        for row in connection.execute(f"PRAGMA table_info({_quoted_identifier(table)})")
+    }
     if column not in columns:
         return []
     return [
@@ -300,7 +304,9 @@ def _malformed_json_count(connection: sqlite3.Connection) -> int:
             continue
         available = {
             str(row[1])
-            for row in connection.execute(f"PRAGMA table_info({_quoted_identifier(table)})")
+            for row in connection.execute(
+                f"PRAGMA table_info({_quoted_identifier(table)})"
+            )
         }
         selected = [column for column in columns if column in available]
         if not selected:
@@ -330,7 +336,9 @@ def _malformed_time_count(connection: sqlite3.Connection) -> int:
             continue
         available = {
             str(row[1])
-            for row in connection.execute(f"PRAGMA table_info({_quoted_identifier(table)})")
+            for row in connection.execute(
+                f"PRAGMA table_info({_quoted_identifier(table)})"
+            )
         }
         selected = [column for column in columns if column in available]
         if not selected:
@@ -350,7 +358,9 @@ def _malformed_time_count(connection: sqlite3.Connection) -> int:
 
 
 def _orphan_relationship_count(connection: sqlite3.Connection) -> int:
-    if not _table_exists(connection, "memory_relationships") or not _table_exists(connection, "memories"):
+    if not _table_exists(connection, "memory_relationships") or not _table_exists(
+        connection, "memories"
+    ):
         return 0
     return int(
         connection.execute(
@@ -376,7 +386,9 @@ def inventory_database(path: Path) -> dict[str, Any]:
         max_schema = 0
         if "schema_version" in tables:
             max_schema = int(
-                connection.execute("SELECT COALESCE(MAX(version),0) FROM schema_version").fetchone()[0]
+                connection.execute(
+                    "SELECT COALESCE(MAX(version),0) FROM schema_version"
+                ).fetchone()[0]
             )
         vector_count = 0
         vector_bytes = 0
@@ -405,7 +417,9 @@ def inventory_database(path: Path) -> dict[str, Any]:
             if value not in _KNOWN_CHANGES
         )
         quick_rows = [str(row[0]) for row in connection.execute("PRAGMA quick_check")]
-        foreign_rows = [list(row) for row in connection.execute("PRAGMA foreign_key_check")]
+        foreign_rows = [
+            list(row) for row in connection.execute("PRAGMA foreign_key_check")
+        ]
         memory_count = table_counts.get("memories", 0)
         version_count = table_counts.get("memory_versions", 0)
         fact_count = table_counts.get("facts", 0)
@@ -442,8 +456,15 @@ def inventory_database(path: Path) -> dict[str, Any]:
         "orphan_references": orphan_count,
         "quick_check": quick_rows[0] if len(quick_rows) == 1 else quick_rows,
         "foreign_key_violations": foreign_rows,
-        "estimated_event_rows": memory_count + version_count + fact_count + relationship_count + orphan_count,
-        "estimated_projection_rows": memory_count + fact_count + relationship_count + orphan_count,
+        "estimated_event_rows": memory_count
+        + version_count
+        + fact_count
+        + relationship_count
+        + orphan_count,
+        "estimated_projection_rows": memory_count
+        + fact_count
+        + relationship_count
+        + orphan_count,
         "required_bytes_estimate": source_size * 2 + 64 * 1024 * 1024,
     }
 
@@ -626,7 +647,7 @@ def _lossless_row(row: sqlite3.Row, table: str) -> dict[str, Any]:
                     else _encode_sqlite_value(row[name], table=table, column=name)
                 ),
             ]
-            for name in row.keys()
+            for name in tuple(row.keys())
         ],
     }
 
@@ -668,7 +689,7 @@ def _parse_legacy_time(value: Any) -> tuple[int, str, Any]:
 
 
 def _column(row: sqlite3.Row, name: str, default: Any = None) -> Any:
-    return row[name] if name in row.keys() else default
+    return row[name] if name in tuple(row.keys()) else default
 
 
 def _legacy_bool(value: Any, default: bool = False) -> bool:
@@ -682,7 +703,9 @@ def _legacy_score(value: Any) -> float | None:
     return number if math.isfinite(number) and 0 <= number <= 1 else None
 
 
-def _memory_state(row: sqlite3.Row, *, base: dict[str, Any] | None = None) -> dict[str, Any]:
+def _memory_state(
+    row: sqlite3.Row, *, base: dict[str, Any] | None = None
+) -> dict[str, Any]:
     category = _column(row, "category") if base is None else base["record_type"]
     legacy_type = None
     if base is None:
@@ -705,19 +728,41 @@ def _memory_state(row: sqlite3.Row, *, base: dict[str, Any] | None = None) -> di
         "rationale": _column(row, "rationale"),
         "context": context,
         "tags": tags,
-        "file_path": base.get("file_path") if base is not None else _column(row, "file_path"),
-        "file_path_relative": base.get("file_path_relative") if base is not None else _column(row, "file_path_relative"),
-        "keywords": base.get("keywords") if base is not None else _column(row, "keywords"),
-        "is_permanent": base.get("is_permanent", False) if base is not None else _legacy_bool(_column(row, "is_permanent")),
-        "pinned": base.get("pinned", False) if base is not None else _legacy_bool(_column(row, "pinned")),
-        "archived": base.get("archived", False) if base is not None else _legacy_bool(_column(row, "archived")),
+        "file_path": base.get("file_path")
+        if base is not None
+        else _column(row, "file_path"),
+        "file_path_relative": base.get("file_path_relative")
+        if base is not None
+        else _column(row, "file_path_relative"),
+        "keywords": base.get("keywords")
+        if base is not None
+        else _column(row, "keywords"),
+        "is_permanent": base.get("is_permanent", False)
+        if base is not None
+        else _legacy_bool(_column(row, "is_permanent")),
+        "pinned": base.get("pinned", False)
+        if base is not None
+        else _legacy_bool(_column(row, "pinned")),
+        "archived": base.get("archived", False)
+        if base is not None
+        else _legacy_bool(_column(row, "archived")),
         "outcome": _column(row, "outcome"),
         "worked": worked,
-        "recall_count": base.get("recall_count", 0) if base is not None else max(0, int(_column(row, "recall_count", 0) or 0)),
-        "surprise_score": base.get("surprise_score") if base is not None else _legacy_score(_column(row, "surprise_score")),
-        "importance_score": base.get("importance_score") if base is not None else _legacy_score(_column(row, "importance_score")),
-        "source_client": base.get("source_client") if base is not None else _column(row, "source_client"),
-        "source_model": base.get("source_model") if base is not None else _column(row, "source_model"),
+        "recall_count": base.get("recall_count", 0)
+        if base is not None
+        else max(0, int(_column(row, "recall_count", 0) or 0)),
+        "surprise_score": base.get("surprise_score")
+        if base is not None
+        else _legacy_score(_column(row, "surprise_score")),
+        "importance_score": base.get("importance_score")
+        if base is not None
+        else _legacy_score(_column(row, "importance_score")),
+        "source_client": base.get("source_client")
+        if base is not None
+        else _column(row, "source_client"),
+        "source_model": base.get("source_model")
+        if base is not None
+        else _column(row, "source_model"),
         "deleted_at_us": None,
     }
 
@@ -739,7 +784,9 @@ def _source_row_hash(row: sqlite3.Row, table: str) -> str:
 
 def _event_root(connection: sqlite3.Connection) -> str:
     digest = hashlib.sha256()
-    for row in connection.execute("SELECT event_hash FROM memory_events ORDER BY event_id"):
+    for row in connection.execute(
+        "SELECT event_hash FROM memory_events ORDER BY event_id"
+    ):
         digest.update(bytes.fromhex(str(row[0])))
     return digest.hexdigest()
 
@@ -927,9 +974,7 @@ def _validate_retained_compatibility(
             legacy_type = None
         else:
             relationship_type = "legacy"
-            legacy_type = (
-                "<null>" if relation_value is None else str(relation_value)
-            )
+            legacy_type = "<null>" if relation_value is None else str(relation_value)
         confidence = _legacy_score(_column(source, "confidence", 1.0))
         if confidence is None:
             confidence = 1.0
@@ -1006,19 +1051,19 @@ class MigrationV7Service:
             versions = (
                 {
                     int(row[0])
-                    for row in connection.execute(
-                        "SELECT version FROM schema_version"
-                    )
+                    for row in connection.execute("SELECT version FROM schema_version")
                 }
                 if "schema_version" in tables
                 else set()
             )
             version = max(versions, default=0)
-            quick = [str(row[0]) for row in connection.execute("PRAGMA integrity_check")]
+            quick = [
+                str(row[0]) for row in connection.execute("PRAGMA integrity_check")
+            ]
             foreign = list(connection.execute("PRAGMA foreign_key_check"))
             if (
                 version < CURRENT_SCHEMA_VERSION
-                or not REQUIRED_V7_SCHEMA_VERSIONS <= versions
+                or not versions >= REQUIRED_V7_SCHEMA_VERSIONS
                 or not required <= tables
                 or quick != ["ok"]
                 or foreign
@@ -1032,7 +1077,8 @@ class MigrationV7Service:
             expected_relative = f"migrations/v7/{run_id}/candidate.db"
             if resolved.relative_path != expected_relative:
                 raise MigrationV7Error(
-                    "ACTIVE_V7_INVALID", "active target does not match its migration run"
+                    "ACTIVE_V7_INVALID",
+                    "active target does not match its migration run",
                 )
             run = connection.execute(
                 "SELECT workspace_id, source_db_sha256, status, target_format_version "
@@ -1098,7 +1144,9 @@ class MigrationV7Service:
                 (run_id,),
             ).fetchone()
         except sqlite3.Error as exc:
-            raise MigrationV7Error(error_code, "published run metadata is invalid") from exc
+            raise MigrationV7Error(
+                error_code, "published run metadata is invalid"
+            ) from exc
         finally:
             connection.close()
         if row is None or row[0] != workspace_id:
@@ -1114,7 +1162,9 @@ class MigrationV7Service:
             inventory = json.loads(row[4])
             canonical_inventory = canonical_json_bytes(inventory).decode("utf-8")
         except (TypeError, ValueError, RecursionError) as exc:
-            raise MigrationV7Error(error_code, "published inventory is invalid") from exc
+            raise MigrationV7Error(
+                error_code, "published inventory is invalid"
+            ) from exc
         if not isinstance(inventory, dict) or canonical_inventory != row[4]:
             raise MigrationV7Error(error_code, "published inventory is non-canonical")
         validation: dict[str, Any] = {}
@@ -1227,7 +1277,9 @@ class MigrationV7Service:
         finally:
             connection.close()
 
-    def _recover_ready_pointer(self, resolved, workspace_id: str) -> MigrationResult | None:
+    def _recover_ready_pointer(
+        self, resolved, workspace_id: str
+    ) -> MigrationResult | None:
         """Finish activation when the pointer was durable before metadata commit."""
 
         run_id = resolved.migration_run_id
@@ -1265,31 +1317,54 @@ class MigrationV7Service:
             validation=validation,
         )
 
-    def dry_run(self, selector: str | os.PathLike[str] | None = None) -> MigrationResult:
+    def dry_run(
+        self, selector: str | os.PathLike[str] | None = None
+    ) -> MigrationResult:
         workspace, storage = self._storage(selector)
-        resolved = resolve_active_database(storage)
-        inventory = inventory_database(resolved.path)
-        inventory["active_db"] = resolved.relative_path
-        if resolved.format_version == TARGET_FORMAT_VERSION:
-            action = "already_active"
-        else:
-            partials = _partial_candidates(
-                _validated_migration_root(storage, create=False)
+        with DatabaseFileLock(storage, "shared"):
+            resolved = resolve_active_database(storage)
+            if resolved.format_version == TARGET_FORMAT_VERSION:
+                from .v7_schema_upgrade import V7SchemaUpgradeService
+
+                try:
+                    upgrade = V7SchemaUpgradeService(
+                        fault_injector=self._fault_injector,
+                        clock_us=self._clock_us,
+                    ).inspect(storage, workspace.workspace_id, resolved)
+                except MigrationV7Error as exc:
+                    if exc.code == "V7_PHYSICAL_SCHEMA_INVALID":
+                        try:
+                            self._validate_active_v7(resolved, workspace.workspace_id)
+                        except MigrationV7Error as active_error:
+                            raise active_error from exc
+                        raise
+                    if exc.code != "UNSUPPORTED_V7_SCHEMA":
+                        raise
+                    upgrade = None
+                if upgrade is not None:
+                    return upgrade
+            inventory = inventory_database(resolved.path)
+            inventory["active_db"] = resolved.relative_path
+            if resolved.format_version == TARGET_FORMAT_VERSION:
+                action = "already_active"
+            else:
+                partials = _partial_candidates(
+                    _validated_migration_root(storage, create=False)
+                )
+                action = "resume" if partials else "migrate"
+            return MigrationResult(
+                status="dry_run",
+                action=action,
+                workspace_id=workspace.workspace_id,
+                source_format=resolved.format_version,
+                migration_run_id=resolved.migration_run_id,
+                active_generation=resolved.generation,
+                inventory=inventory,
+                validation={
+                    "quick_check": inventory["quick_check"],
+                    "foreign_key_violations": inventory["foreign_key_violations"],
+                },
             )
-            action = "resume" if partials else "migrate"
-        return MigrationResult(
-            status="dry_run",
-            action=action,
-            workspace_id=workspace.workspace_id,
-            source_format=resolved.format_version,
-            migration_run_id=resolved.migration_run_id,
-            active_generation=resolved.generation,
-            inventory=inventory,
-            validation={
-                "quick_check": inventory["quick_check"],
-                "foreign_key_violations": inventory["foreign_key_violations"],
-            },
-        )
 
     def apply(
         self,
@@ -1297,12 +1372,35 @@ class MigrationV7Service:
         *,
         batch_size: int = DEFAULT_BATCH_SIZE,
     ) -> MigrationResult:
-        if not isinstance(batch_size, int) or isinstance(batch_size, bool) or not 1 <= batch_size <= 10_000:
+        if (
+            not isinstance(batch_size, int)
+            or isinstance(batch_size, bool)
+            or not 1 <= batch_size <= 10_000
+        ):
             raise ValueError("batch_size must be between 1 and 10000")
         workspace, storage = self._storage(selector)
         with DatabaseFileLock(storage, "exclusive"):
             resolved = resolve_active_database(storage)
             if resolved.format_version == TARGET_FORMAT_VERSION:
+                from .v7_schema_upgrade import V7SchemaUpgradeService
+
+                try:
+                    upgrade = V7SchemaUpgradeService(
+                        fault_injector=self._fault_injector,
+                        clock_us=self._clock_us,
+                    ).apply(storage, workspace.workspace_id, resolved)
+                except MigrationV7Error as exc:
+                    if exc.code == "V7_PHYSICAL_SCHEMA_INVALID":
+                        try:
+                            self._validate_active_v7(resolved, workspace.workspace_id)
+                        except MigrationV7Error as active_error:
+                            raise active_error from exc
+                        raise
+                    if exc.code != "UNSUPPORTED_V7_SCHEMA":
+                        raise
+                    upgrade = None
+                if upgrade is not None:
+                    return upgrade
                 recovered = self._recover_ready_pointer(
                     resolved, workspace.workspace_id
                 )
@@ -1359,7 +1457,9 @@ class MigrationV7Service:
                 published = run_dir / "candidate.db"
                 already_published = candidate == published
                 if published.exists() and not already_published:
-                    raise MigrationV7Error("CANDIDATE_EXISTS", "validated candidate already exists")
+                    raise MigrationV7Error(
+                        "CANDIDATE_EXISTS", "validated candidate already exists"
+                    )
                 if not already_published:
                     os.replace(candidate, published)
                 relative_candidate = published.relative_to(storage).as_posix()
@@ -1433,23 +1533,34 @@ class MigrationV7Service:
             raise MigrationV7Error("STALE_SNAPSHOT", "unowned staging snapshot exists")
         _sqlite_backup(source, staging)
         try:
-            if _is_link_or_reparse(staging) or not stat.S_ISREG(staging.lstat().st_mode):
+            if _is_link_or_reparse(staging) or not stat.S_ISREG(
+                staging.lstat().st_mode
+            ):
                 raise MigrationV7Error(
                     "UNSAFE_MIGRATION_PATH", "staging snapshot is not a regular file"
                 )
             _integrity(staging)
             snapshot_hash = _physical_sha256(staging)
             run_id = deterministic_id(
-                "mig", "migration", workspace_id, "snapshot", snapshot_hash, TARGET_FORMAT_VERSION
+                "mig",
+                "migration",
+                workspace_id,
+                "snapshot",
+                snapshot_hash,
+                TARGET_FORMAT_VERSION,
             )
             run_dir = migration_root / run_id
             if run_dir.exists() or _is_link_or_reparse(run_dir):
-                raise MigrationV7Error("MIGRATION_RUN_EXISTS", "run directory requires explicit recovery")
+                raise MigrationV7Error(
+                    "MIGRATION_RUN_EXISTS", "run directory requires explicit recovery"
+                )
             run_dir.mkdir(mode=0o700)
-            if _is_link_or_reparse(run_dir) or not stat.S_ISDIR(run_dir.lstat().st_mode):
+            if _is_link_or_reparse(run_dir) or not stat.S_ISDIR(
+                run_dir.lstat().st_mode
+            ):
                 raise MigrationV7Error(
                     "UNSAFE_MIGRATION_PATH", "migration run is not an owned directory"
-            )
+                )
             snapshot = run_dir / "source.snapshot.db"
             os.replace(staging, snapshot)
             self._fault("after_snapshot", migration_run_id=run_id)
@@ -1484,7 +1595,9 @@ class MigrationV7Service:
                 "UNSAFE_MIGRATION_PATH", "partial candidate name is already occupied"
             )
         _sqlite_backup(snapshot, candidate)
-        if _is_link_or_reparse(candidate) or not stat.S_ISREG(candidate.lstat().st_mode):
+        if _is_link_or_reparse(candidate) or not stat.S_ISREG(
+            candidate.lstat().st_mode
+        ):
             raise MigrationV7Error(
                 "UNSAFE_MIGRATION_PATH", "partial candidate is not a regular file"
             )
@@ -1569,7 +1682,10 @@ class MigrationV7Service:
                         and resolved.migration_run_id == run_dir.name
                         and resolved.previous_db == relative_published
                     )
-                    if status in {"active", "rolled_back"} and not rollback_pointer_matches:
+                    if (
+                        status in {"active", "rolled_back"}
+                        and not rollback_pointer_matches
+                    ):
                         raise MigrationV7Error(
                             "MIGRATION_RUN_EXISTS",
                             "published rollback state does not match the active pointer",
@@ -1643,7 +1759,9 @@ class MigrationV7Service:
             )
             return run_id, run_dir, snapshot, candidate, "resume"
         if len(candidates) != 1:
-            raise MigrationV7Error("AMBIGUOUS_RESUME", "multiple partial candidates exist")
+            raise MigrationV7Error(
+                "AMBIGUOUS_RESUME", "multiple partial candidates exist"
+            )
         candidate = candidates[0]
         run_dir = candidate.parent
         run_id = run_dir.name
@@ -1652,7 +1770,9 @@ class MigrationV7Service:
             or _is_link_or_reparse(run_dir)
             or not re.fullmatch(r"mig_[0-9a-f]{64}", run_id)
         ):
-            raise MigrationV7Error("UNSAFE_MIGRATION_PATH", "partial candidate path is unsafe")
+            raise MigrationV7Error(
+                "UNSAFE_MIGRATION_PATH", "partial candidate path is unsafe"
+            )
         connection = sqlite3.connect(candidate)
         try:
             row = connection.execute(
@@ -1662,16 +1782,22 @@ class MigrationV7Service:
         finally:
             connection.close()
         if row is None or row[0] != workspace_id:
-            raise MigrationV7Error("INVALID_RESUME", "candidate run metadata does not match workspace")
+            raise MigrationV7Error(
+                "INVALID_RESUME", "candidate run metadata does not match workspace"
+            )
         if row[2] != canonical_json_bytes(inventory).decode("utf-8"):
-            raise MigrationV7Error("SOURCE_CHANGED", "source inventory changed after snapshot")
+            raise MigrationV7Error(
+                "SOURCE_CHANGED", "source inventory changed after snapshot"
+            )
         snapshot = run_dir / "source.snapshot.db"
         if (
             _is_link_or_reparse(snapshot)
             or not snapshot.is_file()
             or _physical_sha256(snapshot) != row[1]
         ):
-            raise MigrationV7Error("INVALID_RESUME", "snapshot fingerprint does not match run")
+            raise MigrationV7Error(
+                "INVALID_RESUME", "snapshot fingerprint does not match run"
+            )
         return run_id, run_dir, snapshot, candidate, "resume"
 
     def _checkpoint_summary(self, candidate: Path, run_id: str) -> dict[str, Any]:
@@ -1784,7 +1910,13 @@ class MigrationV7Service:
                     try:
                         if not rows:
                             self._save_checkpoint(
-                                connection, run_id, table, last_pk or None, imported, rolling, True
+                                connection,
+                                run_id,
+                                table,
+                                last_pk or None,
+                                imported,
+                                rolling,
+                                True,
                             )
                             connection.commit()
                             break
@@ -2038,7 +2170,11 @@ class MigrationV7Service:
             ).fetchone()
             subject = str(mapped[0]) if mapped is not None else None
         category = _column(row, "category")
-        normalized = re.sub(r"[^a-z0-9]+", ".", str(category).lower()).strip(".") if category else ""
+        normalized = (
+            re.sub(r"[^a-z0-9]+", ".", str(category).lower()).strip(".")
+            if category
+            else ""
+        )
         predicate = f"legacy.fact.{normalized}" if normalized else "legacy.fact"
         valid_from, quality, original = _parse_legacy_time(_column(row, "created_at"))
         tags, tags_quality = _parse_legacy_json(_column(row, "tags"), list, [])
@@ -2062,7 +2198,9 @@ class MigrationV7Service:
                         "object": str(_column(row, "content", "")),
                         "legacy_type": None,
                         "confidence": 1.0,
-                        "verification_count": max(0, int(_column(row, "verification_count", 0) or 0)),
+                        "verification_count": max(
+                            0, int(_column(row, "verification_count", 0) or 0)
+                        ),
                         "is_verified": _legacy_bool(_column(row, "is_verified")),
                         "evidence": [],
                         "metadata": {
@@ -2112,7 +2250,12 @@ class MigrationV7Service:
         )
         legacy_id = str(row["id"])
         relationship_id = deterministic_id(
-            "rel", "relationship", workspace_id, "legacy", "memory_relationships", legacy_id
+            "rel",
+            "relationship",
+            workspace_id,
+            "legacy",
+            "memory_relationships",
+            legacy_id,
         )
         legacy_type_value = _column(row, "relationship")
         if legacy_type_value in _KNOWN_RELATIONSHIPS:
@@ -2120,7 +2263,9 @@ class MigrationV7Service:
             legacy_type = None
         else:
             relation_type = "legacy"
-            legacy_type = "<null>" if legacy_type_value is None else str(legacy_type_value)
+            legacy_type = (
+                "<null>" if legacy_type_value is None else str(legacy_type_value)
+            )
         confidence = _column(row, "confidence", 1.0)
         confidence = _legacy_score(confidence)
         if confidence is None:
@@ -2191,10 +2336,16 @@ class MigrationV7Service:
                 "UPDATE v7_migration_runs SET status='validating', updated_at_us=? WHERE migration_run_id=?",
                 (now, run_id),
             )
-            quick = [str(row[0]) for row in connection.execute("PRAGMA integrity_check")]
-            foreign = [list(row) for row in connection.execute("PRAGMA foreign_key_check")]
+            quick = [
+                str(row[0]) for row in connection.execute("PRAGMA integrity_check")
+            ]
+            foreign = [
+                list(row) for row in connection.execute("PRAGMA foreign_key_check")
+            ]
             if quick != ["ok"] or foreign:
-                raise MigrationV7Error("VALIDATION_FAILED", "candidate integrity check failed")
+                raise MigrationV7Error(
+                    "VALIDATION_FAILED", "candidate integrity check failed"
+                )
 
             # Every copied source table remains logically exact. The v7
             # destinations are excluded because a pointerless format-6 database
@@ -2222,7 +2373,9 @@ class MigrationV7Service:
                     digest.update(len(encoded).to_bytes(8, "big"))
                     digest.update(encoded)
                 if digest.hexdigest() != expected_hash:
-                    raise MigrationV7Error("VALIDATION_FAILED", f"source table changed: {table}")
+                    raise MigrationV7Error(
+                        "VALIDATION_FAILED", f"source table changed: {table}"
+                    )
 
             snapshot_path = candidate.parent / "source.snapshot.db"
             snapshot_connection = _readonly_connection(snapshot_path)
@@ -2242,7 +2395,7 @@ class MigrationV7Service:
                         candidate_row is None
                         or tuple(candidate_row) != tuple(source_row)
                         for source_row, candidate_row in zip(
-                            source_versions, candidate_versions
+                            source_versions, candidate_versions, strict=True
                         )
                     ):
                         raise MigrationV7Error(
@@ -2309,15 +2462,14 @@ class MigrationV7Service:
                         != canonical_json_bytes(_memory_state(source_row))
                     ):
                         raise MigrationV7Error(
-                            "VALIDATION_FAILED", "final memory state does not round-trip"
+                            "VALIDATION_FAILED",
+                            "final memory state does not round-trip",
                         )
 
             heads: dict[tuple[str, str], tuple[int, str]] = {}
             legacy_version_claims: dict[tuple[str, str], int] = {}
             required_fact_versions: set[tuple[str, str, str, int, str]] = set()
-            required_relationship_versions: set[
-                tuple[str, str, str, int, str]
-            ] = set()
+            required_relationship_versions: set[tuple[str, str, str, int, str]] = set()
             event_count = 0
             for row in connection.execute(
                 "SELECT * FROM memory_events ORDER BY workspace_id, stream_id, stream_version"
@@ -2326,11 +2478,17 @@ class MigrationV7Service:
                 try:
                     payload = json.loads(row["payload_json"])
                 except (TypeError, ValueError) as exc:
-                    raise MigrationV7Error("VALIDATION_FAILED", "event payload is invalid") from exc
+                    raise MigrationV7Error(
+                        "VALIDATION_FAILED", "event payload is invalid"
+                    ) from exc
                 if canonical_json_bytes(payload).decode("utf-8") != row["payload_json"]:
-                    raise MigrationV7Error("VALIDATION_FAILED", "event payload is noncanonical")
+                    raise MigrationV7Error(
+                        "VALIDATION_FAILED", "event payload is noncanonical"
+                    )
                 if sha256_json(payload) != row["payload_hash"]:
-                    raise MigrationV7Error("VALIDATION_FAILED", "event payload hash mismatch")
+                    raise MigrationV7Error(
+                        "VALIDATION_FAILED", "event payload hash mismatch"
+                    )
                 columns = {
                     "actor_id": row["actor_id"],
                     "actor_type": row["actor_type"],
@@ -2347,15 +2505,30 @@ class MigrationV7Service:
                     "stream_version": row["stream_version"],
                     "workspace_id": row["workspace_id"],
                 }
-                if event_hash_for(columns) != row["event_hash"] or row["event_id"] != "evt_" + row["event_hash"]:
-                    raise MigrationV7Error("VALIDATION_FAILED", "event envelope hash mismatch")
+                if (
+                    event_hash_for(columns) != row["event_hash"]
+                    or row["event_id"] != "evt_" + row["event_hash"]
+                ):
+                    raise MigrationV7Error(
+                        "VALIDATION_FAILED", "event envelope hash mismatch"
+                    )
                 key = (str(row["workspace_id"]), str(row["stream_id"]))
                 prior = heads.get(key)
                 if prior is None:
-                    if row["stream_version"] != 1 or row["previous_event_hash"] is not None:
-                        raise MigrationV7Error("VALIDATION_FAILED", "event stream does not start at one")
-                elif row["stream_version"] != prior[0] + 1 or row["previous_event_hash"] != prior[1]:
-                    raise MigrationV7Error("VALIDATION_FAILED", "event stream chain is discontinuous")
+                    if (
+                        row["stream_version"] != 1
+                        or row["previous_event_hash"] is not None
+                    ):
+                        raise MigrationV7Error(
+                            "VALIDATION_FAILED", "event stream does not start at one"
+                        )
+                elif (
+                    row["stream_version"] != prior[0] + 1
+                    or row["previous_event_hash"] != prior[1]
+                ):
+                    raise MigrationV7Error(
+                        "VALIDATION_FAILED", "event stream chain is discontinuous"
+                    )
                 heads[key] = (int(row["stream_version"]), str(row["event_hash"]))
                 if row["stream_kind"] == "fact":
                     required_fact_versions.add(
@@ -2388,9 +2561,14 @@ class MigrationV7Service:
                         )
                     )
                 legacy = payload.get("legacy")
-                if isinstance(legacy, dict) and legacy.get("table") == "memory_versions":
+                if (
+                    isinstance(legacy, dict)
+                    and legacy.get("table") == "memory_versions"
+                ):
                     claim = (sha256_json(legacy), str(row["stream_id"]))
-                    legacy_version_claims[claim] = legacy_version_claims.get(claim, 0) + 1
+                    legacy_version_claims[claim] = (
+                        legacy_version_claims.get(claim, 0) + 1
+                    )
 
             actual_fact_versions = {
                 (str(row[0]), str(row[1]), str(row[2]), int(row[3]), str(row[4]))
@@ -2401,7 +2579,8 @@ class MigrationV7Service:
             }
             if actual_fact_versions != required_fact_versions:
                 raise MigrationV7Error(
-                    "VALIDATION_FAILED", "fact projection version keys do not match events"
+                    "VALIDATION_FAILED",
+                    "fact projection version keys do not match events",
                 )
             actual_relationship_versions = {
                 (str(row[0]), str(row[1]), str(row[2]), int(row[3]), str(row[4]))
@@ -2464,7 +2643,9 @@ class MigrationV7Service:
                     record["content_hash"] == memory_content_hash(projected),
                     record["rationale"] == projected.get("rationale"),
                     record["context_json"]
-                    == canonical_json_bytes(projected.get("context", {})).decode("utf-8"),
+                    == canonical_json_bytes(projected.get("context", {})).decode(
+                        "utf-8"
+                    ),
                     record["tags_json"]
                     == canonical_json_bytes(projected.get("tags", [])).decode("utf-8"),
                     record["file_path"] == projected.get("file_path"),
@@ -2477,8 +2658,8 @@ class MigrationV7Service:
                     record["worked"]
                     == (
                         None
-                        if projected.get("worked") is None
-                        else int(projected.get("worked"))
+                        if (projected_worked := projected.get("worked")) is None
+                        else int(projected_worked)
                     ),
                     record["recall_count"] == projected.get("recall_count", 0),
                     record["surprise_score"] == projected.get("surprise_score"),
@@ -2493,7 +2674,9 @@ class MigrationV7Service:
                     record["state_hash"] == memory_state_hash(projected),
                 )
                 if not all(projection_values):
-                    raise MigrationV7Error("VALIDATION_FAILED", "memory projection replay mismatch")
+                    raise MigrationV7Error(
+                        "VALIDATION_FAILED", "memory projection replay mismatch"
+                    )
 
             # Independently replay typed fact assertions from their immutable
             # event payloads. This deliberately does not trust EventStore's
@@ -2542,7 +2725,9 @@ class MigrationV7Service:
                         int(projected["version"]) + 1,
                     ),
                 ).fetchone()
-                expected_transaction_to = successor[0] if successor is not None else None
+                expected_transaction_to = (
+                    successor[0] if successor is not None else None
+                )
                 expected_retraction = (
                     successor[1]
                     if successor is not None
@@ -2626,7 +2811,9 @@ class MigrationV7Service:
                         int(projected["version"]) + 1,
                     ),
                 ).fetchone()
-                expected_transaction_to = successor[0] if successor is not None else None
+                expected_transaction_to = (
+                    successor[0] if successor is not None else None
+                )
                 expected_retraction = (
                     successor[1]
                     if successor is not None
@@ -2644,12 +2831,10 @@ class MigrationV7Service:
                     projected["version"] == event["stream_version"],
                     projected["source_record_id"] == relation.get("source_record_id"),
                     projected["target_record_id"] == relation.get("target_record_id"),
-                    projected["relationship_type"]
-                    == relation.get("relationship_type"),
+                    projected["relationship_type"] == relation.get("relationship_type"),
                     projected["legacy_type"] == relation.get("legacy_type"),
                     projected["description"] == relation.get("description"),
-                    projected["confidence"]
-                    == float(relation.get("confidence", 1.0)),
+                    projected["confidence"] == float(relation.get("confidence", 1.0)),
                     projected["metadata_json"]
                     == canonical_json_bytes(relation.get("metadata", {})).decode(
                         "utf-8"
@@ -2684,7 +2869,9 @@ class MigrationV7Service:
                     ).fetchone()[0]
                 )
                 if actual != expected:
-                    raise MigrationV7Error("VALIDATION_FAILED", f"mapping count mismatch: {table}")
+                    raise MigrationV7Error(
+                        "VALIDATION_FAILED", f"mapping count mismatch: {table}"
+                    )
 
             root_hash = _event_root(connection)
             cursor = connection.execute(
@@ -2692,8 +2879,16 @@ class MigrationV7Service:
             ).fetchone()
             manifests = (
                 ("memory_records", "ready", _count(connection, "memory_records")),
-                ("memory_fact_versions", "ready", _count(connection, "memory_fact_versions")),
-                ("memory_relationship_versions", "ready", _count(connection, "memory_relationship_versions")),
+                (
+                    "memory_fact_versions",
+                    "ready",
+                    _count(connection, "memory_fact_versions"),
+                ),
+                (
+                    "memory_relationship_versions",
+                    "ready",
+                    _count(connection, "memory_relationship_versions"),
+                ),
                 ("dense", "rebuild_required", 0),
                 ("graph", "rebuild_required", 0),
                 ("temporal", "rebuild_required", 0),
@@ -2749,7 +2944,9 @@ class MigrationV7Service:
                 "event_root_hash": root_hash,
                 "memory_record_count": _count(connection, "memory_records"),
                 "fact_version_count": _count(connection, "memory_fact_versions"),
-                "relationship_version_count": _count(connection, "memory_relationship_versions"),
+                "relationship_version_count": _count(
+                    connection, "memory_relationship_versions"
+                ),
             }
             if retained_authority:
                 validation["authority"] = "retained_v7"
@@ -2804,11 +3001,34 @@ class MigrationV7Service:
         workspace, storage = self._storage(selector)
         with DatabaseFileLock(storage, "exclusive"):
             resolved = resolve_active_database(storage)
-            requested = None if migration_run_id in (None, "latest") else migration_run_id
+            requested = (
+                None if migration_run_id in (None, "latest") else migration_run_id
+            )
+            if resolved.format_version == TARGET_FORMAT_VERSION:
+                from .v7_schema_upgrade import V7SchemaUpgradeService
+
+                upgrade_service = V7SchemaUpgradeService(
+                    fault_injector=self._fault_injector,
+                    clock_us=self._clock_us,
+                )
+                recovered_rollback = upgrade_service.prepare_rollback(
+                    storage, workspace.workspace_id, resolved
+                )
+                if recovered_rollback is not None:
+                    if (
+                        requested is None
+                        or requested == recovered_rollback.migration_run_id
+                    ):
+                        return recovered_rollback
+                    raise MigrationV7Error(
+                        "ROLLBACK_NOT_ACTIVE", "migration run is not active"
+                    )
             if resolved.format_version != TARGET_FORMAT_VERSION:
                 run_id = resolved.migration_run_id
                 expected_candidate = (
-                    f"migrations/v7/{run_id}/candidate.db" if run_id is not None else None
+                    f"migrations/v7/{run_id}/candidate.db"
+                    if run_id is not None
+                    else None
                 )
                 if (
                     resolved.format_version == 6
@@ -2816,7 +3036,9 @@ class MigrationV7Service:
                     and resolved.previous_db == expected_candidate
                     and (requested is None or requested == run_id)
                 ):
-                    candidate = storage.joinpath(*expected_candidate.split("/"))
+                    candidate = storage.joinpath(
+                        "migrations", "v7", run_id, "candidate.db"
+                    )
                     status, source_format, inventory, _validation = (
                         self._load_published_run(
                             candidate,
@@ -2845,16 +3067,28 @@ class MigrationV7Service:
                         migration_run_id=resolved.migration_run_id,
                         active_generation=resolved.generation,
                     )
-                raise MigrationV7Error("ROLLBACK_NOT_ACTIVE", "migration run is not active")
+                raise MigrationV7Error(
+                    "ROLLBACK_NOT_ACTIVE", "migration run is not active"
+                )
             self._validate_active_v7(resolved, workspace.workspace_id)
             run_id = resolved.migration_run_id
             if run_id is None or (requested is not None and requested != run_id):
-                raise MigrationV7Error("ROLLBACK_NOT_ACTIVE", "migration run is not active")
+                raise MigrationV7Error(
+                    "ROLLBACK_NOT_ACTIVE", "migration run is not active"
+                )
             if resolved.previous_db is None:
-                raise MigrationV7Error("ROLLBACK_UNAVAILABLE", "active database has no predecessor")
+                raise MigrationV7Error(
+                    "ROLLBACK_UNAVAILABLE", "active database has no predecessor"
+                )
             current_relative = resolved.relative_path
+            _status, source_format, _inventory, _validation = self._load_published_run(
+                resolved.path,
+                run_id,
+                workspace.workspace_id,
+                error_code="ROLLBACK_STATE_INVALID",
+            )
             pointer = ActiveDatabasePointer(
-                format_version=6,
+                format_version=source_format,
                 generation=resolved.generation + 1,
                 active_db=resolved.previous_db,
                 previous_db=current_relative,

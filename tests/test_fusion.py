@@ -1,7 +1,14 @@
 # tests/test_fusion.py
 """Tests for Reciprocal Rank Fusion."""
 
+import pytest
+
 from daem0nmcp.fusion import RRFHybridSearch, reciprocal_rank_fusion
+
+
+@pytest.fixture(autouse=True)
+def models_local_enabled(monkeypatch):
+    monkeypatch.setenv("DAEM0NMCP_MODELS_LOCAL_ENABLED", "true")
 
 
 class TestReciprocalRankFusion:

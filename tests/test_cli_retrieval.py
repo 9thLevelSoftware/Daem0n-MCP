@@ -143,9 +143,7 @@ class RetrievalProjectionCliTests(unittest.TestCase):
                 "--workspace-id",
                 second_id,
                 environment={
-                    "DAEM0NMCP_WORKSPACE_ROOTS": json.dumps(
-                        [str(second_root)]
-                    )
+                    "DAEM0NMCP_WORKSPACE_ROOTS": json.dumps([str(second_root)])
                 },
             )
 
@@ -154,8 +152,7 @@ class RetrievalProjectionCliTests(unittest.TestCase):
             lexical = [
                 manifest
                 for manifest in payload["manifests"]
-                if manifest["projection"] == "lexical"
-                and manifest["active"]
+                if manifest["projection"] == "lexical" and manifest["active"]
             ]
             self.assertEqual(1, len(lexical))
             self.assertEqual(second_id, payload["workspace_id"])

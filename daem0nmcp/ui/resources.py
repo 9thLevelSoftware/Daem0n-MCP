@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Callable
+from collections.abc import Callable
+from typing import TYPE_CHECKING, Any
 
 from .rendering import (
     APP_SPECS,
@@ -65,7 +66,7 @@ def _compat_handler(app_id: str) -> Callable[[str], str]:
     return handle
 
 
-def register_ui_resources(mcp: "FastMCP") -> None:
+def register_ui_resources(mcp: FastMCP) -> None:
     """Register stable base resources and bounded compatibility templates."""
     for app_id, spec in APP_SPECS.items():
         mcp.resource(

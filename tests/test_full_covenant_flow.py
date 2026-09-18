@@ -14,9 +14,7 @@ class TestFullCovenantFlow:
         return DatabaseManager(str(tmp_path / "storage"))
 
     @pytest.mark.asyncio
-    async def test_complete_covenant_flow(
-        self, db_manager, covenant_workspace_factory
-    ):
+    async def test_complete_covenant_flow(self, db_manager, covenant_workspace_factory):
         """Test: communion -> counsel -> inscribe -> seal."""
         await db_manager.init_db()
 
@@ -24,7 +22,7 @@ class TestFullCovenantFlow:
 
         server._project_contexts.clear()
 
-        project_path = str(db_manager.storage_path.parent.parent)
+        project_path = str(db_manager.storage_path.parent)
         workspace = covenant_workspace_factory(project_path)
 
         # 1. COMMUNION - get_briefing
@@ -96,7 +94,7 @@ class TestFullCovenantFlow:
 
         server._project_contexts.clear()
 
-        project_path = str(db_manager.storage_path.parent.parent)
+        project_path = str(db_manager.storage_path.parent)
         workspace = covenant_workspace_factory(project_path)
 
         # Try to recall without briefing - should be blocked
@@ -127,7 +125,7 @@ class TestFullCovenantFlow:
         from daem0nmcp import server
 
         server._project_contexts.clear()
-        project_path = str(db_manager.storage_path.parent.parent)
+        project_path = str(db_manager.storage_path.parent)
         workspace = covenant_workspace_factory(project_path)
 
         # Briefing first

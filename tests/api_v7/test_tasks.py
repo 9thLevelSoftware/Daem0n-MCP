@@ -1,10 +1,26 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import unittest
 
 
 class SyncFallbackTests(unittest.IsolatedAsyncioTestCase):
+    def test_default_deadline_is_fifteen_seconds(self) -> None:
+        from daem0nmcp.api.v7.fastmcp import build_fastmcp_server
+        from daem0nmcp.api.v7.tasks import run_sync_fallback
+
+        self.assertEqual(
+            inspect.signature(run_sync_fallback).parameters["timeout_seconds"].default,
+            15,
+        )
+        self.assertEqual(
+            inspect.signature(build_fastmcp_server)
+            .parameters["sync_timeout_seconds"]
+            .default,
+            15,
+        )
+
     async def test_short_optional_work_completes_within_bound(self) -> None:
         from daem0nmcp.api.v7.tasks import run_sync_fallback
 
@@ -67,6 +83,24 @@ class SyncFallbackTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(cancelled.is_set())
         await asyncio.sleep(0)
         self.assertFalse(completed)
+
+    async def test_committed_receipt_wins_over_deadline_cancellation(self) -> None:
+        from daem0nmcp.api.v7.tasks import run_sync_fallback
+
+        async def operation() -> str:
+            try:
+                await asyncio.Future()
+            except asyncio.CancelledError:
+                return "committed-receipt"
+
+        result = await run_sync_fallback(
+            operation,
+            estimated_to_fit=True,
+            timeout_seconds=0.01,
+            _test_allow_subsecond=True,
+        )
+
+        self.assertEqual(result, "committed-receipt")
 
     async def test_caller_cancellation_is_never_translated_or_swallowed(self) -> None:
         from daem0nmcp.api.v7.tasks import run_sync_fallback
@@ -140,13 +174,58 @@ class SyncFallbackTests(unittest.IsolatedAsyncioTestCase):
             return None
 
         for value in (0, 61, True, 10**400):
-            with self.subTest(value=value):
-                with self.assertRaises(ValueError):
-                    await run_sync_fallback(
-                        operation,
-                        estimated_to_fit=True,
-                        timeout_seconds=value,
-                    )
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                await run_sync_fallback(
+                    operation,
+                    estimated_to_fit=True,
+                    timeout_seconds=value,
+                )
+
+
+class ForegroundExecutionPolicyTests(unittest.TestCase):
+    def test_every_optional_manifest_tool_has_an_explicit_policy(self) -> None:
+        from daem0nmcp.api.v7.policy import V7_TOOL_LEVELS
+        from daem0nmcp.api.v7.tasks import FOREGROUND_EXECUTION_POLICIES
+        from daem0nmcp.api.v7.tools import build_tool_specs
+
+        async def handler(**arguments):
+            return arguments
+
+        specs = build_tool_specs(dict.fromkeys(V7_TOOL_LEVELS, handler))
+        optional = {spec.name for spec in specs if spec.task_mode == "optional"}
+
+        self.assertEqual(set(FOREGROUND_EXECUTION_POLICIES), optional)
+
+    def test_policy_bounds_payload_nested_collections_and_deadline(self) -> None:
+        from daem0nmcp.api.v7.tasks import ForegroundExecutionPolicy
+
+        policy = ForegroundExecutionPolicy(
+            max_request_bytes=100,
+            max_collection_lengths={"bundle.events": 2},
+            max_numeric_values={"limit": 5},
+            deadline_field="timeout_seconds",
+        )
+        admitted = {
+            "bundle": {"events": [1, 2]},
+            "limit": 5,
+            "timeout_seconds": 15,
+        }
+
+        self.assertTrue(policy.admits(admitted, timeout_seconds=15))
+        self.assertFalse(
+            policy.admits(
+                admitted | {"bundle": {"events": [1, 2, 3]}},
+                timeout_seconds=15,
+            )
+        )
+        self.assertFalse(policy.admits(admitted | {"limit": 6}, timeout_seconds=15))
+        self.assertFalse(
+            policy.admits(
+                admitted | {"timeout_seconds": 16},
+                timeout_seconds=15,
+            )
+        )
+        self.assertFalse(policy.admits({"payload": "x" * 101}, timeout_seconds=15))
 
 
 if __name__ == "__main__":

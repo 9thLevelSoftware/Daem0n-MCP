@@ -17,7 +17,8 @@ class MemoryEventRoutingSourceTests(unittest.TestCase):
         node = next(
             node
             for node in ast.walk(self.tree)
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == name
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and node.name == name
         )
         return ast.get_source_segment(self.source, node) or ""
 
@@ -155,7 +156,16 @@ class MemoryEventRoutingSourceTests(unittest.TestCase):
 
         self.assertIn('session.info["daem0nmcp_v7_event_appended"] = True', event_store)
         self.assertIn("drain_projection_jobs", database)
-        self.assertIn('session.info.pop("daem0nmcp_v7_event_appended"', database)
+        self.assertTrue(
+            any(
+                isinstance(node, ast.Call)
+                and ast.unparse(node.func) == "session.info.pop"
+                and node.args
+                and isinstance(node.args[0], ast.Constant)
+                and node.args[0].value == "daem0nmcp_v7_event_appended"
+                for node in ast.walk(ast.parse(database))
+            )
+        )
         self.assertIn("schedule_projection_job_drain", database)
 
     def test_format_seven_recall_uses_only_the_retrieval_service_facade(self):
@@ -221,7 +231,10 @@ class MemoryEventRoutingSourceTests(unittest.TestCase):
                     targets = []
                 for target in targets:
                     for item in ast.walk(target):
-                        if isinstance(item, ast.Attribute) and item.attr in semantic_fields:
+                        if (
+                            isinstance(item, ast.Attribute)
+                            and item.attr in semantic_fields
+                        ):
                             violations.append(f"{relative}:{node.lineno}:{item.attr}")
                 if not isinstance(node, ast.Call):
                     continue
@@ -240,7 +253,9 @@ class MemoryEventRoutingSourceTests(unittest.TestCase):
                     and isinstance(node.args[0], ast.Name)
                     and node.args[0].id == "memory"
                 ):
-                    violations.append(f"{relative}:{node.lineno}:session.delete(memory)")
+                    violations.append(
+                        f"{relative}:{node.lineno}:session.delete(memory)"
+                    )
         self.assertEqual([], violations)
 
 

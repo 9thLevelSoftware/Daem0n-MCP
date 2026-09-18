@@ -43,7 +43,7 @@ _RELATIONSHIPS = {
 }
 
 
-class InvalidAppPayload(ValueError):
+class InvalidAppPayload(ValueError):  # noqa: N818 -- retained public Python API name
     """Raised when a root payload cannot be represented safely."""
 
 
@@ -218,7 +218,9 @@ def _normalize_briefing(data: dict[str, Any]) -> dict[str, Any]:
         )
     raw_focus = data.get("focus_areas")
     if isinstance(raw_focus, dict):
-        focus_values: list[Any] = [{"topic": key} for key in list(raw_focus)[:MAX_BRIEFING_ITEMS]]
+        focus_values: list[Any] = [
+            {"topic": key} for key in list(raw_focus)[:MAX_BRIEFING_ITEMS]
+        ]
     else:
         focus_values = _items(raw_focus, MAX_BRIEFING_ITEMS)
     focus = []
@@ -259,9 +261,7 @@ def _normalize_covenant(data: dict[str, Any]) -> dict[str, Any]:
         "phase_label": _text(data.get("phase_label")),
         "phase_description": _text(data.get("phase_description"), MAX_CONTENT_CHARS),
         "preflight": {
-            "status": _enum(
-                status, {"valid", "issued", "expired", "none"}, "unknown"
-            ),
+            "status": _enum(status, {"valid", "issued", "expired", "none"}, "unknown"),
             "expires_at": _date(preflight.get("expires_at")),
             "remaining_seconds": _bounded_int(
                 preflight.get("remaining_seconds"), 0, 86_400, 0
@@ -297,7 +297,11 @@ def _normalize_community(data: dict[str, Any]) -> dict[str, Any]:
     by_id = {_id_key(item["id"]): item for item in communities}
     for item in communities:
         parent = item["parent_community_id"]
-        if parent is None or _id_key(parent) not in by_id or _id_key(parent) == _id_key(item["id"]):
+        if (
+            parent is None
+            or _id_key(parent) not in by_id
+            or _id_key(parent) == _id_key(item["id"])
+        ):
             item["parent_community_id"] = None
 
     # Break any remaining cycle by detaching the first repeated edge encountered.
@@ -318,7 +322,11 @@ def _normalize_community(data: dict[str, Any]) -> dict[str, Any]:
         community_id = _safe_id(record.get("id"))
         if community_id is not None:
             path.append({"id": community_id, "name": _text(record.get("name"))})
-    return {"count": _count(data.get("count"), len(communities)), "communities": communities, "path": path}
+    return {
+        "count": _count(data.get("count"), len(communities)),
+        "communities": communities,
+        "path": path,
+    }
 
 
 def _normalize_graph(data: dict[str, Any]) -> dict[str, Any]:
@@ -362,9 +370,7 @@ def _normalize_graph(data: dict[str, Any]) -> dict[str, Any]:
             {
                 "source": source,
                 "target": target,
-                "relationship": _enum(
-                    relationship, _RELATIONSHIPS, "relates_to"
-                ),
+                "relationship": _enum(relationship, _RELATIONSHIPS, "relates_to"),
                 "confidence": _ratio(record.get("confidence")),
                 "description": _text(record.get("description"), MAX_CONTENT_CHARS),
             }
@@ -374,7 +380,12 @@ def _normalize_graph(data: dict[str, Any]) -> dict[str, Any]:
         node_id = _safe_id(value)
         if node_id is not None and _id_key(node_id) in node_ids:
             path.append(node_id)
-    return {"topic": _text(data.get("topic")), "nodes": nodes, "edges": edges, "path": path}
+    return {
+        "topic": _text(data.get("topic")),
+        "nodes": nodes,
+        "edges": edges,
+        "path": path,
+    }
 
 
 _PROJECTORS = {

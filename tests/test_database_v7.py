@@ -14,7 +14,6 @@ from unittest import mock
 
 from daem0nmcp.schema_version import CURRENT_SCHEMA_VERSION
 
-
 _V7_CORE_TABLES = {
     "memory_events",
     "memory_records",
@@ -48,6 +47,7 @@ _V7_DISCOVERY_TABLES = {
     "discovery_communities",
     "discovery_community_members",
     "discovery_code_entities",
+    "discovery_code_edges",
 }
 
 
@@ -241,9 +241,10 @@ class DatabaseManagerActivationValidationTests(unittest.TestCase):
         """Every durable retrieval projection table is part of the active schema."""
 
         for missing in sorted(_V7_RETRIEVAL_TABLES):
-            with self.subTest(missing=missing), tempfile.TemporaryDirectory(
-                ignore_cleanup_errors=True
-            ) as raw:
+            with (
+                self.subTest(missing=missing),
+                tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as raw,
+            ):
                 path = Path(raw) / "candidate.db"
                 _create_v7_validation_database(path)
                 connection = sqlite3.connect(path)
@@ -298,9 +299,10 @@ class DatabaseManagerActivationValidationTests(unittest.TestCase):
             "session_update_sequence",
         }
         for missing in sorted(governance_tables):
-            with self.subTest(missing=missing), tempfile.TemporaryDirectory(
-                ignore_cleanup_errors=True
-            ) as raw:
+            with (
+                self.subTest(missing=missing),
+                tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as raw,
+            ):
                 path = Path(raw) / "candidate.db"
                 _create_v7_validation_database(path)
                 connection = sqlite3.connect(path)
@@ -316,9 +318,10 @@ class DatabaseManagerActivationValidationTests(unittest.TestCase):
         """An active v7 database cannot fall back to path-keyed discovery rows."""
 
         for missing in sorted(_V7_DISCOVERY_TABLES):
-            with self.subTest(missing=missing), tempfile.TemporaryDirectory(
-                ignore_cleanup_errors=True
-            ) as raw:
+            with (
+                self.subTest(missing=missing),
+                tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as raw,
+            ):
                 path = Path(raw) / "candidate.db"
                 _create_v7_validation_database(path)
                 connection = sqlite3.connect(path)
@@ -426,7 +429,9 @@ class DatabaseManagerDependencyIntegrationTests(unittest.IsolatedAsyncioTestCase
             self.assertEqual(7, resolved.format_version)
             self.assertEqual(1, resolved.generation)
             self.assertEqual("daem0nmcp.db", resolved.relative_path)
-            self.assertEqual(pointer_before, (Path(raw) / "active-db.json").read_bytes())
+            self.assertEqual(
+                pointer_before, (Path(raw) / "active-db.json").read_bytes()
+            )
             await manager.close()
 
     async def test_invalid_pointer_fails_before_engine_construction(self):
@@ -439,6 +444,114 @@ class DatabaseManagerDependencyIntegrationTests(unittest.IsolatedAsyncioTestCase
             (storage / "active-db.json").write_text("{}", encoding="utf-8")
             with self.assertRaises(PointerValidationError):
                 DatabaseManager(raw)
+
+    @mock.patch("daem0nmcp.retrieval.runtime.schedule_projection_job_drain")
+    async def test_async_compatibility_facade_scans_adapted_cursor_in_batches(
+        self, _schedule_projection_job_drain
+    ):
+        from daem0nmcp.database import DatabaseManager
+        from daem0nmcp.event_store import (
+            EventCommand,
+            append_and_project_async,
+            resolve_compatibility_stream_async,
+        )
+
+        with tempfile.TemporaryDirectory() as raw:
+            manager = DatabaseManager(raw)
+            await manager.init_db()
+            record_id = "mem_" + "f" * 64
+            record = {
+                "record_type": "decision",
+                "legacy_type": None,
+                "content": "async compatibility",
+                "rationale": None,
+                "context": {},
+                "tags": [],
+                "file_path": None,
+                "file_path_relative": None,
+                "keywords": None,
+                "is_permanent": False,
+                "pinned": False,
+                "archived": False,
+                "outcome": None,
+                "worked": None,
+                "recall_count": 0,
+                "surprise_score": None,
+                "importance_score": None,
+                "source_client": "test",
+                "source_model": None,
+                "deleted_at_us": None,
+            }
+            try:
+                async with manager.get_session() as session:
+                    await append_and_project_async(
+                        session,
+                        EventCommand(
+                            workspace_id=manager.workspace_id,
+                            stream_id=record_id,
+                            stream_kind="memory",
+                            event_type="memory.created",
+                            occurred_at_us=1,
+                            recorded_at_us=1,
+                            actor_type="system",
+                            payload={
+                                "record": record,
+                                "compatibility": {"legacy_memory_id": 42},
+                            },
+                        ),
+                    )
+                    self.assertEqual(
+                        record_id,
+                        await resolve_compatibility_stream_async(
+                            session,
+                            manager.workspace_id,
+                            "memory",
+                            "memories",
+                            42,
+                        ),
+                    )
+                    rolled_back_id = "mem_" + "e" * 64
+                with self.assertRaisesRegex(RuntimeError, "rollback boundary"):
+                    async with manager.get_session() as session:
+                        await append_and_project_async(
+                            session,
+                            EventCommand(
+                                workspace_id=manager.workspace_id,
+                                stream_id=rolled_back_id,
+                                stream_kind="memory",
+                                event_type="memory.created",
+                                occurred_at_us=2,
+                                recorded_at_us=2,
+                                actor_type="system",
+                                payload={
+                                    "record": {**record, "content": "roll back"},
+                                    "compatibility": {"legacy_memory_id": 43},
+                                },
+                            ),
+                        )
+                        raise RuntimeError("rollback boundary")
+                async with manager.get_session() as session:
+                    self.assertEqual(
+                        record_id,
+                        await resolve_compatibility_stream_async(
+                            session,
+                            manager.workspace_id,
+                            "memory",
+                            "memories",
+                            42,
+                        ),
+                    )
+                    self.assertIsNone(
+                        await resolve_compatibility_stream_async(
+                            session,
+                            manager.workspace_id,
+                            "memory",
+                            "memories",
+                            43,
+                        )
+                    )
+            finally:
+                await manager.close()
 
 
 if __name__ == "__main__":

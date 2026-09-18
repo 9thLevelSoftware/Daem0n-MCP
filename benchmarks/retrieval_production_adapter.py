@@ -44,7 +44,6 @@ from daem0nmcp.retrieval.specialized_projection import (
 )
 from daem0nmcp.retrieval.types import ProviderResult, RetrievalQuery
 
-
 _DEFAULT_FIXTURE_ROOT = (
     Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "retrieval"
 )
@@ -56,7 +55,7 @@ _DOCUMENT_PREFIX = "search_document: "
 
 def _apply_schema(connection: sqlite3.Connection) -> None:
     for version, _description, statements in MIGRATIONS:
-        if version not in {16, 17, 18}:
+        if version < 16:
             continue
         for statement in statements:
             connection.execute(statement)
@@ -89,7 +88,7 @@ class _FixtureEncoder:
         self.prefix = prefix
 
     def encode(self, text: str) -> list[float]:
-        digest = hashlib.sha256(f"{self.prefix}{text}".encode("utf-8")).digest()
+        digest = hashlib.sha256(f"{self.prefix}{text}".encode()).digest()
         return [
             int.from_bytes(digest[index : index + 4], "big") / (2**32)
             for index in (0, 4, 8)
@@ -220,8 +219,7 @@ class _FixtureQdrantClient:
             return SimpleNamespace(points=[])
         stored = self._collections[collection_name]
         by_record = {
-            str(point["payload"]["record_id"]): point
-            for point in stored.values()
+            str(point["payload"]["record_id"]): point for point in stored.values()
         }
         points = []
         for ranked in search(query_id, limit=limit):
@@ -320,9 +318,7 @@ class ProductionRetrievalAdapter:
             self._lexical_delegate = LexicalProvider(
                 connection_factory=self._connection_factory
             )
-            self._lexical = _ScenarioLexicalProvider(
-                self._lexical_delegate
-            )
+            self._lexical = _ScenarioLexicalProvider(self._lexical_delegate)
             self._fully_enabled = self._service(
                 {
                     "lexical": self._lexical,
@@ -338,9 +334,7 @@ class ProductionRetrievalAdapter:
                         timeout_seconds=2.0,
                         collection_prefix="fixture",
                     ),
-                    "graph": GraphProvider(
-                        connection_factory=self._connection_factory
-                    ),
+                    "graph": GraphProvider(connection_factory=self._connection_factory),
                     "temporal": TemporalProvider(
                         connection_factory=self._connection_factory
                     ),
@@ -378,9 +372,7 @@ class ProductionRetrievalAdapter:
                         payload=event["payload"],
                         causation_event_id=event["causation_event_id"],
                         correlation_id=str(event["correlation_id"]),
-                        event_schema_version=int(
-                            event["event_schema_version"]
-                        ),
+                        event_schema_version=int(event["event_schema_version"]),
                         expected_stream_version=int(event["stream_version"]),
                     )
                 )
@@ -389,8 +381,7 @@ class ProductionRetrievalAdapter:
                     or appended.event_hash != event["event_hash"]
                     or appended.payload_hash != event["payload_hash"]
                     or appended.stream_version != event["stream_version"]
-                    or appended.previous_event_hash
-                    != event["previous_event_hash"]
+                    or appended.previous_event_hash != event["previous_event_hash"]
                 ):
                     raise RuntimeError("RETRIEVAL_FIXTURE_REPLAY_MISMATCH")
             workspace_id = str(self.fixtures.records[0]["workspace_id"])
@@ -434,9 +425,7 @@ class ProductionRetrievalAdapter:
             text=str(raw["text"]),
             limit=10,
             candidate_limit=50,
-            as_of_valid_time=_utc_from_microseconds(
-                raw.get("as_of_valid_time_us")
-            ),
+            as_of_valid_time=_utc_from_microseconds(raw.get("as_of_valid_time_us")),
             as_of_transaction_time=_utc_from_microseconds(
                 raw.get("as_of_transaction_time_us")
             ),
@@ -487,9 +476,7 @@ class ProductionRetrievalAdapter:
             if mode == "fully_enabled":
                 result = asyncio.run(self._fully_enabled.retrieve(query))
             else:
-                result = asyncio.run(
-                    self._retrieve_lexical_only(query_id, query)
-                )
+                result = asyncio.run(self._retrieve_lexical_only(query_id, query))
         finally:
             self._lexical.query_id = None
         citation_ids: list[str] = []

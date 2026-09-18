@@ -16,7 +16,6 @@ from .types import (
     evidence_identity,
 )
 
-
 DEFAULT_RRF_K = 60
 MAX_RRF_K = 1_000_000
 DEFAULT_RRF_WEIGHTS: Mapping[str, float] = MappingProxyType(
@@ -54,9 +53,7 @@ def _validated_weights(weights: Mapping[str, float]) -> dict[str, float]:
         try:
             numeric = float(weight)
         except (OverflowError, ValueError) as exc:
-            raise ValueError(
-                "RRF weights must be positive finite numbers"
-            ) from exc
+            raise ValueError("RRF weights must be positive finite numbers") from exc
         if not math.isfinite(numeric) or numeric <= 0:
             raise ValueError("RRF weights must be positive finite numbers")
         validated[channel] = numeric
@@ -75,9 +72,7 @@ def _evidence_order(evidence: EvidenceRef) -> tuple[object, ...]:
     )
 
 
-def _newer(
-    current: datetime | None, candidate: datetime | None
-) -> datetime | None:
+def _newer(current: datetime | None, candidate: datetime | None) -> datetime | None:
     if current is None:
         return candidate
     if candidate is None:
@@ -119,12 +114,7 @@ def weighted_reciprocal_rank_fusion(
     order.  A provider contributes at most once for each record/version key.
     """
 
-    if (
-        isinstance(k, bool)
-        or not isinstance(k, int)
-        or k < 1
-        or k > MAX_RRF_K
-    ):
+    if isinstance(k, bool) or not isinstance(k, int) or k < 1 or k > MAX_RRF_K:
         raise ValueError("RRF k must be a bounded positive integer")
     channel_weights = _validated_weights(weights)
     results = tuple(provider_results)
@@ -148,9 +138,9 @@ def weighted_reciprocal_rank_fusion(
             accumulator.evidence_refs.add(candidate.evidence)
             accumulator.channels.add(result.provider)
             accumulator.channel_ranks[result.provider] = candidate.rank
-            accumulator.manifest_generations[
-                result.provider
-            ] = result.manifest_generation
+            accumulator.manifest_generations[result.provider] = (
+                result.manifest_generation
+            )
             accumulator.highlights.update(candidate.highlights)
             accumulator.policy_notes.update(candidate.policy_notes)
             accumulator.transaction_time = _newer(
@@ -159,9 +149,7 @@ def weighted_reciprocal_rank_fusion(
 
     fused: list[FusedCandidate] = []
     for accumulator in accumulators.values():
-        evidence_refs = tuple(
-            sorted(accumulator.evidence_refs, key=_evidence_order)
-        )
+        evidence_refs = tuple(sorted(accumulator.evidence_refs, key=_evidence_order))
         fused.append(
             FusedCandidate(
                 evidence=evidence_refs[0],

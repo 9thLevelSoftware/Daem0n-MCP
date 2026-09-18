@@ -13,7 +13,6 @@ from dataclasses import dataclass
 
 from .types import RetrievalQuery
 
-
 _MAX_INTENT_CHARS = 4096
 _TOKEN = re.compile(r"[a-z0-9]+")
 _OPTIONAL_ORDER = ("dense", "graph", "temporal", "procedure", "outcome")
@@ -154,9 +153,7 @@ class RetrievalPlanner:
             "procedure": not words.isdisjoint(_PROCEDURE_TERMS),
             "outcome": not words.isdisjoint(_OUTCOME_TERMS),
         }
-        optional_limit = min(
-            query.candidate_limit, self.optional_candidate_limit
-        )
+        optional_limit = min(query.candidate_limit, self.optional_candidate_limit)
         requests = [ProviderRequest("lexical", query.candidate_limit)]
         if "dense" in ready:
             requests.append(ProviderRequest("dense", optional_limit))

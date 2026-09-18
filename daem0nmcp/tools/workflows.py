@@ -260,9 +260,7 @@ async def inscribe(
     pp = project_path or _default_project_path
     if not pp:
         return _missing_project_path_error()
-    violation = authorize_workflow_call(
-        "inscribe", action, locals(), preflight_token
-    )
+    violation = authorize_workflow_call("inscribe", action, locals(), preflight_token)
     if violation is not None:
         return violation
 
@@ -334,9 +332,7 @@ async def reflect(
     pp = project_path or _default_project_path
     if not pp:
         return _missing_project_path_error()
-    violation = authorize_workflow_call(
-        "reflect", action, locals(), preflight_token
-    )
+    violation = authorize_workflow_call("reflect", action, locals(), preflight_token)
     if violation is not None:
         return violation
 
@@ -398,9 +394,7 @@ async def understand(
     pp = project_path or _default_project_path
     if not pp:
         return _missing_project_path_error()
-    violation = authorize_workflow_call(
-        "understand", action, locals(), preflight_token
-    )
+    violation = authorize_workflow_call("understand", action, locals(), preflight_token)
     if violation is not None:
         return violation
 
@@ -473,9 +467,7 @@ async def govern(
     pp = project_path or _default_project_path
     if not pp:
         return _missing_project_path_error()
-    violation = authorize_workflow_call(
-        "govern", action, locals(), preflight_token
-    )
+    violation = authorize_workflow_call("govern", action, locals(), preflight_token)
     if violation is not None:
         return violation
 
@@ -567,9 +559,7 @@ async def explore(
     pp = project_path or _default_project_path
     if not pp:
         return _missing_project_path_error()
-    violation = authorize_workflow_call(
-        "explore", action, locals(), preflight_token
-    )
+    violation = authorize_workflow_call("explore", action, locals(), preflight_token)
     if violation is not None:
         return violation
 
@@ -662,9 +652,7 @@ async def maintain(
     pp = project_path or _default_project_path
     if not pp:
         return _missing_project_path_error()
-    violation = authorize_workflow_call(
-        "maintain", action, locals(), preflight_token
-    )
+    violation = authorize_workflow_call("maintain", action, locals(), preflight_token)
     if violation is not None:
         return violation
 

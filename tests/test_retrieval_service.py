@@ -7,7 +7,6 @@ import unittest
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 
-
 WORKSPACE_ID = "ws_0123456789abcdef01234567"
 SNAPSHOT = datetime(2026, 8, 8, 18, 0, tzinfo=timezone.utc)
 
@@ -154,6 +153,11 @@ class UnavailableComposer:
         )
 
 
+class ForbiddenComposer:
+    async def compose_async(self, selected, *, token_budget):
+        raise AssertionError("candidate retrieval must not compose context")
+
+
 class ProvenanceTamperingComposer:
     def __init__(self):
         self.delegate = AsyncComposer()
@@ -161,9 +165,7 @@ class ProvenanceTamperingComposer:
     async def compose_async(self, selected, *, token_budget):
         from daem0nmcp.retrieval.composer import CompositionResult
 
-        result = await self.delegate.compose_async(
-            selected, token_budget=token_budget
-        )
+        result = await self.delegate.compose_async(selected, token_budget=token_budget)
         return CompositionResult(
             items=(replace(result.items[0], score=999.0),),
             context=result.context,
@@ -177,9 +179,7 @@ class OutcomeFlagTamperingComposer:
     async def compose_async(self, selected, *, token_budget):
         from daem0nmcp.retrieval.composer import CompositionResult
 
-        result = await self.delegate.compose_async(
-            selected, token_budget=token_budget
-        )
+        result = await self.delegate.compose_async(selected, token_budget=token_budget)
         return CompositionResult(
             items=(replace(result.items[0], outcome_failed=True),),
             context=result.context,
@@ -193,9 +193,7 @@ class StructuredFieldTamperingComposer:
     async def compose_async(self, selected, *, token_budget):
         from daem0nmcp.retrieval.composer import CompositionResult
 
-        result = await self.delegate.compose_async(
-            selected, token_budget=token_budget
-        )
+        result = await self.delegate.compose_async(selected, token_budget=token_budget)
         return CompositionResult(
             items=(
                 replace(
@@ -215,9 +213,7 @@ class LegacyMetadataTamperingComposer:
     async def compose_async(self, selected, *, token_budget):
         from daem0nmcp.retrieval.composer import CompositionResult
 
-        result = await self.delegate.compose_async(
-            selected, token_budget=token_budget
-        )
+        result = await self.delegate.compose_async(selected, token_budget=token_budget)
         return CompositionResult(
             items=(
                 replace(
@@ -246,9 +242,7 @@ class ExcerptTamperingComposer:
     async def compose_async(self, selected, *, token_budget):
         from daem0nmcp.retrieval.composer import CompositionResult
 
-        result = await self.delegate.compose_async(
-            selected, token_budget=token_budget
-        )
+        result = await self.delegate.compose_async(selected, token_budget=token_budget)
         return CompositionResult(
             items=(
                 replace(
@@ -268,9 +262,7 @@ class OrderTamperingComposer:
     async def compose_async(self, selected, *, token_budget):
         from daem0nmcp.retrieval.composer import CompositionResult
 
-        result = await self.delegate.compose_async(
-            selected, token_budget=token_budget
-        )
+        result = await self.delegate.compose_async(selected, token_budget=token_budget)
         return CompositionResult(
             items=tuple(reversed(result.items)),
             context=replace(
@@ -291,6 +283,7 @@ class CanonicalRepository:
         selected_changes=None,
         omit_content=(),
     ):
+        self.closed = False
         self.changes = changes or {}
         self.contents = contents or {}
         self.selected_changes = selected_changes or {}
@@ -300,9 +293,10 @@ class CanonicalRepository:
         self.policy_candidates = ()
         self.content_candidates = ()
 
-    async def load_policy_records(
-        self, query, candidates, *, snapshot_time
-    ):
+    def close(self):
+        self.closed = True
+
+    async def load_policy_records(self, query, candidates, *, snapshot_time):
         from daem0nmcp.retrieval.policy import PolicyRecord
 
         self.policy_snapshots.append(snapshot_time)
@@ -342,9 +336,7 @@ class CanonicalRepository:
             records.append(PolicyRecord(**values))
         return tuple(records)
 
-    async def load_selected_evidence(
-        self, query, candidates, *, snapshot_time
-    ):
+    async def load_selected_evidence(self, query, candidates, *, snapshot_time):
         from daem0nmcp.retrieval.composer import SelectedEvidence
 
         self.content_snapshots.append(snapshot_time)
@@ -395,9 +387,7 @@ class OversizedPlanner:
     def plan(self, query, *, ready_providers):
         from daem0nmcp.retrieval.planner import ProviderRequest, RetrievalPlan
 
-        return RetrievalPlan(
-            (ProviderRequest("lexical", query.candidate_limit + 1),)
-        )
+        return RetrievalPlan((ProviderRequest("lexical", query.candidate_limit + 1),))
 
 
 def _composer():
@@ -443,9 +433,7 @@ class RetrievalServiceProviderTests(unittest.IsolatedAsyncioTestCase):
             providers={
                 "lexical": StaticProvider(
                     "lexical",
-                    _provider_result(
-                        "lexical", _candidate("1", "lexical", 1)
-                    ),
+                    _provider_result("lexical", _candidate("1", "lexical", 1)),
                     calls,
                 ),
                 "dense": StaticProvider(
@@ -475,9 +463,7 @@ class RetrievalServiceProviderTests(unittest.IsolatedAsyncioTestCase):
         calls = []
         result = await _service(
             providers={
-                "lexical": StaticProvider(
-                    "lexical", _provider_result("lexical"), calls
-                )
+                "lexical": StaticProvider("lexical", _provider_result("lexical"), calls)
             },
             repository=CanonicalRepository(),
             planner=FailingPlanner(),
@@ -492,9 +478,7 @@ class RetrievalServiceProviderTests(unittest.IsolatedAsyncioTestCase):
         calls = []
         result = await _service(
             providers={
-                "lexical": StaticProvider(
-                    "lexical", _provider_result("lexical"), calls
-                )
+                "lexical": StaticProvider("lexical", _provider_result("lexical"), calls)
             },
             repository=CanonicalRepository(),
             planner=OversizedPlanner(),
@@ -515,9 +499,7 @@ class RetrievalServiceProviderTests(unittest.IsolatedAsyncioTestCase):
         )
         dense = StaticProvider(
             "dense",
-            _provider_result(
-                "dense", _candidate("2", "dense", 1, raw_score=1e200)
-            ),
+            _provider_result("dense", _candidate("2", "dense", 1, raw_score=1e200)),
             calls,
         )
         outcome = StaticProvider("outcome", _provider_result("outcome"), calls)
@@ -531,9 +513,7 @@ class RetrievalServiceProviderTests(unittest.IsolatedAsyncioTestCase):
         result = await service.retrieve(_query(limit=2))
 
         self.assertFalse(result.abstained)
-        self.assertEqual(
-            ["lexical", "dense", "outcome"], [name for name, _ in calls]
-        )
+        self.assertEqual(["lexical", "dense", "outcome"], [name for name, _ in calls])
         self.assertEqual(
             ("lexical", "dense", "outcome"),
             tuple(item.provider for item in result.providers),
@@ -550,9 +530,7 @@ class RetrievalServiceProviderTests(unittest.IsolatedAsyncioTestCase):
             {item.citation for item in result.items},
             {citation.marker for citation in result.context.citations},
         )
-        self.assertIs(
-            repository.policy_snapshots[0], repository.content_snapshots[0]
-        )
+        self.assertIs(repository.policy_snapshots[0], repository.content_snapshots[0])
 
     async def test_lexical_unavailable_or_failed_abstains_before_optionals(self):
         cases = (
@@ -581,9 +559,7 @@ class RetrievalServiceProviderTests(unittest.IsolatedAsyncioTestCase):
                 lexical = StaticProvider("lexical", lexical_result, calls)
                 dense = StaticProvider(
                     "dense",
-                    _provider_result(
-                        "dense", _candidate("2", "dense", 1)
-                    ),
+                    _provider_result("dense", _candidate("2", "dense", 1)),
                     calls,
                 )
                 result = await _service(
@@ -615,7 +591,9 @@ class RetrievalServiceProviderTests(unittest.IsolatedAsyncioTestCase):
         ).retrieve(_query())
 
         self.assertFalse(result.abstained)
-        self.assertEqual(("lexical", "dense"), tuple(d.provider for d in result.providers))
+        self.assertEqual(
+            ("lexical", "dense"), tuple(d.provider for d in result.providers)
+        )
         self.assertEqual("failed", result.providers[1].status)
         self.assertEqual("DENSE_PROVIDER_FAILED", result.providers[1].reason)
         self.assertNotIn("hunter2", repr(result))
@@ -627,9 +605,7 @@ class RetrievalServiceProviderTests(unittest.IsolatedAsyncioTestCase):
             providers={
                 "lexical": StaticProvider(
                     "lexical",
-                    _provider_result(
-                        "lexical", _candidate("1", "lexical", 1)
-                    ),
+                    _provider_result("lexical", _candidate("1", "lexical", 1)),
                     calls,
                 ),
                 "dense": HangingProvider("dense", calls),
@@ -644,9 +620,7 @@ class RetrievalServiceProviderTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(["lexical", "dense"], [name for name, _ in calls])
         self.assertEqual("failed", result.providers[1].status)
         self.assertEqual("DENSE_PROVIDER_TIMEOUT", result.providers[1].reason)
-        self.assertEqual(
-            _record_id("1"), result.items[0].evidence_refs[0].record_id
-        )
+        self.assertEqual(_record_id("1"), result.items[0].evidence_refs[0].record_id)
 
     async def test_dense_only_match_is_allowed_only_after_ready_lexical_runs(self):
         calls = []
@@ -657,9 +631,7 @@ class RetrievalServiceProviderTests(unittest.IsolatedAsyncioTestCase):
                 ),
                 "dense": StaticProvider(
                     "dense",
-                    _provider_result(
-                        "dense", _candidate("2", "dense", 1)
-                    ),
+                    _provider_result("dense", _candidate("2", "dense", 1)),
                     calls,
                 ),
             },
@@ -668,9 +640,7 @@ class RetrievalServiceProviderTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertFalse(result.abstained)
         self.assertEqual(["lexical", "dense"], [name for name, _ in calls])
-        self.assertEqual(
-            _record_id("2"), result.items[0].evidence_refs[0].record_id
-        )
+        self.assertEqual(_record_id("2"), result.items[0].evidence_refs[0].record_id)
 
 
 class RetrievalServicePolicyTests(unittest.IsolatedAsyncioTestCase):
@@ -709,9 +679,7 @@ class RetrievalServicePolicyTests(unittest.IsolatedAsyncioTestCase):
         calls = []
         service = _service(
             providers={
-                "lexical": StaticProvider(
-                    "lexical", _provider_result("lexical"), calls
-                )
+                "lexical": StaticProvider("lexical", _provider_result("lexical"), calls)
             },
             repository=CanonicalRepository(),
             clock=FixedClock(datetime(2026, 8, 8)),
@@ -794,6 +762,22 @@ class RetrievalServicePolicyTests(unittest.IsolatedAsyncioTestCase):
 
 
 class RetrievalServiceRerankAndCompositionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_candidate_retrieval_stops_before_context_composition(self):
+        candidate = _candidate("1", "lexical", 1)
+        result = await _service(
+            providers={
+                "lexical": StaticProvider(
+                    "lexical", _provider_result("lexical", candidate), []
+                )
+            },
+            repository=CanonicalRepository(),
+            composer=ForbiddenComposer(),
+        ).retrieve_candidates(_query(limit=1))
+
+        self.assertFalse(result.abstained)
+        self.assertEqual(1, len(result.selected))
+        self.assertEqual(_record_id("1"), result.selected[0].candidate.record_id)
+
     async def test_real_composer_async_boundary_produces_cited_evidence(self):
         from daem0nmcp.retrieval.composer import EvidenceComposer
 
@@ -805,9 +789,7 @@ class RetrievalServiceRerankAndCompositionTests(unittest.IsolatedAsyncioTestCase
                 )
             },
             repository=CanonicalRepository(),
-            composer=EvidenceComposer(
-                tokenizer=WordTokenizer(), max_excerpt_chars=240
-            ),
+            composer=EvidenceComposer(tokenizer=WordTokenizer(), max_excerpt_chars=240),
         ).retrieve(_query())
 
         self.assertFalse(result.abstained)
@@ -1087,6 +1069,19 @@ class RetrievalServiceRerankAndCompositionTests(unittest.IsolatedAsyncioTestCase
 
 
 class RetrievalServiceValidationTests(unittest.TestCase):
+    def test_close_releases_the_owned_repository(self):
+        repository = CanonicalRepository()
+        service = _service(
+            providers={
+                "lexical": StaticProvider("lexical", _provider_result("lexical"), [])
+            },
+            repository=repository,
+        )
+
+        service.close()
+
+        self.assertTrue(repository.closed)
+
     def test_injected_boundaries_and_ranking_configuration_fail_closed(self):
         from daem0nmcp.retrieval.service import RetrievalService
 
@@ -1098,9 +1093,7 @@ class RetrievalServiceValidationTests(unittest.TestCase):
             {
                 "providers": {
                     "lexical": lexical,
-                    "custom": StaticProvider(
-                        "custom", _provider_result("custom"), []
-                    ),
+                    "custom": StaticProvider("custom", _provider_result("custom"), []),
                 }
             },
             {"repository": object()},
@@ -1116,9 +1109,7 @@ class RetrievalServiceValidationTests(unittest.TestCase):
             {
                 "providers": {
                     "lexical": lexical,
-                    "dense": StaticProvider(
-                        "dense", _provider_result("dense"), []
-                    ),
+                    "dense": StaticProvider("dense", _provider_result("dense"), []),
                 },
                 "weights": {"lexical": 1.0},
             },

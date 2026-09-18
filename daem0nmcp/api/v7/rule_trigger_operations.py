@@ -19,6 +19,7 @@ import secrets
 import sqlite3
 import threading
 from collections.abc import Callable, Mapping
+from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -56,7 +57,6 @@ from .resources import RuleView
 from .runtime_services import WorkspaceStorageResolver
 from .tasks import await_task_terminal
 from .tools import RuleCheckData, TriggerMatch, TriggerMatchData, TriggerView
-
 
 _MAX_RULES = 1_000
 _MAX_TRIGGER_MATCHES = 5
@@ -127,7 +127,7 @@ class RecallService(Protocol):
     def retrieve(
         self,
         workspace: Workspace,
-        query: object,
+        query: RetrievalQuery,
         linked_workspace_ids: frozenset[str],
     ) -> object: ...
 
@@ -177,9 +177,7 @@ def _authorize(
         raise RuleTriggerOperationError("UNAUTHORIZED_WORKSPACE")
     try:
         canonical = workspace.root.resolve(strict=True)
-        registered = WorkspaceRegistry(
-            [canonical], default_root=canonical
-        ).default
+        registered = WorkspaceRegistry([canonical], default_root=canonical).default
         exact_root = os.path.normcase(str(workspace.root)) == os.path.normcase(
             str(canonical)
         )
@@ -248,8 +246,7 @@ def _open_database(
             version_row is None
             or int(version_row[0]) < CURRENT_SCHEMA_VERSION
             or tables != required_tables
-            or not projection_columns
-            <= _table_columns(connection, projection_table)
+            or not projection_columns <= _table_columns(connection, projection_table)
             or not compatibility_columns
             <= _table_columns(connection, compatibility_table)
         ):
@@ -276,18 +273,17 @@ def _now(dependencies: RuleTriggerOperationDependencies) -> datetime:
 
 
 def _stored_timestamp(value: datetime) -> str:
-    return value.astimezone(timezone.utc).replace(tzinfo=None).isoformat(
-        sep=" ", timespec="microseconds"
+    return (
+        value.astimezone(timezone.utc)
+        .replace(tzinfo=None)
+        .isoformat(sep=" ", timespec="microseconds")
     )
 
 
 def _timestamp_us(value: datetime) -> int:
     try:
         delta = value.astimezone(timezone.utc) - _EPOCH
-        result = (
-            (delta.days * 86_400 + delta.seconds) * 1_000_000
-            + delta.microseconds
-        )
+        result = (delta.days * 86_400 + delta.seconds) * 1_000_000 + delta.microseconds
     except (OverflowError, ValueError):
         raise RuleTriggerOperationError("CAPABILITY_DEGRADED") from None
     if not 0 <= result <= 9_223_372_036_854_775_807:
@@ -346,9 +342,7 @@ def _translate_error(error: Exception) -> RuleTriggerOperationError:
 
 
 def _legacy_id(workspace_id: str, domain: str, idempotency_key: str) -> int:
-    digest = sha256_json(
-        ["daem0nmcp", "v7", domain, workspace_id, idempotency_key]
-    )
+    digest = sha256_json(["daem0nmcp", "v7", domain, workspace_id, idempotency_key])
     value = int(digest[:16], 16) & ((1 << 63) - 1)
     return value or 1
 
@@ -408,10 +402,8 @@ async def _run_read(operation: Callable[[], Any]) -> Any:
     try:
         return await asyncio.shield(worker)
     except asyncio.CancelledError as cancellation:
-        try:
+        with suppress(asyncio.CancelledError, Exception):
             await await_task_terminal(worker)
-        except (asyncio.CancelledError, Exception):
-            pass
         raise cancellation
     except BoundedWorkerBusyError as exc:
         raise RuleTriggerOperationError("TASK_REQUIRED") from exc
@@ -661,7 +653,8 @@ def _rule_update_sync(
                         changed = True
                 if changed:
                     updated_at_us = _timestamp_us(_now(dependencies))
-                    if updated_at_us < int(state["created_at_us"]):
+                    created_at_us = state["created_at_us"]
+                    if type(created_at_us) is not int or updated_at_us < created_at_us:
                         raise RuleTriggerOperationError("CAPABILITY_DEGRADED")
                     state["updated_at_us"] = updated_at_us
                     GovernanceEventStore(
@@ -841,8 +834,7 @@ def _rule_check_sync(
                     raise RuleTriggerOperationError("CAPABILITY_DEGRADED")
                 indexed_rows = dict(enumerate(rows, start=1))
                 views_by_id = {
-                    index: _rule_view(row)
-                    for index, row in indexed_rows.items()
+                    index: _rule_view(row) for index, row in indexed_rows.items()
                 }
                 index = TFIDFIndex()
                 for document_id, row in indexed_rows.items():
@@ -896,6 +888,8 @@ def _rule_check_sync(
 _PUBLIC_TO_STORED_TRIGGER_TYPE = MappingProxyType(
     {"file": "file_pattern", "tag": "tag_match", "entity": "entity_match"}
 )
+
+
 def _trigger_view(
     row: sqlite3.Row,
 ) -> TriggerView:
@@ -907,14 +901,16 @@ def _trigger_view(
         if trigger_type not in _PUBLIC_TO_STORED_TRIGGER_TYPE:
             raise RuleTriggerOperationError("CAPABILITY_DEGRADED")
         categories = _json_list(row["categories_json"])
-        return TriggerView(
-            trigger_id=row["trigger_id"],
-            trigger_type=trigger_type,
-            pattern=row["pattern"],
-            recall_query=row["recall_query"],
-            categories=None if not categories else set(categories),
-            enabled=bool(enabled),
-            updated_at=_public_timestamp(row["updated_at_us"]),
+        return TriggerView.model_validate(
+            {
+                "trigger_id": row["trigger_id"],
+                "trigger_type": trigger_type,
+                "pattern": row["pattern"],
+                "recall_query": row["recall_query"],
+                "categories": None if not categories else set(categories),
+                "enabled": bool(enabled),
+                "updated_at": _public_timestamp(row["updated_at_us"]),
+            }
         )
     except RuleTriggerOperationError:
         raise
@@ -1178,8 +1174,7 @@ def _trigger_list_sync(
                     where += " AND enabled=1"
                 if cursor_row is not None:
                     where += (
-                        " AND (created_at_us<? OR "
-                        "(created_at_us=? AND trigger_id>?))"
+                        " AND (created_at_us<? OR (created_at_us=? AND trigger_id>?))"
                     )
                     parameters.extend(
                         [
@@ -1222,9 +1217,7 @@ def _trigger_list_sync(
 
 
 def _operation_id(*parts: object) -> str:
-    return "op_" + sha256_json(
-        ["daem0nmcp", "v7", "rule-trigger-operation", *parts]
-    )
+    return "op_" + sha256_json(["daem0nmcp", "v7", "rule-trigger-operation", *parts])
 
 
 def _trigger_delete_sync(

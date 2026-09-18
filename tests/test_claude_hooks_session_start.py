@@ -76,7 +76,7 @@ def test_main_outputs_v7_session_brief_call(tmp_path, monkeypatch, capsys):
     captured = capsys.readouterr()
     assert "[Daem0n] IMPORTANT" in captured.out
     assert "mcp__daem0nmcp__session_brief" in captured.out
-    assert "workspace_id=\"ws_" in captured.out
+    assert 'workspace_id="ws_' in captured.out
     assert str(tmp_path) not in captured.out
 
 

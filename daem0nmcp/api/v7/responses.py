@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, TypeVar
 
-from .errors import ErrorCode, INTERNAL_ERROR_MESSAGE
+from .errors import INTERNAL_ERROR_MESSAGE, ErrorCode
 from .models import (
     ApiError,
     ApiResponse,
@@ -19,7 +19,6 @@ from .models import (
     ResponseMeta,
     WorkspaceId,
 )
-
 
 T = TypeVar("T")
 

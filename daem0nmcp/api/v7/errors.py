@@ -49,9 +49,7 @@ class ErrorCode(str, Enum):
 
 STABLE_ERROR_CODES: tuple[str, ...] = tuple(code.value for code in ErrorCode)
 STABLE_ERROR_CODE_SET = frozenset(STABLE_ERROR_CODES)
-ERROR_CODE_REGISTRY = MappingProxyType(
-    {code.value: code for code in ErrorCode}
-)
+ERROR_CODE_REGISTRY = MappingProxyType({code.value: code for code in ErrorCode})
 
 # INTERNAL_ERROR is intentionally less descriptive than every domain error.
 # The correlation ID in ApiError is the sole diagnostic handle exposed to a

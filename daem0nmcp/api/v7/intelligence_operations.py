@@ -16,10 +16,10 @@ from typing import Any
 
 from ...bounded_workers import BoundedWorkerBusyError, BoundedWorkerPool
 from ...event_store import (
-    deterministic_id,
     EventCommand,
     EventStore,
     EventStreamConflict,
+    deterministic_id,
     event_hash_for,
     event_id_for_hash,
     memory_content_hash,
@@ -27,16 +27,23 @@ from ...event_store import (
     sha256_json,
 )
 from ...schema_version import CURRENT_SCHEMA_VERSION
+from ...storage_activation import ResolvedActiveDatabase
 from ...workspace import Workspace, WorkspaceRegistry
 from .application import AdmittedRequest
 from .errors import STABLE_ERROR_CODE_SET
-from .models import EvidenceRef, RecordSummary, contains_absolute_filesystem_path
+from .models import (
+    EvidenceRef,
+    RecordSummary,
+    contains_absolute_filesystem_path,
+    parse_wire_datetime,
+)
 from .public_ids import PublicObjectIdNotFound, PublicObjectIdRepository
 from .resources import RuleView
+from .runtime_protocols import ActiveStorageResolver, WorkerPool
 from .runtime_services import WorkspaceStorageResolver
 from .tools import (
-    Contradiction,
     CommunitySummary,
+    Contradiction,
     DebateRound,
     DecisionDebateData,
     DecisionSimulationData,
@@ -47,7 +54,6 @@ from .tools import (
     RuleEvolutionReport,
     VerifiedClaim,
 )
-
 
 _EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
 _MAX_SCAN_EVENTS = 20_000
@@ -96,9 +102,7 @@ _EVENT_COLUMNS = (
     "causation_event_id,correlation_id,payload_json,payload_hash,"
     "previous_event_hash,event_hash"
 )
-_CORE_REQUIRED_TABLES = frozenset(
-    {"memory_events", "memory_records", "schema_version"}
-)
+_CORE_REQUIRED_TABLES = frozenset({"memory_events", "memory_records", "schema_version"})
 
 
 class IntelligenceOperationError(RuntimeError):
@@ -140,9 +144,11 @@ def _default_worker_pool() -> BoundedWorkerPool:
 class IntelligenceOperationDependencies:
     """Owned dependencies for canonical deterministic intelligence."""
 
-    storage_resolver: object = field(default_factory=WorkspaceStorageResolver)
+    storage_resolver: ActiveStorageResolver = field(
+        default_factory=WorkspaceStorageResolver
+    )
     clock: Callable[[], datetime] = field(default=_default_clock)
-    worker_pool: object = field(default_factory=_default_worker_pool)
+    worker_pool: WorkerPool = field(default_factory=_default_worker_pool)
 
     def __post_init__(self) -> None:
         if not callable(getattr(self.storage_resolver, "locked_active", None)):
@@ -172,9 +178,7 @@ def _authorize(
         raise IntelligenceOperationError("UNAUTHORIZED_WORKSPACE")
     try:
         canonical = workspace.root.resolve(strict=True)
-        registered = WorkspaceRegistry(
-            [canonical], default_root=canonical
-        ).default
+        registered = WorkspaceRegistry([canonical], default_root=canonical).default
         exact = os.path.normcase(str(canonical)) == os.path.normcase(
             str(workspace.root)
         )
@@ -184,10 +188,10 @@ def _authorize(
         raise IntelligenceOperationError("UNAUTHORIZED_WORKSPACE")
 
 
-def _database_path(workspace: Workspace, active: object) -> Path:
+def _database_path(workspace: Workspace, active: ResolvedActiveDatabase) -> Path:
     try:
         root = workspace.root.resolve(strict=True)
-        candidate = Path(getattr(active, "path"))
+        candidate = Path(active.path)
         if candidate.is_symlink():
             raise ValueError
         resolved = candidate.resolve(strict=True)
@@ -297,14 +301,10 @@ async def _run_mutation(
 
 
 def _datetime_us(value: object) -> int:
-    if not isinstance(value, datetime) or value.tzinfo is None:
-        raise IntelligenceOperationError("INVALID_ARGUMENT")
     try:
+        value = parse_wire_datetime(value)
         delta = value.astimezone(timezone.utc) - _EPOCH
-        result = (
-            (delta.days * 86_400 + delta.seconds) * 1_000_000
-            + delta.microseconds
-        )
+        result = (delta.days * 86_400 + delta.seconds) * 1_000_000 + delta.microseconds
     except (OverflowError, ValueError):
         raise IntelligenceOperationError("INVALID_ARGUMENT") from None
     if not -(2**63) <= result <= 2**63 - 1:
@@ -413,19 +413,15 @@ def _record_evidence_from_events(
             raise IntelligenceOperationError("CAPABILITY_DEGRADED")
         expected_version = previous_version.get(stream_id, 0) + 1
         expected_hash = previous_hash.get(stream_id)
-        if (
-            version != expected_version
-            or row["previous_event_hash"] != expected_hash
-        ):
+        if version != expected_version or row["previous_event_hash"] != expected_hash:
             raise IntelligenceOperationError("CAPABILITY_DEGRADED")
         payload = _verified_event(row)
         previous_version[stream_id] = version
         previous_hash[stream_id] = str(row["event_hash"])
         first_recorded.setdefault(stream_id, int(row["recorded_at_us"]))
         occurred_at = row["occurred_at_us"]
-        if (
-            valid_at_us is not None
-            and (not isinstance(occurred_at, int) or occurred_at > valid_at_us)
+        if valid_at_us is not None and (
+            not isinstance(occurred_at, int) or occurred_at > valid_at_us
         ):
             continue
         selected[stream_id] = (row, payload, first_recorded[stream_id])
@@ -453,16 +449,18 @@ def _record_evidence_from_events(
             updated = _datetime_from_us(recorded_at_us)
             if created > updated:
                 created = updated
-            summary = RecordSummary(
-                record_id=stream_id,
-                record_type=record_type,
-                excerpt=content[:4000],
-                tags=tags,
-                relative_file_path=relative_path,
-                current_status="current",
-                content_hash=content_hash,
-                created_at=created,
-                updated_at=updated,
+            summary = RecordSummary.model_validate(
+                {
+                    "record_id": stream_id,
+                    "record_type": record_type,
+                    "excerpt": content[:4000],
+                    "tags": tags,
+                    "relative_file_path": relative_path,
+                    "current_status": "current",
+                    "content_hash": content_hash,
+                    "created_at": created,
+                    "updated_at": updated,
+                }
             )
             worked = state.get("worked")
             if worked is not None and not isinstance(worked, bool):
@@ -549,11 +547,7 @@ def _memory_verify_sync(
         if request.as_of_transaction_time is None
         else _datetime_us(request.as_of_transaction_time)
     )
-    categories = (
-        None
-        if request.categories is None
-        else frozenset(request.categories)
-    )
+    categories = None if request.categories is None else frozenset(request.categories)
     try:
         with dependencies.storage_resolver.locked_active(workspace) as active:
             connection = _open_database(_database_path(workspace, active))
@@ -586,14 +580,10 @@ def _memory_verify_sync(
                     )
                     selected = matches[:32]
                     contradictory = [
-                        entry
-                        for entry in selected
-                        if entry[1] != claim_negated
+                        entry for entry in selected if entry[1] != claim_negated
                     ]
                     supporting = [
-                        entry
-                        for entry in selected
-                        if entry[1] == claim_negated
+                        entry for entry in selected if entry[1] == claim_negated
                     ]
                     if contradictory:
                         status = "contradicted"
@@ -608,10 +598,8 @@ def _memory_verify_sync(
                     for ref in refs:
                         all_refs[(ref.record_id, ref.event_id)] = ref
                     verified_claims.append(
-                        VerifiedClaim(
-                            claim=claim,
-                            status=status,
-                            evidence_refs=refs,
+                        VerifiedClaim.model_validate(
+                            {"claim": claim, "status": status, "evidence_refs": refs}
                         )
                     )
                     if status == "contradicted":
@@ -634,11 +622,13 @@ def _memory_verify_sync(
                     overall = "unknown"
                 else:
                     overall = "mixed"
-                return MemoryVerifyData(
-                    claims=verified_claims,
-                    evidence_refs=list(all_refs.values())[:200],
-                    contradictions=contradictions,
-                    overall_status=overall,
+                return MemoryVerifyData.model_validate(
+                    {
+                        "claims": verified_claims,
+                        "evidence_refs": list(all_refs.values())[:200],
+                        "contradictions": contradictions,
+                        "overall_status": overall,
+                    }
                 )
             finally:
                 if connection.in_transaction:
@@ -685,9 +675,7 @@ def _decision_simulate_sync(
                     connection,
                     workspace.workspace_id,
                 )
-                current_by_id = {
-                    item.record.record_id: item for item in current
-                }
+                current_by_id = {item.record.record_id: item for item in current}
                 decision = current_by_id.get(request.record_id)
                 if decision is None:
                     raise IntelligenceOperationError("NOT_FOUND")
@@ -912,9 +900,7 @@ def _rule_evolution_sync(
                         if score >= 0.4:
                             matches.append((score, item))
                     matches.sort(
-                        key=lambda entry: (
-                            -entry[0], entry[1].record.record_id
-                        )
+                        key=lambda entry: (-entry[0], entry[1].record.record_id)
                     )
                     worked = sum(entry[1].worked is True for entry in matches)
                     failed = sum(entry[1].worked is False for entry in matches)
@@ -935,13 +921,12 @@ def _rule_evolution_sync(
                         f"Review signal: {signal}."
                     )
                     references = [
-                        _evidence_ref(entry[1], "canonical")
-                        for entry in matches[:2]
+                        _evidence_ref(entry[1], "canonical") for entry in matches[:2]
                     ]
                     for reference in references:
-                        all_references[
-                            (reference.record_id, reference.event_id)
-                        ] = reference
+                        all_references[(reference.record_id, reference.event_id)] = (
+                            reference
+                        )
                     reports.append(
                         RuleEvolutionReport(
                             rule=rule,
@@ -1071,15 +1056,14 @@ def _community_rows(
     ).fetchall()
     if len(members) > _MAX_COMMUNITY_MEMBERS:
         raise IntelligenceOperationError("TASK_REQUIRED")
-    counts = {community_id: 0 for community_id in community_ids}
+    counts = dict.fromkeys(community_ids, 0)
     for member in members:
         community_id = str(member["community_id"])
         if community_id not in counts:
             raise IntelligenceOperationError("CAPABILITY_DEGRADED")
         counts[community_id] += 1
     if any(
-        counts[str(row["community_id"])] != row["member_count"]
-        for row in communities
+        counts[str(row["community_id"])] != row["member_count"] for row in communities
     ):
         raise IntelligenceOperationError("CAPABILITY_DEGRADED")
     return communities, members
@@ -1128,9 +1112,7 @@ def _hierarchical_recall_sync(
                     record = by_id.get(str(member["record_id"]))
                     if record is None:
                         raise IntelligenceOperationError("CAPABILITY_DEGRADED")
-                    members_by_community[str(member["community_id"])].append(
-                        record
-                    )
+                    members_by_community[str(member["community_id"])].append(record)
 
                 query_terms, _ = _semantic_signature(request.query)
                 direct: list[tuple[float, sqlite3.Row]] = []
@@ -1142,9 +1124,7 @@ def _hierarchical_recall_sync(
                     member_score = max(
                         (
                             _match_score(query_terms, item.content)[0]
-                            for item in members_by_community[
-                                str(row["community_id"])
-                            ]
+                            for item in members_by_community[str(row["community_id"])]
                         ),
                         default=0.0,
                     )
@@ -1153,29 +1133,26 @@ def _hierarchical_recall_sync(
                 candidates = direct if direct else fallback
                 candidates.sort(
                     key=lambda entry: (
-                        -entry[0], entry[1]["level"], entry[1]["community_id"]
+                        -entry[0],
+                        entry[1]["level"],
+                        entry[1]["community_id"],
                     )
                 )
-                selected_rows = [
-                    entry[1] for entry in candidates[: request.limit]
-                ]
+                selected_rows = [entry[1] for entry in candidates[: request.limit]]
                 selected_communities = [
-                    _community_summary(row, generation)
-                    for row in selected_rows
+                    _community_summary(row, generation) for row in selected_rows
                 ]
                 layered: dict[int, list[RecordSummary]] = {}
                 seen: set[str] = set()
                 references: dict[tuple[str, str], EvidenceRef] = {}
                 remaining = request.limit
                 for row in selected_rows:
-                    community_members = members_by_community[
-                        str(row["community_id"])
-                    ]
+                    community_members = members_by_community[str(row["community_id"])]
                     for item in community_members:
                         reference = _evidence_ref(item, "graph")
-                        references[
-                            (reference.record_id, reference.event_id)
-                        ] = reference
+                        references[(reference.record_id, reference.event_id)] = (
+                            reference
+                        )
                         if (
                             not request.include_members
                             or remaining <= 0
@@ -1183,9 +1160,7 @@ def _hierarchical_recall_sync(
                         ):
                             continue
                         seen.add(item.record.record_id)
-                        layered.setdefault(int(row["level"]), []).append(
-                            item.record
-                        )
+                        layered.setdefault(int(row["level"]), []).append(item.record)
                         remaining -= 1
                 layers = [
                     HierarchyLayer(level=level, records=layered[level])
@@ -1234,14 +1209,8 @@ def _debate_argument(
     evidence: list[tuple[float, _RecordEvidence]],
     citations: Mapping[str, int],
 ) -> tuple[str, float]:
-    score = (
-        sum(entry[0] for entry in evidence) / len(evidence)
-        if evidence
-        else 0.0
-    )
-    labels = [
-        f"[E{citations[entry[1].record.record_id]}]" for entry in evidence
-    ]
+    score = sum(entry[0] for entry in evidence) / len(evidence) if evidence else 0.0
+    labels = [f"[E{citations[entry[1].record.record_id]}]" for entry in evidence]
     rendered_labels = ", ".join(labels) if labels else "none"
     bounded_position = position[:1_200]
     argument = (
@@ -1363,9 +1332,7 @@ def _decision_debate_sync(
                                     "outcome": state.get("outcome"),
                                     "worked": state.get("worked"),
                                 },
-                                "is_permanent": bool(
-                                    state.get("is_permanent", False)
-                                ),
+                                "is_permanent": bool(state.get("is_permanent", False)),
                                 "pinned": bool(state.get("pinned", False)),
                                 "archived": bool(state.get("archived", False)),
                                 "deleted": state.get("deleted_at_us") is not None,
@@ -1419,13 +1386,9 @@ def _decision_debate_sync(
                 advocate_position = request.advocate_position[:1_500]
                 challenger_position = request.challenger_position[:1_500]
                 if advocate_score > challenger_score:
-                    conclusion = (
-                        "the advocate has stronger canonical support"
-                    )
+                    conclusion = "the advocate has stronger canonical support"
                 elif challenger_score > advocate_score:
-                    conclusion = (
-                        "the challenger has stronger canonical support"
-                    )
+                    conclusion = "the challenger has stronger canonical support"
                 else:
                     conclusion = (
                         "the positions have balanced or insufficient canonical support"
@@ -1443,13 +1406,11 @@ def _decision_debate_sync(
                 debate_context = {
                     "request_hash": request_hash,
                     "rounds": [
-                        round_item.model_dump(mode="json")
-                        for round_item in rounds
+                        round_item.model_dump(mode="json") for round_item in rounds
                     ],
                     "synthesis": synthesis,
                     "evidence_refs": [
-                        reference.model_dump(mode="json")
-                        for reference in references
+                        reference.model_dump(mode="json") for reference in references
                     ],
                 }
                 state = {
@@ -1500,9 +1461,7 @@ def _decision_debate_sync(
                 if cancelled.is_set():
                     raise _WorkerCancelledError()
                 connection.commit()
-                return _debate_result_from_state(
-                    state, record_id, event.event_id
-                )
+                return _debate_result_from_state(state, record_id, event.event_id)
             except (
                 EventStreamConflict,
                 IntelligenceOperationError,
@@ -1564,9 +1523,7 @@ def build_intelligence_operations(
         _authorize(workspace, request, "memory_recall_hierarchical")
         return await _run_read(
             dependencies,
-            lambda: _hierarchical_recall_sync(
-                dependencies, workspace, request
-            ),
+            lambda: _hierarchical_recall_sync(dependencies, workspace, request),
         )
 
     async def memory_verify(

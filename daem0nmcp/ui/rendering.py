@@ -7,7 +7,7 @@ import hashlib
 import json
 import math
 from dataclasses import dataclass
-from functools import lru_cache
+from functools import cache
 from importlib import resources
 from string import Template
 from typing import Any, Final
@@ -78,7 +78,7 @@ APP_SPECS: Final[dict[str, AppSpec]] = {
         "ui://daem0n/community",
         "Community Cluster Map",
         "Interactive community treemap",
-        ("d3.bundle.js", "runtime.js", "renderers/community.js"),
+        ("d3.bundle.js", "messenger.js", "runtime.js", "renderers/community.js"),
     ),
     "graph": AppSpec(
         "graph",
@@ -86,7 +86,7 @@ APP_SPECS: Final[dict[str, AppSpec]] = {
         "ui://daem0n/graph",
         "Memory Graph",
         "Interactive memory graph viewer",
-        ("d3.bundle.js", "runtime.js", "renderers/graph.js"),
+        ("d3.bundle.js", "messenger.js", "runtime.js", "renderers/graph.js"),
     ),
 }
 
@@ -117,7 +117,7 @@ def serialize_app_data(data: dict[str, Any]) -> str:
     )
 
 
-@lru_cache(maxsize=None)
+@cache
 def _load_package_text(kind: str, name: str) -> str:
     parts = name.split("/")
     asset = resources.files("daem0nmcp.ui").joinpath(kind, *parts)
@@ -128,9 +128,12 @@ def _load_package_text(kind: str, name: str) -> str:
     if not text:
         raise RuntimeError("required UI asset is unavailable")
     closing = "</script" if kind == "static" and name.endswith(".js") else "</style"
-    if kind == "static" and (name.endswith(".js") or name.endswith(".css")):
-        if closing in text.lower():
-            raise RuntimeError("required UI asset is unsafe")
+    if (
+        kind == "static"
+        and (name.endswith(".js") or name.endswith(".css"))
+        and closing in text.lower()
+    ):
+        raise RuntimeError("required UI asset is unsafe")
     return text
 
 
@@ -233,7 +236,11 @@ def _validate_shape(root: dict[str, Any]) -> None:
 def parse_compat_payload(data: str) -> dict[str, Any]:
     """Validate one framework-decoded JSON object without URL-decoding again."""
     try:
-        if not isinstance(data, str) or not data or len(data.encode("utf-8")) > MAX_COMPAT_JSON_BYTES:
+        if (
+            not isinstance(data, str)
+            or not data
+            or len(data.encode("utf-8")) > MAX_COMPAT_JSON_BYTES
+        ):
             raise UIResourcePayloadError(_INVALID_PAYLOAD_MESSAGE)
         parsed = json.loads(
             data,
@@ -247,7 +254,13 @@ def parse_compat_payload(data: str) -> dict[str, Any]:
         return parsed
     except UIResourcePayloadError:
         raise
-    except (json.JSONDecodeError, UnicodeError, RecursionError, ValueError, TypeError) as error:
+    except (
+        json.JSONDecodeError,
+        UnicodeError,
+        RecursionError,
+        ValueError,
+        TypeError,
+    ) as error:
         raise UIResourcePayloadError(_INVALID_PAYLOAD_MESSAGE) from error
 
 

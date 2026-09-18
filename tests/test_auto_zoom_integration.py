@@ -43,6 +43,7 @@ def _make_mock_mm(hybrid_results=None, qdrant=None):
         None  # Prevent MagicMock auto-attribute from shadowing router's self._kg
     )
     mm.db = MagicMock()
+    mm.db.format_version = 6
     mm.db.storage_path = "/tmp/test"
     return mm
 

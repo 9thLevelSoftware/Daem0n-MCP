@@ -3,10 +3,12 @@ from __future__ import annotations
 import asyncio
 import importlib
 import inspect
+import os
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import MappingProxyType
+from unittest.mock import patch
 
 from daem0nmcp.api.v7.responses import ResponseFactory
 from daem0nmcp.covenant import (
@@ -16,7 +18,6 @@ from daem0nmcp.covenant import (
     InvocationScope,
 )
 from daem0nmcp.workspace import Workspace, WorkspaceAccessError
-
 
 EXPECTED_PINNED_HANDLERS = frozenset(
     {
@@ -57,7 +58,7 @@ class _BriefingService:
             workspace_id=workspace.workspace_id,
             briefed_at=NOW,
             workspace_statistics={
-                "focus_count": len(getattr(request, "focus_areas")),
+                "focus_count": len(request.focus_areas),
             },
         )
 
@@ -184,10 +185,7 @@ class _MemoryEventWriter:
             "procedure_steps": (),
             "idempotency_key": "decision-1001",
         }
-        actual = {
-            name: getattr(command, name)
-            for name in expected
-        }
+        actual = {name: getattr(command, name) for name in expected}
         if (
             workspace.workspace_id != WORKSPACE_ID
             or actual != expected
@@ -327,6 +325,7 @@ class _LeakyHealthService:
             auth_mode="process",
         )
 
+
 class _UnusedService:
     def __getattr__(self, name: str) -> object:
         raise AssertionError(f"unused service was invoked: {name}")
@@ -336,7 +335,9 @@ def _gate() -> CovenantGate:
     from daem0nmcp.api.v7.policy import V7_COVENANT_POLICY
     from daem0nmcp.api.v7.tools import build_argument_normalizer
 
-    seconds = lambda: int(NOW.timestamp())
+    def seconds() -> int:
+        return int(NOW.timestamp())
+
     return CovenantGate(
         state_store=CovenantStateStore(clock=seconds),
         authority=CapabilityAuthority(
@@ -563,7 +564,9 @@ class PinnedHandlerTests(unittest.TestCase):
         self.assertNotIn("prompt-secret", validated.model_dump_json())
         self.assertFalse(gate.state_store.is_briefed(scope))
 
-    def test_unknown_workspace_fails_with_an_opaque_response_before_briefing(self) -> None:
+    def test_unknown_workspace_fails_with_an_opaque_response_before_briefing(
+        self,
+    ) -> None:
         # Catches workspace enumeration and resolver exception disclosure.
         from daem0nmcp.api.v7.errors import ErrorCode
         from daem0nmcp.api.v7.pinned import build_pinned_handlers
@@ -849,7 +852,9 @@ class PinnedHandlerTests(unittest.TestCase):
                     ErrorCode.IDENTITY_UNAVAILABLE,
                 )
 
-    def test_preflight_validates_defaults_and_issues_an_exact_scoped_token(self) -> None:
+    def test_preflight_validates_defaults_and_issues_an_exact_scoped_token(
+        self,
+    ) -> None:
         # Catches tokens signed over raw/missing defaults or a broad target bag.
         from daem0nmcp.api.v7.pinned import build_pinned_handlers
         from daem0nmcp.api.v7.tools import (
@@ -1033,7 +1038,9 @@ class PinnedHandlerTests(unittest.TestCase):
         self.assertNotIn("policy.txt", validated.model_dump_json())
         self.assertEqual(gate.state_store.status(scope)["active_capabilities"], 0)
 
-    def test_preflight_rejects_reserved_target_fields_before_guidance_or_issue(self) -> None:
+    def test_preflight_rejects_reserved_target_fields_before_guidance_or_issue(
+        self,
+    ) -> None:
         # Catches caller override of workspace/token fields inside the target bag.
         from daem0nmcp.api.v7.errors import ErrorCode
         from daem0nmcp.api.v7.pinned import build_pinned_handlers
@@ -1076,7 +1083,9 @@ class PinnedHandlerTests(unittest.TestCase):
         self.assertEqual(validated.error.code, ErrorCode.INVALID_ARGUMENT)
         self.assertEqual(gate.state_store.status(scope)["active_capabilities"], 0)
 
-    def test_preflight_rejects_target_arguments_that_do_not_match_the_model(self) -> None:
+    def test_preflight_rejects_target_arguments_that_do_not_match_the_model(
+        self,
+    ) -> None:
         # Catches capabilities issued for incomplete or loosely validated mutations.
         from daem0nmcp.api.v7.errors import ErrorCode
         from daem0nmcp.api.v7.pinned import build_pinned_handlers
@@ -1132,9 +1141,7 @@ class PinnedHandlerTests(unittest.TestCase):
                 normalized_arguments,
                 description,
             ):
-                observed.append(
-                    (target_tool, dict(normalized_arguments), description)
-                )
+                observed.append((target_tool, dict(normalized_arguments), description))
                 return PreflightGuidance(
                     records=[],
                     rules=[],
@@ -1223,7 +1230,9 @@ class PinnedHandlerTests(unittest.TestCase):
         encoded = validated.model_dump_json()
         self.assertNotIn(str(workspace.root), encoded)
 
-    def test_recall_passes_a_normalized_task8_query_and_envelopes_the_result(self) -> None:
+    def test_recall_passes_a_normalized_task8_query_and_envelopes_the_result(
+        self,
+    ) -> None:
         # Catches ad-hoc retrieval arguments and bare Task 8 result leakage.
         from daem0nmcp.api.v7.pinned import build_pinned_handlers
         from daem0nmcp.api.v7.tools import MemoryRecallOutput
@@ -1372,7 +1381,161 @@ class PinnedHandlerTests(unittest.TestCase):
         self.assertFalse(validated.ok)
         self.assertEqual(ErrorCode.CAPABILITY_DISABLED, validated.error.code)
 
-    def test_store_consumes_admission_and_passes_only_a_sanitized_event_command(self) -> None:
+    def test_federated_recall_requires_independent_target_briefing(self) -> None:
+        from daem0nmcp.api.v7.models import RetrievalData, TokenUsage
+        from daem0nmcp.api.v7.pinned import build_pinned_handlers
+        from daem0nmcp.api.v7.tools import MemoryRecallOutput
+
+        linked_id = "ws_" + "b" * 24
+        origin = Workspace(WORKSPACE_ID, Path.cwd())
+        linked = Workspace(linked_id, Path.cwd() / "linked")
+        origin_scope = InvocationScope("principal", "session", str(origin.root))
+        linked_scope = InvocationScope("principal", "session", str(linked.root))
+        gate = _gate()
+        gate.record_briefing(origin_scope)
+
+        class FederatedRecall:
+            async def retrieve(
+                self, _workspace, _query, _linked_ids, authorizer
+            ) -> object:
+                await authorizer(linked)
+                return RetrievalData(
+                    abstained=True,
+                    abstention_reason="NO_POLICY_VALID_EVIDENCE",
+                    token_usage=TokenUsage(
+                        budget=256,
+                        requested=0,
+                        selected=0,
+                        rendered=0,
+                        dropped=0,
+                    ),
+                )
+
+        handlers = build_pinned_handlers(
+            _dependencies(
+                gate=gate,
+                scope=origin_scope,
+                workspace=origin,
+                briefing_service=_UnusedService(),
+                recall_service=FederatedRecall(),
+            )
+        )
+        arguments = {
+            "workspace_id": WORKSPACE_ID,
+            "query": "linked decision",
+            "linked_workspace_ids": {linked_id},
+            "token_budget": 256,
+        }
+
+        denied = MemoryRecallOutput.model_validate(
+            asyncio.run(handlers["memory_recall"](**arguments))
+        )
+        self.assertFalse(denied.ok)
+        self.assertEqual("COMMUNION_REQUIRED", denied.error.code.value)
+
+        gate.record_briefing(linked_scope)
+        admitted = MemoryRecallOutput.model_validate(
+            asyncio.run(handlers["memory_recall"](**arguments))
+        )
+        self.assertTrue(admitted.ok)
+
+    def test_durable_federated_recall_restores_identity_and_rechecks_briefing(
+        self,
+    ) -> None:
+        from daem0nmcp.api.v7.models import RetrievalData, TokenUsage
+        from daem0nmcp.api.v7.pinned import build_pinned_handlers
+        from daem0nmcp.api.v7.tasks import (
+            DurableTaskExecution,
+            durable_task_arguments_sha256,
+            durable_task_execution_var,
+        )
+        from daem0nmcp.api.v7.tools import MemoryRecallInput, MemoryRecallOutput
+
+        linked_id = "ws_" + "b" * 24
+        origin = Workspace(WORKSPACE_ID, Path.cwd())
+        linked = Workspace(linked_id, Path.cwd() / "linked")
+        origin_scope = InvocationScope("principal", "session", str(origin.root))
+        linked_scope = InvocationScope("principal", "session", str(linked.root))
+
+        class FederatedRecall:
+            async def retrieve(
+                self, _workspace, _query, _linked_ids, authorizer
+            ) -> object:
+                await authorizer(linked)
+                await authorizer(linked)
+                return RetrievalData(
+                    abstained=True,
+                    abstention_reason="NO_POLICY_VALID_EVIDENCE",
+                    token_usage=TokenUsage(
+                        budget=256,
+                        requested=0,
+                        selected=0,
+                        rendered=0,
+                        dropped=0,
+                    ),
+                )
+
+        arguments = {
+            "workspace_id": WORKSPACE_ID,
+            "query": "durable linked decision",
+            "linked_workspace_ids": {linked_id},
+            "token_budget": 256,
+        }
+        effective = MemoryRecallInput.model_validate(arguments).model_dump(mode="json")
+        execution = DurableTaskExecution(
+            task_id="tsk_" + "1" * 64,
+            tool_name="memory_recall",
+            workspace_id=WORKSPACE_ID,
+            arguments_sha256=durable_task_arguments_sha256(effective),
+            principal_id="principal",
+            transport_session_id="session",
+        )
+
+        def invoke(gate: CovenantGate, current: DurableTaskExecution):
+            handlers = build_pinned_handlers(
+                _dependencies(
+                    gate=gate,
+                    # Durable execution must not borrow ambient request scope.
+                    scope=InvocationScope("ambient", "wrong", str(origin.root)),
+                    workspace=origin,
+                    briefing_service=_UnusedService(),
+                    recall_service=FederatedRecall(),
+                )
+            )
+            token = durable_task_execution_var.set(current)
+            try:
+                return MemoryRecallOutput.model_validate(
+                    asyncio.run(handlers["memory_recall"](**arguments))
+                )
+            finally:
+                durable_task_execution_var.reset(token)
+
+        admitted_gate = _gate()
+        admitted_gate.record_briefing(origin_scope)
+        admitted_gate.record_briefing(linked_scope)
+        self.assertTrue(invoke(admitted_gate, execution).ok)
+
+        lost_access = _gate()
+        lost_access.record_briefing(origin_scope)
+        denied = invoke(lost_access, execution)
+        self.assertFalse(denied.ok)
+        self.assertEqual("COMMUNION_REQUIRED", denied.error.code.value)
+
+        missing_session = DurableTaskExecution(
+            task_id=execution.task_id,
+            tool_name=execution.tool_name,
+            workspace_id=execution.workspace_id,
+            arguments_sha256=execution.arguments_sha256,
+            principal_id=execution.principal_id,
+            transport_session_id=None,
+        )
+        renewed = invoke(admitted_gate, missing_session)
+        self.assertFalse(renewed.ok)
+        self.assertEqual("COMMUNION_REQUIRED", renewed.error.code.value)
+
+    def test_store_consumes_admission_and_passes_only_a_sanitized_event_command(
+        self,
+    ) -> None:
         # Catches token forwarding and mutation responses detached from Task 7 events.
         from daem0nmcp.api.v7 import pinned
         from daem0nmcp.api.v7.tools import MemoryStoreInput, MemoryStoreOutput
@@ -1413,9 +1576,7 @@ class PinnedHandlerTests(unittest.TestCase):
         request = MemoryStoreInput(**target, preflight_token=token)
 
         try:
-            response = asyncio.run(
-                handlers["memory_store"](**request.model_dump())
-            )
+            response = asyncio.run(handlers["memory_store"](**request.model_dump()))
         except NotImplementedError:
             response = None
 
@@ -1427,7 +1588,9 @@ class PinnedHandlerTests(unittest.TestCase):
         self.assertEqual(validated.data.stream_version, 1)
         self.assertFalse(validated.data.idempotent_replay)
 
-    def test_store_argument_mismatch_is_rejected_before_writer_with_safe_remedy(self) -> None:
+    def test_store_argument_mismatch_is_rejected_before_writer_with_safe_remedy(
+        self,
+    ) -> None:
         # Catches post-preflight mutation and accidental capability forwarding.
         from daem0nmcp.api.v7.errors import ErrorCode
         from daem0nmcp.api.v7.pinned import build_pinned_handlers
@@ -1459,9 +1622,7 @@ class PinnedHandlerTests(unittest.TestCase):
         )
 
         try:
-            response = asyncio.run(
-                handlers["memory_store"](**request.model_dump())
-            )
+            response = asyncio.run(handlers["memory_store"](**request.model_dump()))
         except AssertionError:
             response = None
 
@@ -1641,7 +1802,9 @@ class PinnedHandlerTests(unittest.TestCase):
         self.assertFalse(validated.ok)
         self.assertEqual(ErrorCode.NOT_FOUND, validated.error.code)
 
-    def test_system_health_returns_a_typed_path_free_envelope_without_workspace(self) -> None:
+    def test_system_health_returns_a_typed_path_free_envelope_without_workspace(
+        self,
+    ) -> None:
         # Catches health implementations that expose roots or require storage access.
         from daem0nmcp.api.v7.pinned import build_pinned_handlers
         from daem0nmcp.api.v7.tools import SystemHealthOutput
@@ -1677,6 +1840,41 @@ class PinnedHandlerTests(unittest.TestCase):
         encoded = validated.model_dump_json()
         self.assertNotIn(str(workspace.root), encoded)
         self.assertNotIn("project_path", encoded)
+
+    def test_health_revocation_during_inspection_discards_all_data(self) -> None:
+        from daem0nmcp.api.v7.pinned import build_pinned_handlers
+        from daem0nmcp.api.v7.tools import SystemHealthOutput
+
+        allowed = [True]
+        gate = _gate()
+        workspace = Workspace(WORKSPACE_ID, Path.cwd())
+        scope = InvocationScope(
+            "principal", "session", os.path.normcase(str(workspace.root))
+        )
+
+        class RevokingHealth(_HealthService):
+            async def inspect(self, workspace, include_components):
+                result = await super().inspect(None, False)
+                allowed[0] = False
+                return result
+
+        with patch.object(
+            gate, "workspace_authorized", side_effect=lambda _: allowed[0]
+        ):
+            handlers = build_pinned_handlers(
+                _dependencies(
+                    gate=gate,
+                    scope=scope,
+                    workspace=workspace,
+                    briefing_service=_UnusedService(),
+                    health_service=RevokingHealth(),
+                )
+            )
+            response = asyncio.run(handlers["system_health"](workspace_id=WORKSPACE_ID))
+        validated = SystemHealthOutput.model_validate(response)
+        self.assertFalse(validated.ok)
+        self.assertEqual(validated.error.code, "UNAUTHORIZED_WORKSPACE")
+        self.assertIsNone(validated.data)
 
     def test_success_output_with_a_raw_path_fails_closed(self) -> None:
         # Catches valid-looking model text that reintroduces canonical paths.

@@ -34,7 +34,6 @@ from .types import (
     RetrievalQuery,
 )
 
-
 _HASH = re.compile(r"^[0-9a-f]{64}$")
 _TOKEN = re.compile(r"[^\W_]+", re.UNICODE)
 _MAX_TERMS = 64
@@ -88,6 +87,8 @@ _OUTCOME_INTENT_TERMS = frozenset(
         "worked",
     }
 )
+
+
 @dataclass(frozen=True, slots=True)
 class _ProjectionSnapshot:
     generation: int
@@ -104,9 +105,7 @@ def _positive_timeout(value: object) -> float:
     try:
         timeout = float(value)
     except OverflowError as exc:
-        raise ValueError(
-            "timeout_seconds must be a positive finite number"
-        ) from exc
+        raise ValueError("timeout_seconds must be a positive finite number") from exc
     if not math.isfinite(timeout) or timeout <= 0 or timeout > 60:
         raise ValueError("timeout_seconds must be a positive finite number")
     return timeout
@@ -129,9 +128,7 @@ def _bounded_positive_integer(
         or value < 1
         or value > maximum
     ):
-        raise ValueError(
-            f"{field_name} must be between 1 and {maximum}"
-        )
+        raise ValueError(f"{field_name} must be between 1 and {maximum}")
     return value
 
 
@@ -150,9 +147,7 @@ def _sqlite_read_factory(
     database_row = connection.execute("PRAGMA database_list").fetchone()
     database_path = "" if database_row is None else str(database_row[2])
     if not database_path:
-        raise ValueError(
-            "in-memory SQLite requires a worker-local connection_factory"
-        )
+        raise ValueError("in-memory SQLite requires a worker-local connection_factory")
 
     def open_connection() -> sqlite3.Connection:
         return sqlite3.connect(database_path, timeout=5.0)
@@ -174,10 +169,7 @@ def _datetime_us(value: datetime) -> int:
     if value is None:
         raise ValueError("datetime is required")
     delta = value.astimezone(timezone.utc) - _EPOCH
-    return (
-        (delta.days * 86_400 + delta.seconds) * 1_000_000
-        + delta.microseconds
-    )
+    return (delta.days * 86_400 + delta.seconds) * 1_000_000 + delta.microseconds
 
 
 def _transaction_datetime(value: object) -> datetime | None:
@@ -191,11 +183,7 @@ def _query_terms(text: str) -> tuple[str, ...]:
     unique: list[str] = []
     seen: set[str] = set()
     for term in _TOKEN.findall(text.casefold()):
-        if (
-            term in _STOP_WORDS
-            or len(term) > _MAX_TERM_CHARS
-            or term in seen
-        ):
+        if term in _STOP_WORDS or len(term) > _MAX_TERM_CHARS or term in seen:
             continue
         seen.add(term)
         unique.append(term)
@@ -216,13 +204,9 @@ class _SQLiteProjectionProvider:
         worker_pool: BoundedWorkerPool | None = None,
         clock_us: Callable[[], int] | None = None,
     ) -> None:
-        self._connection_factory = _sqlite_read_factory(
-            connection, connection_factory
-        )
+        self._connection_factory = _sqlite_read_factory(connection, connection_factory)
         self._timeout_seconds = _positive_timeout(timeout_seconds)
-        if worker_pool is not None and not isinstance(
-            worker_pool, BoundedWorkerPool
-        ):
+        if worker_pool is not None and not isinstance(worker_pool, BoundedWorkerPool):
             raise ValueError("worker_pool must be a BoundedWorkerPool")
         if clock_us is not None and not callable(clock_us):
             raise ValueError("clock_us must be callable")
@@ -260,9 +244,7 @@ class _SQLiteProjectionProvider:
         try:
             return await asyncio.wait_for(
                 self._worker_pool.run(
-                    lambda: self._search_sync(
-                        query, bounded_limit, started, *extra
-                    )
+                    lambda: self._search_sync(query, bounded_limit, started, *extra)
                 ),
                 timeout=self._timeout_seconds,
             )
@@ -295,9 +277,7 @@ class _SQLiteProjectionProvider:
         connection = _open_read_connection(self._connection_factory)
         try:
             connection.execute("BEGIN")
-            snapshot, reason = self._active_snapshot(
-                connection, query.workspace_id
-            )
+            snapshot, reason = self._active_snapshot(connection, query.workspace_id)
             if snapshot is None:
                 return self._result(
                     started,
@@ -366,15 +346,12 @@ class _SQLiteProjectionProvider:
             "rebuild_required_at_us",
             "rebuild_required_event_id",
         }
-        if (
-            not specialized_manifest_matches_contract(
-                named_details,
-                workspace_id,
-                self.name,
-                named[0],
-            )
-            or rebuild_markers.intersection(lexical_details)
-        ):
+        if not specialized_manifest_matches_contract(
+            named_details,
+            workspace_id,
+            self.name,
+            named[0],
+        ) or rebuild_markers.intersection(lexical_details):
             return None, f"{self.name.upper()}_STALE"
         try:
             if self.name == "procedure":
@@ -391,8 +368,7 @@ class _SQLiteProjectionProvider:
                 ).fetchone()
             elif self.name == "temporal":
                 count_row = connection.execute(
-                    "SELECT count(*) FROM memory_fact_versions "
-                    "WHERE workspace_id=?",
+                    "SELECT count(*) FROM memory_fact_versions WHERE workspace_id=?",
                     (workspace_id,),
                 ).fetchone()
             elif self.name == "graph":
@@ -494,8 +470,7 @@ class TemporalProvider(_SQLiteProjectionProvider):
             text_filter = (
                 " AND ("
                 + " OR ".join(
-                    "instr(lower(fact.predicate || ' ' || "
-                    "fact.object_json), ?) > 0"
+                    "instr(lower(fact.predicate || ' ' || fact.object_json), ?) > 0"
                     for _term in terms
                 )
                 + ")"
@@ -564,9 +539,7 @@ class TemporalProvider(_SQLiteProjectionProvider):
         candidates: list[Candidate] = []
         for row in rows:
             version_id = str(row[0])
-            invalidated = (
-                row[4] is not None and int(row[4]) <= valid_at
-            ) or (
+            invalidated = (row[4] is not None and int(row[4]) <= valid_at) or (
                 row[6] is not None and int(row[6]) <= transaction_at
             )
             if invalidated:
@@ -622,9 +595,7 @@ class ProcedureProvider(_SQLiteProjectionProvider):
         terms = _query_terms(query.text)
         if not terms:
             return self._result(started, generation=snapshot.generation)
-        fts_table = procedure_fts_table_name(
-            query.workspace_id, snapshot.generation
-        )
+        fts_table = procedure_fts_table_name(query.workspace_id, snapshot.generation)
         if (
             snapshot.details.get("fts_table") != fts_table
             or snapshot.details.get("build_config_hash")
@@ -756,9 +727,7 @@ class ProcedureProvider(_SQLiteProjectionProvider):
             or "using fts5" not in definition[0].casefold()
         ):
             return False
-        total = connection.execute(
-            f'SELECT count(*) FROM "{fts_table}"'
-        ).fetchone()
+        total = connection.execute(f'SELECT count(*) FROM "{fts_table}"').fetchone()
         if total is None or total[0] != snapshot.row_count:
             return False
         matched = connection.execute(
@@ -811,8 +780,7 @@ class OutcomeProvider(_SQLiteProjectionProvider):
         )
         score_sql = (
             " + ".join(
-                "CASE WHEN instr(lower(outcome.outcome_text), ?) > 0 "
-                "THEN 1 ELSE 0 END"
+                "CASE WHEN instr(lower(outcome.outcome_text), ?) > 0 THEN 1 ELSE 0 END"
                 for _term in terms
             )
             if terms
@@ -823,8 +791,7 @@ class OutcomeProvider(_SQLiteProjectionProvider):
             text_filter = (
                 " AND (outcome.worked=0 OR "
                 + " OR ".join(
-                    "instr(lower(outcome.outcome_text), ?) > 0"
-                    for _term in terms
+                    "instr(lower(outcome.outcome_text), ?) > 0" for _term in terms
                 )
                 + ")"
             )

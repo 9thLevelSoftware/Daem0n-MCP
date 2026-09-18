@@ -247,6 +247,7 @@ function renderApp(appId, payload, options = {}) {
   context.addEventListener = () => {};
   const messenger = {
     on(name, handler) { handlers.set(name, handler); },
+    request(method, value) { sent.push({ method, value }); return Promise.resolve({ structuredContent: { ok: false } }); },
   };
   if (options.messengerMode === "notify") messenger.notify = (method, value) => { sent.push({ method, value }); };
   else messenger.send = (method, value) => { sent.push({ method, value }); };
@@ -257,6 +258,12 @@ function renderApp(appId, payload, options = {}) {
     observe() {}
   };
   ui.bootstrap();
+  if (options.workspaceId) {
+    handlers.get("ui/notifications/tool-input")?.({
+      toolName: options.initialTool || { search: "memory_recall", covenant: "covenant_status" }[appId],
+      arguments: { workspace_id: options.workspaceId, ...(options.initialArgs || {}) },
+    });
+  }
   return { animationFrames, cancelledFrames, document, handlers, idle, resizeCallbacks, sent, trace };
 }
 
@@ -281,8 +288,8 @@ test("search normalizer clamps numeric values and rejects boolean IDs", () => {
   assert.equal(result.decisions[0].id, null);
   assert.equal(result.decisions[0].relevance, 0.95);
   assert.equal(result.decisions[0].semantic_match, 0);
-  assert.equal(result.decisions[0].recency_weight, 1);
-  assert.equal(result.limit, 100);
+  assert.equal(result.decisions[0].recency_weight, null, "an unavailable weight is not fabricated");
+  assert.equal(result.limit, undefined, "server pagination options do not enter the view model");
 });
 
 test("briefing and covenant normalizers use neutral enum fallbacks", () => {
@@ -327,18 +334,15 @@ test("graph normalizer separates integer and string IDs and drops missing endpoi
 
 test("fixed actions never derive tool or message names from input", () => {
   assert.deepEqual(JSON.parse(JSON.stringify(ui.actions)), {
-    recordOutcome: { method: "tool_request", tool: "record_outcome" },
-    briefingFocus: { method: "tool_request", tool: "recall" },
-    contextCheck: { method: "tool_request", tool: "context_check" },
-    listCommunities: { method: "tool_request", tool: "list_communities" },
-    graphFocus: { method: "tool_request", tool: "get_graph" },
-    refresh: { method: "tool_request", tool: "refresh_ui" },
-    pagination: { method: "pagination" },
+    briefingFocus: { tool: "memory_recall" },
+    contextCheck: { tool: "covenant_status" },
+    listCommunities: { tool: "community_list" },
+    graphFocus: { tool: "knowledge_graph_get" },
   });
 });
 
 test("data_updated exposes only a fixed refresh indicator and refresh clears it", () => {
-  const rendered = renderApp("search", {});
+  const rendered = renderApp("search", {}, { workspaceId: "ws_1", initialArgs: { query: "q" } });
   const indicator = findByClass(rendered.document.mount, "daemon-update-badge");
   assert.ok(indicator);
   assert.equal(indicator.hidden, true);
@@ -349,34 +353,30 @@ test("data_updated exposes only a fixed refresh indicator and refresh clears it"
   assert.equal(findByText(rendered.document.mount, marker), null);
   findByText(rendered.document.mount, "Refresh").dispatch("click");
   assert.equal(indicator.hidden, true);
-  assert.deepEqual(JSON.parse(JSON.stringify(rendered.sent)), [{ method: "tool_request", value: { tool: "refresh_ui" } }]);
+  assert.deepEqual(JSON.parse(JSON.stringify(rendered.sent)), [{ method: "tools/call", value: { name: "memory_recall", arguments: { workspace_id: "ws_1", query: "q" } } }]);
 });
 
-test("covenant refresh emits the exact fixed context-check request", () => {
-  const rendered = renderApp("covenant", { preflight: { remaining_seconds: 0 } });
+test("covenant refresh emits the exact read-only status request", () => {
+  const rendered = renderApp("covenant", { preflight: { remaining_seconds: 0 } }, { workspaceId: "ws_1" });
   const refresh = findByText(rendered.document.mount, "Refresh Token");
   assert.ok(refresh);
   refresh.dispatch("click");
-  assert.deepEqual(JSON.parse(JSON.stringify(rendered.sent)), [{
-    method: "tool_request",
-    value: {
-      tool: "context_check",
-      args: { description: "Refreshing token from Covenant Status dashboard" },
-    },
-  }]);
+  assert.deepEqual(JSON.parse(JSON.stringify(rendered.sent)), [{ method: "tools/call", value: { name: "covenant_status", arguments: { workspace_id: "ws_1" } } }]);
 });
 
-test("search next-page action clamps the offset to a safe integer", () => {
+test("search pagination traverses delivered results without unsupported MCP arguments", () => {
   const rendered = renderApp("search", {
-    has_more: true,
-    limit: 100,
-    offset: Number.MAX_SAFE_INTEGER - 1,
-  });
+    decisions: Array.from({ length: 21 }, (_, index) => ({ id: index + 1, content: "Decision " + index })),
+  }, { workspaceId: "ws_1", initialArgs: { query: "q" } });
+  assert.ok(findByText(rendered.document.mount, "Decision 0"));
+  assert.equal(findByText(rendered.document.mount, "Decision 10"), null);
   findByText(rendered.document.mount, "Next").dispatch("click");
-  assert.deepEqual(JSON.parse(JSON.stringify(rendered.sent.at(-1))), {
-    method: "pagination",
-    value: { offset: Number.MAX_SAFE_INTEGER, limit: 100 },
-  });
+  assert.ok(findByText(rendered.document.mount, "Decision 10"));
+  assert.equal(findByText(rendered.document.mount, "Decision 0"), null);
+  findByText(rendered.document.mount, "Next").dispatch("click");
+  assert.ok(findByText(rendered.document.mount, "Decision 20"));
+  assert.equal(findByText(rendered.document.mount, "Next").disabled, true);
+  assert.equal(rendered.sent.length, 0);
 });
 
 test("graph resizes its backing store, scales clicks, bounds pan, and resets view", () => {

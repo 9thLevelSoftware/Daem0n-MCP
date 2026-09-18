@@ -19,7 +19,6 @@ from types import MappingProxyType
 
 from ...event_store import sha256_json
 
-
 _MAX_SIGNED_INTEGER = 2**63 - 1
 _MAX_SOURCE_KEY_CHARS = 512
 _WORKSPACE_ID_RE = re.compile(r"^ws_[0-9a-f]{24}$")
@@ -72,13 +71,13 @@ class PublicObjectIdError(RuntimeError):
         super().__init__(self.code)
 
 
-class PublicObjectIdNotFound(PublicObjectIdError):
+class PublicObjectIdNotFound(PublicObjectIdError):  # noqa: N818 -- retained public Python API name
     """Invariant lookup failure that does not reveal another workspace."""
 
     code = "NOT_FOUND"
 
 
-class StaleProjectionId(PublicObjectIdError):
+class StaleProjectionId(PublicObjectIdError):  # noqa: N818 -- retained public Python API name
     """The identifier belongs to a superseded projection generation."""
 
     code = "STALE_PROJECTION_ID"
@@ -101,7 +100,10 @@ class ResolvedPublicObjectId:
 
 
 def _normalize_workspace_id(workspace_id: str) -> str:
-    if not isinstance(workspace_id, str) or _WORKSPACE_ID_RE.fullmatch(workspace_id) is None:
+    if (
+        not isinstance(workspace_id, str)
+        or _WORKSPACE_ID_RE.fullmatch(workspace_id) is None
+    ):
         raise ValueError("workspace_id must be an opaque v7 workspace identifier")
     return workspace_id
 
@@ -143,7 +145,9 @@ def _normalize_source_key(source_key: SourceKey) -> tuple[SourceKey, str]:
 def _stored_generation(kind: str, projection_generation: int | None) -> int:
     if kind in STABLE_PUBLIC_OBJECT_KINDS:
         if projection_generation is not None:
-            raise ValueError("stable object kinds do not accept a projection generation")
+            raise ValueError(
+                "stable object kinds do not accept a projection generation"
+            )
         return 0
     if (
         isinstance(projection_generation, bool)
@@ -178,9 +182,10 @@ def _default_id_factory(
 
 def _validate_public_id(public_id: str, kind: str) -> str:
     prefix = PUBLIC_OBJECT_PREFIXES[kind]
-    if not isinstance(public_id, str) or re.fullmatch(
-        rf"{re.escape(prefix)}_[0-9a-f]{{64}}", public_id
-    ) is None:
+    if (
+        not isinstance(public_id, str)
+        or re.fullmatch(rf"{re.escape(prefix)}_[0-9a-f]{{64}}", public_id) is None
+    ):
         raise ValueError(f"public_id must use the canonical {prefix}_ prefix")
     return public_id
 
@@ -328,7 +333,9 @@ class PublicObjectIdRepository:
             or created_at_us < 0
             or created_at_us > _MAX_SIGNED_INTEGER
         ):
-            raise ValueError("clock_us must return a non-negative signed 64-bit integer")
+            raise ValueError(
+                "clock_us must return a non-negative signed 64-bit integer"
+            )
         try:
             self._connection.execute(
                 "INSERT INTO public_object_ids "

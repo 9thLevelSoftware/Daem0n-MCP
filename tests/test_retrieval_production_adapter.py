@@ -14,16 +14,11 @@ from benchmarks.retrieval_benchmark import (
     load_retrieval_fixtures,
 )
 
-
 FIXTURE_ROOT = Path(__file__).parent / "fixtures" / "retrieval"
 
 
 def _quality(result: dict[str, object]) -> dict[str, object]:
-    return {
-        key: value
-        for key, value in result.items()
-        if key != "provider_timings_ns"
-    }
+    return {key: value for key, value in result.items() if key != "provider_timings_ns"}
 
 
 class ProductionRetrievalAdapterTests(unittest.TestCase):
@@ -78,9 +73,7 @@ class ProductionRetrievalAdapterTests(unittest.TestCase):
         baseline = _quality(self.adapter.retrieve("fully_enabled", query))
         query["expected_relevant"] = []
         query["required_citations"] = []
-        query["expected_excluded_citations"] = [
-            self.fixtures.records[-1]["record_id"]
-        ]
+        query["expected_excluded_citations"] = [self.fixtures.records[-1]["record_id"]]
         query["expected_abstention"] = True
         query["expected_provider_degradation"] = {
             "fully_enabled": ["lexical"],
@@ -142,9 +135,7 @@ class ProductionRetrievalAdapterTests(unittest.TestCase):
 
     def test_adapter_source_never_reads_fixture_answer_fields(self):
         source = (
-            Path(__file__).parents[1]
-            / "benchmarks"
-            / "retrieval_production_adapter.py"
+            Path(__file__).parents[1] / "benchmarks" / "retrieval_production_adapter.py"
         ).read_text(encoding="utf-8")
 
         for forbidden in (

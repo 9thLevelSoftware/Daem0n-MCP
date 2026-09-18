@@ -1055,9 +1055,7 @@ async def _get_linked_projects_summary(ctx: ProjectContext) -> list[dict[str, An
         except ImportError:
             from daem0nmcp.workspace import resolve_derived_path
 
-        linked_storage = resolve_derived_path(
-            linked_path, ".daem0nmcp", "storage"
-        )
+        linked_storage = resolve_derived_path(linked_path, ".daem0nmcp", "storage")
 
         summary = {
             "path": linked_path,
@@ -1334,15 +1332,10 @@ async def get_covenant_status(project_path: str | None = None) -> dict[str, Any]
     Returns:
         Dict with phase info, token status, and message
     """
-    try:
-        from ..covenant import COUNSEL_TTL_SECONDS
-    except ImportError:
-        from daem0nmcp.covenant import COUNSEL_TTL_SECONDS
-
     if not project_path and not _default_project_path:
         return _missing_project_path_error()
 
-    ctx = await get_project_context(project_path)
+    await get_project_context(project_path)
 
     scoped_state = current_covenant_status()
 
@@ -1439,8 +1432,7 @@ async def get_covenant_status_visual(
     text = format_covenant_status_text(result)
 
     ui_resource = (
-        build_compat_ui_uri("covenant", result)
-        or APP_SPECS["covenant"].resource_uri
+        build_compat_ui_uri("covenant", result) or APP_SPECS["covenant"].resource_uri
     )
 
     return format_with_ui_hint(data=result, ui_resource=ui_resource, text=text)

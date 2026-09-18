@@ -194,7 +194,8 @@ async def test_mcp_get_memory_versions_tool(covenant_compliant_project):
     # Get versions via MCP tool
     versions = await covenant_compliant_project.call(
         server.get_memory_versions,
-        memory_id=memory_id, project_path=covenant_compliant_project
+        memory_id=memory_id,
+        project_path=covenant_compliant_project,
     )
 
     assert "versions" in versions
@@ -218,7 +219,8 @@ async def test_mcp_get_memory_at_time_tool(covenant_compliant_project):
     # Get the creation time from versions
     versions = await covenant_compliant_project.call(
         server.get_memory_versions,
-        memory_id=memory_id, project_path=covenant_compliant_project
+        memory_id=memory_id,
+        project_path=covenant_compliant_project,
     )
     creation_time = versions["versions"][0]["changed_at"]
 

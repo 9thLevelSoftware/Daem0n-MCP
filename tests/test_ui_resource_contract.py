@@ -23,7 +23,8 @@ class _FakeMCP:
 
 class UIResourceContractTests(unittest.TestCase):
     def setUp(self):
-        from daem0nmcp.ui import rendering, resources as ui_resources
+        from daem0nmcp.ui import rendering
+        from daem0nmcp.ui import resources as ui_resources
 
         self.rendering = rendering
         self.ui_resources = ui_resources
@@ -31,9 +32,16 @@ class UIResourceContractTests(unittest.TestCase):
     def test_registers_six_base_resources_and_five_compat_templates(self):
         mcp = _FakeMCP()
         self.ui_resources.register_ui_resources(mcp)
-        by_uri = {metadata["uri"]: (metadata, handler) for metadata, handler in mcp.registrations}
+        by_uri = {
+            metadata["uri"]: (metadata, handler)
+            for metadata, handler in mcp.registrations
+        }
         expected = {f"ui://daem0n/{app_id}" for app_id in self.rendering.APP_SPECS}
-        expected |= {f"ui://daem0n/{app_id}/{{data}}" for app_id in self.rendering.APP_SPECS if app_id != "test"}
+        expected |= {
+            f"ui://daem0n/{app_id}/{{data}}"
+            for app_id in self.rendering.APP_SPECS
+            if app_id != "test"
+        }
         self.assertEqual(set(by_uri), expected)
         for uri, (metadata, handler) in by_uri.items():
             self.assertEqual(metadata["mime_type"], self.rendering.MCP_APPS_MIME)
@@ -98,9 +106,7 @@ class UIResourceContractTests(unittest.TestCase):
                 "graph",
                 lambda value: {
                     "nodes": [{"id": 1}, {"id": 2}],
-                    "edges": [
-                        {"source": 1, "target": 2, "relationship": value}
-                    ],
+                    "edges": [{"source": 1, "target": 2, "relationship": value}],
                 },
                 ("edges", 0, "relationship"),
                 "relates_to",
@@ -111,7 +117,9 @@ class UIResourceContractTests(unittest.TestCase):
         for path_name, app_id, payload_for, result_path, expected in cases:
             handler = self.ui_resources._compat_handler(app_id)
             for hostile_value in hostile_values:
-                with self.subTest(path=path_name, value_type=type(hostile_value).__name__):
+                with self.subTest(
+                    path=path_name, value_type=type(hostile_value).__name__
+                ):
                     document = handler(json.dumps(payload_for(hostile_value)))
                     match = re.search(
                         r'<script id="app-data" type="application/json">(.*?)</script>',
@@ -127,7 +135,9 @@ class UIResourceContractTests(unittest.TestCase):
 
     def test_parser_accepts_one_decoded_object_and_rejects_malformed_inputs(self):
         good = '{"topic":"café / path\\\\name"}'
-        self.assertEqual(self.rendering.parse_compat_payload(good), {"topic": "café / path\\name"})
+        self.assertEqual(
+            self.rendering.parse_compat_payload(good), {"topic": "café / path\\name"}
+        )
         bad = (
             "",
             "{",
@@ -138,12 +148,17 @@ class UIResourceContractTests(unittest.TestCase):
             '{"a":Infinity}',
             '{"a":1e309}',
             '{"topic":"\\ud800"}',
-            '%7B%22topic%22%3A%22double%22%7D',
+            "%7B%22topic%22%3A%22double%22%7D",
         )
         for value in bad:
-            with self.subTest(value=value):
-                with self.assertRaisesRegex(self.rendering.UIResourcePayloadError, "^invalid UI resource payload$"):
-                    self.rendering.parse_compat_payload(value)
+            with (
+                self.subTest(value=value),
+                self.assertRaisesRegex(
+                    self.rendering.UIResourcePayloadError,
+                    "^invalid UI resource payload$",
+                ),
+            ):
+                self.rendering.parse_compat_payload(value)
 
     def test_parser_enforces_depth_members_and_decoded_utf8_limits(self):
         depth_seventeen = "{}"
@@ -152,9 +167,14 @@ class UIResourceContractTests(unittest.TestCase):
         too_many_members = json.dumps({"items": [0] * 10_001}, separators=(",", ":"))
         too_many_bytes = '{"x":"' + ("x" * 65_530) + '"}'
         for value in (depth_seventeen, too_many_members, too_many_bytes):
-            with self.subTest(size=len(value)):
-                with self.assertRaisesRegex(self.rendering.UIResourcePayloadError, "^invalid UI resource payload$"):
-                    self.rendering.parse_compat_payload(value)
+            with (
+                self.subTest(size=len(value)),
+                self.assertRaisesRegex(
+                    self.rendering.UIResourcePayloadError,
+                    "^invalid UI resource payload$",
+                ),
+            ):
+                self.rendering.parse_compat_payload(value)
 
     def test_builder_normalizes_then_percent_encodes_one_uri_segment(self):
         data = {"topic": 'café / "quoted" \\ path', "token": "secret"}
@@ -166,13 +186,19 @@ class UIResourceContractTests(unittest.TestCase):
         decoded = unquote(encoded)
         self.assertEqual(json.loads(decoded)["topic"], data["topic"])
         self.assertNotIn("token", decoded)
-        self.assertEqual(self.rendering.parse_compat_payload(decoded)["topic"], data["topic"])
+        self.assertEqual(
+            self.rendering.parse_compat_payload(decoded)["topic"], data["topic"]
+        )
 
     def test_builder_returns_none_for_payload_or_uri_limit(self):
-        huge = {"nodes": [{"id": index + 1, "content": "x" * 1000} for index in range(100)]}
+        huge = {
+            "nodes": [{"id": index + 1, "content": "x" * 1000} for index in range(100)]
+        }
         self.assertIsNone(self.rendering.build_compat_ui_uri("graph", huge))
         with patch.object(self.rendering, "MAX_COMPAT_URI_CHARS", 20):
-            self.assertIsNone(self.rendering.build_compat_ui_uri("search", {"topic": "small"}))
+            self.assertIsNone(
+                self.rendering.build_compat_ui_uri("search", {"topic": "small"})
+            )
         self.assertIsNone(self.rendering.build_compat_ui_uri("unknown", {}))
 
     def test_all_declared_assets_are_package_readable_and_nonempty(self):
@@ -205,15 +231,21 @@ class UIResourceContractTests(unittest.TestCase):
 
         self.rendering._load_package_text.cache_clear()
         try:
-            with patch.object(self.rendering.resources, "files", return_value=FakeRoot()):
-                with self.assertRaisesRegex(RuntimeError, "required UI asset is unsafe"):
-                    self.rendering._load_package_text("static", "runtime.js")
+            with (
+                patch.object(
+                    self.rendering.resources, "files", return_value=FakeRoot()
+                ),
+                self.assertRaisesRegex(RuntimeError, "required UI asset is unsafe"),
+            ):
+                self.rendering._load_package_text("static", "runtime.js")
         finally:
             self.rendering._load_package_text.cache_clear()
 
     def test_only_the_single_secure_html_shell_remains(self):
         template_root = resources.files("daem0nmcp.ui").joinpath("templates")
-        names = sorted(item.name for item in template_root.iterdir() if item.name.endswith(".html"))
+        names = sorted(
+            item.name for item in template_root.iterdir() if item.name.endswith(".html")
+        )
         self.assertEqual(names, ["app.html"])
 
     def test_environment_can_enable_text_only_mode(self):
@@ -232,9 +264,13 @@ class UIResourceContractTests(unittest.TestCase):
             "ui_resource": "ui://daem0n/stale",
         }
         with patch.object(fallback.settings, "ui_rendering_enabled", True):
-            visual = fallback.format_with_ui_hint(data, "ui://daem0n/briefing", "exact text")
+            visual = fallback.format_with_ui_hint(
+                data, "ui://daem0n/briefing", "exact text"
+            )
         with patch.object(fallback.settings, "ui_rendering_enabled", False):
-            text_only = fallback.format_with_ui_hint(data, "ui://daem0n/briefing", "exact text")
+            text_only = fallback.format_with_ui_hint(
+                data, "ui://daem0n/briefing", "exact text"
+            )
         self.assertEqual(visual["text"], text_only["text"])
         self.assertEqual(
             text_only,

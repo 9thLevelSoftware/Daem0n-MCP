@@ -5,7 +5,6 @@ from __future__ import annotations
 import unittest
 from datetime import datetime, timedelta, timezone
 
-
 WORKSPACE_ID = "ws_0123456789abcdef01234567"
 OTHER_WORKSPACE_ID = "ws_76543210fedcba9876543210"
 DEFAULT_HASH = "c" * 64
@@ -78,10 +77,7 @@ def _record(
         "superseded_by_version_id": None,
         "has_unresolved_contradiction": False,
         "projection_content_hashes": tuple(
-            sorted(
-                (channel, projected_hash or content_hash)
-                for channel in channels
-            )
+            sorted((channel, projected_hash or content_hash) for channel in channels)
         ),
         "active_manifest_generations": tuple(
             sorted((channel, generation) for channel in channels)
@@ -269,9 +265,7 @@ class BitemporalAndContradictionPolicyTests(unittest.TestCase):
         self.assertEqual("NOT_YET_VALID", future_start.rejections[0].reason)
         self.assertFalse(future_end.abstained)
         self.assertEqual("INVALIDATED_VERSION", exact_end.rejections[0].reason)
-        self.assertEqual(
-            "NOT_YET_RECORDED", future_transaction.rejections[0].reason
-        )
+        self.assertEqual("NOT_YET_RECORDED", future_transaction.rejections[0].reason)
 
     def test_not_yet_valid_and_not_yet_recorded_are_excluded(self):
         not_valid = _apply_policy(
@@ -313,9 +307,7 @@ class BitemporalAndContradictionPolicyTests(unittest.TestCase):
             (_fused("4"),),
             (self._temporal_record(superseded_by_version_id=None),),
         )
-        self.assertEqual(
-            "INVALIDATION_PROVENANCE_MISSING", result.rejections[0].reason
-        )
+        self.assertEqual("INVALIDATION_PROVENANCE_MISSING", result.rejections[0].reason)
 
     def test_supersession_without_timing_never_leaks_through_an_as_of_query(self):
         result = _apply_policy(
@@ -415,9 +407,7 @@ class ManifestAndDeduplicationPolicyTests(unittest.TestCase):
         retained = result.candidates[0]
         self.assertEqual(_record_id("7"), retained.record_id)
         self.assertEqual(0.9, retained.score)
-        self.assertEqual(
-            frozenset({"lexical", "dense", "graph"}), retained.channels
-        )
+        self.assertEqual(frozenset({"lexical", "dense", "graph"}), retained.channels)
         self.assertEqual(
             {_record_id("7"), _record_id("8")},
             {evidence.record_id for evidence in retained.evidence_refs},

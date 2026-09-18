@@ -341,7 +341,9 @@ def main():
     )
     migration_action = migrate_v7_parser.add_mutually_exclusive_group()
     migration_action.add_argument(
-        "--apply", action="store_true", help="Apply or resume the offline migration"
+        "--apply",
+        action="store_true",
+        help="Apply or resume an offline format or schema upgrade",
     )
     migration_action.add_argument(
         "--rollback",
@@ -351,7 +353,22 @@ def main():
         help="Roll back the active migration run (default: latest)",
     )
     migrate_v7_parser.add_argument(
-        "--batch-size", type=_v7_batch_size, default=500, help="Rows per checkpoint batch"
+        "--batch-size",
+        type=_v7_batch_size,
+        default=500,
+        help="Rows per checkpoint batch",
+    )
+
+    verify_v7_parser = subparsers.add_parser(
+        "verify-v7", help="Verify all format-7 authority and projection state"
+    )
+    verify_v7_parser.add_argument(
+        "--workspace-id", required=True, help="Registered opaque workspace ID"
+    )
+    verify_v7_parser.add_argument(
+        "--repair-projections",
+        action="store_true",
+        help="Offline replay, validate, and atomically activate repaired projections",
     )
 
     projection_status_parser = subparsers.add_parser(
@@ -374,6 +391,20 @@ def main():
     )
     rebuild_projection_parser.add_argument(
         "--dry-run", action="store_true", help="Report changes without writing"
+    )
+
+    recover_consolidation_parser = subparsers.add_parser(
+        "recover-consolidation",
+        help="Resume committed workspace consolidation archive events",
+    )
+    recover_consolidation_parser.add_argument(
+        "--project-path",
+        dest="consolidation_project_path",
+        required=True,
+        help="Target workspace project root",
+    )
+    recover_consolidation_parser.add_argument(
+        "--run-id", help="Recover one consolidation run (default: all pending runs)"
     )
 
     # pre-commit command
@@ -456,6 +487,11 @@ def main():
         action="store_true",
         help="Overwrite existing configuration files",
     )
+    install_oc_parser.add_argument(
+        "--interface",
+        choices=("v1", "v2"),
+        help="OpenCode plugin interface (native edit hooks require v1)",
+    )
 
     # watch command
     watch_parser = subparsers.add_parser("watch", help="Start file watcher daemon")
@@ -525,10 +561,77 @@ def main():
         # Create new settings instance to pick up the env var
         active_settings = Settings()
 
+    if args.command == "verify-v7":
+        from .storage_activation import DatabaseInUseError, PointerValidationError
+        from .verification_v7 import VerificationV7Error, verify_v7
+        from .workspace import (
+            WorkspaceAccessError,
+            WorkspacePathError,
+            WorkspaceRegistry,
+        )
+
+        try:
+            registry = WorkspaceRegistry.from_settings(active_settings)
+            workspace = registry.resolve(args.workspace_id)
+            workspace_settings = active_settings
+            if workspace.workspace_id != registry.default.workspace_id:
+                if getattr(active_settings, "storage_path", None):
+                    raise VerificationV7Error("WORKSPACE_STORAGE_AMBIGUOUS")
+                workspace_settings = active_settings.model_copy(
+                    update={"project_root": str(workspace.root)}
+                )
+            payload = verify_v7(
+                Path(workspace_settings.get_storage_path()),
+                workspace.workspace_id,
+                repair_projections=args.repair_projections,
+            )
+            exit_code = 0 if payload["status"] in {"verified", "repaired"} else 1
+        except (
+            DatabaseInUseError,
+            PointerValidationError,
+            VerificationV7Error,
+            WorkspaceAccessError,
+            WorkspacePathError,
+        ) as exc:
+            code = getattr(exc, "code", type(exc).__name__)
+            payload = {"status": "error", "error": {"code": code, "message": code}}
+            exit_code = (
+                2
+                if code
+                in {
+                    "DATABASE_IN_USE",
+                    "UNAUTHORIZED_WORKSPACE",
+                    "WORKSPACE_PATH_ESCAPE",
+                }
+                else 1
+            )
+        except Exception:
+            payload = {
+                "status": "error",
+                "error": {
+                    "code": "VERIFICATION_FAILED",
+                    "message": "VERIFICATION_FAILED",
+                },
+            }
+            exit_code = 1
+        if args.json:
+            print(json.dumps(payload, sort_keys=True, separators=(",", ":")))
+        elif payload.get("error"):
+            print(f"Error: {payload['error']['code']}")
+        else:
+            print(f"Status: {payload['status']}")
+            print(f"Workspace: {payload['workspace_id']}")
+            print(f"Generation: {payload['active_generation']}")
+        sys.exit(exit_code)
+
     if args.command == "migrate-v7":
         from .migrations import MigrationV7Error, MigrationV7Service
         from .storage_activation import DatabaseInUseError, PointerValidationError
-        from .workspace import WorkspaceAccessError, WorkspacePathError, WorkspaceRegistry
+        from .workspace import (
+            WorkspaceAccessError,
+            WorkspacePathError,
+            WorkspaceRegistry,
+        )
 
         registry = WorkspaceRegistry.from_settings(active_settings)
         service = MigrationV7Service(registry)
@@ -596,18 +699,75 @@ def main():
             }
             exit_code = 1
         if args.json:
-            print(json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str))
+            print(
+                json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
+            )
         else:
             print(f"Status: {payload['status']}")
             print(f"Action: {payload['action']}")
             if payload.get("workspace_id"):
                 print(f"Workspace: {payload['workspace_id']}")
             if payload.get("source_format") is not None:
-                print(f"Format: {payload['source_format']} -> {payload['target_format']}")
+                print(
+                    f"Format: {payload['source_format']} -> {payload['target_format']}"
+                )
             if payload.get("active_generation") is not None:
                 print(f"Generation: {payload['active_generation']}")
             if payload.get("error"):
                 print(f"Error: {payload['error']['code']}")
+        sys.exit(exit_code)
+
+    if args.command == "recover-consolidation":
+        from .api.v7.consolidation_operations import (
+            ConsolidationOperationError,
+            recover_consolidation,
+        )
+        from .workspace import (
+            WorkspaceAccessError,
+            WorkspacePathError,
+            WorkspaceRegistry,
+        )
+
+        try:
+            recovery_settings = active_settings.model_copy(
+                update={"project_root": args.consolidation_project_path}
+            )
+            registry = WorkspaceRegistry.from_settings(recovery_settings)
+            target = registry.default
+            runs = recover_consolidation(registry, target, run_id=args.run_id)
+            payload = {
+                "status": "recovered",
+                "workspace_id": target.workspace_id,
+                "runs": runs,
+            }
+            exit_code = 0
+        except (
+            ConsolidationOperationError,
+            WorkspaceAccessError,
+            WorkspacePathError,
+        ) as exc:
+            code = getattr(exc, "code", type(exc).__name__)
+            payload = {"status": "error", "error": {"code": code, "message": code}}
+            exit_code = (
+                2 if code in {"UNAUTHORIZED_WORKSPACE", "WORKSPACE_PATH_ESCAPE"} else 1
+            )
+        except Exception:
+            payload = {
+                "status": "error",
+                "error": {
+                    "code": "CAPABILITY_DEGRADED",
+                    "message": "CAPABILITY_DEGRADED",
+                },
+            }
+            exit_code = 1
+        if args.json:
+            print(json.dumps(payload, sort_keys=True, separators=(",", ":")))
+        elif payload.get("error"):
+            print(f"Error: {payload['error']['code']}")
+        else:
+            print(f"Status: {payload['status']}")
+            print(f"Workspace: {payload['workspace_id']}")
+            print(f"Runs: {len(payload['runs'])}")
         sys.exit(exit_code)
 
     if args.command in {"projection-status", "rebuild-projection"}:
@@ -637,9 +797,7 @@ def main():
             workspace_settings = active_settings
             if workspace.workspace_id != registry.default.workspace_id:
                 if getattr(active_settings, "storage_path", None):
-                    raise ProjectionOperationError(
-                        "WORKSPACE_STORAGE_AMBIGUOUS"
-                    )
+                    raise ProjectionOperationError("WORKSPACE_STORAGE_AMBIGUOUS")
                 workspace_settings = active_settings.model_copy(
                     update={"project_root": str(workspace.root)}
                 )
@@ -650,12 +808,11 @@ def main():
                     raise ProjectionOperationError("FORMAT_7_REQUIRED")
                 connection = sqlite3.connect(active.path)
                 connection.row_factory = sqlite3.Row
+                builders = None
                 try:
                     connection.execute("PRAGMA foreign_keys=ON")
                     if args.command == "projection-status":
-                        payload = projection_status(
-                            connection, workspace.workspace_id
-                        )
+                        payload = projection_status(connection, workspace.workspace_id)
                     else:
                         builders = create_projection_builders(
                             connection,
@@ -671,6 +828,9 @@ def main():
                             builders=builders,
                         )
                 finally:
+                    close = getattr(builders, "close", None)
+                    if callable(close):
+                        close()
                     connection.close()
             exit_code = 0
         except (
@@ -682,11 +842,16 @@ def main():
         ) as exc:
             code = getattr(exc, "code", type(exc).__name__)
             payload = {"error": {"code": code, "message": code}, "status": "error"}
-            exit_code = 2 if code in {
-                "DATABASE_IN_USE",
-                "UNAUTHORIZED_WORKSPACE",
-                "WORKSPACE_PATH_ESCAPE",
-            } else 1
+            exit_code = (
+                2
+                if code
+                in {
+                    "DATABASE_IN_USE",
+                    "UNAUTHORIZED_WORKSPACE",
+                    "WORKSPACE_PATH_ESCAPE",
+                }
+                else 1
+            )
         except Exception:
             payload = {
                 "error": {
@@ -717,6 +882,7 @@ def main():
             project_path,
             dry_run=getattr(args, "dry_run", False),
             force=getattr(args, "force", False),
+            interface=getattr(args, "interface", None),
         )
         if args.json:
             print(json.dumps({"success": success, "message": message}))
@@ -749,7 +915,10 @@ def main():
     elif args.command == "install-claude-hooks":
         from .claude_hooks.install import install_claude_hooks
 
-        success, message = install_claude_hooks(dry_run=getattr(args, "dry_run", False))
+        success, message = install_claude_hooks(
+            dry_run=getattr(args, "dry_run", False),
+            project_path=args.project_path or os.getcwd(),
+        )
         if args.json:
             print(json.dumps({"success": success, "message": message}))
         else:
@@ -840,9 +1009,7 @@ def main():
 
             from .migrations import migrate_and_backfill_vectors
 
-            result = migrate_and_backfill_vectors(
-                db_path, workspace_id=db.workspace_id
-            )
+            result = migrate_and_backfill_vectors(db_path, workspace_id=db.workspace_id)
             if args.json:
                 result["database"] = db_path
                 print(json.dumps(result, default=str))
@@ -856,9 +1023,7 @@ def main():
                 print(f"  Vectors available: {result['vectors_available']}")
                 safe_print(f"\n{result['message']}")
         else:
-            count, applied = run_migrations(
-                db_path, workspace_id=db.workspace_id
-            )
+            count, applied = run_migrations(db_path, workspace_id=db.workspace_id)
             if args.json:
                 result = {
                     "database": db_path,

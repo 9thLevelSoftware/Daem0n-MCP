@@ -9,11 +9,9 @@ import tempfile
 import types
 import unittest
 from pathlib import Path
-from types import SimpleNamespace
 from unittest.mock import patch
 
 import daem0nmcp.covenant as covenant
-
 
 EXPECTED_LEGACY_ENTRYPOINTS = {
     "remember": "inscribe.remember",
@@ -126,44 +124,95 @@ SECURITY_RELEVANT_LEGACY_ENTRYPOINTS = frozenset(
 )
 
 LEGACY_MODULES = {
-    **{name: "memory" for name in (
-        "remember", "remember_batch", "recall", "recall_visual",
-        "record_outcome", "recall_for_file", "recall_by_entity",
-        "recall_hierarchical", "search_memories", "find_related",
-        "get_related_memories", "get_memory_versions", "get_memory_at_time",
-        "compact_memories", "cleanup_memories", "archive_memory", "pin_memory",
-    )},
-    **{name: "rules" for name in (
-        "add_rule", "check_rules", "list_rules", "update_rule",
-    )},
-    **{name: "briefing" for name in (
-        "get_briefing", "get_briefing_visual", "get_covenant_status",
-        "get_covenant_status_visual", "context_check", "check_for_updates", "health",
-    )},
+    **dict.fromkeys(
+        (
+            "remember",
+            "remember_batch",
+            "recall",
+            "recall_visual",
+            "record_outcome",
+            "recall_for_file",
+            "recall_by_entity",
+            "recall_hierarchical",
+            "search_memories",
+            "find_related",
+            "get_related_memories",
+            "get_memory_versions",
+            "get_memory_at_time",
+            "compact_memories",
+            "cleanup_memories",
+            "archive_memory",
+            "pin_memory",
+        ),
+        "memory",
+    ),
+    **dict.fromkeys(("add_rule", "check_rules", "list_rules", "update_rule"), "rules"),
+    **dict.fromkeys(
+        (
+            "get_briefing",
+            "get_briefing_visual",
+            "get_covenant_status",
+            "get_covenant_status_visual",
+            "context_check",
+            "check_for_updates",
+            "health",
+        ),
+        "briefing",
+    ),
     "verify_facts": "verification",
-    **{name: "code_tools" for name in (
-        "scan_todos", "index_project", "find_code", "analyze_impact", "propose_refactor",
-    )},
-    **{name: "maintenance" for name in (
-        "rebuild_index", "export_data", "import_data", "prune_memories",
-    )},
-    **{name: "graph_tools" for name in (
-        "link_memories", "unlink_memories", "trace_chain", "get_graph",
-        "get_graph_visual", "get_graph_stats", "rebuild_communities",
-        "list_communities", "list_communities_visual", "get_community_details",
-    )},
-    **{name: "context_tools" for name in (
-        "set_active_context", "get_active_context", "remove_from_active_context",
-        "clear_active_context", "add_context_trigger", "list_context_triggers",
-        "remove_context_trigger", "check_context_triggers",
-    )},
-    **{name: "federation" for name in (
-        "link_projects", "unlink_projects", "list_linked_projects",
-        "consolidate_linked_databases",
-    )},
-    **{name: "agency_tools" for name in (
-        "compress_context", "execute_python", "ingest_doc",
-    )},
+    **dict.fromkeys(
+        (
+            "scan_todos",
+            "index_project",
+            "find_code",
+            "analyze_impact",
+            "propose_refactor",
+        ),
+        "code_tools",
+    ),
+    **dict.fromkeys(
+        ("rebuild_index", "export_data", "import_data", "prune_memories"), "maintenance"
+    ),
+    **dict.fromkeys(
+        (
+            "link_memories",
+            "unlink_memories",
+            "trace_chain",
+            "get_graph",
+            "get_graph_visual",
+            "get_graph_stats",
+            "rebuild_communities",
+            "list_communities",
+            "list_communities_visual",
+            "get_community_details",
+        ),
+        "graph_tools",
+    ),
+    **dict.fromkeys(
+        (
+            "set_active_context",
+            "get_active_context",
+            "remove_from_active_context",
+            "clear_active_context",
+            "add_context_trigger",
+            "list_context_triggers",
+            "remove_context_trigger",
+            "check_context_triggers",
+        ),
+        "context_tools",
+    ),
+    **dict.fromkeys(
+        (
+            "link_projects",
+            "unlink_projects",
+            "list_linked_projects",
+            "consolidate_linked_databases",
+        ),
+        "federation",
+    ),
+    **dict.fromkeys(
+        ("compress_context", "execute_python", "ingest_doc"), "agency_tools"
+    ),
     "trace_causal_path": "temporal",
     "trace_evolution": "temporal",
     "list_entities": "entity_tools",
@@ -212,7 +261,9 @@ class LegacyEntrypointInventoryTests(unittest.TestCase):
                 decorator_names = []
                 legacy_argument = None
                 for decorator in node.decorator_list:
-                    expression = decorator.func if isinstance(decorator, ast.Call) else decorator
+                    expression = (
+                        decorator.func if isinstance(decorator, ast.Call) else decorator
+                    )
                     if isinstance(expression, ast.Name):
                         decorator_names.append(expression.id)
                     elif isinstance(expression, ast.Attribute):
@@ -252,15 +303,21 @@ class LegacyEntrypointInventoryTests(unittest.TestCase):
         )
         defaults = dict(
             zip(
-                [argument.arg for argument in consult.args.args[-len(consult.args.defaults):]],
+                [
+                    argument.arg
+                    for argument in consult.args.args[-len(consult.args.defaults) :]
+                ],
                 consult.args.defaults,
+                strict=True,
             )
         )
         self.assertIn("as_of_time", defaults)
         self.assertIsInstance(defaults["as_of_time"], ast.Constant)
         self.assertIsNone(defaults["as_of_time"].value)
 
-    def test_every_effective_leaf_parameter_has_an_explicit_digest_mapping(self) -> None:
+    def test_every_effective_leaf_parameter_has_an_explicit_digest_mapping(
+        self,
+    ) -> None:
         self.assertEqual(set(EXPECTED_LEGACY_ENTRYPOINTS), set(LEGACY_MODULES))
         tools_root = Path(__file__).parents[1] / "daem0nmcp" / "tools"
         for name, module_name in LEGACY_MODULES.items():
@@ -328,9 +385,7 @@ class LegacyEntrypointBehaviorTests(unittest.IsolatedAsyncioTestCase):
         Path(self.workspace).mkdir()
         Path(self.workspace_b).mkdir()
         self.clock = lambda: 1_000
-        self.scope = covenant.InvocationScope(
-            "principal", "session", self.workspace
-        )
+        self.scope = covenant.InvocationScope("principal", "session", self.workspace)
         self.gate = covenant.CovenantGate(
             state_store=covenant.CovenantStateStore(clock=self.clock),
             authority=covenant.CapabilityAuthority(
@@ -390,10 +445,7 @@ class LegacyEntrypointBehaviorTests(unittest.IsolatedAsyncioTestCase):
             "sqlalchemy": sqlalchemy_module,
         }
         module_path = (
-            Path(__file__).parents[1]
-            / "daem0nmcp"
-            / "tools"
-            / f"{module_name}.py"
+            Path(__file__).parents[1] / "daem0nmcp" / "tools" / f"{module_name}.py"
         )
         qualified_name = f"daem0nmcp.tools._legacy_{module_name}_security_test"
         spec = importlib.util.spec_from_file_location(qualified_name, module_path)
@@ -403,16 +455,17 @@ class LegacyEntrypointBehaviorTests(unittest.IsolatedAsyncioTestCase):
             spec.loader.exec_module(module)
         return module, reached
 
-    async def test_every_protected_inventory_entry_fails_before_unscoped_sink(self) -> None:
+    async def test_every_protected_inventory_entry_fails_before_unscoped_sink(
+        self,
+    ) -> None:
         decorator = getattr(covenant, "legacy_entrypoint", None)
         self.assertIsNotNone(decorator)
         if decorator is None:
             return
-        protected = set(EXPECTED_LEGACY_ENTRYPOINTS) - set(
-            EXEMPT_LEGACY_ENTRYPOINTS
-        )
+        protected = set(EXPECTED_LEGACY_ENTRYPOINTS) - set(EXEMPT_LEGACY_ENTRYPOINTS)
         reached = []
         for name in sorted(protected):
+
             async def sink(project_path=None, *, _name=name):
                 reached.append(_name)
                 return {"reached": _name}
@@ -425,13 +478,9 @@ class LegacyEntrypointBehaviorTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_real_add_rule_and_import_data_stop_before_context_sink(self) -> None:
         rules, rules_reached = self._load_real_leaf_module("rules")
-        maintenance, maintenance_reached = self._load_real_leaf_module(
-            "maintenance"
-        )
+        maintenance, maintenance_reached = self._load_real_leaf_module("maintenance")
 
-        add_result = await rules.add_rule(
-            "unscoped-write", project_path=self.workspace
-        )
+        add_result = await rules.add_rule("unscoped-write", project_path=self.workspace)
         import_result = await maintenance.import_data(
             {"memories": [], "rules": []}, project_path=self.workspace
         )
@@ -441,19 +490,24 @@ class LegacyEntrypointBehaviorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([], rules_reached)
         self.assertEqual([], maintenance_reached)
 
-    async def test_exempt_entries_are_workspace_bound_when_scope_is_installed(self) -> None:
+    async def test_exempt_entries_are_workspace_bound_when_scope_is_installed(
+        self,
+    ) -> None:
         decorator = getattr(covenant, "legacy_entrypoint", None)
         self.assertIsNotNone(decorator)
         if decorator is None:
             return
-        for name in sorted(EXEMPT_LEGACY_ENTRYPOINTS):
-            reached = []
 
+        def make_sink(reached):
             async def sink(project_path=None):
                 reached.append(project_path)
                 return {"reached": project_path}
 
-            guarded = decorator(name)(sink)
+            return sink
+
+        for name in sorted(EXEMPT_LEGACY_ENTRYPOINTS):
+            reached = []
+            guarded = decorator(name)(make_sink(reached))
             with self.subTest(name=name):
                 with covenant.installed_invocation(
                     self.scope,
@@ -463,9 +517,7 @@ class LegacyEntrypointBehaviorTests(unittest.IsolatedAsyncioTestCase):
                     allowed = await guarded(project_path="ws_a")
                     blocked = await guarded(project_path="ws_b")
                 self.assertEqual({"reached": "ws_a"}, allowed)
-                self.assertEqual(
-                    "TOKEN_SCOPE_MISMATCH", blocked["violation"]
-                )
+                self.assertEqual("TOKEN_SCOPE_MISMATCH", blocked["violation"])
                 self.assertEqual(["ws_a"], reached)
 
     async def test_positional_arguments_exact_token_and_token_stripping(self) -> None:
@@ -520,7 +572,9 @@ class LegacyEntrypointBehaviorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("TOKEN_ARGUMENT_MISMATCH", mismatch["violation"])
         self.assertEqual(1, len(reached))
 
-    async def test_default_sensitive_leaf_binds_omitted_defaults_into_token(self) -> None:
+    async def test_default_sensitive_leaf_binds_omitted_defaults_into_token(
+        self,
+    ) -> None:
         reached = []
 
         @covenant.legacy_entrypoint("prune_memories")
@@ -564,7 +618,9 @@ class LegacyEntrypointBehaviorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("TOKEN_ARGUMENT_MISMATCH", mismatch["violation"])
         self.assertEqual([(90, False, "ws_a")], reached)
 
-    async def test_no_selector_compress_leaf_uses_installed_scope_workspace(self) -> None:
+    async def test_no_selector_compress_leaf_uses_installed_scope_workspace(
+        self,
+    ) -> None:
         reached = []
 
         @covenant.legacy_entrypoint("compress_context")

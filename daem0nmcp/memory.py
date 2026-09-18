@@ -12,10 +12,12 @@ This module handles:
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import re
 import secrets
+import sqlite3
 import sys
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
@@ -27,14 +29,15 @@ from pathlib import Path
 from sqlalchemy import desc, func, or_, select
 
 from . import vectors
+from .bounded_workers import BoundedWorkerBusyError, BoundedWorkerPool
 from .cache import get_recall_cache, make_cache_key
 from .capabilities import CapabilityRegistry
 from .config import settings
 from .database import DatabaseManager
 from .event_store import (
     EventCommand,
-    apply_compatibility_memory_update,
     append_and_project_async,
+    apply_compatibility_memory_update,
     compatibility_memory_record,
     deterministic_id,
     resolve_compatibility_stream_async,
@@ -61,6 +64,10 @@ VALID_RELATIONSHIPS = frozenset(
 
 logger = logging.getLogger(__name__)
 
+_LEGACY_V7_WORKERS = BoundedWorkerPool(
+    max_workers=2,
+    thread_name_prefix="daem0nmcp-legacy-v7",
+)
 # =============================================================================
 # Constants for scoring and relevance calculations
 # =============================================================================
@@ -146,7 +153,7 @@ def _infer_tags(
         List of inferred tags (excludes duplicates from existing_tags)
     """
     inferred: list[str] = []
-    existing = set(t.lower() for t in (existing_tags or []))
+    existing = {t.lower() for t in (existing_tags or [])}
     content_lower = content.lower()
 
     # Bugfix patterns - use word boundaries to avoid false positives
@@ -174,7 +181,11 @@ def _infer_tags(
 
     # Explicit warning mentions in non-warning categories - use word boundaries
     warning_pattern = r"\b(warn|avoid)\b|don\'t"
-    if category != "warning" and re.search(warning_pattern, content_lower) and "warning" not in existing:
+    if (
+        category != "warning"
+        and re.search(warning_pattern, content_lower)
+        and "warning" not in existing
+    ):
         inferred.append("warning")
 
     return inferred
@@ -204,6 +215,12 @@ class MemoryManager:
         # Auto-Zoom: Retrieval router (lazy-loaded)
         self._retrieval_router = None
         self._v7_retrieval_service = None
+        self._v7_retrieval_slots = asyncio.Semaphore(4)
+        self._v7_retrieval_waiters = 0
+        self._closed = False
+        register_close = getattr(db_manager, "register_close_callback", None)
+        if callable(register_close):
+            register_close(self.close)
 
         # Phase 4: Context compression (lazy initialized)
         self._compressor: AdaptiveCompressor | None = None
@@ -300,7 +317,9 @@ class MemoryManager:
         )
 
     @staticmethod
-    def _v7_record_state(memory: Memory, *, deleted_at_us: int | None = None) -> dict[str, Any]:
+    def _v7_record_state(
+        memory: Memory, *, deleted_at_us: int | None = None
+    ) -> dict[str, Any]:
         return compatibility_memory_record(memory, deleted_at_us=deleted_at_us)
 
     async def _append_v7_memory_event(
@@ -368,9 +387,7 @@ class MemoryManager:
         occurred = removed_at or relationship.created_at or datetime.now(timezone.utc)
         valid_from = self._datetime_us(relationship.created_at or occurred)
         valid_to = self._datetime_us(removed_at) if removed_at is not None else None
-        stream_id = await self._resolve_typed_relationship_id(
-            session, relationship.id
-        )
+        stream_id = await self._resolve_typed_relationship_id(session, relationship.id)
         if stream_id is None:
             if event_type != "relationship.created":
                 raise RuntimeError("V7_RELATIONSHIP_STREAM_MISSING")
@@ -452,7 +469,7 @@ class MemoryManager:
         return self._retrieval_router
 
     @property
-    def compressor(self) -> "AdaptiveCompressor":
+    def compressor(self) -> AdaptiveCompressor:
         """Lazy-load compressor on first use."""
         if self._compressor is None:
             from .compression import AdaptiveCompressor, HierarchicalContextManager
@@ -923,7 +940,10 @@ class MemoryManager:
                     )
                     session.add(version)
                     await self._append_v7_memory_event(
-                        session, memory, "memory.created", occurred_at=version.valid_from
+                        session,
+                        memory,
+                        "memory.created",
+                        occurred_at=version.valid_from,
                     )
 
                     # Add to TF-IDF index
@@ -1207,13 +1227,46 @@ class MemoryManager:
             )
 
     def _get_v7_retrieval_service(self):
+        if self._closed:
+            raise RuntimeError("MEMORY_MANAGER_CLOSED")
         if self._v7_retrieval_service is None:
             from .retrieval.runtime import create_retrieval_service
 
-            self._v7_retrieval_service = create_retrieval_service(
-                self.db.db_path
-            )
+            self._v7_retrieval_service = create_retrieval_service(self.db.db_path)
         return self._v7_retrieval_service
+
+    def close(self) -> None:
+        """Close database-scoped retrieval resources exactly once."""
+
+        if self._closed:
+            return
+        self._closed = True
+        resources = (
+            self._v7_retrieval_service,
+            self._qdrant,
+            self._retrieval_router,
+            self._knowledge_graph,
+        )
+        self._v7_retrieval_service = None
+        self._qdrant = None
+        self._retrieval_router = None
+        self._knowledge_graph = None
+        first_error: BaseException | None = None
+        closed: set[int] = set()
+        for resource in resources:
+            if resource is None or id(resource) in closed:
+                continue
+            closed.add(id(resource))
+            close = getattr(resource, "close", None)
+            if not callable(close):
+                continue
+            try:
+                close()
+            except BaseException as exc:
+                if first_error is None:
+                    first_error = exc
+        if first_error is not None:
+            raise first_error
 
     async def _recall_v7(
         self,
@@ -1234,7 +1287,15 @@ class MemoryManager:
     ) -> dict[str, Any]:
         """Compatibility envelope backed exclusively by the v7 facade."""
 
-        from .retrieval.legacy_compat import build_legacy_recall_categories
+        import asyncio
+        import copy
+
+        from .bounded_workers import BoundedWorkerBusyError
+        from .cache import get_recall_cache, make_cache_key
+        from .retrieval.legacy_compat import (
+            build_legacy_recall_categories,
+            load_legacy_evidence_metadata,
+        )
         from .retrieval.runtime import (
             normalize_legacy_category_filter,
             resolve_legacy_record_filter,
@@ -1244,16 +1305,44 @@ class MemoryManager:
         if offset < 0 or limit < 1:
             return {"error": "INVALID_RETRIEVAL_BOUNDS"}
 
+        cache = get_recall_cache()
+        revision: tuple[Any, ...] | None = None
+        cache_key: tuple[Any, ...] | None = None
+        cache_arguments = (
+            topic,
+            categories,
+            tags,
+            file_path,
+            project_path,
+            offset,
+            limit,
+            since.isoformat() if since else None,
+            until.isoformat() if until else None,
+            include_warnings,
+            condensed,
+            as_of_time.isoformat() if as_of_time else None,
+        )
+        revision_reader = getattr(self, "_v7_cache_revision", None)
+        if not include_linked:
+            revision = await revision_reader() if callable(revision_reader) else None
+            if revision is not None:
+                cache_key = make_cache_key(
+                    "legacy-v7",
+                    self.db.workspace_id,
+                    getattr(self.db, "active_generation", None),
+                    revision,
+                    *cache_arguments,
+                )
+                found, cached = cache.get(cache_key)
+                if found and isinstance(cached, dict):
+                    return copy.deepcopy(cached)
+
         file_paths: tuple[str, ...] = ()
         if file_path is not None:
             normalized = [file_path]
             if project_path:
-                absolute, relative = _normalize_file_path(
-                    file_path, project_path
-                )
-                normalized.extend(
-                    value for value in (absolute, relative) if value
-                )
+                absolute, relative = _normalize_file_path(file_path, project_path)
+                normalized.extend(value for value in (absolute, relative) if value)
             file_paths = tuple(dict.fromkeys(normalized))[:2]
         normalized_since = since
         normalized_until = until
@@ -1296,14 +1385,35 @@ class MemoryManager:
             rerank=settings.retrieval_rerank_enabled,
         )
         service = self._get_v7_retrieval_service()
+        waiters = getattr(self, "_v7_retrieval_waiters", 0)
+        # Four calls may own service slots while sixteen more wait for one.
+        if waiters >= 20:
+            return {"error": "V7_RETRIEVAL_BUSY", "topic": topic}
+        self._v7_retrieval_waiters = waiters + 1
+        slots = getattr(self, "_v7_retrieval_slots", None)
+        if slots is None:
+            slots = asyncio.Semaphore(4)
+            self._v7_retrieval_slots = slots
+
+        async def retrieve_bounded():
+            async with slots:
+                return await service.retrieve(query)
+
         try:
-            retrieval = await service.retrieve(query)
+            retrieval = await asyncio.wait_for(
+                retrieve_bounded(),
+                timeout=float(getattr(settings, "sync_timeout_seconds", 15.0)),
+            )
+        except asyncio.TimeoutError:
+            return {"error": "V7_RETRIEVAL_DEADLINE_EXCEEDED", "topic": topic}
         except Exception:
             logger.warning("V7 retrieval facade failed closed", exc_info=True)
             return {
                 "error": "V7_RETRIEVAL_UNAVAILABLE",
                 "topic": topic,
             }
+        finally:
+            self._v7_retrieval_waiters -= 1
 
         diagnostics = [
             {
@@ -1333,9 +1443,7 @@ class MemoryManager:
                     "abstained": True,
                     "reason": retrieval.reason,
                     "providers": diagnostics,
-                    "policy_rejection_counts": list(
-                        retrieval.policy_rejection_counts
-                    ),
+                    "policy_rejection_counts": list(retrieval.policy_rejection_counts),
                 },
             }
             return await self._merge_v7_linked_results(
@@ -1355,11 +1463,31 @@ class MemoryManager:
             )
 
         selected_items = tuple(retrieval.items[offset : offset + limit * 4])
+        metadata = None
+        compatibility_workers = globals().get("_LEGACY_V7_WORKERS")
+        try:
+            if compatibility_workers is not None:
+                metadata = await compatibility_workers.run(
+                    lambda: load_legacy_evidence_metadata(
+                        self.db.db_path,
+                        self.db.workspace_id,
+                        selected_items,
+                    )
+                )
+        except BoundedWorkerBusyError:
+            # Compatibility hydration is optional; canonical evidence remains
+            # available with opaque IDs when the bounded pool is saturated.
+            metadata = None
+        except Exception:
+            logger.warning("V7 legacy event hydration failed closed", exc_info=True)
+            metadata = None
         try:
             by_category = build_legacy_recall_categories(
                 selected_items,
                 per_category_limit=min(limit, 100),
                 condensed=condensed,
+                metadata=metadata,
+                origin_workspace_id=self.db.workspace_id,
             )
         except Exception:
             logger.warning(
@@ -1390,7 +1518,7 @@ class MemoryManager:
         if as_of_time is not None:
             result["query_time"] = as_of_time.isoformat()
             result["temporal_filter"] = "point_in_time"
-        return await self._merge_v7_linked_results(
+        merged = await self._merge_v7_linked_results(
             result,
             topic=topic,
             categories=categories,
@@ -1405,6 +1533,50 @@ class MemoryManager:
             condensed=condensed,
             as_of_time=as_of_time,
         )
+        if not include_linked and revision is not None and callable(revision_reader):
+            final_revision = await revision_reader()
+            if final_revision == revision and cache_key is not None:
+                cache.set(cache_key, copy.deepcopy(merged))
+        return merged
+
+    async def _v7_cache_revision(self) -> tuple[Any, ...] | None:
+        """Return a small revision tuple covering local v7 retrieval policy."""
+
+        workspace_id = self.db.workspace_id
+        database_path = self.db.db_path
+
+        def read_revision() -> tuple[Any, ...]:
+            connection = sqlite3.connect(database_path)
+            try:
+                events = connection.execute(
+                    "SELECT count(*),COALESCE(max(recorded_at_us),0),"
+                    "COALESCE(max(event_hash),'') FROM memory_events "
+                    "WHERE workspace_id=?",
+                    (workspace_id,),
+                ).fetchone()
+                manifests = connection.execute(
+                    "SELECT projection_name,generation,source_event_count,"
+                    "source_event_root_hash,details_json FROM projection_manifests "
+                    "WHERE workspace_id=? AND status='active' "
+                    "ORDER BY projection_name",
+                    (workspace_id,),
+                ).fetchall()
+                return (*tuple(events or (0, 0, "")), *map(tuple, manifests))
+            finally:
+                connection.close()
+
+        try:
+            return await _LEGACY_V7_WORKERS.run(read_revision)
+        except BoundedWorkerBusyError:
+            # A just-completed compatibility hydration can release its slot in
+            # the future callback on the next loop turn. Retry exactly once.
+            await asyncio.sleep(0)
+            try:
+                return await _LEGACY_V7_WORKERS.run(read_revision)
+            except (BoundedWorkerBusyError, sqlite3.Error):
+                return None
+        except sqlite3.Error:
+            return None
 
     async def _merge_v7_linked_results(
         self,
@@ -1423,34 +1595,185 @@ class MemoryManager:
         condensed: bool,
         as_of_time: datetime | None,
     ) -> dict[str, Any]:
-        """Expose linked origins without merging unmanifested evidence."""
+        """Merge a bounded set of independently authorized v7 workspaces."""
 
         if not include_linked or not project_path:
             return result
+        from .covenant import (
+            InvocationScope,
+            covenant_gate_var,
+            invocation_scope_var,
+            workspace_resolver_var,
+        )
+        from .database import DatabaseManager
         from .links import LinkManager
+        from .workspace import resolve_derived_path
 
         linked_diagnostics: list[dict[str, str]] = []
+        resolver_hint = workspace_resolver_var.get()
+        registry_hint = getattr(resolver_hint, "__self__", None)
         try:
-            linked_managers = await LinkManager(
-                self.db
-            ).get_linked_db_managers(project_path)
-            seen_workspaces: set[str] = set()
-            for _linked_path, linked_db in linked_managers:
-                workspace_id = getattr(linked_db, "workspace_id", None)
+            link_manager = LinkManager(self.db, registry=registry_hint)
+        except TypeError:
+            link_manager = LinkManager(self.db)
+        try:
+            # Keep the historical degradation behavior for retained v6 link
+            # manager adapters which cannot provide an authoritative link list.
+            list_links = getattr(link_manager, "list_linked_projects", None)
+            if not callable(list_links):
+                linked_managers = await link_manager.get_linked_db_managers(
+                    project_path
+                )
+                for _linked_path, linked_db in linked_managers:
+                    workspace_id = getattr(linked_db, "workspace_id", None)
+                    if isinstance(workspace_id, str):
+                        linked_diagnostics.append(
+                            {
+                                "workspace_id": workspace_id,
+                                "status": "degraded",
+                                "reason": "LINKED_EVIDENCE_FEDERATION_REQUIRED",
+                            }
+                        )
+                result.setdefault("retrieval", {})["linked"] = linked_diagnostics
+                return result
+
+            scope = invocation_scope_var.get()
+            gate = covenant_gate_var.get()
+            resolver = workspace_resolver_var.get()
+            if scope is None or gate is None or resolver is None:
+                result.setdefault("retrieval", {})["linked"] = [
+                    {
+                        "status": "degraded",
+                        "reason": "LINKED_AUTHORIZATION_REQUIRED",
+                    }
+                ]
+                return result
+
+            links = await list_links(project_path)
+            if len(links) > 2:
+                linked_diagnostics.append(
+                    {
+                        "status": "degraded",
+                        "reason": "LINKED_FANOUT_LIMIT",
+                    }
+                )
+
+            authorized: list[tuple[str, Any, InvocationScope]] = []
+            for link in links[:2]:
+                workspace_id = link.get("workspace_id")
                 if (
                     not isinstance(workspace_id, str)
                     or re.fullmatch(r"ws_[0-9a-f]{24}", workspace_id) is None
-                    or workspace_id in seen_workspaces
                 ):
                     continue
-                seen_workspaces.add(workspace_id)
+                selected = resolver(workspace_id)
+                registered = link_manager.registry.resolve(workspace_id)
+                if (
+                    getattr(selected, "workspace_id", None) != workspace_id
+                    or getattr(selected, "root", None) != registered.root
+                ):
+                    continue
+                linked_scope = InvocationScope(
+                    scope.principal_id,
+                    scope.transport_session_id,
+                    str(registered.root),
+                )
+                if gate.workspace_authorized(linked_scope):
+                    authorized.append((workspace_id, registered, linked_scope))
+
+            remaining = max(0, min(100, limit * 4) - int(result.get("found", 0)))
+            token_budget = int(settings.retrieval_token_budget)
+            token_used = sum(
+                len(str(item.get("content", "")).split())
+                for category in ("decisions", "patterns", "warnings", "learnings")
+                for item in result.get(category, [])
+            )
+            pending: list[tuple[str, dict[str, Any]]] = []
+            for workspace_id, workspace, _linked_scope in authorized:
+                if remaining == 0 or token_used >= token_budget:
+                    break
+                storage_path = resolve_derived_path(
+                    workspace.root, ".daem0nmcp", "storage"
+                )
+                if not storage_path.exists():
+                    linked_diagnostics.append(
+                        {
+                            "workspace_id": workspace_id,
+                            "status": "degraded",
+                            "reason": "LINKED_STORAGE_UNAVAILABLE",
+                        }
+                    )
+                    continue
+                linked_db = DatabaseManager(str(storage_path))
+                linked_memory: MemoryManager | None = None
+                try:
+                    await linked_db.init_db()
+                    if linked_db.format_version != 7:
+                        linked_diagnostics.append(
+                            {
+                                "workspace_id": workspace_id,
+                                "status": "degraded",
+                                "reason": "LINKED_V7_REQUIRED",
+                            }
+                        )
+                        continue
+                    linked_memory = MemoryManager(linked_db)
+                    linked_result = await linked_memory._recall_v7(
+                        topic=topic,
+                        categories=categories,
+                        tags=tags,
+                        file_path=file_path,
+                        project_path=str(workspace.root),
+                        offset=0,
+                        limit=min(remaining, limit),
+                        since=since,
+                        until=until,
+                        include_warnings=include_warnings,
+                        include_linked=False,
+                        condensed=condensed,
+                        as_of_time=as_of_time,
+                    )
+                    pending.append((workspace_id, linked_result))
+                finally:
+                    if linked_memory is not None:
+                        linked_memory.close()
+                    await linked_db.close()
+
+            # Link state and caller access are both checked again immediately
+            # before the response is assembled.
+            current_links = await list_links(project_path)
+            current_ids = {link.get("workspace_id") for link in current_links}
+            authorized_ids = {
+                workspace_id
+                for workspace_id, _workspace, linked_scope in authorized
+                if workspace_id in current_ids
+                and gate.workspace_authorized(linked_scope)
+            }
+            for workspace_id, linked_result in pending:
+                if workspace_id not in authorized_ids:
+                    continue
+                for category in ("decisions", "patterns", "warnings", "learnings"):
+                    for item in linked_result.get(category, []):
+                        if remaining == 0:
+                            break
+                        item_tokens = len(str(item.get("content", "")).split())
+                        if token_used + item_tokens > token_budget:
+                            remaining = 0
+                            break
+                        result.setdefault(category, []).append(item)
+                        token_used += item_tokens
+                        remaining -= 1
                 linked_diagnostics.append(
                     {
                         "workspace_id": workspace_id,
-                        "status": "degraded",
-                        "reason": "LINKED_EVIDENCE_FEDERATION_REQUIRED",
+                        "status": "ready",
+                        "reason": "LINKED_EVIDENCE_INCLUDED",
                     }
                 )
+            result["found"] = sum(
+                len(result.get(category, []))
+                for category in ("decisions", "patterns", "warnings", "learnings")
+            )
         except Exception:
             logger.warning("V7 linked retrieval degraded", exc_info=True)
             linked_diagnostics.append(
@@ -1650,12 +1973,13 @@ class MemoryManager:
                     or normalized_filter.endswith(mem_abs)
                 ):
                     return True
-                if mem_rel and (
-                    mem_rel.endswith(normalized_filter)
-                    or normalized_filter.endswith(mem_rel)
-                ):
-                    return True
-                return False
+                return bool(
+                    mem_rel
+                    and (
+                        mem_rel.endswith(normalized_filter)
+                        or normalized_filter.endswith(mem_rel)
+                    )
+                )
 
             memories = {mid: mem for mid, mem in memories.items() if _matches_path(mem)}
 
@@ -2495,7 +2819,11 @@ class MemoryManager:
             # Filter: decisions must have outcome recorded
             candidates = []
             for mem in all_candidates:
-                if mem.category == "decision" and mem.outcome is None and mem.worked is None:
+                if (
+                    mem.category == "decision"
+                    and mem.outcome is None
+                    and mem.worked is None
+                ):
                     continue  # Skip pending decisions
                 candidates.append(mem)
 
@@ -2601,7 +2929,10 @@ class MemoryManager:
             )
             session.add(summary_version)
             await self._append_v7_memory_event(
-                session, summary_memory, "memory.created", occurred_at=summary_version.valid_from
+                session,
+                summary_memory,
+                "memory.created",
+                occurred_at=summary_version.valid_from,
             )
 
             # Create supersedes relationships and archive originals

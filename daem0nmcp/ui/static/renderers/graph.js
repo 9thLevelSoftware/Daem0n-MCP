@@ -458,7 +458,7 @@
       for (const tag of selected.tags) tagList.append(ui.element("li", "graph-details__tag", tag));
       const focus = ui.element("button", "daemon-btn daemon-btn--small", "Focus node");
       focus.type = "button";
-      focus.addEventListener("click", function () { ui.sendHost(ui.actions.graphFocus.method, { tool: ui.actions.graphFocus.tool, args: { memory_ids: [selected.id], include_orphans: true } }); });
+      focus.addEventListener("click", function () { ui.callTool(ui.actions.graphFocus.tool, { record_ids: [selected.id], include_orphans: true }); });
       detailsContent.replaceChildren(ui.element("h2", "graph-details__title", selected.category), ui.element("p", "graph-details__content", selected.full_content), tagList, focus);
       details.hidden = false;
     });

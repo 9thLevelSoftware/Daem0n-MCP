@@ -499,7 +499,7 @@ class TestRecordOutcomeCLI:
         assert result.returncode == 0
         assert "memory" in result.stdout.lower() or "outcome" in result.stdout.lower()
 
-    def test_record_outcome_requires_worked_or_failed(self):
+    def test_record_outcome_requires_worked_or_failed(self, tmp_path):
         """record-outcome should require --worked or --failed."""
         import subprocess
         import sys
@@ -509,6 +509,8 @@ class TestRecordOutcomeCLI:
                 sys.executable,
                 "-m",
                 "daem0nmcp.cli",
+                "--project-path",
+                str(tmp_path),
                 "record-outcome",
                 "1",
                 "test outcome",

@@ -10,6 +10,7 @@ This module provides:
 import logging
 import math
 import struct
+from collections.abc import Sequence
 from typing import Any
 
 from .capabilities import CapabilityRegistry
@@ -19,6 +20,39 @@ logger = logging.getLogger(__name__)
 
 # Global model instance (lazy loaded, shared across all contexts)
 _model: Any | None = None
+
+
+class _PooledOnnxSentenceTransformerAdapter:
+    """Keep the shared legacy model's single and batch ``encode`` surface."""
+
+    def __init__(self, pooled_model: Any) -> None:
+        self._pooled_model = pooled_model
+
+    def encode(
+        self,
+        sentences: str | Sequence[str],
+        *,
+        convert_to_numpy: bool = True,
+        **_options: Any,
+    ) -> Any:
+        import numpy as np
+
+        if isinstance(sentences, str):
+            values = self._pooled_model.encode(
+                sentences,
+                convert_to_numpy=False,
+            )
+        else:
+            values = [
+                self._pooled_model.encode(text, convert_to_numpy=False)
+                for text in sentences
+            ]
+        if convert_to_numpy:
+            return np.asarray(values, dtype=np.float32)
+        return values
+
+    def close(self) -> None:
+        self._pooled_model.close()
 
 
 def is_available() -> bool:
@@ -33,33 +67,60 @@ def _get_model() -> Any:
     CapabilityRegistry().require("models-local")
 
     if _model is None:
-        from sentence_transformers import SentenceTransformer
-
         backend = settings.embedding_backend
         logger.info(
             f"Loading embedding model ({settings.embedding_model}, "
             f"backend={backend}, dim={settings.embedding_dimension})..."
         )
-        try:
-            _model = SentenceTransformer(
-                settings.embedding_model,
-                truncate_dim=settings.embedding_dimension,
-                backend=backend,
-                model_kwargs={"file_name": "onnx/model_quantized.onnx"}
-                if backend == "onnx"
-                else {},
-            )
-        except Exception:
-            logger.warning(
-                f"Failed to load model with backend={backend}, falling back to torch"
-            )
-            _model = SentenceTransformer(
-                settings.embedding_model,
-                truncate_dim=settings.embedding_dimension,
-            )
+        if backend == "onnx":
+            try:
+                from .retrieval.onnx_encoder import load_pooled_onnx_model
+
+                pooled_model = load_pooled_onnx_model(
+                    settings.embedding_model,
+                    settings.embedding_dimension,
+                )
+                if pooled_model is not None:
+                    _model = _PooledOnnxSentenceTransformerAdapter(pooled_model)
+            except Exception:
+                # Preserve the legacy fallback below for token-output exports
+                # and installations without the pooled ONNX dependencies.
+                logger.warning(
+                    "Failed to load the pooled ONNX embedding adapter; "
+                    "trying Sentence Transformers"
+                )
+        if _model is None:
+            from sentence_transformers import SentenceTransformer
+
+            try:
+                _model = SentenceTransformer(
+                    settings.embedding_model,
+                    truncate_dim=settings.embedding_dimension,
+                    backend=backend,
+                    model_kwargs={"file_name": "onnx/model_quantized.onnx"}
+                    if backend == "onnx"
+                    else {},
+                )
+            except Exception:
+                logger.warning(
+                    "Failed to load model with backend=%s, falling back to torch",
+                    backend,
+                )
+                _model = SentenceTransformer(
+                    settings.embedding_model,
+                    truncate_dim=settings.embedding_dimension,
+                )
         logger.info("Embedding model loaded.")
 
     return _model
+
+
+def _embedding_values(embedding: Any) -> list[float]:
+    """Normalize NumPy and pooled-adapter outputs to the legacy list contract."""
+
+    to_list = getattr(embedding, "tolist", None)
+    values = to_list() if callable(to_list) else list(embedding)
+    return [float(value) for value in values]
 
 
 def get_dimension() -> int:
@@ -85,7 +146,8 @@ def encode(text: str, *, prefix: str = "document") -> bytes | None:
 
     model = _get_model()
     embedding = model.encode(prefixed, convert_to_numpy=True)
-    return struct.pack(f"{len(embedding)}f", *embedding)
+    values = _embedding_values(embedding)
+    return struct.pack(f"{len(values)}f", *values)
 
 
 def encode_query(text: str) -> bytes | None:
@@ -112,7 +174,7 @@ def cosine_similarity(vec1: list[float], vec2: list[float]) -> float:
     if len(vec1) != len(vec2):
         raise ValueError("Vector dimensions must match.")
 
-    dot_product = sum(left * right for left, right in zip(vec1, vec2))
+    dot_product = sum(left * right for left, right in zip(vec1, vec2, strict=True))
     norm_a = math.sqrt(sum(value * value for value in vec1))
     norm_b = math.sqrt(sum(value * value for value in vec2))
 
@@ -137,7 +199,7 @@ class VectorIndex:
         model = _get_model()
         prefixed = f"{settings.embedding_document_prefix}{text}"
         embedding = model.encode(prefixed, convert_to_numpy=True)
-        self.vectors[doc_id] = embedding.tolist()
+        self.vectors[doc_id] = _embedding_values(embedding)
         return True
 
     def add_from_bytes(self, doc_id: int, data: bytes) -> bool:
@@ -174,11 +236,12 @@ class VectorIndex:
         # Encode query with query prefix
         prefixed = f"{settings.embedding_query_prefix}{query}"
         query_vec = model.encode(prefixed, convert_to_numpy=True)
+        query_values = _embedding_values(query_vec)
 
         # Compute similarities
         results = []
         for doc_id, doc_vec in self.vectors.items():
-            sim = cosine_similarity(query_vec.tolist(), doc_vec)
+            sim = cosine_similarity(query_values, doc_vec)
             if sim >= threshold:
                 results.append((doc_id, sim))
 

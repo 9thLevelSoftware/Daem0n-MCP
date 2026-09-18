@@ -1,7 +1,17 @@
 # tests/test_linked_projects.py
 """Tests for linked projects feature."""
 
+import uuid
+
 import pytest
+
+
+def authorized_link_manager(db_manager, root, *linked_roots):
+    """Build a LinkManager against the explicit roots used by this test."""
+    from daem0nmcp.links import LinkManager
+    from daem0nmcp.workspace import WorkspaceRegistry
+
+    return LinkManager(db_manager, WorkspaceRegistry(linked_roots, default_root=root))
 
 
 class TestProjectLinkModel:
@@ -64,10 +74,18 @@ class TestLinkManager:
         return DatabaseManager(str(tmp_path / "storage"))
 
     @pytest.fixture
-    def link_manager(self, db_manager):
+    def link_manager(self, db_manager, tmp_path):
         from daem0nmcp.links import LinkManager
+        from daem0nmcp.workspace import WorkspaceRegistry
 
-        return LinkManager(db_manager)
+        roots = [tmp_path / name for name in ("backend", "client", "shared")]
+        for root in roots:
+            root.mkdir()
+        manager = LinkManager(
+            db_manager, WorkspaceRegistry(roots[1:], default_root=roots[0])
+        )
+        manager.roots = tuple(str(root) for root in roots)
+        return manager
 
     @pytest.mark.asyncio
     async def test_link_projects(self, db_manager, link_manager):
@@ -75,14 +93,14 @@ class TestLinkManager:
         await db_manager.init_db()
 
         result = await link_manager.link_projects(
-            source_path="/repos/backend",
-            linked_path="/repos/client",
+            source_path=link_manager.roots[0],
+            linked_path=link_manager.roots[1],
             relationship="same-project",
         )
 
         assert result["status"] == "linked"
-        assert result["source_path"] == "/repos/backend"
-        assert result["linked_path"] == "/repos/client"
+        assert result["source_path"] == link_manager.roots[0]
+        assert result["linked_path"] == link_manager.roots[1]
 
     @pytest.mark.asyncio
     async def test_list_linked_projects(self, db_manager, link_manager):
@@ -90,16 +108,18 @@ class TestLinkManager:
         await db_manager.init_db()
 
         await link_manager.link_projects(
-            "/repos/backend", "/repos/client", "same-project"
+            link_manager.roots[0], link_manager.roots[1], "same-project"
         )
-        await link_manager.link_projects("/repos/backend", "/repos/shared", "upstream")
+        await link_manager.link_projects(
+            link_manager.roots[0], link_manager.roots[2], "upstream"
+        )
 
-        links = await link_manager.list_linked_projects("/repos/backend")
+        links = await link_manager.list_linked_projects(link_manager.roots[0])
 
         assert len(links) == 2
         paths = {link["linked_path"] for link in links}
-        assert "/repos/client" in paths
-        assert "/repos/shared" in paths
+        assert link_manager.roots[1] in paths
+        assert link_manager.roots[2] in paths
 
     @pytest.mark.asyncio
     async def test_unlink_projects(self, db_manager, link_manager):
@@ -107,13 +127,15 @@ class TestLinkManager:
         await db_manager.init_db()
 
         await link_manager.link_projects(
-            "/repos/backend", "/repos/client", "same-project"
+            link_manager.roots[0], link_manager.roots[1], "same-project"
         )
-        result = await link_manager.unlink_projects("/repos/backend", "/repos/client")
+        result = await link_manager.unlink_projects(
+            link_manager.roots[0], link_manager.roots[1]
+        )
 
         assert result["status"] == "unlinked"
 
-        links = await link_manager.list_linked_projects("/repos/backend")
+        links = await link_manager.list_linked_projects(link_manager.roots[0])
         assert len(links) == 0
 
     @pytest.mark.asyncio
@@ -122,10 +144,10 @@ class TestLinkManager:
         await db_manager.init_db()
 
         await link_manager.link_projects(
-            "/repos/backend", "/repos/client", "same-project"
+            link_manager.roots[0], link_manager.roots[1], "same-project"
         )
         result = await link_manager.link_projects(
-            "/repos/backend", "/repos/client", "same-project"
+            link_manager.roots[0], link_manager.roots[1], "same-project"
         )
 
         assert result["status"] == "already_linked"
@@ -141,9 +163,7 @@ class TestLinkTools:
         return DatabaseManager(str(tmp_path / "storage"))
 
     @pytest.mark.asyncio
-    async def test_link_projects_tool(
-        self, db_manager, covenant_workspace_factory
-    ):
+    async def test_link_projects_tool(self, db_manager, covenant_workspace_factory):
         """link_projects MCP tool should create a link."""
         await db_manager.init_db()
 
@@ -151,9 +171,11 @@ class TestLinkTools:
 
         server._project_contexts.clear()
 
-        project_path = str(db_manager.storage_path.parent.parent)
+        project_path = str(db_manager.storage_path.parent)
+        client_path = db_manager.storage_path.parent / f"client-{uuid.uuid4().hex}"
+        client_path.mkdir(exist_ok=True)
         workspace = covenant_workspace_factory(
-            project_path, additional_roots=["/repos/client"]
+            project_path, additional_roots=[client_path]
         )
 
         # Briefing first (for communion)
@@ -161,7 +183,7 @@ class TestLinkTools:
 
         result = await workspace.call(
             server.link_projects,
-            linked_path="/repos/client",
+            linked_path=str(client_path),
             relationship="same-project",
             project_path=workspace,
         )
@@ -179,15 +201,17 @@ class TestLinkTools:
 
         server._project_contexts.clear()
 
-        project_path = str(db_manager.storage_path.parent.parent)
+        project_path = str(db_manager.storage_path.parent)
+        client_path = db_manager.storage_path.parent / f"client-{uuid.uuid4().hex}"
+        client_path.mkdir(exist_ok=True)
         workspace = covenant_workspace_factory(
-            project_path, additional_roots=["/repos/client"]
+            project_path, additional_roots=[client_path]
         )
 
         await workspace.brief()
         await workspace.call(
             server.link_projects,
-            linked_path="/repos/client",
+            linked_path=str(client_path),
             relationship="same-project",
             project_path=workspace,
         )
@@ -197,12 +221,10 @@ class TestLinkTools:
         )
 
         assert len(result["links"]) == 1
-        assert result["links"][0]["linked_path"] == "/repos/client"
+        assert result["links"][0]["linked_path"] == str(client_path)
 
     @pytest.mark.asyncio
-    async def test_unlink_projects_tool(
-        self, db_manager, covenant_workspace_factory
-    ):
+    async def test_unlink_projects_tool(self, db_manager, covenant_workspace_factory):
         """unlink_projects MCP tool should remove a link."""
         await db_manager.init_db()
 
@@ -210,22 +232,24 @@ class TestLinkTools:
 
         server._project_contexts.clear()
 
-        project_path = str(db_manager.storage_path.parent.parent)
+        project_path = str(db_manager.storage_path.parent)
+        client_path = db_manager.storage_path.parent / f"client-{uuid.uuid4().hex}"
+        client_path.mkdir(exist_ok=True)
         workspace = covenant_workspace_factory(
-            project_path, additional_roots=["/repos/client"]
+            project_path, additional_roots=[client_path]
         )
 
         await workspace.brief()
         await workspace.call(
             server.link_projects,
-            linked_path="/repos/client",
+            linked_path=str(client_path),
             relationship="same-project",
             project_path=workspace,
         )
 
         result = await workspace.call(
             server.unlink_projects,
-            linked_path="/repos/client",
+            linked_path=str(client_path),
             project_path=workspace,
         )
 
@@ -239,25 +263,24 @@ class TestCrossProjectRecall:
     def backend_db(self, tmp_path):
         from daem0nmcp.database import DatabaseManager
 
-        db = DatabaseManager(str(tmp_path / "backend" / ".daem0nmcp"))
+        db = DatabaseManager(str(tmp_path / "backend" / ".daem0nmcp" / "storage"))
         return db
 
     @pytest.fixture
     def client_db(self, tmp_path):
         from daem0nmcp.database import DatabaseManager
 
-        db = DatabaseManager(str(tmp_path / "client" / ".daem0nmcp"))
+        db = DatabaseManager(str(tmp_path / "client" / ".daem0nmcp" / "storage"))
         return db
 
     @pytest.mark.asyncio
     async def test_recall_includes_linked_memories(
-        self, tmp_path, backend_db, client_db
+        self, tmp_path, backend_db, client_db, covenant_workspace_factory
     ):
         """recall with include_linked=True should span linked projects."""
         await backend_db.init_db()
         await client_db.init_db()
 
-        from daem0nmcp.links import LinkManager
         from daem0nmcp.memory import MemoryManager
 
         backend_memory = MemoryManager(backend_db)
@@ -278,7 +301,9 @@ class TestCrossProjectRecall:
         )
 
         # Link backend -> client
-        backend_links = LinkManager(backend_db)
+        backend_links = authorized_link_manager(
+            backend_db, tmp_path / "backend", tmp_path / "client"
+        )
         await backend_links.link_projects(
             source_path=str(tmp_path / "backend"),
             linked_path=str(tmp_path / "client"),
@@ -286,26 +311,78 @@ class TestCrossProjectRecall:
         )
 
         # Recall from backend with include_linked
-        result = await backend_memory.recall(
-            topic="API", project_path=str(tmp_path / "backend"), include_linked=True
+        workspace = covenant_workspace_factory(
+            tmp_path / "backend", additional_roots=[tmp_path / "client"]
         )
+        with workspace.installed():
+            result = await backend_memory.recall(
+                topic="API", project_path=str(tmp_path / "backend"), include_linked=True
+            )
 
         # Should find memories from both projects
         all_content = str(result)
         assert "FastAPI" in all_content or "React Query" in all_content
+        selected = [
+            item
+            for category in ("decisions", "patterns", "warnings", "learnings")
+            for item in result[category]
+        ]
+        assert selected
+        assert all(item["record_id"].startswith("mem_") for item in selected)
+        assert all(item["origin_workspace_id"].startswith("ws_") for item in selected)
+
+    @pytest.mark.asyncio
+    async def test_recall_does_not_read_link_without_caller_scope(
+        self, tmp_path, backend_db, client_db
+    ):
+        """A registered link alone does not authorize linked evidence."""
+        await backend_db.init_db()
+        await client_db.init_db()
+
+        from daem0nmcp.memory import MemoryManager
+
+        backend_memory = MemoryManager(backend_db)
+        client_memory = MemoryManager(client_db)
+        await client_memory.remember(
+            category="warning",
+            content="Linked-only authorization sentinel",
+        )
+        backend_links = authorized_link_manager(
+            backend_db, tmp_path / "backend", tmp_path / "client"
+        )
+        await backend_links.link_projects(
+            str(tmp_path / "backend"),
+            str(tmp_path / "client"),
+            "same-project",
+        )
+
+        result = await backend_memory.recall(
+            "authorization sentinel",
+            project_path=str(tmp_path / "backend"),
+            include_linked=True,
+        )
+
+        assert "Linked-only authorization sentinel" not in str(result)
+        assert result["retrieval"]["linked"] == [
+            {
+                "status": "degraded",
+                "reason": "LINKED_AUTHORIZATION_REQUIRED",
+            }
+        ]
 
 
 class TestLinkedBriefing:
     """Test get_briefing includes linked project context."""
 
     @pytest.mark.asyncio
-    async def test_briefing_shows_linked_projects(self, tmp_path):
+    async def test_briefing_shows_linked_projects(
+        self, tmp_path, covenant_workspace_factory
+    ):
         """get_briefing should mention linked projects."""
         from pathlib import Path
 
         from daem0nmcp import server
         from daem0nmcp.database import DatabaseManager
-        from daem0nmcp.links import LinkManager
         from daem0nmcp.memory import MemoryManager
 
         server._project_contexts.clear()
@@ -335,7 +412,10 @@ class TestLinkedBriefing:
         )
 
         # Link backend -> client (use normalized path to match get_project_context)
-        backend_links = LinkManager(backend_db)
+        workspace = covenant_workspace_factory(
+            backend_path, additional_roots=[client_path]
+        )
+        backend_links = authorized_link_manager(backend_db, backend_path, client_path)
         await backend_links.link_projects(
             source_path=backend_path,
             linked_path=client_path,
@@ -343,7 +423,9 @@ class TestLinkedBriefing:
         )
 
         # Get briefing for backend
-        result = await server.get_briefing(project_path=backend_path)
+        result = await workspace.call_unsealed(
+            server.get_briefing, project_path=workspace
+        )
 
         assert "linked_projects" in result
         assert len(result["linked_projects"]) == 1
@@ -364,9 +446,7 @@ class TestLinkedProjectsE2E:
     """End-to-end test of the complete linked projects flow."""
 
     @pytest.mark.asyncio
-    async def test_complete_linked_workflow(
-        self, tmp_path, covenant_workspace_factory
-    ):
+    async def test_complete_linked_workflow(self, tmp_path, covenant_workspace_factory):
         """Test: link -> briefing -> recall -> unlink."""
         from daem0nmcp import server
         from daem0nmcp.database import DatabaseManager
@@ -474,7 +554,6 @@ class TestDatabaseConsolidation:
     async def test_consolidate_linked_databases(self, tmp_path):
         """Should merge memories from child repos into parent."""
         from daem0nmcp.database import DatabaseManager
-        from daem0nmcp.links import LinkManager
         from daem0nmcp.memory import MemoryManager
 
         # Setup parent and two child repos
@@ -511,7 +590,9 @@ class TestDatabaseConsolidation:
         await parent_db.init_db()
 
         # Link children to parent
-        parent_links = LinkManager(parent_db)
+        parent_links = authorized_link_manager(
+            parent_db, parent_path, backend_path, client_path
+        )
         await parent_links.link_projects(
             str(parent_path), str(backend_path), "same-project"
         )
@@ -537,7 +618,6 @@ class TestDatabaseConsolidation:
     async def test_consolidate_no_links_returns_status(self, tmp_path):
         """Should return no_links status when no projects are linked."""
         from daem0nmcp.database import DatabaseManager
-        from daem0nmcp.links import LinkManager
 
         parent_path = tmp_path / "project"
         parent_path.mkdir()
@@ -545,7 +625,7 @@ class TestDatabaseConsolidation:
         parent_db = DatabaseManager(str(parent_path / ".daem0nmcp" / "storage"))
         await parent_db.init_db()
 
-        parent_links = LinkManager(parent_db)
+        parent_links = authorized_link_manager(parent_db, parent_path)
         result = await parent_links.consolidate_linked_databases(
             target_path=str(parent_path)
         )
@@ -558,7 +638,6 @@ class TestDatabaseConsolidation:
         from sqlalchemy import select
 
         from daem0nmcp.database import DatabaseManager
-        from daem0nmcp.links import LinkManager
         from daem0nmcp.memory import MemoryManager
         from daem0nmcp.models import Memory
 
@@ -580,7 +659,7 @@ class TestDatabaseConsolidation:
         parent_db = DatabaseManager(str(parent_path / ".daem0nmcp" / "storage"))
         await parent_db.init_db()
 
-        parent_links = LinkManager(parent_db)
+        parent_links = authorized_link_manager(parent_db, parent_path, child_path)
         await parent_links.link_projects(
             str(parent_path), str(child_path), "same-project"
         )

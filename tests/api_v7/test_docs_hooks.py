@@ -11,7 +11,6 @@ import tempfile
 import unittest
 from pathlib import Path
 
-
 ROOT = Path(__file__).resolve().parents[2]
 
 PROTOCOL_FILES = (
@@ -39,9 +38,7 @@ CUTOVER_FILES = (
     ROOT / "hooks" / "settings.json.example",
 )
 
-ROOT_HOOKS = tuple(
-    path for path in CUTOVER_FILES if path.parent == ROOT / "hooks"
-)
+ROOT_HOOKS = tuple(path for path in CUTOVER_FILES if path.parent == ROOT / "hooks")
 
 V7_RITUAL_TOOLS = (
     "session_brief",
@@ -96,12 +93,7 @@ def _all_protocol_files() -> tuple[Path, ...]:
 
 
 def _tree_snapshot(root: Path) -> tuple[str, ...]:
-    return tuple(
-        sorted(
-            path.relative_to(root).as_posix()
-            for path in root.rglob("*")
-        )
-    )
+    return tuple(sorted(path.relative_to(root).as_posix() for path in root.rglob("*")))
 
 
 def _run_root_hook(
@@ -329,7 +321,7 @@ class HookFailClosedTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("preflight_token", result.message)
             self.assertFalse((project / ".daem0nmcp" / "storage").exists())
 
-    async def test_pre_edit_fails_closed_with_exact_v7_preflight(self) -> None:
+    async def test_pre_edit_fails_closed_without_native_bridge(self) -> None:
         from daem0nmcp.claude_hooks.pre_edit import async_main
 
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -338,10 +330,7 @@ class HookFailClosedTests(unittest.IsolatedAsyncioTestCase):
             result = await async_main(str(project), str(project / "server.py"))
 
             self.assertFalse(result.allowed)
-            self.assertIn("memory_preflight", result.message)
-            self.assertIn("workspace_id", result.message)
-            self.assertIn("target_tool", result.message)
-            self.assertIn("target_arguments", result.message)
+            self.assertEqual("EDIT_BRIDGE_UNAVAILABLE", result.message)
             self.assertFalse((project / ".daem0nmcp" / "storage").exists())
 
 

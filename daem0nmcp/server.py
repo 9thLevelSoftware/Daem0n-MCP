@@ -8,13 +8,17 @@ being built.
 
 from __future__ import annotations
 
-from importlib import import_module
 import threading
-from typing import Any
+from importlib import import_module
+from typing import TYPE_CHECKING, Any
 
 from .api.v7.launcher import parse_server_options, run_server
 from .api.v7.production import create_v7_server
 
+if TYPE_CHECKING:
+    from fastmcp import FastMCP
+
+    mcp: FastMCP
 
 _SUPPORTED_TRANSPORTS = frozenset({"stdio", "streamable-http"})
 
@@ -304,6 +308,10 @@ _LEGACY_EXPORTS: dict[str, tuple[str, str]] = {
     "_context_resource_impl": (
         "daem0nmcp.tools.resources",
         "_context_resource_impl",
+    ),
+    "get_triggered_context_resource": (
+        "daem0nmcp.tools.resources",
+        "get_triggered_context_resource",
     ),
     # Former composition-root class/function re-exports.
     "check_capability": ("daem0nmcp.agency", "check_capability"),

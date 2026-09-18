@@ -7,18 +7,20 @@ or network stacks.
 
 from __future__ import annotations
 
+import ctypes
 import json
 import os
 import sqlite3
 import stat
 import threading
+from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from pathlib import Path, PurePosixPath
-from typing import BinaryIO, Callable, Literal
+from typing import BinaryIO, Literal
 
 from .event_store import canonical_json_bytes
-from .schema_version import CURRENT_SCHEMA_VERSION
-
+from .protected_files import reject_linked_ancestry
+from .workspace import normalize_resolved_path
 
 POINTER_NAME = "active-db.json"
 POINTER_TEMP_NAME = "active-db.json.tmp"
@@ -131,7 +133,8 @@ def _resolve_storage_file(storage: Path, relative_name: str, field: str) -> Path
     """Resolve a pointer target while rejecting every symlink component."""
 
     try:
-        root = storage.resolve(strict=True)
+        reject_linked_ancestry(storage)
+        root = normalize_resolved_path(storage.resolve(strict=True))
     except (OSError, RuntimeError) as exc:
         raise _invalid("storage directory is unavailable") from exc
     candidate = storage.joinpath(*PurePosixPath(relative_name).parts)
@@ -141,7 +144,7 @@ def _resolve_storage_file(storage: Path, relative_name: str, field: str) -> Path
             current = current / part
             if current.is_symlink():
                 raise _invalid(f"{field} may not traverse a symlink")
-        resolved = candidate.resolve(strict=True)
+        resolved = normalize_resolved_path(candidate.resolve(strict=True))
         resolved.relative_to(root)
     except PointerValidationError:
         raise
@@ -169,7 +172,9 @@ def validate_pointer(pointer: ActiveDatabasePointer) -> ActiveDatabasePointer:
     if run_id is not None and not _valid_prefixed_hash(run_id, "mig"):
         raise _invalid("migration_run_id is invalid")
 
-    is_fresh = active_db == DEFAULT_DATABASE_NAME and previous_db is None and run_id is None
+    is_fresh = (
+        active_db == DEFAULT_DATABASE_NAME and previous_db is None and run_id is None
+    )
     if is_fresh:
         if pointer.format_version != 7 or pointer.generation != 1:
             raise _invalid("fresh v7 pointer must be generation one")
@@ -271,7 +276,7 @@ def has_canonical_v7_state(database_path: str | os.PathLike[str]) -> bool:
                     "SELECT name FROM sqlite_master WHERE type='table'"
                 )
             }
-            if "schema_version" not in tables or not _V7_FORMAT_TABLES <= tables:
+            if "schema_version" not in tables or not tables >= _V7_FORMAT_TABLES:
                 return False
             version = int(
                 connection.execute(
@@ -350,11 +355,17 @@ def write_active_pointer(
     storage_path: str | os.PathLike[str],
     pointer: ActiveDatabasePointer,
     *,
-    replace: Callable[[str | os.PathLike[str], str | os.PathLike[str]], None] = os.replace,
+    replace: Callable[
+        [str | os.PathLike[str], str | os.PathLike[str]], None
+    ] = os.replace,
 ) -> bytes:
     """Validate and atomically publish an activation pointer."""
 
     storage = Path(storage_path)
+    try:
+        reject_linked_ancestry(storage)
+    except (OSError, PermissionError) as exc:
+        raise _invalid("storage contains a link or reparse point") from exc
     if not storage.is_dir() or storage.is_symlink():
         raise _invalid("storage must be an existing non-symlink directory")
     pointer = validate_pointer(pointer)
@@ -394,6 +405,86 @@ _PROCESS_LOCK_GUARD = threading.RLock()
 _PROCESS_LOCKS: dict[str, _ProcessLockState] = {}
 
 
+class _WindowsOverlapped(ctypes.Structure):
+    _fields_ = (
+        ("Internal", ctypes.c_size_t),
+        ("InternalHigh", ctypes.c_size_t),
+        ("Offset", ctypes.c_ulong),
+        ("OffsetHigh", ctypes.c_ulong),
+        ("hEvent", ctypes.c_void_p),
+    )
+
+
+def _windows_file_lock(
+    handle: BinaryIO,
+    *,
+    exclusive: bool,
+    nonblocking: bool,
+) -> None:
+    import msvcrt
+    from ctypes import wintypes
+
+    flags = 0
+    if nonblocking:
+        flags |= 0x00000001  # LOCKFILE_FAIL_IMMEDIATELY
+    if exclusive:
+        flags |= 0x00000002  # LOCKFILE_EXCLUSIVE_LOCK
+    overlapped = _WindowsOverlapped()
+    try:
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        lock_file = kernel32.LockFileEx
+        lock_file.argtypes = (
+            wintypes.HANDLE,
+            wintypes.DWORD,
+            wintypes.DWORD,
+            wintypes.DWORD,
+            wintypes.DWORD,
+            ctypes.POINTER(_WindowsOverlapped),
+        )
+        lock_file.restype = wintypes.BOOL
+        locked = lock_file(
+            wintypes.HANDLE(msvcrt.get_osfhandle(handle.fileno())),
+            flags,
+            0,
+            1,
+            0,
+            ctypes.byref(overlapped),
+        )
+    except OSError as exc:
+        raise DatabaseInUseError() from exc
+    if not locked:
+        raise DatabaseInUseError()
+
+
+def _windows_file_unlock(handle: BinaryIO) -> None:
+    import msvcrt
+    from ctypes import wintypes
+
+    overlapped = _WindowsOverlapped()
+    try:
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        unlock_file = kernel32.UnlockFileEx
+        unlock_file.argtypes = (
+            wintypes.HANDLE,
+            wintypes.DWORD,
+            wintypes.DWORD,
+            wintypes.DWORD,
+            ctypes.POINTER(_WindowsOverlapped),
+        )
+        unlock_file.restype = wintypes.BOOL
+        unlocked = unlock_file(
+            wintypes.HANDLE(msvcrt.get_osfhandle(handle.fileno())),
+            0,
+            1,
+            0,
+            ctypes.byref(overlapped),
+        )
+    except OSError as exc:
+        raise DatabaseInUseError() from exc
+    if not unlocked:
+        raise DatabaseInUseError()
+
+
 class DatabaseFileLock:
     """Lifetime shared or exclusive advisory lock for a storage generation."""
 
@@ -416,10 +507,18 @@ class DatabaseFileLock:
     def acquired(self) -> bool:
         return self._registered
 
-    def acquire(self) -> "DatabaseFileLock":
+    def acquire(self) -> DatabaseFileLock:
         if self._registered:
             return self
+        try:
+            reject_linked_ancestry(self.path.parent)
+        except (OSError, PermissionError) as exc:
+            raise _invalid("lock storage directory is unsafe") from exc
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            reject_linked_ancestry(self.path.parent)
+        except (OSError, PermissionError) as exc:
+            raise _invalid("lock storage directory is unsafe") from exc
         if self.path.parent.is_symlink():
             raise _invalid("lock storage directory may not be a symlink")
         key = os.path.normcase(str(self.path.resolve(strict=False)))
@@ -451,16 +550,11 @@ class DatabaseFileLock:
 
     def _lock_handle(self, handle: BinaryIO) -> None:
         if os.name == "nt":
-            import msvcrt
-
-            if self.mode == "shared":
-                mode = msvcrt.LK_NBRLCK if self.nonblocking else msvcrt.LK_RLCK
-            else:
-                mode = msvcrt.LK_NBLCK if self.nonblocking else msvcrt.LK_LOCK
-            try:
-                msvcrt.locking(handle.fileno(), mode, 1)
-            except OSError as exc:
-                raise DatabaseInUseError() from exc
+            _windows_file_lock(
+                handle,
+                exclusive=self.mode == "exclusive",
+                nonblocking=self.nonblocking,
+            )
             return
         try:
             import fcntl
@@ -488,10 +582,7 @@ class DatabaseFileLock:
                 handle = state.handle
                 try:
                     if os.name == "nt":
-                        import msvcrt
-
-                        handle.seek(0)
-                        msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+                        _windows_file_unlock(handle)
                     else:
                         import fcntl
 
@@ -502,7 +593,7 @@ class DatabaseFileLock:
             self._registered = False
             self._key = None
 
-    def __enter__(self) -> "DatabaseFileLock":
+    def __enter__(self) -> DatabaseFileLock:
         return self.acquire()
 
     def __exit__(self, exc_type, exc, traceback) -> None:

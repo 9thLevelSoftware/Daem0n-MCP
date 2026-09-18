@@ -1,0 +1,100 @@
+{
+  "P0": {
+    "migration-fixtures": "Freeze real v6-generated databases and sanitized supported-schema snapshots before migration optimization.",
+    "relevance-fixtures": "Freeze representative queries and relevance judgments; retain comparable v6 and v7 baseline measurements.",
+    "full-baseline": "Run the complete immutable-baseline suite and classify defects, missing dependencies, and unfinished-behavior assertions."
+  },
+  "P1": {
+    "foreground-core": "Installed core-only server performs ordinary recall and bounded tools through stdio and HTTP without tasks extra.",
+    "foreground-deadline": "Configured 1-60 second deadline bounds all admission paths; oversized operations reject before side effects.",
+    "admission-atomicity": "Identity, scope, normalized arguments, exact grant, deadline and idempotency are validated before one durable admission; crash injection cannot lose admitted work.",
+    "opaque-queue": "Inspect actual persisted Valkey queue, logs and task context: only admitted job IDs, no credentials or bearer material.",
+    "task-lifecycle": "Actual MCP submit/status/list/result/cancel works and denies cross-principal/workspace access.",
+    "task-reconnect": "Restart plus reauthentication and renewed briefing retrieves the prior result without repeating mutation.",
+    "task-recovery": "Queue outage, outbox crash, duplicate delivery and expired admission preserve authorized semantics.",
+    "task-cancel-retry": "Cancellation before/after commit is truthful; only replay-safe operations retry; ambiguous sandbox execution never retries automatically."
+  },
+  "P2": {
+    "verify-authority": "Whole-store verification detects hashes, continuity, causation, typed state, all ledgers, mappings, pointer metadata and manifest corruption.",
+    "repair-candidate": "Offline verified replay creates and validates a separate candidate and atomically activates it; corrupt authority is never guessed or dropped.",
+    "migration-schemas": "Migrate every supported legacy schema, real v6 fixture and representative snapshot including new task/capture/discovery/consolidation metadata.",
+    "migration-inspect": "Inspection reports disk needs, unsupported data and concrete recovery instructions before apply.",
+    "rollback-reactivate": "Rollback retains both database generations and post-migration v7 writes; reactivation restores those writes.",
+    "durable-boundaries": "Terminate at every append, migration checkpoint, candidate construction, pointer publication and projection activation boundary; no silent loss or ambiguous active storage.",
+    "io-failures": "Disk exhaustion, locks, permissions, corrupt candidates and interrupted replacement preserve recoverability.",
+    "recovery-commands": "Operator commands recover interrupted consolidation and retry failed projection jobs."
+  },
+  "P3": {
+    "isolated-convergence": "An isolated write updates every enabled projection without a subsequent user call.",
+    "leases-deadletters": "Expired leases recover; unavailable optional providers stop retrying; stable dead letters support explicit retry.",
+    "resource-lifecycle": "Concurrent recall reuses generation/config resources and closes them after storage change and shutdown without races or accumulating clients.",
+    "federation-access": "Every requested origin needs both a live link and independent caller authorization; unlink/access changes before return deny results.",
+    "federation-budget": "Bounded fan-out uses one global candidate/result/token budget and deterministic ranking; identical record IDs remain distinct by origin.",
+    "qdrant-local": "Actual local Qdrant indexing, recall, restart and cleanup pass with the configured embedding model.",
+    "qdrant-remote": "Actual authenticated remote Qdrant indexing, recall, failure and restart pass.",
+    "onnx": "Configured actual ONNX execution produces validated embeddings and retrieval results.",
+    "rerank-compress": "Enabled real reranking and compression preserve citations and global bounds.",
+    "degraded-lexical": "Missing or disabled optional services preserve bounded lexical operation without loading disabled models."
+  },
+  "P4": {
+    "impact-edges": "Generation-scoped call/import/reference edges pass integrity checks and bounded code impact traversal through the server.",
+    "entity-backfill": "Production extraction persists event-authoritative or rebuildable entity results with cancellation and replay safety.",
+    "community-resolution": "Atomic graph-generation rebuild uses public resolution in clustering and recovers interrupted activation.",
+    "url-ingestion": "Pinned no-redirect transport enforces type/size/address limits and atomically stores idempotent provenance-bearing chunks.",
+    "sandbox-staging": "Actual E2B staging proves isolation/network settings, deadline, bounded output, cleanup and nonblocking server execution.",
+    "consolidation-preview": "Apply binds exact source generations/selections and expiry; stale preview/source races reject under deterministic workspace locks.",
+    "consolidation-identity": "Deterministic source-to-target mappings preserve provenance and no duplicate semantic writes.",
+    "consolidation-archive": "Archive occurs only after verified target commit, touches only managed memory storage, retains sources, and resumes every partial boundary."
+  },
+  "P5": {
+    "canonical-roundtrip": "Ordinary export/import preserves identity and canonical history; existing event-only bundles remain compatible.",
+    "vector-roundtrip": "Versioned vectors include model, dimensions, generation and checksums; compatible data roundtrips and incompatible data explicitly rebuilds.",
+    "legacy-payload": "include_legacy_projection serializes an actual validated payload, never a false inclusion claim.",
+    "projection-validation": "Malformed or canonical-state-inconsistent optional projection payloads cannot activate."
+  },
+  "P6": {
+    "exact-edit": "Host captures immutable actual tool args, paths and preimages; denied edit returns exact edit_preflight remedy.",
+    "receipt-binding": "One-use 120s receipt binds principal, MCP and paired host sessions, workspace, exact edit and preimages; changed/replayed/expired requests deny.",
+    "local-ipc": "Same-user protected IPC stages receipts only from real MCP responses and consumes immediately before unchanged retry.",
+    "remote-bridge": "Authenticated HTTPS same-principal pairing retains bridge credentials outside model context; unavailable bridge gives recoverable denial.",
+    "claude-local": "Supported Claude Code performs denied edit, preflight, retry, actual edit, capture and reviewed promotion locally.",
+    "claude-remote": "Supported Claude Code completes the full workflow against the authenticated remote server.",
+    "opencode-v1": "Supported OpenCode V1 preserves session, args, results and transcript access with actual timeouts; full local and remote workflow passes.",
+    "opencode-v2": "Supported OpenCode V2 separately passes full local and remote workflow; installer selects compatible adapter.",
+    "capture-review": "Bounded provenance/idempotent candidates exclude raw transcripts by default and stay out of ordinary recall/rules until exactly authorized canonical promotion."
+  },
+  "P7": {
+    "four-strategies": "Production startup runs failed-decision, pending-outcome, connection-discovery and community-refresh strategies under preserved opt-in/dry-run controls.",
+    "dream-write-policy": "Inferred changes become reviewable candidates; configured auto-actions use narrowly scoped audited system policy.",
+    "dream-lifecycle": "Per-workspace bounded nonoverlapping work yields to foreground activity, recovers restart idempotently and stops cleanly.",
+    "dream-diagnostics": "Health reports strategy progress, last success, failures and pending work without workspace leakage."
+  },
+  "P8": {
+    "app-host": "Supported MCP App host renders populated v7 results and functioning actions for all dashboard shells.",
+    "app-security": "Production assets validate message source/origin, escape untrusted content, enforce payload bounds and content restrictions.",
+    "text-fallback": "Clients without MCP App support retain complete text responses and tool metadata names only registered URIs."
+  },
+  "P9": {
+    "transports": "Stdio, loopback HTTP and authenticated reverse-proxy HTTPS pass the same authorization controls.",
+    "proxy-boundary": "Documented TLS, restricted forwarding/backend exposure, Host/Origin allowlists and JWT validation reject unsafe requests.",
+    "quotas": "Principal/workspace admission and task quotas remain bounded under concurrent clients.",
+    "path-json-url": "Production paths reject symlink/reparse escapes, duplicate JSON keys, oversized triggers and URL address-pinning attacks.",
+    "health-redaction": "Health truthfully reports capability/tasks/projection/migration/bridge/dream readiness while errors and telemetry redact credentials, sensitive content and local paths."
+  },
+  "P10": {
+    "wheel-sdist": "Clean wheel and source installs pass documented workflows without editable checkout imports.",
+    "profiles": "Core-only and every optional profile plus meaningful combinations execute their actual capabilities.",
+    "documentation": "Version/install/migration/rollback/client/task/export docs and generated schemas/examples exactly match tested artifacts, including preflight args.",
+    "postinstall": "Published instructions alone complete briefing, recall, authorized write, outcome, resource reads and optional diagnostics.",
+    "checks": "Complete Python, JavaScript, Ruff, packaging and changed-v7 blocking type checks pass without weakening behavior assertions.",
+    "platform-matrix": "Python 3.10, 3.11 and 3.12 pass on Windows, macOS and Linux; missing infrastructure is incomplete.",
+    "lexical-performance": "At 100k memories/representative 1m-event history on documented 8-core/32GB/SSD reference, warm 4-way lexical recall p95 <=500ms.",
+    "hybrid-performance": "Warm 4-way local hybrid recall p95 <=2s on the documented reference dataset/machine.",
+    "visibility-performance": "Isolated write visible lexical <=5s, specialized <=60s and dense after initial build <=5min.",
+    "migration-performance": "Migration through activation <=30min excluding dense rebuild on the certified reference dataset.",
+    "retrieval-quality": "Frozen comparable Recall@10 and nDCG@10 regress by at most 0.02 absolute.",
+    "eight-hour-soak": "Eight-hour mixed workload shows no accumulating workers/clients or unbounded memory growth.",
+    "published-measurements": "Publish cold start/model load, initial indexing, disk needs and above-target stress evidence.",
+    "final-evidence": "Final-commit evidence bundle identifies dependencies, test/benchmark results, client versions, RC and release artifacts with no open correctness/security/data-loss blocker."
+  }
+}

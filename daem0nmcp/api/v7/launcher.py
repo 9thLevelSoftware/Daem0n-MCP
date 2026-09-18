@@ -7,7 +7,6 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Any, Literal
 
-
 Transport = Literal["stdio", "streamable-http"]
 
 
@@ -42,9 +41,7 @@ def parse_server_options(arguments: Sequence[str] | None = None) -> ServerOption
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", "-p", type=int, default=8765)
     parsed = parser.parse_args(arguments)
-    transport = (
-        "streamable-http" if parsed.transport == "http" else parsed.transport
-    )
+    transport: Transport = "stdio" if parsed.transport == "stdio" else "streamable-http"
     return ServerOptions(transport, parsed.host, parsed.port)
 
 
@@ -100,12 +97,15 @@ def run_server(
         return
     validate_security(options.host, getattr(server, "auth", None))
     origin_middleware = build_origin_middleware(options.host, options.port)
+    from ...transport_security import build_uvicorn_security_config
+
     server.run(
         transport="streamable-http",
         host=options.host,
         port=options.port,
         middleware=origin_middleware,
         stateless_http=False,
+        uvicorn_config=build_uvicorn_security_config(),
     )
 
 

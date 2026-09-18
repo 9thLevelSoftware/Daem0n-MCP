@@ -135,9 +135,7 @@ class TestURLAdmission:
     async def test_accepts_an_all_public_hostname_answer_set(self):
         from daem0nmcp.tools.agency_tools import _validate_url
 
-        resolver = AsyncMock(
-            return_value=("93.184.216.34", "2606:4700:4700::1111")
-        )
+        resolver = AsyncMock(return_value=("93.184.216.34", "2606:4700:4700::1111"))
 
         error = await _validate_url(
             "https://docs.example.test:8443/resource",
@@ -168,7 +166,9 @@ class TestIngestDocHardening:
         for url in bad_urls:
             result = await covenant_compliant_project.call(
                 ingest_doc,
-                url=url, topic="test", project_path=covenant_compliant_project
+                url=url,
+                topic="test",
+                project_path=covenant_compliant_project,
             )
             assert "error" in result, f"Should reject {url}"
             assert (
@@ -204,14 +204,17 @@ class TestIngestDocHardening:
         """Verify total chunks are limited."""
         from daem0nmcp.server import MAX_CHUNKS, ingest_doc
 
-        with patch(
-            "daem0nmcp.tools.agency_tools._validate_url",
-            new_callable=AsyncMock,
-            return_value=None,
-        ), patch(
-            "daem0nmcp.tools.agency_tools._fetch_and_extract",
-            new_callable=AsyncMock,
-        ) as mock_fetch:
+        with (
+            patch(
+                "daem0nmcp.tools.agency_tools._validate_url",
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
+            patch(
+                "daem0nmcp.tools.agency_tools._fetch_and_extract",
+                new_callable=AsyncMock,
+            ) as mock_fetch,
+        ):
             # Return content that would create many chunks
             mock_fetch.return_value = "word " * 100000  # Lots of words
 
@@ -242,7 +245,9 @@ class TestIngestDocHardening:
         for url in ssrf_urls:
             result = await covenant_compliant_project.call(
                 ingest_doc,
-                url=url, topic="test", project_path=covenant_compliant_project
+                url=url,
+                topic="test",
+                project_path=covenant_compliant_project,
             )
             assert "error" in result, f"Should reject {url}: {result}"
             error_msg = result["error"].lower()
@@ -292,7 +297,9 @@ class TestIngestDocHardening:
         # Test empty topic
         result = await covenant_compliant_project.call(
             ingest_doc,
-            url="https://example.com", topic="", project_path=covenant_compliant_project
+            url="https://example.com",
+            topic="",
+            project_path=covenant_compliant_project,
         )
         assert "error" in result
         assert "empty" in result["error"].lower()
@@ -322,14 +329,17 @@ class TestIngestDocMocked:
 
         mock_content = "This is documentation about API usage. Use the /users endpoint for user operations."
 
-        with patch(
-            "daem0nmcp.tools.agency_tools._validate_url",
-            new_callable=AsyncMock,
-            return_value=None,
-        ), patch(
-            "daem0nmcp.tools.agency_tools._fetch_and_extract",
-            new_callable=AsyncMock,
-        ) as mock_fetch:
+        with (
+            patch(
+                "daem0nmcp.tools.agency_tools._validate_url",
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
+            patch(
+                "daem0nmcp.tools.agency_tools._fetch_and_extract",
+                new_callable=AsyncMock,
+            ) as mock_fetch,
+        ):
             mock_fetch.return_value = mock_content
             result = await covenant_compliant_project.call(
                 ingest_doc,
@@ -350,14 +360,17 @@ class TestIngestDocMocked:
         from daem0nmcp.server import ingest_doc
 
         # When _fetch_and_extract returns None, ingest_doc returns an error
-        with patch(
-            "daem0nmcp.tools.agency_tools._validate_url",
-            new_callable=AsyncMock,
-            return_value=None,
-        ), patch(
-            "daem0nmcp.tools.agency_tools._fetch_and_extract",
-            new_callable=AsyncMock,
-        ) as mock_fetch:
+        with (
+            patch(
+                "daem0nmcp.tools.agency_tools._validate_url",
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
+            patch(
+                "daem0nmcp.tools.agency_tools._fetch_and_extract",
+                new_callable=AsyncMock,
+            ) as mock_fetch,
+        ):
             mock_fetch.return_value = None
             result = await covenant_compliant_project.call(
                 ingest_doc,
@@ -376,14 +389,17 @@ class TestIngestDocMocked:
         from daem0nmcp.server import ingest_doc
 
         # When _fetch_and_extract returns None, ingest_doc returns an error
-        with patch(
-            "daem0nmcp.tools.agency_tools._validate_url",
-            new_callable=AsyncMock,
-            return_value=None,
-        ), patch(
-            "daem0nmcp.tools.agency_tools._fetch_and_extract",
-            new_callable=AsyncMock,
-        ) as mock_fetch:
+        with (
+            patch(
+                "daem0nmcp.tools.agency_tools._validate_url",
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
+            patch(
+                "daem0nmcp.tools.agency_tools._fetch_and_extract",
+                new_callable=AsyncMock,
+            ) as mock_fetch,
+        ):
             mock_fetch.return_value = None
             result = await covenant_compliant_project.call(
                 ingest_doc,
@@ -494,9 +510,7 @@ class TestFetchAndExtract:
 
         mock_response = MagicMock()
         mock_response.raise_for_status = MagicMock()
-        mock_response.headers.get = MagicMock(
-            return_value=str(MAX_CONTENT_SIZE + 1)
-        )
+        mock_response.headers.get = MagicMock(return_value=str(MAX_CONTENT_SIZE + 1))
         mock_response.encoding = "utf-8"
 
         async def _aiter_raw(chunk_size=None):
@@ -516,8 +530,10 @@ class TestFetchAndExtract:
 
         mock_response = MagicMock()
         mock_response.raise_for_status = MagicMock()
-        mock_response.headers.get = MagicMock(return_value=None)
+        mock_response.status_code = 200
+        mock_response.headers = {"content-encoding": "identity"}
         mock_response.encoding = "utf-8"
+        mock_response.extensions = {}
 
         async def _aiter_raw(chunk_size=None):
             yield b"<p>safe documentation</p>"
@@ -527,13 +543,16 @@ class TestFetchAndExtract:
         delegate = object()
         transport = object()
 
-        with patch(
-            "daem0nmcp.pinned_http.PinnedAsyncHTTPTransport",
-            return_value=transport,
-        ) as transport_factory, patch(
-            "httpx.AsyncClient",
-            return_value=MockAsyncClient(mock_response),
-        ) as client_factory:
+        with (
+            patch(
+                "daem0nmcp.pinned_http.PinnedAsyncHTTPTransport",
+                return_value=transport,
+            ) as transport_factory,
+            patch(
+                "httpx.AsyncClient",
+                return_value=MockAsyncClient(mock_response),
+            ) as client_factory,
+        ):
             result = await _fetch_and_extract(
                 "https://docs.example.test/",
                 resolver=resolver,
@@ -557,9 +576,12 @@ class TestFetchAndExtract:
         from daem0nmcp.tools.agency_tools import _fetch_and_extract
 
         raw_url = "https://docs.example.test/path?token=do-not-log#fragment"
-        with caplog.at_level("ERROR", logger="daem0nmcp.tools.agency_tools"), patch(
-            "httpx.AsyncClient",
-            return_value=MockAsyncClient(stream_error=RuntimeError(raw_url)),
+        with (
+            caplog.at_level("ERROR", logger="daem0nmcp.tools.agency_tools"),
+            patch(
+                "httpx.AsyncClient",
+                return_value=MockAsyncClient(stream_error=RuntimeError(raw_url)),
+            ),
         ):
             result = await _fetch_and_extract(raw_url)
 
@@ -575,8 +597,8 @@ class TestFetchAndExtract:
         from daem0nmcp.tools.agency_tools import _fetch_and_extract
 
         mock_response = MagicMock()
-        # Mock headers.get() to return None for content-length
-        mock_response.headers.get = MagicMock(return_value=None)
+        mock_response.status_code = 200
+        mock_response.headers = {"content-encoding": "identity"}
         mock_response.raise_for_status = MagicMock()
         mock_response.encoding = "utf-8"
         mock_response.extensions = {}

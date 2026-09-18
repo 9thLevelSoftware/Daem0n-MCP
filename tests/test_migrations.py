@@ -138,6 +138,7 @@ class TestMigrations:
     def test_migration_tracks_schema_version(self, legacy_db):
         """Verify migrations are tracked in schema_version table."""
         from daem0nmcp.migrations import run_migrations
+        from daem0nmcp.schema_version import CURRENT_SCHEMA_VERSION
 
         count, applied = run_migrations(legacy_db)
 
@@ -146,10 +147,7 @@ class TestMigrations:
             versions = [row[0] for row in cursor.fetchall()]
 
         assert len(versions) == count
-        assert versions == [
-            1, 2, 3, 4, 5, 6, 7, 8, 9,
-            10, 11, 12, 13, 14, 15, 16, 17, 18, 19,
-        ]
+        assert versions == list(range(1, CURRENT_SCHEMA_VERSION + 1))
 
 
 def test_migration_14_bitemporal_columns():

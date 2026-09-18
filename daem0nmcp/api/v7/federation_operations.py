@@ -20,13 +20,14 @@ import re
 import secrets
 import sqlite3
 import threading
-from collections.abc import Callable, Mapping
-from contextlib import ExitStack, contextmanager
+from collections.abc import Callable, Iterator, Mapping
+from contextlib import ExitStack, contextmanager, suppress
+from contextvars import copy_context
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from types import MappingProxyType
-from typing import Any, Iterator
+from typing import Any
 
 from ...bounded_workers import BoundedWorkerBusyError, BoundedWorkerPool
 from ...event_store import canonical_json_bytes, sha256_json
@@ -34,16 +35,15 @@ from ...schema_version import CURRENT_SCHEMA_VERSION
 from ...workspace import Workspace, WorkspaceRegistry
 from .application import AdmittedRequest
 from .errors import STABLE_ERROR_CODE_SET
+from .federated_retrieval import federation_access_lock
 from .models import MutationReceipt, Page
+from .runtime_protocols import ActiveStorageResolver, WorkerPool, WorkspaceResolver
 from .runtime_services import WorkspaceStorageResolver
 from .tasks import await_task_terminal
 from .tools import WorkspaceLinkView
 
-
 _EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
-_CURSOR_RE = re.compile(
-    r"^cur_v1_link_(ws_[0-9a-f]{24})_([0-9a-f]{64})$"
-)
+_CURSOR_RE = re.compile(r"^cur_v1_link_(ws_[0-9a-f]{24})_([0-9a-f]{64})$")
 _REQUIRED_TABLES = frozenset({"schema_version", "workspace_link_events"})
 
 
@@ -76,11 +76,14 @@ def _default_worker_pool() -> BoundedWorkerPool:
 class FederationOperationDependencies:
     """Reviewed dependencies for the canonical workspace-link lifecycle."""
 
-    workspace_resolver: object
-    storage_resolver: object = field(default_factory=WorkspaceStorageResolver)
+    workspace_resolver: WorkspaceResolver
+    storage_resolver: ActiveStorageResolver = field(
+        default_factory=WorkspaceStorageResolver
+    )
     clock: Callable[[], datetime] = field(default=_default_clock)
     cursor_secret: bytes = field(default_factory=lambda: secrets.token_bytes(32))
-    worker_pool: object = field(default_factory=_default_worker_pool)
+    worker_pool: WorkerPool = field(default_factory=_default_worker_pool)
+    workspace_authorizer: Callable[[Workspace], bool] | None = None
 
     def __post_init__(self) -> None:
         if not callable(getattr(self.workspace_resolver, "resolve", None)):
@@ -140,13 +143,34 @@ def _resolve_linked(
         resolved = dependencies.workspace_resolver.resolve(linked_workspace_id)
     except Exception:
         raise FederationOperationError("UNAUTHORIZED_WORKSPACE") from None
-    return _exact_workspace(resolved, linked_workspace_id)
+    workspace = _exact_workspace(resolved, linked_workspace_id)
+    _authorize_workspace_access(dependencies, workspace)
+    return workspace
+
+
+def _authorize_workspace_access(
+    dependencies: FederationOperationDependencies, *workspaces: Workspace
+) -> None:
+    if dependencies.workspace_authorizer is None:
+        return
+    try:
+        allowed = all(
+            dependencies.workspace_authorizer(workspace) is True
+            for workspace in workspaces
+        )
+    except Exception:
+        allowed = False
+    if not allowed:
+        raise FederationOperationError("UNAUTHORIZED_WORKSPACE")
 
 
 def _database_path(workspace: Workspace, active: object) -> Path:
     try:
         root = workspace.root.resolve(strict=True)
-        candidate = Path(getattr(active, "path"))
+        active_path = getattr(active, "path", None)
+        if not isinstance(active_path, (str, Path)):
+            raise ValueError("active database path is unavailable")
+        candidate = Path(active_path)
         if candidate.is_symlink():
             raise ValueError
         resolved = candidate.resolve(strict=True)
@@ -222,10 +246,7 @@ def _timestamp_us(value: datetime) -> int:
         raise FederationOperationError("CAPABILITY_DEGRADED")
     try:
         delta = value.astimezone(timezone.utc) - _EPOCH
-        result = (
-            (delta.days * 86_400 + delta.seconds) * 1_000_000
-            + delta.microseconds
-        )
+        result = (delta.days * 86_400 + delta.seconds) * 1_000_000 + delta.microseconds
     except (OverflowError, TypeError, ValueError):
         raise FederationOperationError("CAPABILITY_DEGRADED") from None
     if not 0 <= result <= 2**63 - 1:
@@ -242,14 +263,15 @@ async def _run_read(
     dependencies: FederationOperationDependencies,
     operation: Callable[[], Any],
 ) -> Any:
-    task = asyncio.create_task(dependencies.worker_pool.run(operation))
+    context = copy_context()
+    task = asyncio.create_task(
+        dependencies.worker_pool.run(lambda: context.run(operation))
+    )
     try:
         return await asyncio.shield(task)
     except asyncio.CancelledError as cancellation:
-        try:
+        with suppress(Exception):
             await await_task_terminal(task)
-        except Exception:
-            pass
         raise cancellation
     except BoundedWorkerBusyError as exc:
         raise FederationOperationError("TASK_REQUIRED") from exc
@@ -260,8 +282,9 @@ async def _run_mutation(
     operation: Callable[[threading.Event], Any],
 ) -> Any:
     cancelled = threading.Event()
+    context = copy_context()
     task = asyncio.create_task(
-        dependencies.worker_pool.run(lambda: operation(cancelled))
+        dependencies.worker_pool.run(lambda: context.run(operation, cancelled))
     )
     try:
         return await asyncio.shield(task)
@@ -391,35 +414,56 @@ def _link_sync(
 ) -> WorkspaceLinkView:
     _raise_if_cancelled(cancelled)
     linked = _resolve_linked(dependencies, request.linked_workspace_id)
+    _authorize_workspace_access(dependencies, workspace, linked)
     _raise_if_cancelled(cancelled)
-    with _locked_active_databases(
-        dependencies, (workspace, linked)
-    ) as active_by_id:
+    with _locked_active_databases(dependencies, (workspace, linked)) as active_by_id:
         _raise_if_cancelled(cancelled)
-        linked_connection = _open_database(
-            _database_path(linked, active_by_id[linked.workspace_id]),
-            writable=False,
-        )
-        linked_connection.close()
-        connection = _open_database(
-            _database_path(workspace, active_by_id[workspace.workspace_id]),
-            writable=True,
-        )
-        try:
-            connection.execute("BEGIN IMMEDIATE")
-            _raise_if_cancelled(cancelled)
-            current = _current_link(
-                connection,
-                workspace.workspace_id,
-                request.linked_workspace_id,
+        origin_path = _database_path(workspace, active_by_id[workspace.workspace_id])
+        with federation_access_lock(origin_path, "exclusive"):
+            linked_connection = _open_database(
+                _database_path(linked, active_by_id[linked.workspace_id]),
+                writable=False,
             )
-            if (
-                current is not None
-                and current[4] == "workspace.linked"
-                and current[5] == request.relationship
-                and current[6] == request.label
-            ):
+            linked_connection.close()
+            connection = _open_database(origin_path, writable=True)
+            try:
+                connection.execute("BEGIN IMMEDIATE")
                 _raise_if_cancelled(cancelled)
+                current = _current_link(
+                    connection,
+                    workspace.workspace_id,
+                    request.linked_workspace_id,
+                )
+                if (
+                    current is not None
+                    and current[4] == "workspace.linked"
+                    and current[5] == request.relationship
+                    and current[6] == request.label
+                ):
+                    _raise_if_cancelled(cancelled)
+                    connection.commit()
+                    return WorkspaceLinkView(
+                        workspace_id=workspace.workspace_id,
+                        linked_workspace_id=request.linked_workspace_id,
+                        relationship=request.relationship,
+                        label=request.label,
+                    )
+                version = 1 if current is None else int(current[3]) + 1
+                previous_hash = None if current is None else str(current[10])
+                values = _event_values(
+                    workspace_id=workspace.workspace_id,
+                    linked_workspace_id=request.linked_workspace_id,
+                    stream_version=version,
+                    event_type="workspace.linked",
+                    relationship=request.relationship,
+                    label=request.label,
+                    timestamp_us=_timestamp_us(dependencies.clock()),
+                    previous_event_hash=previous_hash,
+                )
+                _raise_if_cancelled(cancelled)
+                _insert_event(connection, values)
+                _raise_if_cancelled(cancelled)
+                _authorize_workspace_access(dependencies, workspace, linked)
                 connection.commit()
                 return WorkspaceLinkView(
                     workspace_id=workspace.workspace_id,
@@ -427,39 +471,17 @@ def _link_sync(
                     relationship=request.relationship,
                     label=request.label,
                 )
-            version = 1 if current is None else int(current[3]) + 1
-            previous_hash = None if current is None else str(current[10])
-            values = _event_values(
-                workspace_id=workspace.workspace_id,
-                linked_workspace_id=request.linked_workspace_id,
-                stream_version=version,
-                event_type="workspace.linked",
-                relationship=request.relationship,
-                label=request.label,
-                timestamp_us=_timestamp_us(dependencies.clock()),
-                previous_event_hash=previous_hash,
-            )
-            _raise_if_cancelled(cancelled)
-            _insert_event(connection, values)
-            _raise_if_cancelled(cancelled)
-            connection.commit()
-            return WorkspaceLinkView(
-                workspace_id=workspace.workspace_id,
-                linked_workspace_id=request.linked_workspace_id,
-                relationship=request.relationship,
-                label=request.label,
-            )
-        except FederationOperationError:
-            connection.rollback()
-            raise
-        except sqlite3.Error:
-            connection.rollback()
-            raise FederationOperationError("CAPABILITY_DEGRADED") from None
-        except Exception:
-            connection.rollback()
-            raise
-        finally:
-            connection.close()
+            except FederationOperationError:
+                connection.rollback()
+                raise
+            except sqlite3.Error:
+                connection.rollback()
+                raise FederationOperationError("CAPABILITY_DEGRADED") from None
+            except Exception:
+                connection.rollback()
+                raise
+            finally:
+                connection.close()
 
 
 def _unlink_receipt(
@@ -472,9 +494,7 @@ def _unlink_receipt(
 ) -> MutationReceipt:
     return MutationReceipt(
         operation_id="op_"
-        + sha256_json(
-            ["v7-workspace-unlink", workspace_id, linked_workspace_id]
-        ),
+        + sha256_json(["v7-workspace-unlink", workspace_id, linked_workspace_id]),
         affected_ids=[linked_workspace_id] if event_id is not None else [],
         event_ids=[] if event_id is None else [event_id],
         counts={"unlinked": changed},
@@ -490,80 +510,79 @@ def _unlink_sync(
 ) -> MutationReceipt:
     _raise_if_cancelled(cancelled)
     linked = _resolve_linked(dependencies, request.linked_workspace_id)
+    _authorize_workspace_access(dependencies, workspace, linked)
     _raise_if_cancelled(cancelled)
-    with _locked_active_databases(
-        dependencies, (workspace, linked)
-    ) as active_by_id:
+    with _locked_active_databases(dependencies, (workspace, linked)) as active_by_id:
         _raise_if_cancelled(cancelled)
-        linked_connection = _open_database(
-            _database_path(linked, active_by_id[linked.workspace_id]),
-            writable=False,
-        )
-        linked_connection.close()
-        connection = _open_database(
-            _database_path(workspace, active_by_id[workspace.workspace_id]),
-            writable=True,
-        )
-        try:
-            connection.execute("BEGIN IMMEDIATE")
-            _raise_if_cancelled(cancelled)
-            current = _current_link(
-                connection,
-                workspace.workspace_id,
-                request.linked_workspace_id,
+        origin_path = _database_path(workspace, active_by_id[workspace.workspace_id])
+        with federation_access_lock(origin_path, "exclusive"):
+            linked_connection = _open_database(
+                _database_path(linked, active_by_id[linked.workspace_id]),
+                writable=False,
             )
-            if current is None:
+            linked_connection.close()
+            connection = _open_database(origin_path, writable=True)
+            try:
+                connection.execute("BEGIN IMMEDIATE")
                 _raise_if_cancelled(cancelled)
+                current = _current_link(
+                    connection,
+                    workspace.workspace_id,
+                    request.linked_workspace_id,
+                )
+                if current is None:
+                    _raise_if_cancelled(cancelled)
+                    connection.commit()
+                    return _unlink_receipt(
+                        workspace.workspace_id,
+                        request.linked_workspace_id,
+                        event_id=None,
+                        replay=True,
+                        changed=0,
+                    )
+                if current[4] == "workspace.unlinked":
+                    _raise_if_cancelled(cancelled)
+                    connection.commit()
+                    return _unlink_receipt(
+                        workspace.workspace_id,
+                        request.linked_workspace_id,
+                        event_id=str(current[0]),
+                        replay=True,
+                        changed=0,
+                    )
+                values = _event_values(
+                    workspace_id=workspace.workspace_id,
+                    linked_workspace_id=request.linked_workspace_id,
+                    stream_version=int(current[3]) + 1,
+                    event_type="workspace.unlinked",
+                    relationship=str(current[5]),
+                    label=current[6],
+                    timestamp_us=_timestamp_us(dependencies.clock()),
+                    previous_event_hash=str(current[10]),
+                )
+                _raise_if_cancelled(cancelled)
+                _insert_event(connection, values)
+                _raise_if_cancelled(cancelled)
+                _authorize_workspace_access(dependencies, workspace, linked)
                 connection.commit()
                 return _unlink_receipt(
                     workspace.workspace_id,
                     request.linked_workspace_id,
-                    event_id=None,
-                    replay=True,
-                    changed=0,
+                    event_id=str(values[0]),
+                    replay=False,
+                    changed=1,
                 )
-            if current[4] == "workspace.unlinked":
-                _raise_if_cancelled(cancelled)
-                connection.commit()
-                return _unlink_receipt(
-                    workspace.workspace_id,
-                    request.linked_workspace_id,
-                    event_id=str(current[0]),
-                    replay=True,
-                    changed=0,
-                )
-            values = _event_values(
-                workspace_id=workspace.workspace_id,
-                linked_workspace_id=request.linked_workspace_id,
-                stream_version=int(current[3]) + 1,
-                event_type="workspace.unlinked",
-                relationship=str(current[5]),
-                label=current[6],
-                timestamp_us=_timestamp_us(dependencies.clock()),
-                previous_event_hash=str(current[10]),
-            )
-            _raise_if_cancelled(cancelled)
-            _insert_event(connection, values)
-            _raise_if_cancelled(cancelled)
-            connection.commit()
-            return _unlink_receipt(
-                workspace.workspace_id,
-                request.linked_workspace_id,
-                event_id=str(values[0]),
-                replay=False,
-                changed=1,
-            )
-        except FederationOperationError:
-            connection.rollback()
-            raise
-        except sqlite3.Error:
-            connection.rollback()
-            raise FederationOperationError("CAPABILITY_DEGRADED") from None
-        except Exception:
-            connection.rollback()
-            raise
-        finally:
-            connection.close()
+            except FederationOperationError:
+                connection.rollback()
+                raise
+            except sqlite3.Error:
+                connection.rollback()
+                raise FederationOperationError("CAPABILITY_DEGRADED") from None
+            except Exception:
+                connection.rollback()
+                raise
+            finally:
+                connection.close()
 
 
 def _cursor_for(
@@ -607,51 +626,53 @@ def _list_sync(
     workspace: Workspace,
     request: AdmittedRequest,
 ) -> Page[WorkspaceLinkView]:
+    _authorize_workspace_access(dependencies, workspace)
     anchor = _cursor_anchor(
         dependencies,
         workspace.workspace_id,
         request.cursor,
     )
     with dependencies.storage_resolver.locked_active(workspace) as active:
-        connection = _open_database(
-            _database_path(workspace, active), writable=False
-        )
-        try:
-            rows = connection.execute(
-                "SELECT event.linked_workspace_id,event.relationship,event.label "
-                "FROM workspace_link_events AS event JOIN ("
-                "SELECT linked_workspace_id,MAX(stream_version) AS version "
-                "FROM workspace_link_events WHERE workspace_id=? "
-                "GROUP BY linked_workspace_id) AS latest "
-                "ON latest.linked_workspace_id=event.linked_workspace_id "
-                "AND latest.version=event.stream_version "
-                "WHERE event.workspace_id=? AND event.event_type='workspace.linked' "
-                "AND event.linked_workspace_id>? "
-                "ORDER BY event.linked_workspace_id LIMIT ?",
-                (
-                    workspace.workspace_id,
-                    workspace.workspace_id,
-                    anchor,
-                    request.limit + 1,
-                ),
-            ).fetchall()
-            for row in rows:
-                current = _current_link(
-                    connection,
-                    workspace.workspace_id,
-                    str(row[0]),
-                )
-                if (
-                    current is None
-                    or current[4] != "workspace.linked"
-                    or current[5] != row[1]
-                    or current[6] != row[2]
-                ):
-                    raise FederationOperationError("CAPABILITY_DEGRADED")
-        except sqlite3.Error:
-            raise FederationOperationError("CAPABILITY_DEGRADED") from None
-        finally:
-            connection.close()
+        database_path = _database_path(workspace, active)
+        with federation_access_lock(database_path, "shared"):
+            connection = _open_database(database_path, writable=False)
+            try:
+                rows = connection.execute(
+                    "SELECT event.linked_workspace_id,event.relationship,event.label "
+                    "FROM workspace_link_events AS event JOIN ("
+                    "SELECT linked_workspace_id,MAX(stream_version) AS version "
+                    "FROM workspace_link_events WHERE workspace_id=? "
+                    "GROUP BY linked_workspace_id) AS latest "
+                    "ON latest.linked_workspace_id=event.linked_workspace_id "
+                    "AND latest.version=event.stream_version "
+                    "WHERE event.workspace_id=? "
+                    "AND event.event_type='workspace.linked' "
+                    "AND event.linked_workspace_id>? "
+                    "ORDER BY event.linked_workspace_id LIMIT ?",
+                    (
+                        workspace.workspace_id,
+                        workspace.workspace_id,
+                        anchor,
+                        request.limit + 1,
+                    ),
+                ).fetchall()
+                for row in rows:
+                    current = _current_link(
+                        connection,
+                        workspace.workspace_id,
+                        str(row[0]),
+                    )
+                    if (
+                        current is None
+                        or current[4] != "workspace.linked"
+                        or current[5] != row[1]
+                        or current[6] != row[2]
+                    ):
+                        raise FederationOperationError("CAPABILITY_DEGRADED")
+            except sqlite3.Error:
+                raise FederationOperationError("CAPABILITY_DEGRADED") from None
+            finally:
+                connection.close()
     selected = rows[: request.limit]
     items: list[WorkspaceLinkView] = []
     for row in selected:
@@ -694,9 +715,7 @@ def build_federation_operations(
         _authorize(workspace, request, "workspace_link")
         return await _run_mutation(
             dependencies,
-            lambda cancelled: _link_sync(
-                dependencies, workspace, request, cancelled
-            ),
+            lambda cancelled: _link_sync(dependencies, workspace, request, cancelled),
         )
 
     async def workspace_unlink(
@@ -705,9 +724,7 @@ def build_federation_operations(
         _authorize(workspace, request, "workspace_unlink")
         return await _run_mutation(
             dependencies,
-            lambda cancelled: _unlink_sync(
-                dependencies, workspace, request, cancelled
-            ),
+            lambda cancelled: _unlink_sync(dependencies, workspace, request, cancelled),
         )
 
     async def workspace_links_list(

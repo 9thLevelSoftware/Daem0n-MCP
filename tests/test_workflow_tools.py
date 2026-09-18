@@ -18,7 +18,7 @@ class TestV7ToolsRegistered:
         from daem0nmcp.api.v7.policy import V7_TOOL_LEVELS
 
         assert tool_names == set(V7_TOOL_LEVELS)
-        assert len(tool_names) == 71
+        assert len(tool_names) == 75
 
     async def test_retired_workflow_routers_are_absent(self, tool_names):
         retired = {

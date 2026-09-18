@@ -1,153 +1,78 @@
-"""Claude Code PostToolUse hook for replay-safe v7 memory suggestions.
+"""Capture a successful approved native edit without transcript content."""
 
-The hook never writes domain data itself. Significant edits receive exact
-``memory_preflight`` and ``memory_store`` calls with an opaque workspace ID and
-a deterministic idempotency key.
-"""
+from __future__ import annotations
 
-import hashlib
-import json
+import os
 import sys
-from pathlib import Path
+from collections.abc import Mapping
+from typing import Any
 
-from ..workspace import WorkspaceRegistry
-from ._client import get_file_path_from_input, get_project_path, get_tool_input, succeed
-
-# Patterns indicating architecturally or operationally significant changes
-SIGNIFICANT_PATTERNS = [
-    "class ",
-    "def __init__",
-    "async def ",
-    "@dataclass",
-    "@mcp.tool",
-    "config",
-    "settings",
-    "environment",
-    "auth",
-    "password",
-    "token",
-    "secret",
-    "credential",
-    "migration",
-    "schema",
-    "model",
-    "table",
-    "column",
-    "endpoint",
-    "route",
-    "api",
-    "request",
-    "response",
-]
-
-# File types that are usually significant
-SIGNIFICANT_EXTENSIONS = {
-    ".py",
-    ".ts",
-    ".js",
-    ".go",
-    ".rs",
-    ".java",
-    ".yaml",
-    ".yml",
-    ".json",
-    ".toml",
-    ".sql",
-    ".prisma",
-}
+from ..edit_host import EditHostConfig, EditHostStateStore, native_edit_capture_body
+from ._client import read_hook_event
+from .native_edit import configured_native_edit_tools, native_edit_relative_paths
 
 
-def _is_significant(file_path: str, change_content: str) -> bool:
-    """Determine if a change is significant enough to suggest remembering."""
-    ext = Path(file_path).suffix.lower()
-    if ext not in SIGNIFICANT_EXTENSIONS:
-        return False
-
-    change_lower = change_content.lower()
-    for pattern in SIGNIFICANT_PATTERNS:
-        if pattern.lower() in change_lower:
-            return True
-
-    return len(change_content) > 500
+def _ok(response: object) -> bool:
+    body = getattr(response, "body", None)
+    return isinstance(body, Mapping) and body.get("ok") is True
 
 
-def _workspace_id(project_path: str) -> str:
-    return WorkspaceRegistry(default_root=project_path).default.workspace_id
-
-
-def _relative_file_path(project_path: str, file_path: str) -> str | None:
+def handle_post_edit(event: Mapping[str, Any], project_path: str) -> bool:
+    """Stage only a bounded host-generated candidate for a consumed request."""
     try:
-        root = Path(project_path).resolve(strict=True)
-        return Path(file_path).resolve(strict=False).relative_to(root).as_posix()
-    except (OSError, RuntimeError, ValueError):
-        return None
-
-
-def _v7_suggestion(
-    project_path: str,
-    file_path: str,
-    change_content: str,
-) -> str:
-    workspace_id = _workspace_id(project_path)
-    relative_path = _relative_file_path(project_path, file_path)
-    path_label = relative_path or Path(file_path).name
-    digest = hashlib.sha256(
-        f"{workspace_id}\0{path_label}\0{change_content}".encode("utf-8")
-    ).hexdigest()[:24]
-    target_arguments = {
-        "record_type": "decision",
-        "content": f"Summarize the significant change to {path_label}",
-        "rationale": "Preserve the reason and constraints for future sessions",
-        "idempotency_key": f"hook-postedit-{digest}",
-    }
-    if relative_path is not None:
-        target_arguments["relative_file_path"] = relative_path
-    encoded = json.dumps(target_arguments, ensure_ascii=True, separators=(",", ":"))
-    return (
-        f"[Daem0n suggests] Significant change to {Path(file_path).name}. "
-        "First call "
-        f'daem0nmcp_memory_preflight(workspace_id="{workspace_id}", '
-        f'target_tool="memory_store", target_arguments={encoded}); then call '
-        f'daem0nmcp_memory_store(workspace_id="{workspace_id}", '
-        f'record_type="decision", content={json.dumps(target_arguments["content"])}, '
-        f'rationale={json.dumps(target_arguments["rationale"])}, '
-        + (
-            f'relative_file_path={json.dumps(relative_path)}, '
-            if relative_path is not None
-            else ""
+        native_session_id = event["session_id"]
+        native_request_id = event["tool_use_id"]
+        tool_name = event["tool_name"]
+        tool_input = event["tool_input"]
+        if not all(
+            isinstance(value, str) and value
+            for value in (native_session_id, native_request_id, tool_name)
+        ) or not isinstance(tool_input, Mapping):
+            return False
+        config = EditHostConfig.from_environment(os.environ)
+        workspace_id = config.workspace_id(project_path)
+        store = EditHostStateStore(config)
+        consumed = store.get_consumed(
+            workspace_id=workspace_id,
+            native_session_id=native_session_id,
+            credential_id=config.identity.credential_id,
+            native_request_id=native_request_id,
         )
-        + f'idempotency_key="{target_arguments["idempotency_key"]}", '
-        'preflight_token="<token-from-memory_preflight>").'
-    )
+        if consumed is None:
+            return False
+        relative_paths = native_edit_relative_paths(
+            project_path=project_path,
+            tool_name=tool_name,
+            tool_input=tool_input,
+            configured_tools=configured_native_edit_tools(os.environ),
+        )
+        body = native_edit_capture_body(
+            workspace_id=workspace_id,
+            host_session_id=consumed.host_session_id,
+            edit_request_id=consumed.edit_request_id,
+            tool_name=tool_name,
+            relative_paths=relative_paths,
+            result="succeeded",
+        )
+        if not _ok(config.build_client().call("/v1/captures", body)):
+            return False
+        return store.mark_captured(
+            workspace_id=workspace_id,
+            native_session_id=native_session_id,
+            credential_id=config.identity.credential_id,
+            edit_request_id=consumed.edit_request_id,
+        )
+    except Exception:
+        return False
 
 
 def main() -> None:
-    project_path = get_project_path()
-    if project_path is None:
-        sys.exit(0)
-
-    file_path = get_file_path_from_input()
-    if not file_path:
-        sys.exit(0)
-
-    # Extract change content from tool input
-    data = get_tool_input()
-    old_string = data.get("old_string", "")
-    new_string = data.get("new_string", "")
-    content = data.get("content", "")  # Write tool uses 'content'
-    change_content = f"{old_string} {new_string} {content}"
-
-    if not _is_significant(file_path, change_content):
-        sys.exit(0)
-
-    succeed(_v7_suggestion(project_path, file_path, change_content))
+    event = read_hook_event()
+    path = event.get("cwd")
+    if isinstance(path, str) and path:
+        handle_post_edit(event, path)
+    sys.exit(0)
 
 
 if __name__ == "__main__":
-    import warnings
-
-    warnings.filterwarnings("ignore")
-
-    from daem0nmcp.claude_hooks._client import run_hook_safely
-
-    run_hook_safely(main)
+    main()

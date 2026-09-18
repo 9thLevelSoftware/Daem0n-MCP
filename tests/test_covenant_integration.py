@@ -31,9 +31,7 @@ class TestCovenantIntegration:
 
         server._project_contexts.clear()
 
-        workspace = covenant_workspace_factory(
-            str(db_manager.storage_path.parent.parent)
-        )
+        workspace = covenant_workspace_factory(str(db_manager.storage_path.parent))
         result = await workspace.call_unsealed(
             server.remember,
             category="decision",
@@ -55,7 +53,7 @@ class TestCovenantIntegration:
 
         server._project_contexts.clear()
 
-        project_path = str(db_manager.storage_path.parent.parent)
+        project_path = str(db_manager.storage_path.parent)
         workspace = covenant_workspace_factory(project_path)
         await workspace.brief()
 
@@ -80,7 +78,7 @@ class TestCovenantIntegration:
 
         server._project_contexts.clear()
 
-        project_path = str(db_manager.storage_path.parent.parent)
+        project_path = str(db_manager.storage_path.parent)
         workspace = covenant_workspace_factory(project_path)
         await workspace.brief()
 
@@ -132,7 +130,7 @@ class TestCovenantIntegration:
 
         server._project_contexts.clear()
 
-        project_path = str(db_manager.storage_path.parent.parent)
+        project_path = str(db_manager.storage_path.parent)
         workspace = covenant_workspace_factory(project_path)
         await workspace.brief()
 
@@ -150,7 +148,7 @@ class TestCovenantIntegration:
         assert result.get("status") != "blocked"
 
     @pytest.mark.asyncio
-    async def test_health_always_allowed(self, db_manager):
+    async def test_health_always_allowed(self, db_manager, covenant_workspace_factory):
         """health() should work without any covenant compliance."""
         await db_manager.init_db()
 
@@ -158,9 +156,11 @@ class TestCovenantIntegration:
 
         server._project_contexts.clear()
 
-        project_path = str(db_manager.storage_path.parent.parent)
+        project_path = str(db_manager.storage_path.parent)
 
-        result = await server.health(project_path=project_path)
+        workspace = covenant_workspace_factory(project_path)
+        with workspace.installed():
+            result = await server.health(project_path=workspace)
 
         assert "version" in result
         assert result.get("status") != "blocked"

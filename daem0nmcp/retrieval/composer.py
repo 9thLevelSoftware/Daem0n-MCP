@@ -16,16 +16,15 @@ from typing import Literal, Protocol
 
 from ..bounded_workers import BoundedWorkerBusyError, BoundedWorkerPool
 from .types import (
+    _VERSION_ID,
+    MAX_TOKEN_BUDGET,
     CitationEntry,
     ContextPackage,
     EvidenceItem,
     FusedCandidate,
-    MAX_TOKEN_BUDGET,
-    _VERSION_ID,
     _legacy_metadata,
     _opaque,
 )
-
 
 _CITATION_PATTERN = re.compile(r"\[E[1-9][0-9]*\]")
 _COMPOSER_WORKERS = BoundedWorkerPool(
@@ -46,9 +45,7 @@ def _validated_token_budget(value: object) -> int:
         or value < 1
         or value > MAX_TOKEN_BUDGET
     ):
-        raise ValueError(
-            f"token_budget must be between 1 and {MAX_TOKEN_BUDGET}"
-        )
+        raise ValueError(f"token_budget must be between 1 and {MAX_TOKEN_BUDGET}")
     return value
 
 
@@ -106,12 +103,8 @@ class SelectedEvidence:
         _legacy_metadata(self.rationale, self.tags, self.worked)
         if self.status not in {"current", "superseded"}:
             raise ValueError("status is invalid")
-        if (self.status == "superseded") != (
-            self.superseded_by_version_id is not None
-        ):
-            raise ValueError(
-                "superseded evidence requires its invalidating version"
-            )
+        if (self.status == "superseded") != (self.superseded_by_version_id is not None):
+            raise ValueError("superseded evidence requires its invalidating version")
         if self.superseded_by_version_id is not None:
             _opaque(
                 self.superseded_by_version_id,
@@ -153,16 +146,12 @@ class CompositionResult:
         if tuple(item.citation for item in self.items) != tuple(
             citation.marker for citation in self.context.citations
         ):
-            raise ValueError(
-                "items and citation manifest must match in exact order"
-            )
-        for item, citation in zip(self.items, self.context.citations):
+            raise ValueError("items and citation manifest must match in exact order")
+        for item, citation in zip(self.items, self.context.citations, strict=True):
             if (
                 item.evidence_refs != citation.evidence_refs
                 or item.channels != citation.channels
-                or self.context.text[
-                    citation.excerpt_start : citation.excerpt_end
-                ]
+                or self.context.text[citation.excerpt_start : citation.excerpt_end]
                 != item.excerpt
             ):
                 raise ValueError(
@@ -217,12 +206,8 @@ class EvidenceComposer:
             or timeout <= 0
             or timeout > 30
         ):
-            raise ValueError(
-                "compressor_timeout_seconds must be between 0 and 30"
-            )
-        if worker_pool is not None and not isinstance(
-            worker_pool, BoundedWorkerPool
-        ):
+            raise ValueError("compressor_timeout_seconds must be between 0 and 30")
+        if worker_pool is not None and not isinstance(worker_pool, BoundedWorkerPool):
             raise ValueError("worker_pool must be a BoundedWorkerPool")
         self._tokenizer = tokenizer
         self._compressor = compressor
@@ -435,9 +420,7 @@ class EvidenceComposer:
         )
         return CompositionResult(items=tuple(items), context=context)
 
-    def _resequence(
-        self, prepared: list[_PreparedItem]
-    ) -> list[_PreparedItem]:
+    def _resequence(self, prepared: list[_PreparedItem]) -> list[_PreparedItem]:
         """Assign contiguous markers after restoring caller-selected order."""
 
         resequenced: list[_PreparedItem] = []
@@ -576,7 +559,9 @@ class EvidenceComposer:
         return best
 
     def _full_excerpt(self, source: SelectedEvidence) -> str:
-        highlights = " ".join(self._clean(value) for value in source.candidate.highlights)
+        highlights = " ".join(
+            self._clean(value) for value in source.candidate.highlights
+        )
         content = self._clean(source.content)
         return f"{highlights} {content}".strip() if highlights else content
 
@@ -595,12 +580,8 @@ class EvidenceComposer:
             excerpt,
         ]
         if source.outcome is not None:
-            outcome_label = (
-                "Failed outcome" if source.outcome_failed else "Outcome"
-            )
-            lines.append(
-                f"{outcome_label}: {self._bounded(source.outcome)}"
-            )
+            outcome_label = "Failed outcome" if source.outcome_failed else "Outcome"
+            lines.append(f"{outcome_label}: {self._bounded(source.outcome)}")
         if source.procedure_steps:
             lines.append(
                 "Steps: "
@@ -609,8 +590,7 @@ class EvidenceComposer:
         relation_paths = self._relation_paths(source.candidate)
         if relation_paths:
             lines.append(
-                "Relations: "
-                + " ; ".join(" > ".join(path) for path in relation_paths)
+                "Relations: " + " ; ".join(" > ".join(path) for path in relation_paths)
             )
         return "\n".join(lines)
 

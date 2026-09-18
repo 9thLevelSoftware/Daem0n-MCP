@@ -77,7 +77,7 @@
     const refresh = ui.element("button", "daemon-btn", "Refresh Token");
     refresh.type = "button";
     refresh.addEventListener("click", function () {
-      ui.sendHost(ui.actions.contextCheck.method, { tool: ui.actions.contextCheck.tool, args: { description: "Refreshing token from Covenant Status dashboard" } });
+      ui.callTool(ui.actions.contextCheck.tool, {});
     });
     mount.replaceChildren(header, diagram(data.phase), status, ui.element("p", "covenant-message", data.message), refresh);
   }

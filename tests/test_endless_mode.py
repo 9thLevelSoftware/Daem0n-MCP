@@ -198,7 +198,7 @@ class TestEndlessModeMCP:
 
         server._project_contexts.clear()
 
-        project_path = str(db_manager.storage_path.parent.parent)
+        project_path = str(db_manager.storage_path.parent)
         workspace = covenant_workspace_factory(project_path)
         await workspace.brief()
 
@@ -245,7 +245,7 @@ class TestEndlessModeMCP:
 
         server._project_contexts.clear()
 
-        project_path = str(db_manager.storage_path.parent.parent)
+        project_path = str(db_manager.storage_path.parent)
         workspace = covenant_workspace_factory(project_path)
         await workspace.brief()
 

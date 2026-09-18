@@ -28,6 +28,7 @@ async def migrate_vectors_to_qdrant(*args, **kwargs):
 
     return await implementation(*args, **kwargs)
 
+
 __all__ = [
     "run_migrations",
     "migrate_and_backfill_vectors",

@@ -15,6 +15,11 @@ from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
 from daem0nmcp import __version__
 from daem0nmcp.covenant import CovenantLevel
 
+try:
+    import tomllib
+except ImportError:  # pragma: no cover - exercised on Python 3.10
+    import tomli as tomllib
+
 
 class _Input(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
@@ -31,6 +36,9 @@ class _Output(BaseModel):
 
 async def _handler(workspace_id: str, limit: int = 5) -> _Output:
     return _Output(value=f"{workspace_id}:{limit}")
+
+
+_handler.__daem0nmcp_admission_aware__ = True
 
 
 async def _resource_handler(workspace_id: str) -> _Output:
@@ -82,6 +90,7 @@ class FastMCPAdapterTests(unittest.TestCase):
         with_resource=True,
         read_only: bool = True,
         enveloped: bool = False,
+        handler=_handler,
     ):
         from daem0nmcp.api.v7.registry import (
             ResourceSpec,
@@ -97,7 +106,7 @@ class FastMCPAdapterTests(unittest.TestCase):
         tool = ToolSpec(
             name="session_brief",
             description="Return a bounded session response.",
-            handler=_handler,
+            handler=handler,
             input_model=_Input,
             output_model=output_model,
             category="session",
@@ -132,28 +141,39 @@ class FastMCPAdapterTests(unittest.TestCase):
             require_full_surface=False,
         )
 
+    @staticmethod
+    def _foreground_policies(**changes):
+        from daem0nmcp.api.v7.tasks import ForegroundExecutionPolicy
+
+        return {
+            "session_brief": ForegroundExecutionPolicy(
+                max_request_bytes=64 * 1024,
+                **changes,
+            )
+        }
+
     def test_exact_pinned_version_gate(self) -> None:
         from daem0nmcp.api.v7.fastmcp import (
             FastMCPCompatibilityError,
             ensure_fastmcp_compatibility,
         )
 
-        ensure_fastmcp_compatibility("3.0.0b2")
-        for version in ("3.0.0b1", "3.0.0", "3.0.1", "2.13.0"):
-            with self.subTest(version=version):
-                with self.assertRaises(FastMCPCompatibilityError):
-                    ensure_fastmcp_compatibility(version)
+        ensure_fastmcp_compatibility("3.4.7")
+        for version in ("3.4.6", "3.4.8", "3.0.0b2", "2.13.0"):
+            with (
+                self.subTest(version=version),
+                self.assertRaises(FastMCPCompatibilityError),
+            ):
+                ensure_fastmcp_compatibility(version)
 
     def test_project_declares_exact_framework_and_optional_tasks_extra(self) -> None:
-        import tomllib
-
         project = tomllib.loads(pathlib.Path("pyproject.toml").read_text("utf-8"))[
             "project"
         ]
-        self.assertIn("fastmcp==3.0.0b2", project["dependencies"])
+        self.assertIn("fastmcp==3.4.7", project["dependencies"])
         self.assertEqual(
             project["optional-dependencies"]["tasks"],
-            ["fastmcp[tasks]==3.0.0b2"],
+            ["fastmcp[tasks]==3.4.7"],
         )
 
     def test_builds_fresh_strict_stateful_server_from_manifest(self) -> None:
@@ -162,7 +182,7 @@ class FastMCPAdapterTests(unittest.TestCase):
         server = build_fastmcp_server(
             self._manifest(),
             fastmcp_cls=_FakeFastMCP,
-            distribution_version="3.0.0b2",
+            distribution_version="3.4.7",
             tasks_enabled=False,
             auth="auth-provider",
         )
@@ -201,7 +221,7 @@ class FastMCPAdapterTests(unittest.TestCase):
         server = build_fastmcp_server(
             self._manifest(with_resource=False),
             fastmcp_cls=_FakeFastMCP,
-            distribution_version="3.0.0b2",
+            distribution_version="3.4.7",
             tasks_enabled=False,
         )
         _, handler = server.tools[0]
@@ -228,9 +248,7 @@ class FastMCPAdapterTests(unittest.TestCase):
         async def handler(**arguments):
             return arguments
 
-        specs = build_tool_specs(
-            {name: handler for name in V7_TOOL_LEVELS}
-        )
+        specs = build_tool_specs(dict.fromkeys(V7_TOOL_LEVELS, handler))
         for spec in specs:
             with self.subTest(tool=spec.name):
                 adapter = _tool_adapter(
@@ -249,7 +267,7 @@ class FastMCPAdapterTests(unittest.TestCase):
         build_fastmcp_server(
             self._manifest(with_resource=False),
             fastmcp_cls=_FakeFastMCP,
-            distribution_version="3.0.0b2",
+            distribution_version="3.4.7",
             tasks_enabled=False,
         )
         logger = logging.getLogger("fastmcp.server.mixins.mcp_operations")
@@ -297,7 +315,7 @@ class FastMCPAdapterTests(unittest.TestCase):
         server = build_fastmcp_server(
             self._manifest(with_resource=False),
             fastmcp_cls=_FakeFastMCP,
-            distribution_version="3.0.0b2",
+            distribution_version="3.4.7",
             tasks_enabled=False,
             lifespan=lifespan,
         )
@@ -319,14 +337,15 @@ class FastMCPAdapterTests(unittest.TestCase):
 
         with self.assertRaisesRegex(
             FastMCPCompatibilityError,
-            "acceptance seam",
+            "owned task support requires exactly one durable dispatcher",
         ):
             build_fastmcp_server(
                 self._manifest(task_mode="optional", with_resource=False),
                 fastmcp_cls=_FakeFastMCP,
-                distribution_version="3.0.0b2",
+                distribution_version="3.4.7",
                 task_config_cls=_FakeTaskConfig,
                 tasks_enabled=True,
+                foreground_policies=self._foreground_policies(),
             )
 
     def test_optional_tool_uses_bounded_fallback_without_task_support(self) -> None:
@@ -338,23 +357,20 @@ class FastMCPAdapterTests(unittest.TestCase):
             calls.append((estimated_to_fit, timeout_seconds))
             return await operation()
 
-        _handler.__daem0nmcp_sync_fallback_safe__ = True
-        try:
-            with patch(
-                "daem0nmcp.api.v7.fastmcp.run_sync_fallback",
-                side_effect=fallback,
-            ):
-                server = build_fastmcp_server(
-                    self._manifest(task_mode="optional", with_resource=False),
-                    fastmcp_cls=_FakeFastMCP,
-                    distribution_version="3.0.0b2",
-                    tasks_enabled=False,
-                    sync_timeout_seconds=7,
-                )
-                metadata, handler = server.tools[0]
-                result = asyncio.run(handler(workspace_id="ws_test", limit=2))
-        finally:
-            del _handler.__daem0nmcp_sync_fallback_safe__
+        with patch(
+            "daem0nmcp.api.v7.fastmcp.run_sync_fallback",
+            side_effect=fallback,
+        ):
+            server = build_fastmcp_server(
+                self._manifest(task_mode="optional", with_resource=False),
+                fastmcp_cls=_FakeFastMCP,
+                distribution_version="3.4.7",
+                tasks_enabled=False,
+                sync_timeout_seconds=7,
+                foreground_policies=self._foreground_policies(),
+            )
+            metadata, handler = server.tools[0]
+            result = asyncio.run(handler(workspace_id="ws_test", limit=2))
 
         self.assertEqual(result, {"value": "ws_test:2"})
         self.assertEqual(calls, [(True, 7)])
@@ -372,55 +388,103 @@ class FastMCPAdapterTests(unittest.TestCase):
                     read_only=False,
                 ),
                 fastmcp_cls=_FakeFastMCP,
-                distribution_version="3.0.0b2",
+                distribution_version="3.4.7",
                 tasks_enabled=False,
                 sync_timeout_seconds=7,
+                foreground_policies=self._foreground_policies(),
             )
             _, handler = server.tools[0]
             asyncio.run(handler(workspace_id="ws_test", limit=2))
-        self.assertEqual(calls, [(False, 7)])
+        self.assertEqual(calls, [(True, 7)])
 
         for timeout in (0, 61, True, 10**400):
-            with self.subTest(timeout=timeout):
-                with self.assertRaises(ValueError):
-                    build_fastmcp_server(
-                        self._manifest(task_mode="optional", with_resource=False),
-                        fastmcp_cls=_FakeFastMCP,
-                        distribution_version="3.0.0b2",
-                        tasks_enabled=False,
-                        sync_timeout_seconds=timeout,
-                    )
+            with self.subTest(timeout=timeout), self.assertRaises(ValueError):
+                build_fastmcp_server(
+                    self._manifest(task_mode="optional", with_resource=False),
+                    fastmcp_cls=_FakeFastMCP,
+                    distribution_version="3.4.7",
+                    tasks_enabled=False,
+                    sync_timeout_seconds=timeout,
+                    foreground_policies=self._foreground_policies(),
+                )
 
-    def test_read_only_hint_cannot_admit_an_unreviewed_sync_fallback(self) -> None:
+    def test_forbidden_task_tool_still_uses_the_foreground_deadline(self) -> None:
+        from daem0nmcp.api.v7.fastmcp import build_fastmcp_server
+
+        calls: list[tuple[bool, int | float]] = []
+
+        async def fallback(operation, *, estimated_to_fit, timeout_seconds):
+            calls.append((estimated_to_fit, timeout_seconds))
+            return await operation()
+
+        with patch(
+            "daem0nmcp.api.v7.fastmcp.run_sync_fallback",
+            side_effect=fallback,
+        ):
+            server = build_fastmcp_server(
+                self._manifest(with_resource=False),
+                fastmcp_cls=_FakeFastMCP,
+                distribution_version="3.4.7",
+                sync_timeout_seconds=9,
+            )
+            _, handler = server.tools[0]
+            result = asyncio.run(handler(workspace_id="ws_test", limit=2))
+
+        self.assertEqual(result, {"value": "ws_test:2"})
+        self.assertEqual(calls, [(True, 9)])
+
+    def test_optional_tool_requires_an_admission_aware_handler(self) -> None:
+        from daem0nmcp.api.v7.fastmcp import (
+            FastMCPCompatibilityError,
+            build_fastmcp_server,
+        )
+
+        async def unreviewed(workspace_id: str, limit: int = 5) -> _Output:
+            return _Output(value=f"{workspace_id}:{limit}")
+
+        with self.assertRaisesRegex(
+            FastMCPCompatibilityError,
+            "not admission-aware",
+        ):
+            build_fastmcp_server(
+                self._manifest(
+                    task_mode="optional",
+                    with_resource=False,
+                    handler=unreviewed,
+                ),
+                fastmcp_cls=_FakeFastMCP,
+                distribution_version="3.4.7",
+                foreground_policies=self._foreground_policies(),
+            )
+
+    def test_oversized_request_is_authorized_then_rejected_before_side_effects(
+        self,
+    ) -> None:
         from daem0nmcp.api.v7.errors import ErrorCode
         from daem0nmcp.api.v7.fastmcp import build_fastmcp_server
         from daem0nmcp.api.v7.models import ApiResponse
+        from daem0nmcp.api.v7.responses import ResponseFactory
+        from daem0nmcp.api.v7.tasks import task_admission_only_var
 
-        server = build_fastmcp_server(
-            self._manifest(
-                task_mode="optional",
-                with_resource=False,
-                read_only=True,
-                enveloped=True,
-            ),
-            fastmcp_cls=_FakeFastMCP,
-            distribution_version="3.0.0b2",
-            tasks_enabled=False,
-        )
-        metadata, handler = server.tools[0]
-        result = asyncio.run(
-            handler(workspace_id="ws_" + "a" * 24, limit=2)
-        )
+        admitted = False
+        mutated = False
 
-        response = ApiResponse[_Output].model_validate(result)
-        self.assertFalse(response.ok)
-        self.assertEqual(response.error.code, ErrorCode.TASKS_UNAVAILABLE)
-        self.assertNotIn("timeout", metadata)
+        async def admission_aware(
+            workspace_id: str,
+            limit: int = 5,
+        ) -> ApiResponse[_Output]:
+            nonlocal admitted, mutated
+            admitted = True
+            response = ResponseFactory().begin(workspace_id)
+            if task_admission_only_var.get():
+                return response.failure(
+                    ErrorCode.TASKS_UNAVAILABLE,
+                    "Task execution is unavailable.",
+                )
+            mutated = True
+            return response.success(_Output(value=f"{workspace_id}:{limit}"))
 
-    def test_optional_write_reports_tasks_unavailable_without_backend(self) -> None:
-        from daem0nmcp.api.v7.errors import ErrorCode
-        from daem0nmcp.api.v7.fastmcp import build_fastmcp_server
-        from daem0nmcp.api.v7.models import ApiResponse
+        admission_aware.__daem0nmcp_admission_aware__ = True
 
         server = build_fastmcp_server(
             self._manifest(
@@ -428,20 +492,108 @@ class FastMCPAdapterTests(unittest.TestCase):
                 with_resource=False,
                 read_only=False,
                 enveloped=True,
+                handler=admission_aware,
             ),
             fastmcp_cls=_FakeFastMCP,
-            distribution_version="3.0.0b2",
+            distribution_version="3.4.7",
             tasks_enabled=False,
+            foreground_policies=self._foreground_policies(
+                max_numeric_values={"limit": 1}
+            ),
         )
         _, handler = server.tools[0]
 
-        result = asyncio.run(
-            handler(workspace_id="ws_" + "a" * 24, limit=2)
-        )
+        result = asyncio.run(handler(workspace_id="ws_" + "a" * 24, limit=2))
 
         response = ApiResponse[_Output].model_validate(result)
         self.assertFalse(response.ok)
-        self.assertEqual(response.error.code, ErrorCode.TASKS_UNAVAILABLE)
+        self.assertEqual(response.error.code, ErrorCode.TASK_REQUIRED)
+        self.assertIn("reduce its scope", response.error.message)
+        self.assertTrue(admitted)
+        self.assertFalse(mutated)
+
+    def test_oversized_admission_is_deadline_bounded_and_drained(self) -> None:
+        from daem0nmcp.api.v7.errors import ErrorCode
+        from daem0nmcp.api.v7.fastmcp import build_fastmcp_server
+        from daem0nmcp.api.v7.models import ApiResponse
+        from daem0nmcp.api.v7.tasks import task_admission_only_var
+
+        cleaned_up = asyncio.Event()
+
+        async def slow_admission(
+            workspace_id: str,
+            limit: int = 5,
+        ) -> ApiResponse[_Output]:
+            del workspace_id, limit
+            self.assertTrue(task_admission_only_var.get())
+            try:
+                await asyncio.Future()
+            finally:
+                cleaned_up.set()
+
+        slow_admission.__daem0nmcp_admission_aware__ = True
+        server = build_fastmcp_server(
+            self._manifest(
+                task_mode="optional",
+                with_resource=False,
+                enveloped=True,
+                handler=slow_admission,
+            ),
+            fastmcp_cls=_FakeFastMCP,
+            distribution_version="3.4.7",
+            sync_timeout_seconds=1,
+            foreground_policies=self._foreground_policies(
+                max_numeric_values={"limit": 1}
+            ),
+        )
+        _, handler = server.tools[0]
+
+        result = asyncio.run(handler(workspace_id="ws_" + "a" * 24, limit=2))
+
+        response = ApiResponse[_Output].model_validate(result)
+        self.assertFalse(response.ok)
+        self.assertEqual(response.error.code, ErrorCode.DEADLINE_EXCEEDED)
+        self.assertTrue(cleaned_up.is_set())
+
+    def test_operation_task_required_response_gets_actionable_remediation(self) -> None:
+        from daem0nmcp.api.v7.errors import ErrorCode
+        from daem0nmcp.api.v7.fastmcp import build_fastmcp_server
+        from daem0nmcp.api.v7.models import ApiResponse
+        from daem0nmcp.api.v7.responses import ResponseFactory
+
+        async def bounded_rejection(
+            workspace_id: str,
+            limit: int = 5,
+        ) -> ApiResponse[_Output]:
+            del limit
+            return (
+                ResponseFactory()
+                .begin(workspace_id)
+                .failure(
+                    ErrorCode.TASK_REQUIRED,
+                    "The operation could not be completed.",
+                )
+            )
+
+        bounded_rejection.__daem0nmcp_admission_aware__ = True
+        server = build_fastmcp_server(
+            self._manifest(
+                task_mode="optional",
+                with_resource=False,
+                enveloped=True,
+                handler=bounded_rejection,
+            ),
+            fastmcp_cls=_FakeFastMCP,
+            distribution_version="3.4.7",
+            foreground_policies=self._foreground_policies(),
+        )
+        _, handler = server.tools[0]
+
+        result = asyncio.run(handler(workspace_id="ws_" + "a" * 24))
+
+        response = ApiResponse[_Output].model_validate(result)
+        self.assertEqual(response.error.code, ErrorCode.TASK_REQUIRED)
+        self.assertIn("reduce its scope", response.error.message)
 
     def test_registration_failure_is_not_suppressed(self) -> None:
         from daem0nmcp.api.v7.fastmcp import build_fastmcp_server
@@ -450,7 +602,7 @@ class FastMCPAdapterTests(unittest.TestCase):
             build_fastmcp_server(
                 self._manifest(with_resource=False),
                 fastmcp_cls=_ExplodingFastMCP,
-                distribution_version="3.0.0b2",
+                distribution_version="3.4.7",
                 tasks_enabled=False,
             )
 

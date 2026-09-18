@@ -291,6 +291,25 @@ class TestMemoryManager:
                     assert "recency_weight" in mem
 
     @pytest.mark.asyncio
+    async def test_v7_legacy_id_keeps_opaque_canonical_origin(self, memory_manager):
+        """The Python compatibility ID must not replace canonical provenance."""
+        created = await memory_manager.remember(
+            category="decision",
+            content="Opaque canonical origin compatibility marker",
+            context={"reason": r"stored beside C:\private\source.py"},
+        )
+
+        result = await memory_manager.recall("canonical origin compatibility marker")
+        selected = result["decisions"][0]
+
+        assert selected["id"] == created["id"]
+        assert selected["record_id"].startswith("mem_")
+        assert selected["evidence_refs"][0]["record_id"] == selected["record_id"]
+        assert selected["origin_workspace_id"].startswith("ws_")
+        # Public absolute paths are never re-exposed through legacy context.
+        assert selected["context"] is None
+
+    @pytest.mark.asyncio
     async def test_failed_decisions_boosted(self, memory_manager):
         """Test that failed decisions get boosted in recall."""
         # Store a successful and failed decision about same topic
@@ -1247,17 +1266,159 @@ class TestRecallCaching:
         # Check cache stats
         stats_before = get_recall_cache().stats
 
-        # Second recall with identical parameters - should hit cache
-        result2 = await memory_manager.recall("cache test decision")
-
+        # Several optional projections may finish publishing around the first
+        # recall. Results spanning those revisions must not be cached. Once the
+        # revision stabilizes, an identical call must use the cache.
+        result2 = result1
+        for _ in range(8):
+            result2 = await memory_manager.recall("cache test decision")
+            if get_recall_cache().stats["hits"] > stats_before["hits"]:
+                break
         stats_after = get_recall_cache().stats
 
-        # Verify results are the same
         assert result1["found"] == result2["found"]
         assert result1["topic"] == result2["topic"]
-
-        # Verify cache hit happened
         assert stats_after["hits"] > stats_before["hits"]
+
+    @pytest.mark.asyncio
+    async def test_revision_change_during_recall_is_not_cached(self):
+        """A result from revision 1 must never be published as revision 2."""
+        import asyncio
+        from types import SimpleNamespace
+
+        from daem0nmcp.cache import get_recall_cache
+
+        class Retrieval:
+            def __init__(self):
+                self.calls = 0
+
+            async def retrieve(self, _query):
+                self.calls += 1
+                marker = "OLD_SNAPSHOT" if self.calls == 1 else "NEW_SNAPSHOT"
+                diagnostic = SimpleNamespace(
+                    provider="lexical",
+                    status="ready",
+                    manifest_generation=self.calls,
+                    elapsed_ms=1.0,
+                    reason=marker,
+                    returned_count=0,
+                )
+                return SimpleNamespace(
+                    providers=(diagnostic,),
+                    abstained=False,
+                    items=(),
+                    weights=(("lexical", 1.0),),
+                )
+
+        get_recall_cache().clear()
+        service = Retrieval()
+        manager = object.__new__(MemoryManager)
+        manager.db = SimpleNamespace(
+            workspace_id="ws_" + "a" * 24,
+            active_generation=1,
+            db_path=Path("missing-cache-race.db"),
+        )
+        manager._closed = False
+        manager._v7_retrieval_service = service
+        manager._v7_retrieval_slots = asyncio.Semaphore(4)
+        manager._v7_retrieval_waiters = 0
+        revisions = iter(((1,), (2,), (2,), (2,)))
+
+        async def revision():
+            return next(revisions)
+
+        manager._v7_cache_revision = revision
+        arguments = {
+            "topic": "cache race",
+            "categories": None,
+            "tags": None,
+            "file_path": None,
+            "project_path": None,
+            "offset": 0,
+            "limit": 10,
+            "since": None,
+            "until": None,
+            "include_warnings": True,
+            "include_linked": False,
+            "condensed": False,
+            "as_of_time": None,
+        }
+
+        first = await manager._recall_v7(**arguments)
+        second = await manager._recall_v7(**arguments)
+
+        assert first["retrieval"]["providers"][0]["reason"] == "OLD_SNAPSHOT"
+        assert second["retrieval"]["providers"][0]["reason"] == "NEW_SNAPSHOT"
+        assert service.calls == 2
+
+    @pytest.mark.asyncio
+    async def test_v7_admits_four_active_plus_sixteen_waiting(self):
+        """The twenty-call boundary admits 4 active and 16 queued calls."""
+        import asyncio
+        from types import SimpleNamespace
+
+        class BlockingRetrieval:
+            def __init__(self):
+                self.entered = 0
+                self.release = asyncio.Event()
+
+            async def retrieve(self, _query):
+                self.entered += 1
+                await self.release.wait()
+                return SimpleNamespace(
+                    providers=(), abstained=False, items=(), weights=()
+                )
+
+        service = BlockingRetrieval()
+        manager = object.__new__(MemoryManager)
+        manager.db = SimpleNamespace(
+            workspace_id="ws_" + "b" * 24,
+            active_generation=1,
+            db_path=Path("missing-waiter-boundary.db"),
+        )
+        manager._closed = False
+        manager._v7_retrieval_service = service
+        manager._v7_retrieval_slots = asyncio.Semaphore(4)
+        manager._v7_retrieval_waiters = 0
+
+        async def no_cache():
+            return None
+
+        manager._v7_cache_revision = no_cache
+        arguments = {
+            "topic": "bounded waiters",
+            "categories": None,
+            "tags": None,
+            "file_path": None,
+            "project_path": None,
+            "offset": 0,
+            "limit": 10,
+            "since": None,
+            "until": None,
+            "include_warnings": True,
+            "include_linked": False,
+            "condensed": False,
+            "as_of_time": None,
+        }
+        tasks = [
+            asyncio.create_task(manager._recall_v7(**arguments)) for _ in range(21)
+        ]
+        await asyncio.sleep(0.05)
+
+        assert service.entered == 4
+        assert (
+            sum(
+                task.result().get("error") == "V7_RETRIEVAL_BUSY"
+                for task in tasks
+                if task.done()
+            )
+            == 1
+        )
+
+        service.release.set()
+        results = await asyncio.gather(*tasks)
+        assert sum(item.get("error") == "V7_RETRIEVAL_BUSY" for item in results) == 1
+        assert sum("error" not in item for item in results) == 20
 
     @pytest.mark.asyncio
     async def test_recall_cache_invalidated_on_remember(self, memory_manager):

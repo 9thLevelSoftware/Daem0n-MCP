@@ -27,6 +27,52 @@ active context use the `memory://workspaces/{workspace_id}/...` resources. See
 [`docs/v6-to-v7-tools.json`](docs/v6-to-v7-tools.json) for the generated
 migration mapping.
 
+## v7 setup and operations
+
+v7 is not published yet. Until release, install from a source checkout or a
+wheel you built from this checkout:
+
+```bash
+pip install .
+# or: python -m build && pip install dist/daem0nmcp-7.0.0.dev0-py3-none-any.whl
+```
+
+After v7 is published, `pip install daem0nmcp` will install the small core.
+Add only the feature profiles the deployment needs: `tasks`, `local`, `graph`,
+`apps`, `models-local`, `models-hosted`, `agency-e2b`, or `observability`.
+For example, `pip install "daem0nmcp[apps,graph]"`. The development and
+compatibility profiles (`dev` and `tracing`) are not required by a normal MCP
+server. `models-local` is optional and requires Python 3.11 or newer. Its
+secure ONNX runtime dependency has no CPython 3.10 wheel. On Python 3.10, the
+resolver omits this profile's dependencies and the runtime reports the
+Python-version remediation while core installation remains supported.
+
+The server owns workspace registration. Set `DAEM0NMCP_PROJECT_ROOT` to the
+default workspace and, when needed, `DAEM0NMCP_WORKSPACE_ROOTS` to the allowed
+additional roots. Operators derive the stable opaque ID from that configured
+root and provide it in the protected client configuration or pairing flow;
+`session_brief` then confirms that ID. Clients do not choose filesystem paths. Leave
+`DAEM0NMCP_STORAGE_PATH` unset when serving multiple registered workspaces.
+
+For authenticated remote principals, set `DAEM0NMCP_WORKSPACE_ACCESS_FILE` to
+the server-managed grants file. If unset, the server uses
+`<managed-storage>/v7-workspace-access.json`. The file and its parent directory
+must be owner-only. Its strict JSON shape is
+`{"schema_version":1,"grants":{"oauth-sub:<subject>":["ws_<opaque>"]}}`;
+the server rereads it at authorization points, so removing a grant takes effect
+without a restart. The CLI has no grant-editing command: configure the file and
+environment before launching `python -m daem0nmcp.server`.
+
+Start the stdio server with `python -m daem0nmcp.server`, or use
+`python -m daem0nmcp.server --transport streamable-http --host 127.0.0.1 --port
+9876` for loopback HTTP. A remote HTTP deployment requires configured transport
+authentication and security policy; it is not a redirect-based setup.
+
+The complete setup, exact preflight examples, migrations, native client
+installers, diagnostics, and all **75** registered v7 tools are in
+[the v7 operations guide](docs/v7-operations.md). The release ledger remains
+in progress; these instructions do not claim a published v7 release.
+
 ## Historical v6 Migration Context: v6.6.6
 
 ### ModernBERT Deep Sight (BREAKING)

@@ -15,7 +15,6 @@ from ..storage_activation import PointerValidationError, resolve_active_database
 from ..workspace import WorkspaceRegistry
 from ._client import get_project_path, succeed
 
-
 _BUSY_TIMEOUT_MS = 2000
 
 

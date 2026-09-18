@@ -7,7 +7,6 @@ import unittest
 from dataclasses import FrozenInstanceError
 from datetime import datetime, timezone
 
-
 WORKSPACE_ID = "ws_0123456789abcdef01234567"
 RECORD_ID = "mem_" + "1" * 64
 EVENT_ID = "evt_" + "2" * 64
@@ -110,9 +109,7 @@ class EvidenceAndCandidateContractTests(unittest.TestCase):
 
         self.assertEqual(RECORD_ID, evidence.record_id)
         self.assertEqual((RELATION_ID,), evidence.relation_path)
-        fact_path = self._evidence(
-            relation_path=("fact_" + "d" * 64,)
-        )
+        fact_path = self._evidence(relation_path=("fact_" + "d" * 64,))
         self.assertEqual("fact_" + "d" * 64, fact_path.relation_path[0])
         for changes in (
             {"record_id": "mem_7"},
@@ -279,9 +276,7 @@ class ProviderAndRetrievalResultContractTests(unittest.TestCase):
         class Provider:
             name = "lexical"
 
-            async def search(
-                self, query: RetrievalQuery, limit: int
-            ) -> ProviderResult:
+            async def search(self, query: RetrievalQuery, limit: int) -> ProviderResult:
                 return ProviderResult(provider=self.name)
 
         self.assertIsInstance(Provider(), RetrievalProvider)
@@ -341,9 +336,9 @@ class ProviderAndRetrievalResultContractTests(unittest.TestCase):
         )
         self.assertEqual(
             "",
-            ProviderResult(
-                provider="lexical", candidates=(legacy_blank,)
-            ).candidates[0].evidence.provider,
+            ProviderResult(provider="lexical", candidates=(legacy_blank,))
+            .candidates[0]
+            .evidence.provider,
         )
 
     def test_provider_diagnostic_cannot_hide_an_unsanitized_failure(self):
@@ -378,9 +373,7 @@ class ProviderAndRetrievalResultContractTests(unittest.TestCase):
         )
         self.assertEqual((), result.items)
         self.assertIsNone(result.context)
-        self.assertEqual(
-            (("VISIBILITY_DENIED", 2),), result.policy_rejection_counts
-        )
+        self.assertEqual((("VISIBILITY_DENIED", 2),), result.policy_rejection_counts)
         with self.assertRaises(ValueError):
             RetrievalResult(
                 abstained=True,
@@ -483,9 +476,8 @@ class ProviderAndRetrievalResultContractTests(unittest.TestCase):
             {"tags": ("t" * 129,)},
         )
         for changes in invalid:
-            with self.subTest(changes=tuple(changes)):
-                with self.assertRaises(ValueError):
-                    EvidenceItem(**values, **changes)
+            with self.subTest(changes=tuple(changes)), self.assertRaises(ValueError):
+                EvidenceItem(**values, **changes)
 
     def test_citation_manifest_cannot_change_selected_provenance(self):
         from daem0nmcp.retrieval.types import (

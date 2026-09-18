@@ -14,7 +14,6 @@ from unittest.mock import patch
 
 from daem0nmcp.api.v7.application import AdmittedRequest
 
-
 NOW = datetime(2026, 8, 8, 12, 0, tzinfo=timezone.utc)
 PREFLIGHT_TOKEN = "t" * 32
 
@@ -28,9 +27,7 @@ def _apply_v7_schema(connection: sqlite3.Connection) -> None:
         migration = next(item for item in MIGRATIONS if item[0] == version)
         for statement in migration[2]:
             connection.execute(statement)
-        connection.execute(
-            "INSERT INTO schema_version(version) VALUES (?)", (version,)
-        )
+        connection.execute("INSERT INTO schema_version(version) VALUES (?)", (version,))
     connection.commit()
 
 
@@ -63,9 +60,7 @@ class _Fixture:
             self.storage,
             ActiveDatabasePointer(7, 1, self.database.name, None, None),
         )
-        self.workspace = WorkspaceRegistry(
-            [self.root], default_root=self.root
-        ).default
+        self.workspace = WorkspaceRegistry([self.root], default_root=self.root).default
 
     def add_record(
         self,
@@ -173,9 +168,7 @@ class ActiveContextOperationTests(unittest.IsolatedAsyncioTestCase):
             "token_secret": b"active-context-operation-secret-01",
         }
         options.update(changes)
-        return build_local_state_operations(
-            LocalStateOperationDependencies(**options)
-        )
+        return build_local_state_operations(LocalStateOperationDependencies(**options))
 
     def _add_request(
         self,
@@ -448,8 +441,7 @@ class ActiveContextOperationTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(
                 (1, None),
                 connection.execute(
-                    "SELECT count(*),max(removed_at_us) "
-                    "FROM active_context_entries"
+                    "SELECT count(*),max(removed_at_us) FROM active_context_entries"
                 ).fetchone(),
             )
 
@@ -759,9 +751,9 @@ class ActiveContextOperationTests(unittest.IsolatedAsyncioTestCase):
             )
             self.assertEqual(
                 0,
-                connection.execute(
-                    "SELECT count(*) FROM governance_events"
-                ).fetchone()[0],
+                connection.execute("SELECT count(*) FROM governance_events").fetchone()[
+                    0
+                ],
             )
 
 

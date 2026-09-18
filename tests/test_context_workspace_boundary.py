@@ -1,6 +1,5 @@
 """Workspace authorization tests through get_project_context()."""
 
-import asyncio
 import contextlib
 import contextvars
 import importlib.util
@@ -78,12 +77,12 @@ def _load_context_manager(settings_override=None):
         ),
         "daem0nmcp.rwlock": _module("daem0nmcp.rwlock", RWLock=_FakeRWLock),
     }
-    original_modules = {
-        name: sys.modules.get(name) for name in dependency_modules
-    }
+    original_modules = {name: sys.modules.get(name) for name in dependency_modules}
     sys.modules.update(dependency_modules)
     try:
-        source = Path(__file__).resolve().parents[1] / "daem0nmcp" / "context_manager.py"
+        source = (
+            Path(__file__).resolve().parents[1] / "daem0nmcp" / "context_manager.py"
+        )
         module_name = "daem0nmcp._context_workspace_boundary_test"
         spec = importlib.util.spec_from_file_location(module_name, source)
         assert spec is not None and spec.loader is not None
@@ -130,7 +129,9 @@ class ProjectContextWorkspaceBoundaryTests(unittest.IsolatedAsyncioTestCase):
         context_manager.workspace_registry = registry
         workspace = registry.resolve(str(self.registered.resolve()))
 
-        by_path = await context_manager.get_project_context(str(self.registered.resolve()))
+        by_path = await context_manager.get_project_context(
+            str(self.registered.resolve())
+        )
         by_id = await context_manager.get_project_context(workspace.workspace_id)
 
         self.assertIs(by_path, by_id)
@@ -179,17 +180,17 @@ class ProjectContextWorkspaceBoundaryTests(unittest.IsolatedAsyncioTestCase):
         await context_manager.cleanup_all_contexts()
 
     async def test_derived_storage_escape_fails_before_database_construction(self):
-        class DerivedPathEscape(ValueError):
+        class DerivedPathEscapeError(ValueError):
             pass
 
         context_manager = _load_context_manager()
         context_manager.workspace_registry = WorkspaceRegistry([self.registered])
 
         def reject_derived_path(*args, **kwargs):
-            raise DerivedPathEscape("derived storage escaped")
+            raise DerivedPathEscapeError("derived storage escaped")
 
         context_manager.resolve_derived_path = reject_derived_path
-        with self.assertRaises(DerivedPathEscape):
+        with self.assertRaises(DerivedPathEscapeError):
             await context_manager.get_project_context(str(self.registered))
 
         self.assertEqual(_FakeDatabaseManager.constructed_paths, [])

@@ -15,7 +15,6 @@ from ... import __version__
 from ...covenant import CovenantLevel
 from .policy import V7_TOOL_LEVELS
 
-
 PINNED_TOOL_NAMES = frozenset(
     {
         "session_brief",
@@ -33,6 +32,19 @@ FULL_RESOURCE_URI_TEMPLATES = frozenset(
         "memory://workspaces/{workspace_id}/rules",
         "memory://workspaces/{workspace_id}/active-context",
     }
+)
+V7_DASHBOARD_RESOURCE_URIS = frozenset(
+    {
+        "ui://daem0n/test",
+        "ui://daem0n/search",
+        "ui://daem0n/briefing",
+        "ui://daem0n/covenant",
+        "ui://daem0n/community",
+        "ui://daem0n/graph",
+    }
+)
+FULL_V7_RESOURCE_URI_TEMPLATES = (
+    FULL_RESOURCE_URI_TEMPLATES | V7_DASHBOARD_RESOURCE_URIS
 )
 LEGACY_TOOL_NAMES = frozenset(
     {
@@ -192,7 +204,7 @@ class ToolSpec:
     def output_schema(self) -> dict[str, Any]:
         return _model_schema(self.output_model)
 
-    def replace(self, **changes: Any) -> "ToolSpec":
+    def replace(self, **changes: Any) -> ToolSpec:
         return replace(self, **changes)
 
 
@@ -204,22 +216,30 @@ class ResourceSpec:
     name: str
     description: str
     handler: Callable[..., Any]
-    output_model: type[BaseModel]
+    output_model: type[BaseModel] | None
     mime_type: str = "application/json"
     version: str = "7"
+    requires_workspace: bool = True
 
     def __post_init__(self) -> None:
-        if not self.uri_template.startswith("memory://workspaces/{workspace_id}/"):
-            raise ManifestError("v7 resource URI template is invalid")
+        if self.requires_workspace:
+            if not self.uri_template.startswith("memory://workspaces/{workspace_id}/"):
+                raise ManifestError("v7 workspace resource URI template is invalid")
+        elif self.uri_template not in V7_DASHBOARD_RESOURCE_URIS:
+            raise ManifestError("v7 static resource URI template is invalid")
         if not self.name or not self.description or not callable(self.handler):
             raise ManifestError("resource metadata and handler are required")
-        if not (
+        if self.mime_type == "application/json" and not (
             isinstance(self.output_model, type)
             and issubclass(self.output_model, BaseModel)
         ):
             raise ManifestError("resource output model is required")
-        if self.mime_type != "application/json" or self.version != "7":
-            raise ManifestError("v7 resources must be versioned JSON")
+        if self.mime_type != "application/json" and self.output_model is not None:
+            raise ManifestError("static resource output model is invalid")
+        if self.mime_type not in {"application/json", "text/html;profile=mcp-app"}:
+            raise ManifestError("v7 resource MIME type is invalid")
+        if self.version != "7" or type(self.requires_workspace) is not bool:
+            raise ManifestError("v7 resource metadata is invalid")
 
 
 @dataclass(frozen=True, slots=True)
@@ -255,10 +275,12 @@ class V7Manifest:
         if self.require_full_surface:
             pinned = {tool.name for tool in tools if tool.pinned}
             if pinned != PINNED_TOOL_NAMES:
-                raise ManifestError("full v7 manifest must have exactly six pinned tools")
+                raise ManifestError(
+                    "full v7 manifest must have exactly six pinned tools"
+                )
             if set(names) != set(V7_TOOL_LEVELS):
                 raise ManifestError("full v7 manifest tool set is incomplete")
-            if set(resource_uris) != FULL_RESOURCE_URI_TEMPLATES:
+            if set(resource_uris) != FULL_V7_RESOURCE_URI_TEMPLATES:
                 raise ManifestError("full v7 manifest resource set is incomplete")
         object.__setattr__(self, "tools", tools)
         object.__setattr__(self, "resources", resources)
@@ -337,16 +359,22 @@ class InspectableV7Server:
         result = spec.handler(**arguments)
         if inspect.isawaitable(result):
             result = await result
+        if spec.output_model is None:
+            if not isinstance(result, str):
+                raise ManifestError("static resource handler returned invalid output")
+            return result
         return spec.output_model.model_validate(result)
 
 
 __all__ = [
     "InspectableV7Server",
     "FULL_RESOURCE_URI_TEMPLATES",
+    "FULL_V7_RESOURCE_URI_TEMPLATES",
     "LEGACY_TOOL_NAMES",
     "ManifestError",
     "PINNED_TOOL_NAMES",
     "ResourceSpec",
     "ToolSpec",
     "V7Manifest",
+    "V7_DASHBOARD_RESOURCE_URIS",
 ]

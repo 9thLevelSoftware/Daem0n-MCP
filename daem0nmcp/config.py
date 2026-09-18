@@ -38,6 +38,16 @@ class Settings(BaseSettings):
     # Server
     log_level: str = "INFO"
     ui_rendering_enabled: bool = True
+    sync_timeout_seconds: float = Field(
+        default=15.0, ge=1.0, le=60.0, allow_inf_nan=False
+    )
+
+    @field_validator("sync_timeout_seconds", mode="before")
+    @classmethod
+    def validate_sync_deadline(cls, value):
+        if isinstance(value, bool):
+            raise ValueError("sync_timeout_seconds must be between 1 and 60")
+        return value
 
     # Context management
     max_project_contexts: int = 10  # Maximum cached project contexts
@@ -188,41 +198,30 @@ class Settings(BaseSettings):
 
     # Background Dreaming
     dream_enabled: bool = True  # Master switch for dreaming
-    dream_idle_timeout: float = 60.0  # Seconds of idle before dreaming starts
-    dream_max_decisions_per_session: int = (
-        5  # Max failed decisions to re-evaluate per session
-    )
-    dream_yield_check_interval: float = (
-        0.0  # Seconds between yield checks (0 = every step)
-    )
-    dream_min_decision_age_hours: int = (
-        1  # Min age of decision before re-evaluation eligible
-    )
-    dream_review_cooldown_hours: int = 72  # Skip decisions reviewed within this window
+    dream_idle_timeout: float = Field(default=60.0, ge=0.05, le=86_400.0)
+    dream_max_concurrency: int = Field(default=2, ge=1, le=8)
+    dream_max_decisions_per_session: int = Field(
+        default=5, ge=1, le=100
+    )  # Max failed decisions to re-evaluate per session
+    dream_yield_check_interval: float = Field(default=0.0, ge=0.0, le=60.0)
+    dream_min_decision_age_hours: int = Field(default=1, ge=0, le=87_600)
+    dream_review_cooldown_hours: int = Field(default=72, ge=0, le=87_600)
 
     # ConnectionDiscovery strategy
-    dream_connection_lookback_hours: int = 168  # 7-day lookback for entity sharing
-    dream_connection_max_per_session: int = 20  # Max connections per dream session
-    dream_connection_min_shared_entities: int = 2  # Min shared entities to create link
-    dream_connection_confidence: float = 0.7  # Confidence for inferred relationships
+    dream_connection_lookback_hours: int = Field(default=168, ge=1, le=87_600)
+    dream_connection_max_per_session: int = Field(default=20, ge=1, le=100)
+    dream_connection_min_shared_entities: int = Field(default=2, ge=1, le=32)
+    dream_connection_confidence: float = Field(default=0.7, ge=0.0, le=1.0)
 
     # PendingOutcomeResolver strategy
-    dream_pending_max_per_session: int = (
-        3  # Max pending decisions to resolve per session
-    )
-    dream_pending_min_age_hours: int = (
-        24  # Min age before a pending decision is eligible
-    )
-    dream_pending_cooldown_hours: int = 168  # 7 days cooldown between re-evaluations
-    dream_pending_evidence_threshold: int = (
-        3  # Min directional evidence for auto-resolve
-    )
+    dream_pending_max_per_session: int = Field(default=3, ge=1, le=100)
+    dream_pending_min_age_hours: int = Field(default=24, ge=0, le=87_600)
+    dream_pending_cooldown_hours: int = Field(default=168, ge=0, le=87_600)
+    dream_pending_evidence_threshold: int = Field(default=3, ge=1, le=10)
     dream_pending_dry_run: bool = True  # Ships inert -- must opt-in to auto-resolve
 
     # CommunityRefresh strategy
-    dream_community_staleness_threshold: int = (
-        10  # New memories before community rebuild
-    )
+    dream_community_staleness_threshold: int = Field(default=10, ge=1, le=10_000)
 
     # Cognitive Tools
     cognitive_debate_max_rounds: int = 5

@@ -14,7 +14,6 @@ from daem0nmcp.covenant import (
 )
 from daem0nmcp.workspace import Workspace
 
-
 WORKSPACE_ID = "ws_0123456789abcdef01234567"
 OTHER_WORKSPACE_ID = "ws_fedcba9876543210fedcba98"
 ROOT = Path("middleware-fixtures/workspace-one").resolve()
@@ -22,6 +21,9 @@ OTHER_ROOT = Path("middleware-fixtures/workspace-two").resolve()
 
 
 class _Gate:
+    def workspace_authorized(self, scope: InvocationScope) -> bool:
+        return True
+
     def __init__(self) -> None:
         from daem0nmcp.covenant import CovenantStateStore
 
@@ -105,7 +107,43 @@ def _access_token(*, subject: str | None = "alice", client_id: str = "client-a")
 
 
 class StdioInvocationMiddlewareTests(unittest.IsolatedAsyncioTestCase):
-    async def test_initialize_issues_server_session_and_installs_process_scope(self) -> None:
+    async def test_activity_callback_wraps_only_authorized_workspace_calls(
+        self,
+    ) -> None:
+        from daem0nmcp.api.v7.middleware import V7InvocationMiddleware
+
+        events: list[tuple[str, bool]] = []
+        gate = _Gate()
+        middleware = V7InvocationMiddleware(
+            gate=gate,
+            workspace_resolver=_Resolver(),
+            transport_mode="stdio",
+            process_principal="process:test-server",
+            session_id_factory=lambda: "activity-session",
+            activity_callback=lambda workspace, active: events.append(
+                (workspace.workspace_id, active)
+            ),
+        )
+        await middleware.on_initialize(
+            _PoisonContext(SimpleNamespace()), lambda _context: asyncio.sleep(0)
+        )
+
+        async def fail(_context: object) -> None:
+            raise RuntimeError("expected")
+
+        with self.assertRaisesRegex(RuntimeError, "expected"):
+            await middleware.on_call_tool(_tool_context(), fail)
+        self.assertEqual(events, [(WORKSPACE_ID, True), (WORKSPACE_ID, False)])
+
+        gate.workspace_authorized = lambda _scope: False  # type: ignore[method-assign]
+        await middleware.on_call_tool(
+            _tool_context(), lambda _context: asyncio.sleep(0)
+        )
+        self.assertEqual(events, [(WORKSPACE_ID, True), (WORKSPACE_ID, False)])
+
+    async def test_initialize_issues_server_session_and_installs_process_scope(
+        self,
+    ) -> None:
         from daem0nmcp.api.v7.middleware import V7InvocationMiddleware
 
         gate = _Gate()
@@ -150,7 +188,9 @@ class StdioInvocationMiddlewareTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(covenant_gate_var.get())
         self.assertIsNone(workspace_resolver_var.get())
 
-    async def test_stdio_call_before_initialize_dispatches_identity_failure(self) -> None:
+    async def test_stdio_call_before_initialize_dispatches_identity_failure(
+        self,
+    ) -> None:
         from daem0nmcp.api.v7.middleware import V7InvocationMiddleware
 
         called = False
@@ -199,6 +239,7 @@ class StdioInvocationMiddlewareTests(unittest.IsolatedAsyncioTestCase):
         gate_token = covenant_gate_var.set(previous_gate)
         resolver_token = workspace_resolver_var.set(previous_resolver)
         try:
+
             async def downstream(_context: object) -> None:
                 raise RuntimeError("downstream failure")
 
@@ -238,7 +279,9 @@ class RemoteInvocationMiddlewareTests(unittest.IsolatedAsyncioTestCase):
             "mcp-session:loopback-session",
         )
 
-    async def test_remote_identity_uses_oauth_subject_and_mcp_session_only(self) -> None:
+    async def test_remote_identity_uses_oauth_subject_and_mcp_session_only(
+        self,
+    ) -> None:
         from daem0nmcp.api.v7.middleware import V7InvocationMiddleware
 
         gate = _Gate()
@@ -275,6 +318,24 @@ class RemoteInvocationMiddlewareTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(scope.canonical_workspace, os.path.normcase(str(ROOT)))
         self.assertEqual(gate.authorize_calls, 0)
 
+    async def test_remote_identity_preserves_exact_subject(self) -> None:
+        from daem0nmcp.api.v7.middleware import V7InvocationMiddleware
+
+        principals = []
+        for subject in ("alice", " alice", "alice ", "Alice"):
+            middleware = V7InvocationMiddleware(
+                gate=_Gate(),
+                workspace_resolver=_Resolver(),
+                transport_mode="streamable-http",
+                access_token_provider=lambda subject=subject: _access_token(
+                    subject=subject
+                ),
+            )
+            principal, _ = await middleware._remote_identity(_tool_context())
+            self.assertEqual(principal, "oauth-sub:" + subject)
+            principals.append(principal)
+        self.assertEqual(len(set(principals)), 4)
+
     async def test_remote_identity_requires_an_authenticated_subject(self) -> None:
         from daem0nmcp.api.v7.middleware import V7InvocationMiddleware
 
@@ -294,7 +355,9 @@ class RemoteInvocationMiddlewareTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIsNone(scope)
 
-    async def test_missing_identity_unknown_workspace_and_mismatch_are_indistinguishable(self) -> None:
+    async def test_missing_identity_unknown_workspace_and_mismatch_are_indistinguishable(
+        self,
+    ) -> None:
         from daem0nmcp.api.v7.middleware import V7InvocationMiddleware
 
         cases = (
@@ -334,7 +397,9 @@ class RemoteInvocationMiddlewareTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual([None, None, None], results)
 
-    async def test_system_health_without_workspace_runs_without_inventing_scope(self) -> None:
+    async def test_system_health_without_workspace_runs_without_inventing_scope(
+        self,
+    ) -> None:
         from daem0nmcp.api.v7.middleware import V7InvocationMiddleware
 
         gate = _Gate()
@@ -345,9 +410,7 @@ class RemoteInvocationMiddlewareTests(unittest.IsolatedAsyncioTestCase):
             transport_mode="streamable-http",
             access_token_provider=lambda: _access_token(),
         )
-        context = _PoisonContext(
-            SimpleNamespace(name="system_health", arguments={})
-        )
+        context = _PoisonContext(SimpleNamespace(name="system_health", arguments={}))
 
         async def downstream(_context: object) -> tuple[object, object, object]:
             return (
@@ -428,7 +491,9 @@ class ResourceInvocationMiddlewareTests(unittest.IsolatedAsyncioTestCase):
             access_token_provider=lambda: _access_token(),
         )
 
-    async def test_resource_hook_installs_exact_scope_for_communion_authorizer(self) -> None:
+    async def test_resource_hook_installs_exact_scope_for_communion_authorizer(
+        self,
+    ) -> None:
         from daem0nmcp.api.v7.middleware import ResourceCommunionAuthorizer
 
         expected_scope = InvocationScope(
@@ -498,14 +563,22 @@ class ResourceInvocationMiddlewareTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(
             {(type(error), error.args, str(error)) for error in errors},
-            {(ResourceAuthorizationError, ("Resource unavailable",), "Resource unavailable")},
+            {
+                (
+                    ResourceAuthorizationError,
+                    ("Resource unavailable",),
+                    "Resource unavailable",
+                )
+            },
         )
         for error in errors:
             self.assertIsNone(error.__cause__)
             self.assertIsNone(error.__context__)
         self.assertNotIn(str(ROOT), " ".join(repr(error) for error in errors))
 
-    async def test_malformed_unknown_and_mismatched_resource_ids_fail_before_dispatch(self) -> None:
+    async def test_malformed_unknown_and_mismatched_resource_ids_fail_before_dispatch(
+        self,
+    ) -> None:
         from daem0nmcp.api.v7.middleware import (
             ResourceInvocationContextError,
         )

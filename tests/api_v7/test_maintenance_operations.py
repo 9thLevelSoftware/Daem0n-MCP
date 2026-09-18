@@ -13,7 +13,6 @@ from types import MappingProxyType
 
 from daem0nmcp.api.v7.application import AdmittedRequest
 
-
 NOW = datetime(2026, 8, 9, 12, 0, tzinfo=timezone.utc)
 SELECTION_SECRET = b"maintenance-selection-secret-key!"
 PREFLIGHT_TOKEN = "p" * 32
@@ -23,9 +22,7 @@ def _apply_v7_schema(connection: sqlite3.Connection) -> None:
     from daem0nmcp.migrations.schema import MIGRATIONS
     from daem0nmcp.schema_version import CURRENT_SCHEMA_VERSION
 
-    connection.execute(
-        "CREATE TABLE schema_version (version INTEGER PRIMARY KEY)"
-    )
+    connection.execute("CREATE TABLE schema_version (version INTEGER PRIMARY KEY)")
     for version, _description, statements in MIGRATIONS:
         if 16 <= version <= CURRENT_SCHEMA_VERSION:
             for statement in statements:
@@ -66,9 +63,7 @@ class MaintenanceOperationTests(unittest.IsolatedAsyncioTestCase):
             self.storage,
             ActiveDatabasePointer(7, 1, self.database.name, None, None),
         )
-        self.workspace = WorkspaceRegistry(
-            [self.root], default_root=self.root
-        ).default
+        self.workspace = WorkspaceRegistry([self.root], default_root=self.root).default
         self.dependencies = None
 
     async def asyncTearDown(self) -> None:
@@ -192,10 +187,7 @@ class MaintenanceOperationTests(unittest.IsolatedAsyncioTestCase):
                 ("workspace", "request"), tuple(item.name for item in parameters)
             )
             self.assertTrue(
-                all(
-                    item.kind is inspect.Parameter.KEYWORD_ONLY
-                    for item in parameters
-                )
+                all(item.kind is inspect.Parameter.KEYWORD_ONLY for item in parameters)
             )
 
     async def test_prune_preview_and_mutation_are_snapshot_bound_and_replay_safe(
@@ -208,9 +200,7 @@ class MaintenanceOperationTests(unittest.IsolatedAsyncioTestCase):
         selected_id = self._append_record(
             "a", "Low-value old decision.", created_at=old
         )
-        self._append_record(
-            "b", "Pinned old decision.", created_at=old, pinned=True
-        )
+        self._append_record("b", "Pinned old decision.", created_at=old, pinned=True)
         self._append_record(
             "c",
             "Completed old decision.",
@@ -221,9 +211,7 @@ class MaintenanceOperationTests(unittest.IsolatedAsyncioTestCase):
         self._append_record(
             "d", "Frequently recalled decision.", created_at=old, recall_count=5
         )
-        self._append_record(
-            "e", "Recent decision.", created_at=NOW - timedelta(days=1)
-        )
+        self._append_record("e", "Recent decision.", created_at=NOW - timedelta(days=1))
         operations = self._operations()
         preview_request = _request(
             "memory_prune_preview",
@@ -256,11 +244,14 @@ class MaintenanceOperationTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertIsInstance(receipt, DestructiveMutationReceipt)
-        self.assertEqual((1, 1, 0), (
-            receipt.selected_count,
-            receipt.changed_count,
-            receipt.skipped_count,
-        ))
+        self.assertEqual(
+            (1, 1, 0),
+            (
+                receipt.selected_count,
+                receipt.changed_count,
+                receipt.skipped_count,
+            ),
+        )
         self.assertEqual([selected_id], receipt.affected_ids)
         self.assertEqual(1, len(receipt.event_ids))
         self.assertFalse(receipt.idempotent_replay)
@@ -277,9 +268,7 @@ class MaintenanceOperationTests(unittest.IsolatedAsyncioTestCase):
                 (selected_id,),
             ).fetchall()
         self.assertEqual(int(NOW.timestamp() * 1_000_000), state[0])
-        self.assertEqual(
-            [("memory.created",), ("memory.deleted",)], event_types
-        )
+        self.assertEqual([("memory.created",), ("memory.deleted",)], event_types)
 
     async def test_prune_rejects_tampered_mismatched_and_stale_selection_tokens(
         self,
@@ -348,9 +337,7 @@ class MaintenanceOperationTests(unittest.IsolatedAsyncioTestCase):
         from daem0nmcp.workspace import WorkspaceRegistry
 
         current = [NOW]
-        self._append_record(
-            "a", "Old candidate.", created_at=NOW - timedelta(days=100)
-        )
+        self._append_record("a", "Old candidate.", created_at=NOW - timedelta(days=100))
         operations = self._operations(
             clock=lambda: current[0],
             selection_ttl_seconds=1,
@@ -456,11 +443,14 @@ class MaintenanceOperationTests(unittest.IsolatedAsyncioTestCase):
             request=request,
         )
 
-        self.assertEqual((1, 1, 0), (
-            receipt.selected_count,
-            receipt.changed_count,
-            receipt.skipped_count,
-        ))
+        self.assertEqual(
+            (1, 1, 0),
+            (
+                receipt.selected_count,
+                receipt.changed_count,
+                receipt.skipped_count,
+            ),
+        )
         self.assertEqual([keeper_id, duplicate_id], receipt.affected_ids)
         self.assertEqual(2, len(receipt.event_ids))
         self.assertTrue(replay.idempotent_replay)
@@ -483,12 +473,15 @@ class MaintenanceOperationTests(unittest.IsolatedAsyncioTestCase):
             ).fetchall()
         self.assertEqual(int(NOW.timestamp() * 1_000_000), duplicate[0])
         self.assertEqual('["new","old"]', keeper["tags_json"])
-        self.assertEqual((1, "The old attempt worked.", 1, None), (
-            keeper["pinned"],
-            keeper["outcome"],
-            keeper["worked"],
-            keeper["deleted_at_us"],
-        ))
+        self.assertEqual(
+            (1, "The old attempt worked.", 1, None),
+            (
+                keeper["pinned"],
+                keeper["outcome"],
+                keeper["worked"],
+                keeper["deleted_at_us"],
+            ),
+        )
         self.assertEqual(
             [
                 (keeper_id, "memory.duplicates_merged"),
@@ -501,9 +494,7 @@ class MaintenanceOperationTests(unittest.IsolatedAsyncioTestCase):
         self,
     ) -> None:
         """The explicit merge_duplicates=false criterion must remain non-mutating."""
-        self._append_record(
-            "a", "Same content.", created_at=NOW - timedelta(days=2)
-        )
+        self._append_record("a", "Same content.", created_at=NOW - timedelta(days=2))
         self._append_record(
             "b", " same   CONTENT. ", created_at=NOW - timedelta(days=1)
         )
@@ -529,12 +520,15 @@ class MaintenanceOperationTests(unittest.IsolatedAsyncioTestCase):
                 preflight_token=PREFLIGHT_TOKEN,
             ),
         )
-        self.assertEqual((0, 0, [], []), (
-            receipt.selected_count,
-            receipt.changed_count,
-            receipt.affected_ids,
-            receipt.event_ids,
-        ))
+        self.assertEqual(
+            (0, 0, [], []),
+            (
+                receipt.selected_count,
+                receipt.changed_count,
+                receipt.affected_ids,
+                receipt.event_ids,
+            ),
+        )
         with closing(sqlite3.connect(self.database)) as connection:
             live = connection.execute(
                 "SELECT count(*) FROM memory_records WHERE deleted_at_us IS NULL"
@@ -617,11 +611,14 @@ class MaintenanceOperationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("learning", result.summary_record.record_type)
         self.assertEqual(summary, result.summary_record.excerpt)
         self.assertEqual(source_event_ids, result.source_event_ids)
-        self.assertEqual((2, 2, 0), (
-            result.receipt.selected_count,
-            result.receipt.changed_count,
-            result.receipt.skipped_count,
-        ))
+        self.assertEqual(
+            (2, 2, 0),
+            (
+                result.receipt.selected_count,
+                result.receipt.changed_count,
+                result.receipt.skipped_count,
+            ),
+        )
         self.assertEqual(5, len(result.receipt.event_ids))
         self.assertEqual(result.receipt.event_ids, replay.receipt.event_ids)
         self.assertTrue(replay.receipt.idempotent_replay)
@@ -772,11 +769,14 @@ class MaintenanceOperationTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual([old_reeval, old_summary], receipt.affected_ids)
         self.assertEqual(2, len(receipt.event_ids))
-        self.assertEqual((2, 2, 0), (
-            receipt.selected_count,
-            receipt.changed_count,
-            receipt.skipped_count,
-        ))
+        self.assertEqual(
+            (2, 2, 0),
+            (
+                receipt.selected_count,
+                receipt.changed_count,
+                receipt.skipped_count,
+            ),
+        )
         self.assertTrue(replay.idempotent_replay)
         with closing(sqlite3.connect(self.database)) as connection:
             rows = connection.execute(
@@ -824,9 +824,9 @@ class MaintenanceOperationTests(unittest.IsolatedAsyncioTestCase):
                 with delegate.locked_active(workspace) as active:
                     yield active
 
-        operation = self._operations(
-            storage_resolver=BlockingResolver()
-        )["memory_prune"]
+        operation = self._operations(storage_resolver=BlockingResolver())[
+            "memory_prune"
+        ]
         task = asyncio.create_task(
             operation(
                 workspace=self.workspace,
@@ -881,9 +881,9 @@ class MaintenanceOperationTests(unittest.IsolatedAsyncioTestCase):
                     if not release.wait(timeout=5):
                         raise RuntimeError("test resolver timed out")
 
-        operation = self._operations(
-            storage_resolver=ExitBlockingResolver()
-        )["memory_prune"]
+        operation = self._operations(storage_resolver=ExitBlockingResolver())[
+            "memory_prune"
+        ]
         task = asyncio.create_task(
             operation(
                 workspace=self.workspace,

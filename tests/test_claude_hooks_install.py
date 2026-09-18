@@ -1,6 +1,8 @@
 """Tests for the Claude Code hook installer."""
 
 import json
+import ssl
+from pathlib import Path
 
 import pytest
 
@@ -9,6 +11,7 @@ from daem0nmcp.claude_hooks.install import (
     install_claude_hooks,
     uninstall_claude_hooks,
 )
+from daem0nmcp.edit_bridge_transport import provision_bridge_credential
 
 
 @pytest.fixture
@@ -72,6 +75,71 @@ class TestInstall:
 
         # Verify PreToolUse has 2 entries (Edit + Bash)
         assert len(hooks["PreToolUse"]) == 2
+        staging = hooks["PostToolUse"][0]
+        assert staging["matcher"] == "mcp__.*__edit_preflight"
+        assert "post_edit_preflight" in staging["hooks"][0]["command"]
+        assert hooks["PostToolUse"][1]["matcher"] == hooks["PreToolUse"][0]["matcher"]
+        assert "NotebookEdit" in hooks["PostToolUse"][1]["matcher"].split("|")
+
+    def test_project_pairing_writes_paths_without_secret(self, fake_settings, tmp_path):
+        project = tmp_path / "project"
+        project.mkdir()
+        host_config = tmp_path / "host-config"
+
+        ok, message = install_claude_hooks(
+            project_path=project,
+            bridge_config_root=host_config,
+        )
+        assert ok, message
+        local_settings = project / ".claude" / "settings.local.json"
+        environment = json.loads(local_settings.read_text(encoding="utf-8"))["env"]
+        credential = Path(environment["DAEM0NMCP_EDIT_BRIDGE_CREDENTIAL_FILE"])
+        assert credential.is_file()
+        secret = json.loads(credential.read_text(encoding="utf-8"))["secret"]
+        assert secret not in local_settings.read_text(encoding="utf-8")
+        assert environment["DAEM0NMCP_PROJECT_ROOT"] == str(project.resolve())
+
+    def test_remote_pairing_writes_protected_workspace_binding(
+        self, fake_settings, tmp_path, monkeypatch
+    ):
+        project = tmp_path / "desktop-project"
+        project.mkdir()
+        credential = tmp_path / "host" / "credential.json"
+        secret, _identity = provision_bridge_credential(
+            credential,
+            principal_id="remote-principal",
+            transports=frozenset({"remote-https"}),
+        )
+        ca_file = tmp_path / "ca.pem"
+        ca_file.write_text("test CA", encoding="utf-8")
+        monkeypatch.setattr(
+            "daem0nmcp.edit_host.ssl.create_default_context",
+            lambda **_kwargs: ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT),
+        )
+
+        ok, message = install_claude_hooks(
+            project_path=project,
+            remote_workspace_id="ws_" + "7" * 24,
+            remote_credential_path=credential,
+            remote_base_url="https://server.example:7443",
+            remote_ca_file=ca_file,
+            remote_origin="https://desktop.example",
+        )
+
+        assert ok, message
+        settings = project / ".claude" / "settings.local.json"
+        environment = json.loads(settings.read_text(encoding="utf-8"))["env"]
+        assert environment["DAEM0NMCP_EDIT_BRIDGE_MODE"] == "remote-https"
+        for name in (
+            "DAEM0NMCP_EDIT_BRIDGE_REMOTE_URL",
+            "DAEM0NMCP_EDIT_BRIDGE_CA_FILE",
+            "DAEM0NMCP_EDIT_BRIDGE_ORIGIN",
+        ):
+            assert name not in environment
+        binding = Path(environment["DAEM0NMCP_EDIT_HOST_WORKSPACE_BINDING_FILE"])
+        assert binding.parent == credential.parent.resolve()
+        assert secret not in settings.read_text(encoding="utf-8")
+        assert secret not in binding.read_text(encoding="utf-8")
 
     def test_preserves_existing(self, fake_settings):
         # Write existing settings with a GSD hook

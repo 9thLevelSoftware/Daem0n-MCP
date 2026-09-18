@@ -9,20 +9,19 @@ from typing import Literal
 
 from .fusion import fused_candidate_sort_key
 from .types import (
-    FusedCandidate,
-    RetrievalQuery,
     _CONTENT_HASH,
     _EVENT_ID,
     _RECORD_ID,
     _VERSION_ID,
     _WORKSPACE_ID,
+    FusedCandidate,
+    RetrievalQuery,
     _aware_datetime,
     _opaque,
     _plain_positive_int,
     _provider,
     _reason,
 )
-
 
 PolicyGate = Literal["scope", "visibility", "filters", "temporal", "manifest"]
 DedupKind = Literal["exact", "near"]
@@ -102,9 +101,7 @@ class PolicyRecord:
             and self.transaction_to is not None
             and self.transaction_to <= self.transaction_from
         ):
-            raise ValueError(
-                "transaction interval must be half-open and increasing"
-            )
+            raise ValueError("transaction interval must be half-open and increasing")
         if self.superseded_by_version_id is not None:
             _opaque(
                 self.superseded_by_version_id,
@@ -123,17 +120,13 @@ class PolicyRecord:
             _provider(channel, "projection channel")
             _opaque(content_hash, _CONTENT_HASH, "projection content hash")
             if channel in seen or (previous is not None and channel < previous):
-                raise ValueError(
-                    "projection_content_hashes must be unique and sorted"
-                )
+                raise ValueError("projection_content_hashes must be unique and sorted")
             seen.add(channel)
             previous = channel
 
     def _validate_manifest_generations(self) -> None:
         if not isinstance(self.active_manifest_generations, tuple):
-            raise ValueError(
-                "active_manifest_generations must be an ordered tuple"
-            )
+            raise ValueError("active_manifest_generations must be an ordered tuple")
         previous: str | None = None
         seen: set[str] = set()
         for channel, generation in self.active_manifest_generations:
@@ -248,10 +241,7 @@ def _temporal_decision(
         invalidated = True
 
     transaction_at = query.as_of_transaction_time or snapshot_time
-    if (
-        state.transaction_from is not None
-        and transaction_at < state.transaction_from
-    ):
+    if state.transaction_from is not None and transaction_at < state.transaction_from:
         return "NOT_YET_RECORDED", None
     if state.transaction_to is not None and transaction_at >= state.transaction_to:
         invalidated = True
@@ -273,12 +263,9 @@ def _temporal_decision(
     return None, f"SUPERSEDED_BY:{state.superseded_by_version_id}"
 
 
-def _manifest_decision(
-    candidate: FusedCandidate, state: PolicyRecord
-) -> str | None:
+def _manifest_decision(candidate: FusedCandidate, state: PolicyRecord) -> str | None:
     if any(
-        evidence.record_id != state.record_id
-        or evidence.version_id != state.version_id
+        evidence.record_id != state.record_id or evidence.version_id != state.version_id
         for evidence in candidate.evidence_refs
     ):
         return "EVIDENCE_IDENTITY_MISMATCH"
@@ -341,7 +328,7 @@ def _merge_candidates(
             )
         if channel not in manifests or existing is None:
             manifests[channel] = generation
-    merged_refs = set((*retained.evidence_refs, *merged.evidence_refs))
+    merged_refs = {*retained.evidence_refs, *merged.evidence_refs}
     merged_refs.discard(retained.evidence)
     evidence_refs = (
         retained.evidence,
@@ -360,9 +347,9 @@ def _merge_candidates(
         channels=retained.channels | merged.channels,
         channel_ranks=tuple(sorted(ranks.items())),
         manifest_generations=tuple(sorted(manifests.items())),
-        highlights=tuple(sorted(set((*retained.highlights, *merged.highlights)))),
+        highlights=tuple(sorted({*retained.highlights, *merged.highlights})),
         policy_notes=(
-            tuple(sorted(set((*retained.policy_notes, *merged.policy_notes))))
+            tuple(sorted({*retained.policy_notes, *merged.policy_notes}))
             if merge_policy_notes
             else retained.policy_notes
         ),
@@ -501,9 +488,7 @@ def apply_retrieval_policy(
             continue
 
         # Gate 4: valid time, transaction time, and contradiction state.
-        temporal_reason, policy_note = _temporal_decision(
-            query, state, snapshot_time
-        )
+        temporal_reason, policy_note = _temporal_decision(query, state, snapshot_time)
         if temporal_reason is not None:
             rejections.append(_reject(candidate, "temporal", temporal_reason))
             continue

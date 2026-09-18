@@ -16,12 +16,12 @@ try:
     )
     from ..bounded_workers import BoundedWorkerPool
     from ..config import settings
-    from ..covenant import legacy_entrypoint
     from ..context_manager import (
         _default_project_path,
         _missing_project_path_error,
         get_project_context,
     )
+    from ..covenant import legacy_entrypoint
     from ..logging_config import with_request_id
     from ..mcp_instance import mcp
 except ImportError:
@@ -34,12 +34,12 @@ except ImportError:
     )
     from daem0nmcp.bounded_workers import BoundedWorkerPool
     from daem0nmcp.config import settings
-    from daem0nmcp.covenant import legacy_entrypoint
     from daem0nmcp.context_manager import (
         _default_project_path,
         _missing_project_path_error,
         get_project_context,
     )
+    from daem0nmcp.covenant import legacy_entrypoint
     from daem0nmcp.logging_config import with_request_id
     from daem0nmcp.mcp_instance import mcp
 
@@ -104,6 +104,7 @@ async def _fetch_and_extract(
     try:
         import httpx
         from bs4 import BeautifulSoup
+
         from ..pinned_http import (
             PinnedAsyncHTTPTransport,
             pinned_dependency_log_scope,
@@ -113,6 +114,7 @@ async def _fetch_and_extract(
         try:
             import httpx
             from bs4 import BeautifulSoup
+
             from daem0nmcp.pinned_http import (
                 PinnedAsyncHTTPTransport,
                 pinned_dependency_log_scope,

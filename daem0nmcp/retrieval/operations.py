@@ -11,7 +11,6 @@ from typing import Any
 
 from .projections import LexicalProjectionBuilder, ProjectionBuildError
 
-
 _WORKSPACE_ID = re.compile(r"^ws_[0-9a-f]{24}$")
 _PROJECTIONS = frozenset(
     {"lexical", "dense", "graph", "temporal", "procedure", "outcome"}
@@ -27,9 +26,10 @@ class ProjectionOperationError(RuntimeError):
 
 
 def _validate_workspace(workspace_id: str) -> None:
-    if not isinstance(workspace_id, str) or _WORKSPACE_ID.fullmatch(
-        workspace_id
-    ) is None:
+    if (
+        not isinstance(workspace_id, str)
+        or _WORKSPACE_ID.fullmatch(workspace_id) is None
+    ):
         raise ProjectionOperationError("INVALID_WORKSPACE_ID")
 
 
@@ -125,9 +125,7 @@ def projection_status(
                 "build_config_hash": details.get("build_config_hash"),
                 "generation": int(row[1]),
                 "projection": str(row[0]),
-                "rebuild_required": details.get(
-                    "rebuild_required_event_id"
-                )
+                "rebuild_required": details.get("rebuild_required_event_id")
                 is not None,
                 "row_count": int(row[3]),
                 "status": str(row[2]),

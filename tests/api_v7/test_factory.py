@@ -26,7 +26,7 @@ class _Resources:
 
 class V7FactoryTests(unittest.TestCase):
     def _handlers(self) -> dict[str, object]:
-        return {name: _unused for name in V7_TOOL_LEVELS}
+        return dict.fromkeys(V7_TOOL_LEVELS, _unused)
 
     def test_factory_builds_one_exact_immutable_manifest_and_search_index(self) -> None:
         from daem0nmcp.api.v7.factory import (
@@ -37,10 +37,10 @@ class V7FactoryTests(unittest.TestCase):
         manifest = build_v7_manifest(self._handlers(), _Resources())
         self.assertEqual({tool.name for tool in manifest.tools}, set(V7_TOOL_LEVELS))
         self.assertEqual(sum(tool.pinned for tool in manifest.tools), 6)
-        self.assertEqual(len(manifest.resources), 4)
+        self.assertEqual(len(manifest.resources), 10)
 
         index = build_tool_search_index(manifest)
-        self.assertEqual(len(index), 71)
+        self.assertEqual(len(index), 75)
         self.assertEqual(index.search("store durable memory")[0].name, "memory_store")
         self.assertEqual(set(index.document_ids), set(V7_TOOL_LEVELS))
 
@@ -48,7 +48,9 @@ class V7FactoryTests(unittest.TestCase):
         importlib.import_module("daem0nmcp.workflows.errors")
         self.assertEqual(tuple(tool.name for tool in manifest.tools), before)
 
-    def test_inspectable_factory_rejects_missing_handler_without_partial_server(self) -> None:
+    def test_inspectable_factory_rejects_missing_handler_without_partial_server(
+        self,
+    ) -> None:
         from daem0nmcp.api.v7.factory import build_inspectable_v7_server
         from daem0nmcp.api.v7.registry import ManifestError
 
@@ -63,8 +65,8 @@ class V7FactoryTests(unittest.TestCase):
 
         names = sorted(V7_TOOL_LEVELS)
         combined = combine_handler_maps(
-            {name: _unused for name in names[:30]},
-            {name: _unused for name in names[30:]},
+            dict.fromkeys(names[:30], _unused),
+            dict.fromkeys(names[30:], _unused),
         )
         self.assertEqual(set(combined), set(V7_TOOL_LEVELS))
         with self.assertRaisesRegex(ManifestError, "duplicate handler"):

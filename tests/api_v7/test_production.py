@@ -16,6 +16,18 @@ class ProductionCompositionTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
         self.root = Path(self.temporary.name).resolve()
+        from daem0nmcp.database import DatabaseManager
+        from daem0nmcp.workspace import WorkspaceRegistry
+
+        self.workspace = WorkspaceRegistry([self.root], default_root=self.root).default
+
+        storage = self.root / ".daem0nmcp" / "storage"
+        database = DatabaseManager(str(storage))
+        try:
+            with patch("daem0nmcp.retrieval.runtime.schedule_projection_job_drain"):
+                asyncio.run(database.init_db())
+        finally:
+            asyncio.run(database.close())
         self.settings = Settings(
             project_root=str(self.root),
             workspace_roots=[],
@@ -35,8 +47,8 @@ class ProductionCompositionTests(unittest.TestCase):
         )
 
         self.assertEqual(set(surface.handlers), set(V7_TOOL_LEVELS))
-        self.assertEqual(len(surface.manifest.tools), 71)
-        self.assertEqual(len(surface.manifest.resources), 4)
+        self.assertEqual(len(surface.manifest.tools), 75)
+        self.assertEqual(len(surface.manifest.resources), 10)
         self.assertEqual(
             surface.workspace_resolver.default.root,
             self.root,
@@ -55,6 +67,45 @@ class ProductionCompositionTests(unittest.TestCase):
         )
         self.assertEqual("stdio", surface.middleware[0]._transport_mode)
 
+    def test_native_runtime_preloads_only_each_enabled_profile(
+        self,
+    ) -> None:
+        from daem0nmcp.api.v7 import production
+
+        imported: list[str] = []
+        with patch.object(
+            production.importlib,
+            "import_module",
+            side_effect=lambda name: imported.append(name),
+        ):
+            production._OptionalNativeRuntimeLifecycle(
+                {"local": "disabled", "models-local": "disabled"}
+            ).start()
+            self.assertEqual([], imported)
+
+            production._OptionalNativeRuntimeLifecycle(
+                {"local": "ready", "models-local": "disabled"}
+            ).start()
+            self.assertEqual(["qdrant_client"], imported)
+            production._OptionalNativeRuntimeLifecycle(
+                {"local": "disabled", "models-local": "ready"}
+            ).start()
+            production._OptionalNativeRuntimeLifecycle({"graph": "ready"}).start()
+
+        self.assertEqual(
+            [
+                "qdrant_client",
+                "sentence_transformers",
+                "onnx",
+                "onnxruntime",
+                "numpy",
+                "networkx",
+                "igraph",
+                "leidenalg",
+            ],
+            imported,
+        )
+
     def test_full_manifest_rejects_missing_or_unexpected_resources(self) -> None:
         from daem0nmcp.api.v7.production import build_production_surface
         from daem0nmcp.api.v7.registry import ManifestError
@@ -69,9 +120,7 @@ class ProductionCompositionTests(unittest.TestCase):
 
         invented = replace(
             manifest.resources[0],
-            uri_template=(
-                "memory://workspaces/{workspace_id}/invented"
-            ),
+            uri_template=("memory://workspaces/{workspace_id}/invented"),
         )
         with self.assertRaisesRegex(ManifestError, "resource set"):
             replace(manifest, resources=manifest.resources + (invented,))
@@ -81,19 +130,9 @@ class ProductionCompositionTests(unittest.TestCase):
         from daem0nmcp.api.v7.pinned import PINNED_HANDLER_NAMES
         from daem0nmcp.api.v7.policy import V7_TOOL_LEVELS
 
-        intentionally_disabled = {
-            "code_impact_analyze",
-            "community_rebuild",
-            "document_ingest_url",
-            "entity_backfill",
-            "sandbox_execute_python",
-            "workspace_consolidate",
-            "workspace_consolidate_and_archive_sources",
-        }
+        remaining_unimplemented: set[str] = set()
         expected = (
-            set(V7_TOOL_LEVELS)
-            - set(PINNED_HANDLER_NAMES)
-            - intentionally_disabled
+            set(V7_TOOL_LEVELS) - set(PINNED_HANDLER_NAMES) - remaining_unimplemented
         )
         observed: set[str] = set()
         original = production.build_v7_surface
@@ -119,7 +158,6 @@ class ProductionCompositionTests(unittest.TestCase):
         from daem0nmcp.api.v7.resource_repository import (
             ResourceRepositoryReaders,
         )
-        from daem0nmcp.workspace import Workspace
 
         async def forbidden(*_args, **_kwargs):
             raise AssertionError("a zero-bound resource was read")
@@ -138,7 +176,7 @@ class ProductionCompositionTests(unittest.TestCase):
 
         result = asyncio.run(
             reader(
-                Workspace("ws_" + "a" * 24, self.root),
+                self.workspace,
                 SimpleNamespace(
                     warning_limit=0,
                     failure_limit=0,
@@ -156,7 +194,6 @@ class ProductionCompositionTests(unittest.TestCase):
             ResourceRepositoryReaders,
             ResourceRepositorySnapshot,
         )
-        from daem0nmcp.workspace import Workspace
 
         async def forbidden(*_args, **_kwargs):
             raise AssertionError("individual resource read mixed generations")
@@ -164,9 +201,7 @@ class ProductionCompositionTests(unittest.TestCase):
         observed: list[tuple[int, int]] = []
 
         async def snapshot(_workspace, **limits):
-            observed.append(
-                (limits["warning_limit"], limits["failure_limit"])
-            )
+            observed.append((limits["warning_limit"], limits["failure_limit"]))
             return ResourceRepositorySnapshot([], [], [], [])
 
         reader = _briefing_reader(
@@ -181,7 +216,7 @@ class ProductionCompositionTests(unittest.TestCase):
 
         asyncio.run(
             reader(
-                Workspace("ws_" + "a" * 24, self.root),
+                self.workspace,
                 SimpleNamespace(
                     warning_limit=7,
                     failure_limit=9,
@@ -204,7 +239,6 @@ class ProductionCompositionTests(unittest.TestCase):
             GitChangeSummary,
             ProjectionManifest,
         )
-        from daem0nmcp.workspace import Workspace
 
         now = datetime(2026, 1, 1, tzinfo=timezone.utc)
         decision = RecordSummary(
@@ -267,7 +301,7 @@ class ProductionCompositionTests(unittest.TestCase):
         )
         result = asyncio.run(
             reader(
-                Workspace("ws_" + "a" * 24, self.root),
+                self.workspace,
                 SimpleNamespace(
                     warning_limit=10,
                     failure_limit=10,
@@ -419,9 +453,7 @@ class ProductionCompositionTests(unittest.TestCase):
                 "daem0nmcp.api.v7.production.build_fastmcp_auth",
                 return_value=object(),
             ),
-            patch(
-                "daem0nmcp.api.v7.production.validate_transport_security"
-            ),
+            patch("daem0nmcp.api.v7.production.validate_transport_security"),
         ):
             with self.assertRaisesRegex(
                 ProductionConfigurationError,
@@ -440,9 +472,7 @@ class ProductionCompositionTests(unittest.TestCase):
                 settings=self.settings,
                 environ={"DAEM0NMCP_TOKEN_SECRET": "s" * 32},
             )
-        self.assertFalse(
-            surface.middleware[0]._allow_unauthenticated_loopback
-        )
+        self.assertFalse(surface.middleware[0]._allow_unauthenticated_loopback)
 
     def test_create_server_passes_reviewed_runtime_options(self) -> None:
         from daem0nmcp.api.v7.production import create_v7_server
@@ -454,12 +484,15 @@ class ProductionCompositionTests(unittest.TestCase):
             observed.append(options)
             return sentinel
 
-        with patch(
-            "daem0nmcp.api.v7.production.V7Surface.build_server",
-            new=build_server,
-        ), patch(
-            "daem0nmcp.api.v7.production.importlib.util.find_spec",
-            return_value=None,
+        with (
+            patch(
+                "daem0nmcp.api.v7.production.V7Surface.build_server",
+                new=build_server,
+            ),
+            patch(
+                "daem0nmcp.api.v7.production.importlib.util.find_spec",
+                return_value=None,
+            ),
         ):
             built = create_v7_server(
                 "stdio",

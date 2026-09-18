@@ -6,12 +6,14 @@ import copy
 import hashlib
 import importlib.util
 import sqlite3
-from pathlib import Path
 import unittest
+from pathlib import Path
 
 
 def _migration_16_statements():
-    path = Path(__file__).resolve().parents[1] / "daem0nmcp" / "migrations" / "schema.py"
+    path = (
+        Path(__file__).resolve().parents[1] / "daem0nmcp" / "migrations" / "schema.py"
+    )
     spec = importlib.util.spec_from_file_location("bundle_test_schema", path)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
@@ -142,7 +144,11 @@ class EventBundleTests(unittest.TestCase):
         self.assertEqual(bundle, export_event_bundle(target, self.workspace_id))
 
     def test_tamper_or_cross_workspace_rejects_before_any_write(self) -> None:
-        from daem0nmcp.event_store import EventBundleError, export_event_bundle, import_event_bundle
+        from daem0nmcp.event_store import (
+            EventBundleError,
+            export_event_bundle,
+            import_event_bundle,
+        )
 
         source = self._source()
         self.addCleanup(source.close)
@@ -153,7 +159,9 @@ class EventBundleTests(unittest.TestCase):
         payload["events"][0]["payload"]["record"]["content"] = "tampered"
         cases.append(payload)
         chain = copy.deepcopy(original)
-        chained = next(event for event in chain["events"] if event["stream_version"] == 2)
+        chained = next(
+            event for event in chain["events"] if event["stream_version"] == 2
+        )
         chained["previous_event_hash"] = "0" * 64
         cases.append(chain)
         root = copy.deepcopy(original)
@@ -166,7 +174,8 @@ class EventBundleTests(unittest.TestCase):
                 with self.assertRaises(EventBundleError):
                     import_event_bundle(target, bundle, self.workspace_id)
                 self.assertEqual(
-                    0, target.execute("SELECT count(*) FROM memory_events").fetchone()[0]
+                    0,
+                    target.execute("SELECT count(*) FROM memory_events").fetchone()[0],
                 )
                 target.close()
 
@@ -175,11 +184,17 @@ class EventBundleTests(unittest.TestCase):
             EventBundleError, "CROSS_WORKSPACE_IMPORT_UNSUPPORTED"
         ):
             import_event_bundle(target, original, "ws_" + "9" * 24)
-        self.assertEqual(0, target.execute("SELECT count(*) FROM memory_events").fetchone()[0])
+        self.assertEqual(
+            0, target.execute("SELECT count(*) FROM memory_events").fetchone()[0]
+        )
         target.close()
 
     def test_malformed_bundle_shapes_fail_with_stable_error_before_write(self) -> None:
-        from daem0nmcp.event_store import EventBundleError, export_event_bundle, import_event_bundle
+        from daem0nmcp.event_store import (
+            EventBundleError,
+            export_event_bundle,
+            import_event_bundle,
+        )
 
         source = self._source()
         self.addCleanup(source.close)
@@ -204,7 +219,8 @@ class EventBundleTests(unittest.TestCase):
                 with self.assertRaisesRegex(EventBundleError, "INVALID_EVENT_BUNDLE"):
                     import_event_bundle(target, bundle, self.workspace_id)
                 self.assertEqual(
-                    0, target.execute("SELECT count(*) FROM memory_events").fetchone()[0]
+                    0,
+                    target.execute("SELECT count(*) FROM memory_events").fetchone()[0],
                 )
             target.close()
 

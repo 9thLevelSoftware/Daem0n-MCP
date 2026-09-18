@@ -6,9 +6,11 @@ import asyncio
 import logging
 import sqlite3
 import time
-from contextlib import asynccontextmanager
+from collections.abc import Callable
+from contextlib import asynccontextmanager, closing
 from datetime import datetime
 from pathlib import Path
+from typing import Literal
 
 from sqlalchemy import event
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
@@ -20,6 +22,7 @@ from .models import (  # noqa: F401 - MemoryVersion imported for table creation
 )
 from .schema_version import CURRENT_SCHEMA_VERSION
 from .storage_activation import (
+    LOCK_NAME,
     ActiveDatabasePointer,
     DatabaseFileLock,
     resolve_active_database,
@@ -28,6 +31,15 @@ from .storage_activation import (
 from .workspace import WorkspaceRegistry
 
 logger = logging.getLogger(__name__)
+
+
+class FreshDatabaseRequiredError(RuntimeError):
+    """The locked storage generation is not an empty bootstrap target."""
+
+    code = "FRESH_DATABASE_REQUIRED"
+
+    def __init__(self) -> None:
+        super().__init__(self.code)
 
 
 class DatabaseManager:
@@ -39,10 +51,26 @@ class DatabaseManager:
     Auto-migrates existing databases on startup.
     """
 
-    def __init__(self, storage_path: str = "./storage", db_name: str = "daem0nmcp.db"):
+    def __init__(
+        self,
+        storage_path: str = "./storage",
+        db_name: str = "daem0nmcp.db",
+        *,
+        lock_mode: Literal["shared", "exclusive"] = "shared",
+        require_fresh: bool = False,
+        fresh_workspace_root: str | Path | None = None,
+        defer_fresh_activation: bool = False,
+    ):
         self.storage_path = Path(storage_path)
         self.storage_path.mkdir(parents=True, exist_ok=True)
-        if self.storage_path.name == "storage" and self.storage_path.parent.name == ".daem0nmcp":
+        if fresh_workspace_root is not None:
+            if not require_fresh:
+                raise ValueError("fresh_workspace_root requires fresh storage")
+            workspace_root = Path(fresh_workspace_root)
+        elif (
+            self.storage_path.name == "storage"
+            and self.storage_path.parent.name == ".daem0nmcp"
+        ):
             workspace_root = self.storage_path.parent.parent
         else:
             workspace_root = self.storage_path.parent
@@ -50,12 +78,27 @@ class DatabaseManager:
             [workspace_root], default_root=workspace_root
         ).default.workspace_id
         if db_name != "daem0nmcp.db":
-            raise ValueError("custom database names are incompatible with active-db selection")
-        self._database_lock = DatabaseFileLock(self.storage_path, "shared").acquire()
-        self._fresh_at_construction = not (self.storage_path / db_name).exists() and not (
-            self.storage_path / "active-db.json"
-        ).exists()
+            raise ValueError(
+                "custom database names are incompatible with active-db selection"
+            )
+        if defer_fresh_activation and not require_fresh:
+            raise ValueError("deferred activation requires fresh storage")
+        self._defer_fresh_activation = defer_fresh_activation
+        self._database_lock = DatabaseFileLock(self.storage_path, lock_mode).acquire()
         try:
+            entries = iter(self.storage_path.iterdir())
+            first = next(entries, None)
+            self._fresh_at_construction = (
+                first is not None
+                and first.name == LOCK_NAME
+                and not first.is_symlink()
+                and first.is_file()
+                and next(entries, None) is None
+                and not (self.storage_path / db_name).exists()
+                and not (self.storage_path / "active-db.json").exists()
+            )
+            if require_fresh and not self._fresh_at_construction:
+                raise FreshDatabaseRequiredError()
             if self._fresh_at_construction:
                 self._active_database = None
                 self.db_path = self.storage_path / db_name
@@ -76,6 +119,26 @@ class DatabaseManager:
         self._initialized = False
         self._engine = None
         self._session_factory = None
+        self._close_callbacks: list[Callable[[], None]] = []
+        self._foreground_projection_tasks: set[asyncio.Task] = set()
+
+    @property
+    def fresh_at_construction(self) -> bool:
+        """Whether locked storage contained exactly its owned lock file."""
+
+        return self._fresh_at_construction
+
+    def register_close_callback(self, callback: Callable[[], None]) -> None:
+        """Register one idempotent resource cleanup owned by this database."""
+
+        if not callable(callback):
+            raise TypeError("close callback must be callable")
+        if callback not in self._close_callbacks:
+            self._close_callbacks.append(callback)
+
+    def _track_projection_task(self, task: asyncio.Task) -> None:
+        self._foreground_projection_tasks.add(task)
+        task.add_done_callback(self._foreground_projection_tasks.discard)
 
     def _get_engine(self):
         """Lazy engine creation - ensures it's created in the right event loop context."""
@@ -118,7 +181,7 @@ class DatabaseManager:
         return self._get_engine()
 
     @property
-    def SessionLocal(self):
+    def SessionLocal(self):  # noqa: N802 -- retained public Python API name
         """Property for backward compatibility."""
         self._get_engine()  # Ensure engine is created
         return self._session_factory
@@ -174,11 +237,12 @@ class DatabaseManager:
         if is_new_db:
             self._bootstrap_lexical_projection()
             self._validate_database(format_version=7)
-            pointer = ActiveDatabasePointer(7, 1, "daem0nmcp.db", None, None)
-            write_active_pointer(self.storage_path, pointer)
-            self._active_database = resolve_active_database(self.storage_path)
             self.format_version = 7
             self.active_generation = 1
+            if not self._defer_fresh_activation:
+                pointer = ActiveDatabasePointer(7, 1, "daem0nmcp.db", None, None)
+                write_active_pointer(self.storage_path, pointer)
+                self._active_database = resolve_active_database(self.storage_path)
         elif self._active_database is None:
             raise RuntimeError("ACTIVE_DATABASE_STATE_MISSING")
         elif self._active_database.pointer is not None:
@@ -201,11 +265,11 @@ class DatabaseManager:
             self._validate_database(format_version=6)
 
         self._initialized = True
-        if self.format_version == 7:
+        if self.format_version == 7 and not self._defer_fresh_activation:
             from .retrieval.runtime import schedule_projection_job_drain
 
             schedule_projection_job_drain(self.db_path, max_jobs=5)
-        logger.info(f"Database initialized at {self.db_path}")
+        logger.info("Database initialized")
 
     async def init_legacy_v6(self) -> None:
         """Initialize a retained format-6 database without publishing v7 schema.
@@ -226,9 +290,7 @@ class DatabaseManager:
         connection = sqlite3.connect(self.db_path)
         try:
             connection.execute("PRAGMA foreign_keys=ON")
-            integrity = [
-                row[0] for row in connection.execute("PRAGMA integrity_check")
-            ]
+            integrity = [row[0] for row in connection.execute("PRAGMA integrity_check")]
             foreign = list(connection.execute("PRAGMA foreign_key_check"))
         finally:
             connection.close()
@@ -236,7 +298,7 @@ class DatabaseManager:
             raise RuntimeError("DATABASE_INTEGRITY_FAILED")
 
         self._initialized = True
-        logger.info("Legacy format-6 database initialized at %s", self.db_path)
+        logger.info("Legacy format-6 database initialized")
 
     def _bootstrap_lexical_projection(self) -> None:
         """Make the dependency-free lexical baseline valid before v7 use."""
@@ -319,7 +381,7 @@ class DatabaseManager:
 
     def _schema_version(self) -> int:
         try:
-            with sqlite3.connect(self.db_path) as connection:
+            with closing(sqlite3.connect(self.db_path)) as connection:
                 exists = connection.execute(
                     "SELECT 1 FROM sqlite_master WHERE type='table' AND name='schema_version'"
                 ).fetchone()
@@ -334,7 +396,7 @@ class DatabaseManager:
             return 0
 
     def _has_user_rows(self) -> bool:
-        with sqlite3.connect(self.db_path) as connection:
+        with closing(sqlite3.connect(self.db_path)) as connection:
             for table in (
                 "memories",
                 "facts",
@@ -344,14 +406,20 @@ class DatabaseManager:
                 "active_context",
             ):
                 exists = connection.execute(
-                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+                    (table,),
                 ).fetchone()
-                if exists and connection.execute(f'SELECT 1 FROM "{table}" LIMIT 1').fetchone():
+                if (
+                    exists
+                    and connection.execute(
+                        f'SELECT 1 FROM "{table}" LIMIT 1'
+                    ).fetchone()
+                ):
                     return True
         return False
 
     def _validate_database(self, *, format_version: int) -> None:
-        with sqlite3.connect(self.db_path) as connection:
+        with closing(sqlite3.connect(self.db_path)) as connection:
             connection.execute("PRAGMA foreign_keys=ON")
             integrity = [row[0] for row in connection.execute("PRAGMA integrity_check")]
             foreign = list(connection.execute("PRAGMA foreign_key_check"))
@@ -387,6 +455,7 @@ class DatabaseManager:
                     "discovery_communities",
                     "discovery_community_members",
                     "discovery_code_entities",
+                    "discovery_code_edges",
                 }
                 present = {
                     row[0]
@@ -413,19 +482,22 @@ class DatabaseManager:
         try:
             yield session
             await session.commit()
-            if (
-                self.format_version == 7
-                and session.info.pop("daem0nmcp_v7_event_appended", False)
+            if self.format_version == 7 and session.info.pop(
+                "daem0nmcp_v7_event_appended", False
             ):
                 try:
                     from .retrieval.runtime import drain_projection_jobs
 
-                    await asyncio.wait_for(
+                    projection_task = asyncio.create_task(
                         drain_projection_jobs(
                             self.db_path,
                             max_jobs=1,
                             include_optional=False,
-                        ),
+                        )
+                    )
+                    self._track_projection_task(projection_task)
+                    await asyncio.wait_for(
+                        asyncio.shield(projection_task),
                         timeout=2.0,
                     )
                 except Exception:
@@ -522,13 +594,44 @@ class DatabaseManager:
         return current > since
 
     async def close(self):
-        """Dispose of the engine."""
+        """Quiesce owned work and release every database-scoped resource."""
+
+        first_error: BaseException | None = None
+        callbacks = tuple(reversed(self._close_callbacks))
+        self._close_callbacks.clear()
+        for callback in callbacks:
+            try:
+                callback()
+            except BaseException as exc:
+                if first_error is None:
+                    first_error = exc
+        foreground_tasks = tuple(self._foreground_projection_tasks)
+        if foreground_tasks:
+            await asyncio.gather(
+                *(asyncio.shield(task) for task in foreground_tasks),
+                return_exceptions=True,
+            )
+        if self.format_version == 7 and not self._defer_fresh_activation:
+            try:
+                from .retrieval.runtime import await_projection_job_drains
+
+                await await_projection_job_drains((self.db_path,))
+            except BaseException as exc:
+                if first_error is None:
+                    first_error = exc
         if self._engine is not None:
-            await self._engine.dispose()
-            self._engine = None
-            self._session_factory = None
-            self._initialized = False
+            try:
+                await self._engine.dispose()
+            except BaseException as exc:
+                if first_error is None:
+                    first_error = exc
+            finally:
+                self._engine = None
+                self._session_factory = None
+                self._initialized = False
         self._database_lock.release()
+        if first_error is not None:
+            raise first_error
 
     def __del__(self):
         lock = getattr(self, "_database_lock", None)

@@ -11,7 +11,7 @@ from __future__ import annotations
 import asyncio
 import math
 from collections.abc import Iterable, Mapping
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from time import perf_counter_ns
 from types import MappingProxyType
@@ -40,7 +40,6 @@ from .types import (
     RetrievalResult,
     _aware_datetime,
 )
-
 
 _PROVIDER_ORDER = (
     "lexical",
@@ -127,9 +126,7 @@ def _positive_finite_number(value: object, field_name: str) -> float:
     try:
         numeric = float(value)
     except (OverflowError, ValueError) as exc:
-        raise ValueError(
-            f"{field_name} must be positive and finite"
-        ) from exc
+        raise ValueError(f"{field_name} must be positive and finite") from exc
     if not math.isfinite(numeric) or numeric <= 0:
         raise ValueError(f"{field_name} must be positive and finite")
     return numeric
@@ -158,6 +155,18 @@ def _identity(candidate: FusedCandidate) -> tuple[str, str | None]:
     return candidate.record_id, candidate.version_id
 
 
+@dataclass(frozen=True, slots=True)
+class RetrievalCandidateResult:
+    """Policy-valid canonical evidence before any context composition."""
+
+    selected: tuple[SelectedEvidence, ...] = ()
+    providers: tuple[ProviderDiagnostic, ...] = ()
+    weights: tuple[tuple[str, float], ...] = ()
+    policy_rejection_counts: tuple[tuple[str, int], ...] = ()
+    abstained: bool = False
+    reason: str | None = None
+
+
 class RetrievalService:
     """Execute the v7 retrieval contract without bypassing policy."""
 
@@ -178,9 +187,9 @@ class RetrievalService:
         rrf_k: int = DEFAULT_RRF_K,
     ) -> None:
         self._providers = self._validate_providers(providers)
-        if not callable(getattr(repository, "load_policy_records", None)) or not callable(
-            getattr(repository, "load_selected_evidence", None)
-        ):
+        if not callable(
+            getattr(repository, "load_policy_records", None)
+        ) or not callable(getattr(repository, "load_selected_evidence", None)):
             raise ValueError("repository must provide canonical retrieval reads")
         if not callable(getattr(composer, "compose_async", None)):
             raise ValueError("composer must provide compose_async")
@@ -221,6 +230,22 @@ class RetrievalService:
         if self._rrf_k > MAX_RRF_K:
             raise ValueError(f"rrf_k must not exceed {MAX_RRF_K}")
 
+    def close(self) -> None:
+        """Release resources owned by registered providers and repository."""
+
+        first_error: Exception | None = None
+        for resource in (*self._providers.values(), self._repository):
+            close = getattr(resource, "close", None)
+            if not callable(close):
+                continue
+            try:
+                close()
+            except Exception as error:
+                if first_error is None:
+                    first_error = error
+        if first_error is not None:
+            raise first_error
+
     @staticmethod
     def _validate_providers(
         providers: Mapping[str, RetrievalProvider],
@@ -241,6 +266,58 @@ class RetrievalService:
     async def retrieve(self, query: RetrievalQuery) -> RetrievalResult:
         """Retrieve, authorize, select, and compose evidence for *query*."""
 
+        candidates = await self.retrieve_candidates(query)
+        if candidates.abstained:
+            return RetrievalResult(
+                providers=candidates.providers,
+                weights=candidates.weights,
+                policy_rejection_counts=candidates.policy_rejection_counts,
+                abstained=True,
+                reason=candidates.reason,
+            )
+        try:
+            composition = await self._composer.compose_async(
+                candidates.selected,
+                token_budget=query.token_budget,
+            )
+            if not isinstance(composition, CompositionResult):
+                raise ValueError("composer returned an invalid result")
+            if (
+                composition.context.token_budget != query.token_budget
+                or composition.context.rendered_tokens > query.token_budget
+            ):
+                raise ValueError("composer changed the validated token budget")
+            items = self._validated_composed_items(composition, candidates.selected)
+        except Exception:
+            return self._abstention(
+                "COMPOSITION_FAILED",
+                diagnostics=candidates.providers,
+                rejection_counts=candidates.policy_rejection_counts,
+            )
+        if not items:
+            reason = (
+                "COMPOSER_UNAVAILABLE"
+                if "COMPOSER_UNAVAILABLE" in composition.context.drop_reasons
+                else "TOKEN_BUDGET_EXHAUSTED"
+            )
+            return self._abstention(
+                reason,
+                diagnostics=candidates.providers,
+                rejection_counts=candidates.policy_rejection_counts,
+            )
+        return RetrievalResult(
+            items=items,
+            context=composition.context,
+            providers=candidates.providers,
+            weights=candidates.weights,
+            policy_rejection_counts=candidates.policy_rejection_counts,
+        )
+
+    async def retrieve_candidates(
+        self, query: RetrievalQuery
+    ) -> RetrievalCandidateResult:
+        """Retrieve authenticated policy-valid evidence without composing it."""
+
         if not isinstance(query, RetrievalQuery):
             raise ValueError("query must be a RetrievalQuery")
         snapshot_time = self._clock.now()
@@ -248,26 +325,22 @@ class RetrievalService:
         provider_query = replace(
             query,
             as_of_valid_time=query.as_of_valid_time or snapshot_time,
-            as_of_transaction_time=(
-                query.as_of_transaction_time or snapshot_time
-            ),
+            as_of_transaction_time=(query.as_of_transaction_time or snapshot_time),
         )
 
         try:
             plan = self._planner.plan(
                 query,
                 ready_providers=tuple(
-                    name
-                    for name in _PROVIDER_ORDER[1:]
-                    if name in self._providers
+                    name for name in _PROVIDER_ORDER[1:] if name in self._providers
                 ),
             )
         except Exception:
-            return self._abstention("PLANNING_FAILED")
+            return self._candidate_abstention("PLANNING_FAILED")
         if not isinstance(plan, RetrievalPlan) or any(
             request.limit > query.candidate_limit for request in plan.requests
         ):
-            return self._abstention("PLANNING_FAILED")
+            return self._candidate_abstention("PLANNING_FAILED")
 
         results: list[ProviderResult] = []
         lexical_request = plan.requests[0]
@@ -277,7 +350,7 @@ class RetrievalService:
             lexical_request.limit,
         )
         if lexical.status in {"unavailable", "failed"}:
-            return self._abstention(
+            return self._candidate_abstention(
                 lexical.reason or "LEXICAL_PROVIDER_FAILED",
                 diagnostics=(ProviderDiagnostic.from_result(lexical),),
             )
@@ -311,12 +384,8 @@ class RetrievalService:
                 seeds=graph_seeds,
             )
 
-        results = [
-            provider_results[request.provider] for request in plan.requests
-        ]
-        diagnostics = [
-            ProviderDiagnostic.from_result(result) for result in results
-        ]
+        results = [provider_results[request.provider] for request in plan.requests]
+        diagnostics = [ProviderDiagnostic.from_result(result) for result in results]
 
         fused = weighted_reciprocal_rank_fusion(
             results,
@@ -338,27 +407,23 @@ class RetrievalService:
                 snapshot_time=snapshot_time,
             )
         except Exception:
-            return self._abstention(
+            return self._candidate_abstention(
                 "POLICY_STATE_UNAVAILABLE", diagnostics=diagnostics
             )
 
         if policy_result.abstained:
-            return self._abstention(
+            return self._candidate_abstention(
                 policy_result.reason or "ALL_CANDIDATES_FILTERED",
                 diagnostics=diagnostics,
                 rejection_counts=policy_result.rejection_counts,
             )
 
         ordered_candidates = policy_result.candidates
-        content_cache: dict[
-            tuple[str, str | None], SelectedEvidence
-        ] = {}
+        content_cache: dict[tuple[str, str | None], SelectedEvidence] = {}
         if query.rerank:
             rerank_sources: tuple[SelectedEvidence, ...] = ()
             if self._rerank_enabled and self._reranker is not None:
-                head_size = min(
-                    len(ordered_candidates), self._rerank_candidate_limit
-                )
+                head_size = min(len(ordered_candidates), self._rerank_candidate_limit)
                 rerank_candidates = ordered_candidates[:head_size]
                 started = perf_counter_ns()
                 try:
@@ -377,9 +442,7 @@ class RetrievalService:
                         provider="reranker",
                         status="degraded",
                         manifest_generation=None,
-                        elapsed_ms=(
-                            perf_counter_ns() - started
-                        ) / 1_000_000,
+                        elapsed_ms=(perf_counter_ns() - started) / 1_000_000,
                         reason="RERANKER_FAILED",
                         returned_count=0,
                     )
@@ -415,50 +478,17 @@ class RetrievalService:
                     (_identity(source.candidate), source) for source in loaded
                 )
             diverse = tuple(
-                content_cache[_identity(candidate)]
-                for candidate in diverse_candidates
+                content_cache[_identity(candidate)] for candidate in diverse_candidates
             )
         except Exception:
-            return self._abstention(
+            return self._candidate_abstention(
                 "EVIDENCE_CONTENT_UNAVAILABLE",
                 diagnostics=diagnostics,
                 rejection_counts=policy_result.rejection_counts,
             )
 
-        try:
-            composition = await self._composer.compose_async(
-                diverse,
-                token_budget=query.token_budget,
-            )
-            if not isinstance(composition, CompositionResult):
-                raise ValueError("composer returned an invalid result")
-            if (
-                composition.context.token_budget != query.token_budget
-                or composition.context.rendered_tokens > query.token_budget
-            ):
-                raise ValueError("composer changed the validated token budget")
-            items = self._validated_composed_items(composition, diverse)
-        except Exception:
-            return self._abstention(
-                "COMPOSITION_FAILED",
-                diagnostics=diagnostics,
-                rejection_counts=policy_result.rejection_counts,
-            )
-
-        if not items:
-            reason = (
-                "COMPOSER_UNAVAILABLE"
-                if "COMPOSER_UNAVAILABLE" in composition.context.drop_reasons
-                else "TOKEN_BUDGET_EXHAUSTED"
-            )
-            return self._abstention(
-                reason,
-                diagnostics=diagnostics,
-                rejection_counts=policy_result.rejection_counts,
-            )
-        return RetrievalResult(
-            items=items,
-            context=composition.context,
+        return RetrievalCandidateResult(
+            selected=diverse,
             providers=tuple(diagnostics),
             weights=self._reported_weights,
             policy_rejection_counts=policy_result.rejection_counts,
@@ -678,7 +708,7 @@ class RetrievalService:
             != sorted(allowed[key][0] for key in item_keys)
         ):
             raise ValueError("composer emitted unselected evidence")
-        for item, key in zip(composition.items, item_keys):
+        for item, key in zip(composition.items, item_keys, strict=True):
             _, source = allowed[key]
             candidate = source.candidate
             normalized_outcome = (
@@ -707,27 +737,24 @@ class RetrievalService:
             steps_match = len(item.procedure_steps) == len(normalized_steps) and all(
                 expected.startswith(actual)
                 for actual, expected in zip(
-                    item.procedure_steps, normalized_steps
+                    item.procedure_steps, normalized_steps, strict=True
                 )
             )
             if (
                 item.evidence_refs != candidate.evidence_refs
                 or item.channels != candidate.channels
                 or item.score != candidate.score
-                or item.category
-                != _normalize_evidence_text(source.category)
+                or item.category != _normalize_evidence_text(source.category)
                 or item.rationale != source.rationale
                 or item.tags != source.tags
                 or item.worked != source.worked
                 or item.status != source.status
-                or item.superseded_by_version_id
-                != source.superseded_by_version_id
+                or item.superseded_by_version_id != source.superseded_by_version_id
                 or not outcome_matches
                 or item.outcome_failed != source.outcome_failed
                 or not steps_match
                 or item.relation_paths != relation_paths
-                or item.relation_path
-                != (relation_paths[0] if relation_paths else ())
+                or item.relation_path != (relation_paths[0] if relation_paths else ())
             ):
                 raise ValueError("composer changed selected provenance")
         return composition.items
@@ -747,11 +774,27 @@ class RetrievalService:
             reason=reason,
         )
 
+    def _candidate_abstention(
+        self,
+        reason: str,
+        *,
+        diagnostics: Iterable[ProviderDiagnostic] = (),
+        rejection_counts: tuple[tuple[str, int], ...] = (),
+    ) -> RetrievalCandidateResult:
+        return RetrievalCandidateResult(
+            providers=tuple(diagnostics),
+            weights=self._reported_weights,
+            policy_rejection_counts=rejection_counts,
+            abstained=True,
+            reason=reason,
+        )
+
 
 __all__ = [
     "AsyncEvidenceComposer",
     "RetrievalClock",
     "RetrievalRepository",
     "RetrievalReranker",
+    "RetrievalCandidateResult",
     "RetrievalService",
 ]

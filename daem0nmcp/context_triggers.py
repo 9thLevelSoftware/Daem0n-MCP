@@ -278,20 +278,21 @@ class ContextTriggerManager:
                     matched = True
 
                 elif trigger["trigger_type"] == "tag_match" and tags is not None:
-                    matched = (await self._pattern_matcher.matches_async(
-                        trigger["id"], trigger["pattern"], tags, field="tags"
-                    )).matched
+                    matched = (
+                        await self._pattern_matcher.matches_async(
+                            trigger["id"], trigger["pattern"], tags, field="tags"
+                        )
+                    ).matched
 
-                elif (
-                    trigger["trigger_type"] == "entity_match"
-                    and entities is not None
-                ):
-                    matched = (await self._pattern_matcher.matches_async(
-                        trigger["id"],
-                        trigger["pattern"],
-                        entities,
-                        field="entities",
-                    )).matched
+                elif trigger["trigger_type"] == "entity_match" and entities is not None:
+                    matched = (
+                        await self._pattern_matcher.matches_async(
+                            trigger["id"],
+                            trigger["pattern"],
+                            entities,
+                            field="entities",
+                        )
+                    ).matched
 
                 if matched:
                     matches.append(

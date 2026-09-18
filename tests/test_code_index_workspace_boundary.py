@@ -78,7 +78,9 @@ class CodeIndexWorkspaceBoundaryTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(result["files_processed"], 1)
-        self.assertEqual(manager.indexer.read_files, [(self.workspace / "inside.py").resolve()])
+        self.assertEqual(
+            manager.indexer.read_files, [(self.workspace / "inside.py").resolve()]
+        )
 
     async def test_absolute_and_parent_patterns_are_rejected(self):
         for pattern in (str((self.outside / "*.py").resolve()), "../outside/*.py"):
@@ -86,7 +88,9 @@ class CodeIndexWorkspaceBoundaryTests(unittest.IsolatedAsyncioTestCase):
             with self.subTest(pattern=pattern):
                 with self.assertRaises(IndexPathError):
                     await manager.index_project(
-                        str(self.workspace), [pattern], workspace_root=str(self.workspace)
+                        str(self.workspace),
+                        [pattern],
+                        workspace_root=str(self.workspace),
                     )
                 self.assertEqual(manager.indexer.read_files, [])
 

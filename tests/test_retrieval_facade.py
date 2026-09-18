@@ -21,13 +21,6 @@ class RetrievalFacadeTests(unittest.TestCase):
             dense_manifest_details,
             dense_point_id,
         )
-        from daem0nmcp.retrieval.service import (
-            AsyncEvidenceComposer,
-            RetrievalClock,
-            RetrievalRepository,
-            RetrievalReranker,
-            RetrievalService,
-        )
         from daem0nmcp.retrieval.repository import (
             RetrievalRepositoryError,
             SQLiteRetrievalRepository,
@@ -41,10 +34,17 @@ class RetrievalFacadeTests(unittest.TestCase):
             create_retrieval_service,
             drain_projection_jobs,
         )
+        from daem0nmcp.retrieval.service import (
+            AsyncEvidenceComposer,
+            RetrievalClock,
+            RetrievalRepository,
+            RetrievalReranker,
+            RetrievalService,
+        )
         from daem0nmcp.retrieval.specialized_projection import (
+            SpecializedProjectionBuilder,
             SpecializedProjectionBuildError,
             SpecializedProjectionBuildResult,
-            SpecializedProjectionBuilder,
         )
         from daem0nmcp.retrieval.types import MAX_TOKEN_BUDGET
 

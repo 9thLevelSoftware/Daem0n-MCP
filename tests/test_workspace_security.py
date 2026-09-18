@@ -13,6 +13,7 @@ from daem0nmcp.workspace import (
     IndexPathError,
     WorkspaceAccessError,
     WorkspaceRegistry,
+    normalize_resolved_path,
     resolve_index_file,
     resolve_index_target,
     validate_index_patterns,
@@ -77,7 +78,9 @@ class WorkspaceSecurityTests(unittest.TestCase):
         )
 
         self.assertEqual(registry.default.root, self.primary.resolve())
-        self.assertEqual(registry.resolve(str(self.secondary)).root, self.secondary.resolve())
+        self.assertEqual(
+            registry.resolve(str(self.secondary)).root, self.secondary.resolve()
+        )
 
     def test_registry_loads_default_cwd_and_roots_from_settings(self):
         factory = getattr(WorkspaceRegistry, "from_settings", None)
@@ -90,7 +93,9 @@ class WorkspaceSecurityTests(unittest.TestCase):
         )
 
         self.assertEqual(registry.default.root, Path.cwd().resolve())
-        self.assertEqual(registry.resolve(str(self.secondary)).root, self.secondary.resolve())
+        self.assertEqual(
+            registry.resolve(str(self.secondary)).root, self.secondary.resolve()
+        )
 
     def test_derived_path_resolver_rejects_parent_escape_without_symlinks(self):
         resolver = getattr(workspace_module, "resolve_derived_path", None)
@@ -109,6 +114,16 @@ class WorkspaceSecurityTests(unittest.TestCase):
 
         resolved = resolver(self.primary, ".daem0nmcp", "storage")
         self.assertEqual(resolved, self.primary / ".daem0nmcp" / "storage")
+
+    @unittest.skipUnless(os.name == "nt", "Windows path spelling regression")
+    def test_resolved_path_normalizes_drive_and_unc_extended_spellings(self):
+        drive = Path(r"D:\workspace\storage")
+        extended_drive = Path(r"\\?\D:\workspace\storage")
+        unc = Path(r"\\server\share\workspace")
+        extended_unc = Path(r"\\?\UNC\server\share\workspace")
+
+        self.assertEqual(normalize_resolved_path(extended_drive), drive)
+        self.assertEqual(normalize_resolved_path(extended_unc), unc)
 
     @unittest.skipUnless(hasattr(os, "symlink"), "symlinks are unavailable")
     def test_derived_path_resolver_rejects_nested_storage_symlink(self):
@@ -136,9 +151,8 @@ class WorkspaceSecurityTests(unittest.TestCase):
         self.assertEqual(resolve_index_target(workspace, "src"), nested.resolve())
 
         for target in (str(nested.resolve()), "../secondary", "src/../../secondary"):
-            with self.subTest(target=target):
-                with self.assertRaises(IndexPathError):
-                    resolve_index_target(workspace, target)
+            with self.subTest(target=target), self.assertRaises(IndexPathError):
+                resolve_index_target(workspace, target)
 
     def test_index_patterns_reject_absolute_and_parent_components(self):
         good = ["**/*.py", "src/*.ts"]
@@ -150,9 +164,8 @@ class WorkspaceSecurityTests(unittest.TestCase):
             "src/../*.py",
             "**/../../*.py",
         ):
-            with self.subTest(pattern=pattern):
-                with self.assertRaises(IndexPathError):
-                    validate_index_patterns([pattern])
+            with self.subTest(pattern=pattern), self.assertRaises(IndexPathError):
+                validate_index_patterns([pattern])
 
     @unittest.skipUnless(hasattr(os, "symlink"), "symlinks are unavailable")
     def test_resolved_index_file_cannot_escape_workspace_through_symlink(self):

@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 from types import MappingProxyType
-from typing import Literal, get_args
+from typing import Annotated, Literal, get_args
 from urllib.parse import urlsplit
 
 from pydantic import (
@@ -20,7 +20,6 @@ from pydantic import (
     StringConstraints,
     model_validator,
 )
-from typing_extensions import Annotated
 
 from ...covenant import CovenantLevel
 from .mapping import V6_TO_V7_MAPPINGS
@@ -59,10 +58,9 @@ from .models import (
     WireModel,
     WorkspaceId,
 )
-from .policy import V7ArgumentNormalizer, V7_TOOL_LEVELS
-from .registry import ManifestError, PINNED_TOOL_NAMES, ToolSpec
+from .policy import V7_TOOL_LEVELS, V7ArgumentNormalizer
+from .registry import PINNED_TOOL_NAMES, ManifestError, ToolSpec
 from .resources import ActiveContextItem, RuleView
-
 
 ShortText = Annotated[
     str,
@@ -80,10 +78,13 @@ LongText = Annotated[
     str,
     StringConstraints(strict=True, min_length=1, max_length=100_000),
 ]
-OptionalMediumText = Annotated[
-    str,
-    StringConstraints(strict=True, min_length=1, max_length=2000),
-] | None
+OptionalMediumText = (
+    Annotated[
+        str,
+        StringConstraints(strict=True, min_length=1, max_length=2000),
+    ]
+    | None
+)
 IdempotencyKey = Annotated[
     str,
     StringConstraints(
@@ -100,6 +101,33 @@ PreflightToken = Annotated[
         min_length=16,
         max_length=8192,
         pattern=r"^[A-Za-z0-9._~-]+$",
+    ),
+]
+EditRequestId = Annotated[
+    str,
+    StringConstraints(
+        strict=True,
+        min_length=68,
+        max_length=68,
+        pattern=r"^edt_[0-9a-f]{64}$",
+    ),
+]
+EditReceiptToken = Annotated[
+    str,
+    StringConstraints(
+        strict=True,
+        min_length=64,
+        max_length=4096,
+        pattern=r"^edr_v1\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$",
+    ),
+]
+CaptureCandidateId = Annotated[
+    str,
+    StringConstraints(
+        strict=True,
+        min_length=68,
+        max_length=68,
+        pattern=r"^cap_[0-9a-f]{64}$",
     ),
 ]
 EntityType = Annotated[
@@ -259,6 +287,7 @@ ProtectedToolName = Literal[
     "dream_duplicates_purge",
     "entity_backfill",
     "memory_archive_set",
+    "memory_capture_promote",
     "memory_compact",
     "memory_duplicates_cleanup",
     "memory_link",
@@ -362,7 +391,7 @@ class PreflightData(WireModel):
     expires_at: UtcDateTime | None = None
 
     @model_validator(mode="after")
-    def validate_capability_expiry(self) -> "PreflightData":
+    def validate_capability_expiry(self) -> PreflightData:
         if (self.preflight_token is None) != (self.expires_at is None):
             raise ValueError("preflight token and expiry must be returned together")
         return self
@@ -375,12 +404,95 @@ class MemoryStoreData(WireModel):
     idempotent_replay: bool
 
 
+class EditPreflightData(WireModel):
+    edit_request_id: EditRequestId
+    edit_receipt: EditReceiptToken
+    expires_at: UtcDateTime
+
+
+class CaptureCandidateView(WireModel):
+    candidate_id: CaptureCandidateId
+    source_kind: Literal["native_edit", "tool_result", "dreaming", "system"]
+    proposed_record: JsonObject
+    provenance: JsonObject
+    created_at: UtcDateTime
+
+
+class MemoryCaptureListData(WireModel):
+    items: list[CaptureCandidateView] = Field(default_factory=list, max_length=100)
+    next_cursor: Cursor | None = None
+    truncated: bool
+
+
+class MemoryCapturePromoteData(WireModel):
+    candidate_id: CaptureCandidateId
+    record: RecordSummary
+    event_id: EventId
+    idempotent_replay: bool
+
+
 class OutcomeData(WireModel):
     record_id: RecordId
     outcome_event_id: EventId
     stream_version: Annotated[int, Field(ge=1)]
     worked: bool
     idempotent_replay: bool
+
+
+class DreamingStrategyStatus(WireModel):
+    strategy: Literal[
+        "failed_decision",
+        "pending_outcome",
+        "connection_discovery",
+        "community_refresh",
+    ]
+    status: Literal["idle", "running", "disabled", "degraded"]
+    pending_count: Annotated[int, Field(ge=0, le=10_000)] = 0
+    work_remaining: bool = False
+    last_success_at: UtcDateTime | None = None
+    stable_error_code: (
+        Annotated[
+            str,
+            StringConstraints(
+                strict=True, min_length=1, max_length=64, pattern=r"^[A-Z0-9_]+$"
+            ),
+        ]
+        | None
+    ) = None
+    yielded: bool = False
+
+
+class DreamingStatus(WireModel):
+    enabled: bool
+    running: bool
+    yielded: bool
+    strategies: list[DreamingStrategyStatus] = Field(default_factory=list, max_length=4)
+
+
+class RuntimeDiagnostic(WireModel):
+    component: Literal[
+        "lexical",
+        "dense",
+        "graph",
+        "temporal",
+        "procedure",
+        "outcome",
+        "code",
+        "tasks",
+        "edit_bridge",
+        "migration",
+    ]
+    status: Literal["ready", "disabled", "degraded", "not_verified"]
+    counts: CountMap = Field(default_factory=dict)
+    stable_error_code: (
+        Annotated[
+            str,
+            StringConstraints(
+                strict=True, min_length=1, max_length=64, pattern=r"^[A-Z0-9_]+$"
+            ),
+        ]
+        | None
+    ) = None
 
 
 class HealthData(WireModel):
@@ -398,7 +510,13 @@ class HealthData(WireModel):
     supported_transports: TransportSet = Field(min_length=1)
     task_support: CapabilityState
     auth_mode: Literal["process", "loopback", "jwt"]
-    capability_states: list[CapabilityState] = Field(default_factory=list, max_length=64)
+    capability_states: list[CapabilityState] = Field(
+        default_factory=list, max_length=64
+    )
+    dreaming: DreamingStatus | None = None
+    runtime_diagnostics: list[RuntimeDiagnostic] = Field(
+        default_factory=list, max_length=16
+    )
 
 
 class TriggerMatch(WireModel):
@@ -464,7 +582,7 @@ class HighlightSpan(WireModel):
     end: Annotated[int, Field(gt=0)]
 
     @model_validator(mode="after")
-    def validate_span(self) -> "HighlightSpan":
+    def validate_span(self) -> HighlightSpan:
         if self.end <= self.start:
             raise ValueError("highlight end must follow start")
         return self
@@ -564,7 +682,7 @@ class CodeEntitySummary(WireModel):
     manifest_generation: Annotated[int, Field(ge=1)]
 
     @model_validator(mode="after")
-    def validate_lines(self) -> "CodeEntitySummary":
+    def validate_lines(self) -> CodeEntitySummary:
         if self.end_line < self.start_line:
             raise ValueError("end_line cannot precede start_line")
         return self
@@ -599,7 +717,9 @@ class RefactorProposalData(WireModel):
         str,
         StringConstraints(strict=True, min_length=1, max_length=100_000),
     ]
-    affected_entities: list[CodeEntitySummary] = Field(default_factory=list, max_length=500)
+    affected_entities: list[CodeEntitySummary] = Field(
+        default_factory=list, max_length=500
+    )
     warnings: list[MediumText] = Field(default_factory=list, max_length=50)
     evidence_refs: list[EvidenceRef] = Field(default_factory=list, max_length=200)
 
@@ -737,14 +857,100 @@ class ExportEvent(WireModel):
     payload: JsonObject
 
 
+TransferSessionId = Annotated[
+    str,
+    StringConstraints(
+        strict=True,
+        min_length=68,
+        max_length=68,
+        pattern=r"^(?:xpt|ipt)_[0-9a-f]{64}$",
+    ),
+]
+
+
+class PortableVectorPoint(WireModel):
+    point_id: Annotated[
+        str, StringConstraints(strict=True, min_length=1, max_length=256)
+    ]
+    payload: JsonObject
+    vector: list[Annotated[float, Field(allow_inf_nan=False)]] = Field(
+        min_length=1, max_length=4096
+    )
+
+
 class ExportBundle(WireModel):
     api_version: Literal["7"] = "7"
+    bundle_version: Literal[1, 2] = 1
     workspace_id: WorkspaceId
     exported_at: UtcDateTime
     root_hash: ContentHash
     events: list[ExportEvent] = Field(default_factory=list, max_length=10_000)
     legacy_projection_included: bool
     vectors_included: bool
+    export_session_id: TransferSessionId | None = None
+    manifest_hash: ContentHash | None = None
+    manifest: JsonObject | None = None
+    page_index: Annotated[int, Field(strict=True, ge=0)] | None = None
+    page_count: Annotated[int, Field(strict=True, ge=1, le=1_000_000)] | None = None
+    page_kind: Literal["events", "legacy", "vectors"] | None = None
+    page_hash: ContentHash | None = None
+    page_descriptor: JsonObject | None = None
+    page_proof: list[ContentHash] = Field(default_factory=list, max_length=32)
+    next_cursor: Cursor | None = None
+    complete: bool = True
+    legacy_rows: list[JsonObject] = Field(default_factory=list, max_length=4096)
+    vector_points: list[PortableVectorPoint] = Field(
+        default_factory=list, max_length=4096
+    )
+
+    @model_validator(mode="after")
+    def validate_portable_page(self) -> ExportBundle:
+        paging = (
+            self.export_session_id,
+            self.manifest_hash,
+            self.manifest,
+            self.page_index,
+            self.page_count,
+            self.page_kind,
+            self.page_hash,
+            self.page_descriptor,
+        )
+        if self.bundle_version == 1:
+            if (
+                any(value is not None for value in paging)
+                or self.legacy_rows
+                or self.vector_points
+                or self.page_proof
+            ):
+                raise ValueError("format-1 bundles cannot contain format-2 pages")
+            return self
+        if any(value is None for value in paging):
+            raise ValueError("format-2 page metadata is incomplete")
+        if self.page_descriptor is None:
+            raise ValueError("format-2 page descriptor is missing")
+        if len(self.events) > 4096:
+            raise ValueError("format-2 event pages contain at most 4096 events")
+        if self.page_index is not None and self.page_count is not None:
+            if self.page_index >= self.page_count:
+                raise ValueError("page_index must be below page_count")
+            if self.complete != (self.page_index + 1 == self.page_count):
+                raise ValueError("complete does not match page position")
+        populated = {
+            "events": bool(self.events),
+            "legacy": bool(self.legacy_rows),
+            "vectors": bool(self.vector_points),
+        }
+        if any(value for key, value in populated.items() if key != self.page_kind):
+            raise ValueError("page payload does not match page_kind")
+        legacy = (
+            None if self.manifest is None else self.manifest.get("legacy_projection")
+        )
+        vectors = None if self.manifest is None else self.manifest.get("vectors")
+        if self.legacy_projection_included != (legacy is not None):
+            raise ValueError("legacy projection flag does not match the manifest")
+        if self.vectors_included != (vectors is not None):
+            raise ValueError("vector flag does not match the manifest")
+        return self
 
 
 class WorkspaceImportData(WireModel):
@@ -752,6 +958,12 @@ class WorkspaceImportData(WireModel):
     imported: Annotated[int, Field(ge=0)]
     skipped: Annotated[int, Field(ge=0)]
     event_ids: list[EventId] = Field(default_factory=list, max_length=10_000)
+    import_session_id: TransferSessionId | None = None
+    status: Literal["staging", "ready", "succeeded"] = "succeeded"
+    staged_pages: Annotated[int, Field(strict=True, ge=0)] = 0
+    page_count: Annotated[int, Field(strict=True, ge=0)] = 0
+    event_ids_truncated: bool = False
+    diagnostics: list[DiagnosticSummary] = Field(default_factory=list, max_length=100)
 
 
 class WorkspaceLinkView(WireModel):
@@ -769,6 +981,17 @@ class WorkspaceConsolidateData(WireModel):
 
 class WorkspaceConsolidateArchiveData(WorkspaceConsolidateData):
     archived: Annotated[int, Field(ge=0)]
+
+
+class WorkspaceConsolidationPreviewData(WireModel):
+    preview_id: Annotated[
+        str, StringConstraints(strict=True, pattern=r"^cpr_[0-9a-f]{64}$")
+    ]
+    sources: list[WorkspaceId] = Field(min_length=1, max_length=32)
+    selected: Annotated[int, Field(ge=1, le=10_000)]
+    total_bytes: Annotated[int, Field(ge=1, le=67_108_864)]
+    expires_at: UtcDateTime
+    selection_token: SelectionToken
 
 
 class DecisionSimulationData(WireModel):
@@ -819,10 +1042,13 @@ class MemoryPreflightInput(WireModel):
     workspace_id: WorkspaceId
     target_tool: ProtectedToolName
     target_arguments: JsonObject
-    description: Annotated[
-        str,
-        StringConstraints(strict=True, min_length=1, max_length=1000),
-    ] | None = None
+    description: (
+        Annotated[
+            str,
+            StringConstraints(strict=True, min_length=1, max_length=1000),
+        ]
+        | None
+    ) = None
 
 
 class MemoryRecallInput(WireModel):
@@ -845,7 +1071,7 @@ class MemoryRecallInput(WireModel):
     rerank: bool = False
 
     @model_validator(mode="after")
-    def validate_candidate_limit(self) -> "MemoryRecallInput":
+    def validate_candidate_limit(self) -> MemoryRecallInput:
         if self.candidate_limit < self.limit:
             raise ValueError("candidate_limit cannot be smaller than limit")
         return self
@@ -855,10 +1081,13 @@ class MemoryStoreInput(WireModel):
     workspace_id: WorkspaceId
     record_type: RecordType
     content: LongText
-    rationale: Annotated[
-        str,
-        StringConstraints(strict=True, min_length=1, max_length=20_000),
-    ] | None = None
+    rationale: (
+        Annotated[
+            str,
+            StringConstraints(strict=True, min_length=1, max_length=20_000),
+        ]
+        | None
+    ) = None
     context: ContextJsonObject = Field(default_factory=dict)
     tags: list[Tag] = Field(default_factory=list, max_length=32)
     relative_file_path: RelativePath | None = None
@@ -868,10 +1097,37 @@ class MemoryStoreInput(WireModel):
     preflight_token: PreflightToken
 
     @model_validator(mode="after")
-    def validate_procedure_steps(self) -> "MemoryStoreInput":
+    def validate_procedure_steps(self) -> MemoryStoreInput:
         if self.record_type != "procedure" and self.procedure_steps:
             raise ValueError("procedure_steps are only valid for procedure records")
         return self
+
+
+class EditPreflightInput(WireModel):
+    workspace_id: WorkspaceId
+    edit_request_id: EditRequestId
+    description: MediumText
+
+
+class MemoryCaptureListInput(WireModel):
+    workspace_id: WorkspaceId
+    cursor: Cursor | None = None
+    limit: Annotated[int, Field(ge=1, le=100)] = 25
+
+
+class MemoryCapturePromoteInput(WireModel):
+    workspace_id: WorkspaceId
+    candidate_id: CaptureCandidateId
+    record_type: RecordType
+    content: Annotated[
+        str,
+        StringConstraints(strict=True, min_length=1, max_length=8_000),
+    ]
+    rationale: OptionalMediumText = None
+    context: ContextJsonObject = Field(default_factory=dict)
+    tags: list[Tag] = Field(default_factory=list, max_length=16)
+    idempotency_key: IdempotencyKey
+    preflight_token: PreflightToken
 
 
 class MemoryRecordOutcomeInput(WireModel):
@@ -932,7 +1188,7 @@ class MemoryRecallEntityInput(WireModel):
     limit: Annotated[int, Field(ge=1, le=100)] = 20
 
     @model_validator(mode="after")
-    def validate_selector(self) -> "MemoryRecallEntityInput":
+    def validate_selector(self) -> MemoryRecallEntityInput:
         if (self.entity_id is None) == (self.entity_name is None):
             raise ValueError("exactly one of entity_id or entity_name is required")
         return self
@@ -980,10 +1236,13 @@ class ContextCompressInput(WireModel):
 class MemoryCreate(WireModel):
     record_type: RecordType
     content: LongText
-    rationale: Annotated[
-        str,
-        StringConstraints(strict=True, min_length=1, max_length=20_000),
-    ] | None = None
+    rationale: (
+        Annotated[
+            str,
+            StringConstraints(strict=True, min_length=1, max_length=20_000),
+        ]
+        | None
+    ) = None
     context: ContextJsonObject = Field(default_factory=dict)
     tags: list[Tag] = Field(default_factory=list, max_length=32)
     relative_file_path: RelativePath | None = None
@@ -991,7 +1250,7 @@ class MemoryCreate(WireModel):
     procedure_steps: list[MediumText] = Field(default_factory=list, max_length=100)
 
     @model_validator(mode="after")
-    def validate_procedure_steps(self) -> "MemoryCreate":
+    def validate_procedure_steps(self) -> MemoryCreate:
         if self.record_type != "procedure" and self.procedure_steps:
             raise ValueError("procedure_steps are only valid for procedure records")
         return self
@@ -1015,7 +1274,7 @@ class MemoryLinkInput(WireModel):
     preflight_token: PreflightToken
 
     @model_validator(mode="after")
-    def validate_endpoints(self) -> "MemoryLinkInput":
+    def validate_endpoints(self) -> MemoryLinkInput:
         if self.source_record_id == self.target_record_id:
             raise ValueError("relationship endpoints must be distinct")
         return self
@@ -1112,9 +1371,11 @@ class CodeImpactAnalyzeInput(WireModel):
     max_depth: Annotated[int, Field(ge=1, le=10)] = 3
 
     @model_validator(mode="after")
-    def validate_selector(self) -> "CodeImpactAnalyzeInput":
+    def validate_selector(self) -> CodeImpactAnalyzeInput:
         if (self.code_entity_id is None) == (self.qualified_name is None):
-            raise ValueError("exactly one of code_entity_id or qualified_name is required")
+            raise ValueError(
+                "exactly one of code_entity_id or qualified_name is required"
+            )
         return self
 
 
@@ -1165,7 +1426,7 @@ class RulePatch(WireModel):
     enabled: bool | None = None
 
     @model_validator(mode="after")
-    def validate_non_empty(self) -> "RulePatch":
+    def validate_non_empty(self) -> RulePatch:
         if not self.model_fields_set or not self.model_dump(exclude_none=True):
             raise ValueError("rule patch must contain at least one field")
         return self
@@ -1227,10 +1488,13 @@ class MemoryChainTraceInput(WireModel):
 class KnowledgeGraphGetInput(WireModel):
     workspace_id: WorkspaceId
     record_ids: RecordIdSet500 | None = None
-    query: Annotated[
-        str,
-        StringConstraints(strict=True, min_length=1, max_length=2000),
-    ] | None = None
+    query: (
+        Annotated[
+            str,
+            StringConstraints(strict=True, min_length=1, max_length=2000),
+        ]
+        | None
+    ) = None
     include_orphans: bool = False
     max_nodes: Annotated[int, Field(ge=1, le=500)] = 500
 
@@ -1289,7 +1553,7 @@ class EntityEvolutionTraceInput(WireModel):
     include_invalidated: bool = False
 
     @model_validator(mode="after")
-    def validate_selector(self) -> "EntityEvolutionTraceInput":
+    def validate_selector(self) -> EntityEvolutionTraceInput:
         if (self.entity_id is None) == (self.entity_name is None):
             raise ValueError("exactly one of entity_id or entity_name is required")
         return self
@@ -1346,10 +1610,13 @@ class MemoryCompactionPreviewInput(WireModel):
         StringConstraints(strict=True, min_length=1, max_length=50_000),
     ]
     limit: Annotated[int, Field(ge=1, le=100)] = 10
-    query: Annotated[
-        str,
-        StringConstraints(strict=True, min_length=1, max_length=2000),
-    ] | None = None
+    query: (
+        Annotated[
+            str,
+            StringConstraints(strict=True, min_length=1, max_length=2000),
+        ]
+        | None
+    ) = None
 
 
 class MemoryCompactInput(MemoryCompactionPreviewInput):
@@ -1368,14 +1635,39 @@ class WorkspaceExportInput(WireModel):
     workspace_id: WorkspaceId
     include_legacy_projection: bool = True
     include_vectors: bool = False
+    export_session_id: TransferSessionId | None = None
+    page_index: Annotated[int, Field(strict=True, ge=0)] = 0
+    cursor: Cursor | None = None
+    page_byte_limit: Annotated[int, Field(strict=True, ge=65_536, le=850_000)] = 850_000
+
+    @model_validator(mode="after")
+    def validate_export_page_request(self) -> WorkspaceExportInput:
+        if self.export_session_id is None:
+            if self.page_index != 0 or self.cursor is not None:
+                raise ValueError("a new export starts at page zero without a cursor")
+        elif self.page_index > 0 and self.cursor is None:
+            raise ValueError("subsequent export pages require a cursor")
+        return self
 
 
 class WorkspaceImportInput(WireModel):
     workspace_id: WorkspaceId
-    bundle: ExportBundle
+    bundle: ExportBundle | None = None
+    import_session_id: TransferSessionId | None = None
+    finalize: bool = True
     merge: bool = True
     idempotency_key: IdempotencyKey
     preflight_token: PreflightToken
+
+    @model_validator(mode="after")
+    def validate_import_action(self) -> WorkspaceImportInput:
+        if self.bundle is None:
+            if not self.finalize or self.import_session_id is None:
+                raise ValueError("finalize without a page requires an import session")
+            return self
+        if self.bundle.bundle_version == 1 and self.import_session_id is not None:
+            raise ValueError("format-1 import is a single atomic action")
+        return self
 
 
 class WorkspaceLinkInput(WireModel):
@@ -1386,7 +1678,7 @@ class WorkspaceLinkInput(WireModel):
     preflight_token: PreflightToken
 
     @model_validator(mode="after")
-    def validate_link(self) -> "WorkspaceLinkInput":
+    def validate_link(self) -> WorkspaceLinkInput:
         if self.linked_workspace_id == self.workspace_id:
             raise ValueError("a workspace cannot link to itself")
         return self
@@ -1404,17 +1696,21 @@ class WorkspaceLinksListInput(WireModel):
     limit: Annotated[int, Field(ge=1, le=100)] = 50
 
 
-class WorkspaceConsolidateInput(WireModel):
+class WorkspaceConsolidationPreviewInput(WireModel):
     workspace_id: WorkspaceId
     source_workspace_ids: WorkspaceIdSet = Field(min_length=1)
-    idempotency_key: IdempotencyKey
-    preflight_token: PreflightToken
 
     @model_validator(mode="after")
-    def validate_sources(self) -> "WorkspaceConsolidateInput":
+    def validate_sources(self) -> WorkspaceConsolidationPreviewInput:
         if self.workspace_id in self.source_workspace_ids:
             raise ValueError("target workspace cannot be a consolidation source")
         return self
+
+
+class WorkspaceConsolidateInput(WorkspaceConsolidationPreviewInput):
+    idempotency_key: IdempotencyKey
+    selection_token: SelectionToken
+    preflight_token: PreflightToken
 
 
 class WorkspaceConsolidateAndArchiveSourcesInput(WorkspaceConsolidateInput):
@@ -1466,151 +1762,159 @@ MemoryRecordOutcomeOutput = ApiResponse[OutcomeData]
 SystemHealthOutput = ApiResponse[HealthData]
 
 
-_TOOL_MODELS: Mapping[str, tuple[type[WireModel], type[WireModel]]] = (
-    MappingProxyType(
-        {
-            "active_context_add": (ActiveContextAddInput, ActiveContextItem),
-            "active_context_clear": (
-                ActiveContextClearInput,
-                DestructiveMutationReceipt,
-            ),
-            "active_context_list": (
-                ActiveContextListInput,
-                ActiveContextPage,
-            ),
-            "active_context_remove": (
-                ActiveContextRemoveInput,
-                MutationReceipt,
-            ),
-            "code_impact_analyze": (CodeImpactAnalyzeInput, CodeImpactData),
-            "code_index": (CodeIndexInput, CodeIndexData),
-            "code_refactor_propose": (
-                CodeRefactorProposeInput,
-                RefactorProposalData,
-            ),
-            "code_search": (CodeSearchInput, Page[CodeEntitySummary]),
-            "code_todos_scan": (CodeTodosScanInput, Page[TodoFinding]),
-            "code_todos_scan_and_store": (
-                CodeTodosScanAndStoreInput,
-                CodeTodosStoreData,
-            ),
-            "community_get": (CommunityGetInput, CommunityDetail),
-            "community_list": (CommunityListInput, Page[CommunitySummary]),
-            "community_rebuild": (CommunityRebuildInput, CommunityRebuildData),
-            "context_compress": (ContextCompressInput, ContextCompressData),
-            "context_trigger_create": (ContextTriggerCreateInput, TriggerView),
-            "context_trigger_delete": (
-                ContextTriggerDeleteInput,
-                MutationReceipt,
-            ),
-            "context_trigger_list": (
-                ContextTriggerListInput,
-                Page[TriggerView],
-            ),
-            "context_triggers_match": (
-                ContextTriggersMatchInput,
-                TriggerMatchData,
-            ),
-            "covenant_status": (CovenantStatusInput, CovenantStatusData),
-            "decision_debate": (DecisionDebateInput, DecisionDebateData),
-            "decision_simulate": (DecisionSimulateInput, DecisionSimulationData),
-            "document_ingest_url": (DocumentIngestUrlInput, DocumentIngestData),
-            "dream_duplicates_preview": (DreamDuplicatesPreviewInput, Preview),
-            "dream_duplicates_purge": (
-                DreamDuplicatesPurgeInput,
-                DestructiveMutationReceipt,
-            ),
-            "entity_backfill": (EntityBackfillInput, EntityBackfillData),
-            "entity_evolution_trace": (
-                EntityEvolutionTraceInput,
-                EntityEvolutionData,
-            ),
-            "entity_list": (EntityListInput, Page[EntitySummary]),
-            "knowledge_graph_get": (KnowledgeGraphGetInput, KnowledgeGraphData),
-            "knowledge_graph_render": (
-                KnowledgeGraphRenderInput,
-                KnowledgeGraphRenderData,
-            ),
-            "knowledge_graph_stats": (
-                KnowledgeGraphStatsInput,
-                KnowledgeGraphStatsData,
-            ),
-            "memory_archive_set": (MemoryArchiveSetInput, MutationReceipt),
-            "memory_at_time_get": (MemoryAtTimeGetInput, MemoryAtTimeData),
-            "memory_chain_trace": (MemoryChainTraceInput, MemoryChainTraceData),
-            "memory_compact": (MemoryCompactInput, MemoryCompactData),
-            "memory_compaction_preview": (
-                MemoryCompactionPreviewInput,
-                Preview,
-            ),
-            "memory_duplicates_cleanup": (
-                MemoryDuplicatesCleanupInput,
-                DestructiveMutationReceipt,
-            ),
-            "memory_duplicates_preview": (
-                MemoryDuplicatesPreviewInput,
-                Preview,
-            ),
-            "memory_link": (MemoryLinkInput, MutationReceipt),
-            "memory_pin_set": (MemoryPinSetInput, MutationReceipt),
-            "memory_preflight": (MemoryPreflightInput, PreflightData),
-            "memory_prune": (MemoryPruneInput, DestructiveMutationReceipt),
-            "memory_prune_preview": (MemoryPrunePreviewInput, Preview),
-            "memory_recall": (MemoryRecallInput, RetrievalData),
-            "memory_recall_entity": (
-                MemoryRecallEntityInput,
-                Page[RecordSummary],
-            ),
-            "memory_recall_file": (MemoryRecallFileInput, Page[RecordSummary]),
-            "memory_recall_hierarchical": (
-                MemoryRecallHierarchicalInput,
-                HierarchicalRecallData,
-            ),
-            "memory_record_outcome": (MemoryRecordOutcomeInput, OutcomeData),
-            "memory_related": (MemoryRelatedInput, MemoryRelatedData),
-            "memory_search_text": (MemorySearchTextInput, Page[TextSearchHit]),
-            "memory_store": (MemoryStoreInput, MemoryStoreData),
-            "memory_store_batch": (MemoryStoreBatchInput, MemoryStoreBatchData),
-            "memory_unlink": (MemoryUnlinkInput, MutationReceipt),
-            "memory_verify": (MemoryVerifyInput, MemoryVerifyData),
-            "memory_versions_list": (
-                MemoryVersionsListInput,
-                Page[MemoryVersionView],
-            ),
-            "projection_rebuild": (ProjectionRebuildInput, ProjectionRebuildData),
-            "rule_check": (RuleCheckInput, RuleCheckData),
-            "rule_create": (RuleCreateInput, RuleView),
-            "rule_evolution_analyze": (
-                RuleEvolutionAnalyzeInput,
-                RuleEvolutionData,
-            ),
-            "rule_list": (RuleListInput, Page[RuleView]),
-            "rule_update": (RuleUpdateInput, RuleView),
-            "sandbox_execute_python": (
-                SandboxExecutePythonInput,
-                SandboxExecutionData,
-            ),
-            "session_brief": (SessionBriefInput, SessionBriefData),
-            "session_updates_get": (SessionUpdatesGetInput, SessionUpdatesData),
-            "system_health": (SystemHealthInput, HealthData),
-            "workspace_consolidate": (
-                WorkspaceConsolidateInput,
-                WorkspaceConsolidateData,
-            ),
-            "workspace_consolidate_and_archive_sources": (
-                WorkspaceConsolidateAndArchiveSourcesInput,
-                WorkspaceConsolidateArchiveData,
-            ),
-            "workspace_export": (WorkspaceExportInput, ExportBundle),
-            "workspace_import": (WorkspaceImportInput, WorkspaceImportData),
-            "workspace_link": (WorkspaceLinkInput, WorkspaceLinkView),
-            "workspace_links_list": (
-                WorkspaceLinksListInput,
-                Page[WorkspaceLinkView],
-            ),
-            "workspace_unlink": (WorkspaceUnlinkInput, MutationReceipt),
-        }
-    )
+_TOOL_MODELS: Mapping[str, tuple[type[WireModel], type[WireModel]]] = MappingProxyType(
+    {
+        "active_context_add": (ActiveContextAddInput, ActiveContextItem),
+        "active_context_clear": (
+            ActiveContextClearInput,
+            DestructiveMutationReceipt,
+        ),
+        "active_context_list": (
+            ActiveContextListInput,
+            ActiveContextPage,
+        ),
+        "active_context_remove": (
+            ActiveContextRemoveInput,
+            MutationReceipt,
+        ),
+        "code_impact_analyze": (CodeImpactAnalyzeInput, CodeImpactData),
+        "code_index": (CodeIndexInput, CodeIndexData),
+        "code_refactor_propose": (
+            CodeRefactorProposeInput,
+            RefactorProposalData,
+        ),
+        "code_search": (CodeSearchInput, Page[CodeEntitySummary]),
+        "code_todos_scan": (CodeTodosScanInput, Page[TodoFinding]),
+        "code_todos_scan_and_store": (
+            CodeTodosScanAndStoreInput,
+            CodeTodosStoreData,
+        ),
+        "community_get": (CommunityGetInput, CommunityDetail),
+        "community_list": (CommunityListInput, Page[CommunitySummary]),
+        "community_rebuild": (CommunityRebuildInput, CommunityRebuildData),
+        "context_compress": (ContextCompressInput, ContextCompressData),
+        "context_trigger_create": (ContextTriggerCreateInput, TriggerView),
+        "context_trigger_delete": (
+            ContextTriggerDeleteInput,
+            MutationReceipt,
+        ),
+        "context_trigger_list": (
+            ContextTriggerListInput,
+            Page[TriggerView],
+        ),
+        "context_triggers_match": (
+            ContextTriggersMatchInput,
+            TriggerMatchData,
+        ),
+        "covenant_status": (CovenantStatusInput, CovenantStatusData),
+        "decision_debate": (DecisionDebateInput, DecisionDebateData),
+        "decision_simulate": (DecisionSimulateInput, DecisionSimulationData),
+        "document_ingest_url": (DocumentIngestUrlInput, DocumentIngestData),
+        "edit_preflight": (EditPreflightInput, EditPreflightData),
+        "dream_duplicates_preview": (DreamDuplicatesPreviewInput, Preview),
+        "dream_duplicates_purge": (
+            DreamDuplicatesPurgeInput,
+            DestructiveMutationReceipt,
+        ),
+        "entity_backfill": (EntityBackfillInput, EntityBackfillData),
+        "entity_evolution_trace": (
+            EntityEvolutionTraceInput,
+            EntityEvolutionData,
+        ),
+        "entity_list": (EntityListInput, Page[EntitySummary]),
+        "knowledge_graph_get": (KnowledgeGraphGetInput, KnowledgeGraphData),
+        "knowledge_graph_render": (
+            KnowledgeGraphRenderInput,
+            KnowledgeGraphRenderData,
+        ),
+        "knowledge_graph_stats": (
+            KnowledgeGraphStatsInput,
+            KnowledgeGraphStatsData,
+        ),
+        "memory_archive_set": (MemoryArchiveSetInput, MutationReceipt),
+        "memory_at_time_get": (MemoryAtTimeGetInput, MemoryAtTimeData),
+        "memory_capture_list": (MemoryCaptureListInput, MemoryCaptureListData),
+        "memory_capture_promote": (
+            MemoryCapturePromoteInput,
+            MemoryCapturePromoteData,
+        ),
+        "memory_chain_trace": (MemoryChainTraceInput, MemoryChainTraceData),
+        "memory_compact": (MemoryCompactInput, MemoryCompactData),
+        "memory_compaction_preview": (
+            MemoryCompactionPreviewInput,
+            Preview,
+        ),
+        "memory_duplicates_cleanup": (
+            MemoryDuplicatesCleanupInput,
+            DestructiveMutationReceipt,
+        ),
+        "memory_duplicates_preview": (
+            MemoryDuplicatesPreviewInput,
+            Preview,
+        ),
+        "memory_link": (MemoryLinkInput, MutationReceipt),
+        "memory_pin_set": (MemoryPinSetInput, MutationReceipt),
+        "memory_preflight": (MemoryPreflightInput, PreflightData),
+        "memory_prune": (MemoryPruneInput, DestructiveMutationReceipt),
+        "memory_prune_preview": (MemoryPrunePreviewInput, Preview),
+        "memory_recall": (MemoryRecallInput, RetrievalData),
+        "memory_recall_entity": (
+            MemoryRecallEntityInput,
+            Page[RecordSummary],
+        ),
+        "memory_recall_file": (MemoryRecallFileInput, Page[RecordSummary]),
+        "memory_recall_hierarchical": (
+            MemoryRecallHierarchicalInput,
+            HierarchicalRecallData,
+        ),
+        "memory_record_outcome": (MemoryRecordOutcomeInput, OutcomeData),
+        "memory_related": (MemoryRelatedInput, MemoryRelatedData),
+        "memory_search_text": (MemorySearchTextInput, Page[TextSearchHit]),
+        "memory_store": (MemoryStoreInput, MemoryStoreData),
+        "memory_store_batch": (MemoryStoreBatchInput, MemoryStoreBatchData),
+        "memory_unlink": (MemoryUnlinkInput, MutationReceipt),
+        "memory_verify": (MemoryVerifyInput, MemoryVerifyData),
+        "memory_versions_list": (
+            MemoryVersionsListInput,
+            Page[MemoryVersionView],
+        ),
+        "projection_rebuild": (ProjectionRebuildInput, ProjectionRebuildData),
+        "rule_check": (RuleCheckInput, RuleCheckData),
+        "rule_create": (RuleCreateInput, RuleView),
+        "rule_evolution_analyze": (
+            RuleEvolutionAnalyzeInput,
+            RuleEvolutionData,
+        ),
+        "rule_list": (RuleListInput, Page[RuleView]),
+        "rule_update": (RuleUpdateInput, RuleView),
+        "sandbox_execute_python": (
+            SandboxExecutePythonInput,
+            SandboxExecutionData,
+        ),
+        "session_brief": (SessionBriefInput, SessionBriefData),
+        "session_updates_get": (SessionUpdatesGetInput, SessionUpdatesData),
+        "system_health": (SystemHealthInput, HealthData),
+        "workspace_consolidate": (
+            WorkspaceConsolidateInput,
+            WorkspaceConsolidateData,
+        ),
+        "workspace_consolidation_preview": (
+            WorkspaceConsolidationPreviewInput,
+            WorkspaceConsolidationPreviewData,
+        ),
+        "workspace_consolidate_and_archive_sources": (
+            WorkspaceConsolidateAndArchiveSourcesInput,
+            WorkspaceConsolidateArchiveData,
+        ),
+        "workspace_export": (WorkspaceExportInput, ExportBundle),
+        "workspace_import": (WorkspaceImportInput, WorkspaceImportData),
+        "workspace_link": (WorkspaceLinkInput, WorkspaceLinkView),
+        "workspace_links_list": (
+            WorkspaceLinksListInput,
+            Page[WorkspaceLinkView],
+        ),
+        "workspace_unlink": (WorkspaceUnlinkInput, MutationReceipt),
+    }
 )
 
 TOOL_INPUT_MODELS: Mapping[str, type[WireModel]] = MappingProxyType(
@@ -1659,6 +1963,7 @@ _OPTIONAL_TOOLS = frozenset(
         "workspace_import",
         "workspace_consolidate",
         "workspace_consolidate_and_archive_sources",
+        "workspace_consolidation_preview",
         "dream_duplicates_preview",
         "dream_duplicates_purge",
         "decision_simulate",
@@ -1672,6 +1977,7 @@ _READ_ONLY_TOOLS = frozenset(
     {
         "session_brief",
         "memory_preflight",
+        "memory_capture_list",
         "memory_recall",
         "system_health",
         "active_context_list",
@@ -1707,6 +2013,7 @@ _READ_ONLY_TOOLS = frozenset(
         "memory_compaction_preview",
         "workspace_export",
         "workspace_links_list",
+        "workspace_consolidation_preview",
         "dream_duplicates_preview",
         "decision_simulate",
         "rule_evolution_analyze",
@@ -1762,8 +2069,11 @@ _CATEGORY_TOOLS: Mapping[str, frozenset[str]] = MappingProxyType(
                 "memory_chain_trace",
                 "memory_versions_list",
                 "memory_at_time_get",
+                "memory_capture_list",
+                "memory_capture_promote",
             }
         ),
+        "edit": frozenset({"edit_preflight"}),
         "system": frozenset({"system_health"}),
         "context": frozenset(
             {
@@ -1834,6 +2144,7 @@ _CATEGORY_TOOLS: Mapping[str, frozenset[str]] = MappingProxyType(
                 "workspace_links_list",
                 "workspace_consolidate",
                 "workspace_consolidate_and_archive_sources",
+                "workspace_consolidation_preview",
             }
         ),
         "cognitive": frozenset(
@@ -1854,8 +2165,24 @@ def _category_by_tool() -> Mapping[str, str]:
 
 
 _TOOL_CATEGORIES = _category_by_tool()
-_MAPPED_TOOL_NAMES = frozenset(
-    name for mapping in V6_TO_V7_MAPPINGS for name in mapping.new_tools
+_DASHBOARD_TOOL_URIS = {
+    "memory_recall": "ui://daem0n/search",
+    "session_brief": "ui://daem0n/briefing",
+    "covenant_status": "ui://daem0n/covenant",
+    "community_list": "ui://daem0n/community",
+    "knowledge_graph_get": "ui://daem0n/graph",
+}
+V7_NATIVE_TOOL_NAMES = frozenset(
+    {
+        "edit_preflight",
+        "memory_capture_list",
+        "memory_capture_promote",
+        "workspace_consolidation_preview",
+    }
+)
+_MAPPED_TOOL_NAMES = (
+    frozenset(name for mapping in V6_TO_V7_MAPPINGS for name in mapping.new_tools)
+    | V7_NATIVE_TOOL_NAMES
 )
 
 
@@ -1938,6 +2265,11 @@ def build_tool_specs(
                 task_mode=task_mode,
                 annotations=_annotations(name),
                 pinned=name in PINNED_TOOL_NAMES,
+                _meta=(
+                    {"ui": {"resourceUri": _DASHBOARD_TOOL_URIS[name]}}
+                    if name in _DASHBOARD_TOOL_URIS
+                    else {}
+                ),
             )
         )
     return tuple(specs)
@@ -1947,6 +2279,8 @@ __all__ = [
     "ActiveContextPage",
     "CodeImpactAnalyzeInput",
     "DecisionDebateInput",
+    "DreamingStatus",
+    "DreamingStrategyStatus",
     "EntityEvolutionTraceInput",
     "HealthData",
     "MemoryPreflightInput",
@@ -1970,6 +2304,7 @@ __all__ = [
     "SystemHealthOutput",
     "TOOL_DATA_MODELS",
     "TOOL_INPUT_MODELS",
+    "V7_NATIVE_TOOL_NAMES",
     "build_argument_normalizer",
     "build_tool_specs",
 ]

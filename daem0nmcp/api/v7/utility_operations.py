@@ -9,6 +9,7 @@ import hmac
 import os
 import re
 from collections.abc import Callable, Mapping
+from contextlib import suppress
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import MappingProxyType
@@ -22,9 +23,9 @@ from ...workspace import Workspace, WorkspaceRegistry
 from .application import AdmittedRequest
 from .errors import STABLE_ERROR_CODE_SET
 from .models import Page, contains_absolute_filesystem_path
+from .runtime_protocols import WorkerPool
 from .tasks import await_task_terminal
 from .tools import ContextCompressData, RefactorProposalData, TodoFinding
-
 
 _TODO_RE = re.compile(r"\b(TODO|FIXME|HACK|XXX|NOTE)\b", re.IGNORECASE)
 _CURSOR_RE = re.compile(r"^cur_v1_([A-Za-z0-9_-]+)_([0-9a-f]{64})$")
@@ -96,7 +97,7 @@ class UtilityOperationDependencies:
     """Owned dependencies for deterministic utility operations."""
 
     cursor_secret: bytes
-    worker_pool: object = field(default_factory=_default_worker_pool)
+    worker_pool: WorkerPool = field(default_factory=_default_worker_pool)
 
     def __post_init__(self) -> None:
         if not isinstance(self.cursor_secret, bytes) or len(self.cursor_secret) < 32:
@@ -125,9 +126,7 @@ def _authorize(
     try:
         root = workspace.root.resolve(strict=True)
         registered = WorkspaceRegistry([root], default_root=root).default
-        exact = os.path.normcase(str(root)) == os.path.normcase(
-            str(workspace.root)
-        )
+        exact = os.path.normcase(str(root)) == os.path.normcase(str(workspace.root))
     except (OSError, RuntimeError, TypeError, ValueError):
         raise UtilityOperationError("UNAUTHORIZED_WORKSPACE") from None
     if registered.workspace_id != workspace.workspace_id or not exact:
@@ -167,10 +166,8 @@ async def _run_read(
     try:
         return await asyncio.shield(worker)
     except asyncio.CancelledError as cancellation:
-        try:
+        with suppress(asyncio.CancelledError, Exception):
             await await_task_terminal(worker)
-        except (asyncio.CancelledError, Exception):
-            pass
         raise cancellation
     except BoundedWorkerBusyError as exc:
         raise UtilityOperationError("TASK_REQUIRED") from exc
@@ -237,7 +234,9 @@ def _scan_files(scan_root: Path, workspace_root: Path) -> list[Path]:
                 if resolved.is_dir():
                     if entry.name not in _IGNORED_DIRECTORIES:
                         child_directories.append(resolved)
-                elif resolved.is_file() and resolved.suffix.casefold() in _CODE_SUFFIXES:
+                elif (
+                    resolved.is_file() and resolved.suffix.casefold() in _CODE_SUFFIXES
+                ):
                     files.append(resolved)
                     if len(files) > _MAX_SOURCE_FILES:
                         raise UtilityOperationError("CAPABILITY_DEGRADED")
@@ -283,11 +282,13 @@ def _findings(
                 continue
             try:
                 findings.append(
-                    TodoFinding(
-                        relative_file_path=relative,
-                        line=line_number,
-                        todo_type=todo_type,
-                        text=rendered,
+                    TodoFinding.model_validate(
+                        {
+                            "relative_file_path": relative,
+                            "line": line_number,
+                            "todo_type": todo_type,
+                            "text": rendered,
+                        }
                     )
                 )
             except ValidationError:
@@ -463,7 +464,7 @@ def build_utility_operations(
             lambda: _refactor_proposal(workspace, request),
         )
 
-    context_compress.__daem0nmcp_sync_fallback_safe__ = True
+    context_compress.__dict__["__daem0nmcp_sync_fallback_safe__"] = True
     return MappingProxyType(
         {
             "code_refactor_propose": code_refactor_propose,

@@ -7,11 +7,8 @@ from collections.abc import Mapping
 
 from ..event_store import sha256_json
 
-
 SPECIALIZED_BUILDER_VERSION = "retrieval-specialized-1"
-SPECIALIZED_PROJECTIONS = frozenset(
-    {"graph", "outcome", "procedure", "temporal"}
-)
+SPECIALIZED_PROJECTIONS = frozenset({"graph", "outcome", "procedure", "temporal"})
 _WORKSPACE_ID = re.compile(r"^ws_[0-9a-f]{24}$")
 _HASH = re.compile(r"^[0-9a-f]{64}$")
 _PROCEDURE_FTS_CONFIG = {
@@ -70,9 +67,10 @@ def specialized_builder_contract_hash(
 ) -> str:
     if projection_name not in SPECIALIZED_PROJECTIONS:
         raise ValueError("specialized projection name is invalid")
-    if not isinstance(build_config_hash, str) or _HASH.fullmatch(
-        build_config_hash
-    ) is None:
+    if (
+        not isinstance(build_config_hash, str)
+        or _HASH.fullmatch(build_config_hash) is None
+    ):
         raise ValueError("build_config_hash must be a SHA-256 digest")
     if (
         not isinstance(builder_version, str)
@@ -101,9 +99,7 @@ def specialized_projection_contract(
 
     if projection_name not in SPECIALIZED_PROJECTIONS:
         raise ValueError("specialized projection name is invalid")
-    if not isinstance(content_digest, str) or _HASH.fullmatch(
-        content_digest
-    ) is None:
+    if not isinstance(content_digest, str) or _HASH.fullmatch(content_digest) is None:
         raise ValueError("content_digest must be a SHA-256 digest")
     if projection_name == "procedure":
         storage_target = procedure_fts_table_name(workspace_id, generation)
@@ -131,9 +127,7 @@ def specialized_projection_contract(
         )
         details = {
             **configuration,
-            "build_config_hash": SPECIALIZED_BUILD_CONFIG_HASHES[
-                projection_name
-            ],
+            "build_config_hash": SPECIALIZED_BUILD_CONFIG_HASHES[projection_name],
             "content_digest": content_digest,
             "projection": projection_name,
         }
@@ -157,9 +151,7 @@ def specialized_manifest_matches_contract(
     if not isinstance(details, Mapping):
         return False
     content_digest = details.get("content_digest")
-    if not isinstance(content_digest, str) or _HASH.fullmatch(
-        content_digest
-    ) is None:
+    if not isinstance(content_digest, str) or _HASH.fullmatch(content_digest) is None:
         return False
     try:
         expected = specialized_projection_contract(

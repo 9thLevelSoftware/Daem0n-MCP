@@ -10,7 +10,6 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import hmac
-import inspect
 import json
 import os
 import re
@@ -18,6 +17,7 @@ import secrets
 import sqlite3
 import threading
 from collections.abc import Callable, Mapping
+from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -45,7 +45,13 @@ from ...schema_version import CURRENT_SCHEMA_VERSION
 from ...workspace import Workspace, WorkspaceRegistry
 from .application import AdmittedRequest
 from .errors import STABLE_ERROR_CODE_SET
-from .models import EvidenceRef, MutationReceipt, Page, RecordSummary
+from .models import (
+    EvidenceRef,
+    MutationReceipt,
+    Page,
+    RecordSummary,
+    parse_wire_datetime,
+)
 from .pinned import IdempotencyConflict
 from .runtime_services import WorkspaceStorageResolver
 from .tasks import await_task_terminal
@@ -58,13 +64,10 @@ from .tools import (
     UpdateSummary,
 )
 
-
 _SCHEMA_VERSION = CURRENT_SCHEMA_VERSION
 _MAX_LEXICAL_CANDIDATES = 1_000
 _MAX_SESSION_EVENTS = 200
-_EVENT_CURSOR_RE = re.compile(
-    r"^cur_v1_([0-9a-f]{64})_([0-9a-f]{64})$"
-)
+_EVENT_CURSOR_RE = re.compile(r"^cur_v1_([0-9a-f]{64})_([0-9a-f]{64})$")
 _ORIGIN_CURSOR_RE = re.compile(r"^cur_v1_origin_([0-9a-f]{64})$")
 _EVENT_ID_RE = re.compile(r"^evt_([0-9a-f]{64})$")
 _QUERY_TOKEN_RE = re.compile(r"[A-Za-z0-9_]+")
@@ -107,10 +110,10 @@ def _default_clock() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def _default_projection_scheduler(database_path: Path) -> object:
+def _default_projection_scheduler(database_path: Path) -> None:
     from ...retrieval.runtime import schedule_projection_job_drain
 
-    return schedule_projection_job_drain(database_path, max_jobs=5)
+    schedule_projection_job_drain(database_path, max_jobs=5)
 
 
 def _default_lexical_provider(database_path: Path) -> RetrievalProvider:
@@ -157,6 +160,26 @@ class _WorkerCancelledError(RuntimeError):
     pass
 
 
+@dataclass(frozen=True, slots=True)
+class CanonicalBatchStoreRequest:
+    """Explicit, already-authorized input for one atomic event-store batch."""
+
+    records: tuple[Mapping[str, Any], ...]
+    idempotency_key: str
+    semantic_namespace: str = "memory-store-batch"
+    provenance: Mapping[str, Any] | None = None
+
+    def __post_init__(self) -> None:
+        if not self.records or len(self.records) > 100:
+            raise ValueError("records must contain between 1 and 100 items")
+        if not isinstance(self.idempotency_key, str) or not self.idempotency_key:
+            raise ValueError("idempotency_key is required")
+        if not re.fullmatch(r"[a-z][a-z0-9-]{0,63}", self.semantic_namespace):
+            raise ValueError("semantic_namespace is invalid")
+        if self.provenance is not None and not isinstance(self.provenance, Mapping):
+            raise ValueError("provenance must be a mapping")
+
+
 def _authorize(
     workspace: Workspace,
     request: AdmittedRequest,
@@ -171,9 +194,7 @@ def _authorize(
         raise RecordOperationError("UNAUTHORIZED_WORKSPACE")
     try:
         canonical = workspace.root.resolve(strict=True)
-        registered = WorkspaceRegistry(
-            [canonical], default_root=canonical
-        ).default
+        registered = WorkspaceRegistry([canonical], default_root=canonical).default
         exact_root = os.path.normcase(str(workspace.root)) == os.path.normcase(
             str(canonical)
         )
@@ -235,15 +256,11 @@ def _open_database(path: Path, *, writable: bool) -> sqlite3.Connection:
         raise RecordOperationError("CAPABILITY_DEGRADED") from None
 
 
-def _datetime_us(value: datetime) -> int:
-    if not isinstance(value, datetime) or value.tzinfo is None:
-        raise RecordOperationError("INVALID_ARGUMENT")
+def _datetime_us(value: object) -> int:
     try:
+        value = parse_wire_datetime(value)
         delta = value.astimezone(timezone.utc) - _EPOCH
-        result = (
-            (delta.days * 86_400 + delta.seconds) * 1_000_000
-            + delta.microseconds
-        )
+        result = (delta.days * 86_400 + delta.seconds) * 1_000_000 + delta.microseconds
     except (OverflowError, ValueError):
         raise RecordOperationError("INVALID_ARGUMENT") from None
     if not -(2**63) <= result <= 2**63 - 1:
@@ -319,20 +336,20 @@ def _summary(
     if created_at > updated_at:
         created_at = updated_at
     try:
-        return RecordSummary(
-            record_id=str(row["record_id"]),
-            record_type=str(row["record_type"]),
-            excerpt=content[:4000],
-            tags=tags if include_metadata else [],
-            relative_file_path=(
-                None
+        return RecordSummary.model_validate(
+            {
+                "record_id": str(row["record_id"]),
+                "record_type": str(row["record_type"]),
+                "excerpt": content[:4000],
+                "tags": tags if include_metadata else [],
+                "relative_file_path": None
                 if not include_metadata or row["file_path_relative"] is None
-                else str(row["file_path_relative"])
-            ),
-            current_status=_record_status(row),
-            content_hash=str(row["content_hash"]),
-            created_at=created_at,
-            updated_at=updated_at,
+                else str(row["file_path_relative"]),
+                "current_status": _record_status(row),
+                "content_hash": str(row["content_hash"]),
+                "created_at": created_at,
+                "updated_at": updated_at,
+            }
         )
     except RecordOperationError:
         raise
@@ -386,9 +403,7 @@ def _memory_record(
         if "steps" in context and context["steps"] != steps:
             raise RecordOperationError("INVALID_ARGUMENT")
         context["steps"] = steps
-    happened_at_us = (
-        None if happened_at is None else _datetime_us(happened_at)
-    )
+    happened_at_us = None if happened_at is None else _datetime_us(happened_at)
     request_item = {
         "record_type": record_type,
         "content": content,
@@ -444,11 +459,9 @@ def _event_receipt(row: sqlite3.Row) -> AppendedEvent:
 def _verified_payload(row: sqlite3.Row) -> dict[str, Any]:
     payload = _parse_json(row["payload_json"], dict)
     try:
-        if (
-            canonical_json_bytes(payload).decode("utf-8")
-            != str(row["payload_json"])
-            or sha256_json(payload) != str(row["payload_hash"])
-        ):
+        if canonical_json_bytes(payload).decode("utf-8") != str(
+            row["payload_json"]
+        ) or sha256_json(payload) != str(row["payload_hash"]):
             raise RecordOperationError("CAPABILITY_DEGRADED")
     except RecordOperationError:
         raise
@@ -475,10 +488,8 @@ async def _run_read(operation: Callable[[], Any]) -> Any:
     try:
         return await asyncio.shield(worker)
     except asyncio.CancelledError as cancellation:
-        try:
+        with suppress(asyncio.CancelledError, Exception):
             await await_task_terminal(worker)
-        except (asyncio.CancelledError, Exception):
-            pass
         raise cancellation
     except BoundedWorkerBusyError as exc:
         raise RecordOperationError("TASK_REQUIRED") from exc
@@ -514,9 +525,7 @@ async def _schedule_after_commit(
     if not changed:
         return
     try:
-        result = dependencies.projection_scheduler(path)
-        if inspect.isawaitable(result):
-            await result
+        dependencies.projection_scheduler(path)
     except asyncio.CancelledError:
         raise
     except Exception:
@@ -533,26 +542,38 @@ def _translate_storage_error(error: Exception) -> RecordOperationError:
     return RecordOperationError("CAPABILITY_DEGRADED")
 
 
-def _batch_sync(
+def _canonical_batch_sync(
     dependencies: RecordOperationDependencies,
     workspace: Workspace,
-    request: AdmittedRequest,
+    request: CanonicalBatchStoreRequest,
     cancelled: threading.Event,
 ) -> tuple[MemoryStoreBatchData, Path, bool]:
     recorded_at_us = _now_us(dependencies)
     if cancelled.is_set():
         raise _WorkerCancelledError()
     prepared = [_memory_record(item) for item in request.records]
-    request_hash = sha256_json([item[0] for item in prepared])
+    provenance = None if request.provenance is None else dict(request.provenance)
+    legacy_batch = (
+        request.semantic_namespace == "memory-store-batch" and provenance is None
+    )
+    request_hash = sha256_json(
+        [item[0] for item in prepared]
+        if legacy_batch
+        else {
+            "semantic_namespace": request.semantic_namespace,
+            "records": [item[0] for item in prepared],
+            "provenance": provenance,
+        }
+    )
     correlation = _correlation(
         workspace.workspace_id,
-        "memory-store-batch",
+        request.semantic_namespace,
         request.idempotency_key,
     )
     record_ids = [
         deterministic_id(
             "mem",
-            "memory-store-batch",
+            request.semantic_namespace,
             workspace.workspace_id,
             request.idempotency_key,
             index,
@@ -587,6 +608,11 @@ def _batch_sync(
                             or not isinstance(index, int)
                             or not 0 <= index < len(prepared)
                             or payload.get("batch_size") != len(prepared)
+                            or (
+                                not legacy_batch
+                                and payload.get("semantic_namespace")
+                                != request.semantic_namespace
+                            )
                             or index in indexed
                             or str(row["stream_id"]) != record_ids[index]
                         ):
@@ -594,7 +620,9 @@ def _batch_sync(
                         indexed[index] = row
                     if set(indexed) != set(range(len(prepared))):
                         raise RecordOperationError("CAPABILITY_DEGRADED")
-                    events = [_event_receipt(indexed[index]) for index in range(len(prepared))]
+                    events = [
+                        _event_receipt(indexed[index]) for index in range(len(prepared))
+                    ]
                 else:
                     store = EventStore(connection, assume_transaction=True)
                     events = []
@@ -603,6 +631,15 @@ def _batch_sync(
                     ):
                         if cancelled.is_set():
                             raise _WorkerCancelledError()
+                        payload = {
+                            "record": state,
+                            "idempotency_request_hash": request_hash,
+                            "batch_index": index,
+                            "batch_size": len(prepared),
+                        }
+                        if not legacy_batch:
+                            payload["semantic_namespace"] = request.semantic_namespace
+                            payload["provenance"] = provenance
                         event = store.append_and_project(
                             EventCommand(
                                 workspace_id=workspace.workspace_id,
@@ -616,12 +653,7 @@ def _batch_sync(
                                 ),
                                 recorded_at_us=recorded_at_us,
                                 actor_type="client",
-                                payload={
-                                    "record": state,
-                                    "idempotency_request_hash": request_hash,
-                                    "batch_index": index,
-                                    "batch_size": len(prepared),
-                                },
+                                payload=payload,
                                 correlation_id=correlation,
                                 expected_stream_version=1,
                             )
@@ -663,10 +695,31 @@ def _batch_sync(
                 if connection.in_transaction:
                     connection.rollback()
                 connection.close()
-    except (IdempotencyConflict, RecordOperationError, EventStreamConflict, _WorkerCancelledError):
+    except (
+        IdempotencyConflict,
+        RecordOperationError,
+        EventStreamConflict,
+        _WorkerCancelledError,
+    ):
         raise
     except Exception as exc:
         raise _translate_storage_error(exc) from None
+
+
+async def store_canonical_batch(
+    dependencies: RecordOperationDependencies,
+    *,
+    workspace: Workspace,
+    request: CanonicalBatchStoreRequest,
+) -> MemoryStoreBatchData:
+    """Commit a validated semantic batch atomically without authorizing it."""
+    result, path, changed = await _run_mutation(
+        lambda cancelled: _canonical_batch_sync(
+            dependencies, workspace, request, cancelled
+        )
+    )
+    await _schedule_after_commit(dependencies, path, changed)
+    return result
 
 
 def _matching_state_event(
@@ -704,9 +757,7 @@ def _state_set_sync(
     if cancelled.is_set():
         raise _WorkerCancelledError()
     desired = bool(getattr(request, field_name))
-    request_hash = sha256_json(
-        {"record_id": request.record_id, field_name: desired}
-    )
+    request_hash = sha256_json({"record_id": request.record_id, field_name: desired})
     try:
         with dependencies.storage_resolver.locked_active(workspace) as active:
             connection = _open_database(active.path, writable=True)
@@ -889,8 +940,7 @@ def _file_recall_sync(
                 ]
                 if cursor_values is not None:
                     where += (
-                        " AND (updated_at_us<? OR "
-                        "(updated_at_us=? AND record_id>?))"
+                        " AND (updated_at_us<? OR (updated_at_us=? AND record_id>?))"
                     )
                     parameters.extend(
                         [cursor_values[0], cursor_values[0], cursor_values[1]]
@@ -945,10 +995,7 @@ def _highlight_spans(excerpt: str, query: str) -> list[HighlightSpan]:
                 break
         if len(offsets) >= 100:
             break
-    return [
-        HighlightSpan(start=start, end=end)
-        for start, end in sorted(offsets)[:100]
-    ]
+    return [HighlightSpan(start=start, end=end) for start, end in sorted(offsets)[:100]]
 
 
 def _text_search_sync(
@@ -1017,10 +1064,8 @@ def _text_search_sync(
                         candidate.evidence.record_id,
                     )
                     if (
-                        str(row["source_event_id"])
-                        != candidate.evidence.event_id
-                        or str(row["content_hash"])
-                        != candidate.evidence.content_hash
+                        str(row["source_event_id"]) != candidate.evidence.event_id
+                        or str(row["content_hash"]) != candidate.evidence.content_hash
                         or row["deleted_at_us"] is not None
                         or bool(row["archived"])
                     ):
@@ -1077,9 +1122,7 @@ def _text_search_sync(
 
 def _session_selector(request: AdmittedRequest) -> dict[str, int | None]:
     return {
-        "since_at_us": (
-            None if request.since is None else _datetime_us(request.since)
-        )
+        "since_at_us": (None if request.since is None else _datetime_us(request.since))
     }
 
 
@@ -1265,9 +1308,7 @@ def _session_updates_once_sync(
                             kind=kind,
                             object_id=str(row["stream_id"]),
                             occurred_at=_datetime_from_us(row["occurred_at_us"]),
-                            summary=_event_summary(
-                                kind, str(row["event_type"])
-                            ),
+                            summary=_event_summary(kind, str(row["event_type"])),
                         )
                     )
                 if selected:
@@ -1377,16 +1418,14 @@ def build_record_operations(
         *, workspace: Workspace, request: AdmittedRequest
     ) -> MemoryStoreBatchData:
         _authorize(workspace, request, "memory_store_batch")
-        result, path, changed = await _run_mutation(
-            lambda cancelled: _batch_sync(
-                dependencies,
-                workspace,
-                request,
-                cancelled,
-            )
+        return await store_canonical_batch(
+            dependencies,
+            workspace=workspace,
+            request=CanonicalBatchStoreRequest(
+                records=tuple(request.records),
+                idempotency_key=request.idempotency_key,
+            ),
         )
-        await _schedule_after_commit(dependencies, path, changed)
-        return result
 
     async def memory_pin_set(
         *, workspace: Workspace, request: AdmittedRequest
@@ -1435,7 +1474,9 @@ def build_record_operations(
 
 
 __all__ = [
+    "CanonicalBatchStoreRequest",
     "RecordOperationDependencies",
     "RecordOperationError",
     "build_record_operations",
+    "store_canonical_batch",
 ]

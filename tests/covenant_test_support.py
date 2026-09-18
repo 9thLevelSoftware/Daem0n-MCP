@@ -13,10 +13,10 @@ import secrets
 import sys
 import threading
 import uuid
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any
 
 from daem0nmcp.covenant import (
     COVENANT_POLICY,
@@ -30,7 +30,6 @@ from daem0nmcp.covenant import (
     installed_invocation,
 )
 from daem0nmcp.workspace import WorkspaceRegistry
-
 
 _REGISTRY_PATCH_LOCK = threading.Lock()
 _REGISTRY_PATCHES: dict[Any, list[Any]] = {}
@@ -67,12 +66,10 @@ class CovenantTestWorkspace(str):
         project_path: str | Path,
         *,
         additional_roots: Iterable[str | Path] = (),
-    ) -> "CovenantTestWorkspace":
+    ) -> CovenantTestWorkspace:
         canonical = str(Path(project_path).resolve())
         instance = super().__new__(cls, canonical)
-        registry = WorkspaceRegistry(
-            list(additional_roots), default_root=canonical
-        )
+        registry = WorkspaceRegistry(list(additional_roots), default_root=canonical)
         workspace = registry.resolve(canonical)
         instance._registry = registry
         instance.scope = InvocationScope(
@@ -145,9 +142,7 @@ class CovenantTestWorkspace(str):
             operation, adapted = self._bound_arguments(func, args, kwargs)
             return self.gate.issue_preflight(self.scope, operation, adapted)
 
-    async def call(
-        self, func: Callable[..., Any], /, *args: Any, **kwargs: Any
-    ) -> Any:
+    async def call(self, func: Callable[..., Any], /, *args: Any, **kwargs: Any) -> Any:
         """Invoke a real guarded leaf, issuing a token only when policy requires."""
         if "preflight_token" in kwargs:
             raise TypeError("use call_unsealed when supplying an explicit token")

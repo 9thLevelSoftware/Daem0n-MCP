@@ -112,7 +112,17 @@ class RetrievalProjectionOperationTests(unittest.TestCase):
             ],
             status["manifests"],
         )
-        self.assertEqual([], status["jobs"])
+        self.assertEqual(
+            [
+                {
+                    "attempts": 0,
+                    "max_attempts": 3,
+                    "projection_names": ["lexical"],
+                    "status": "queued",
+                }
+            ],
+            status["jobs"],
+        )
         self.assertNotIn("path", str(status).casefold())
 
     def test_unimplemented_optional_builder_fails_with_owned_code(self):

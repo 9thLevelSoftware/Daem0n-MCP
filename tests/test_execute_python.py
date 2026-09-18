@@ -192,8 +192,7 @@ class TestExecutePythonTool:
             await workspace.brief()
 
             result = await workspace.call(
-                server.execute_python,
-                code="print('hello')", project_path=None
+                server.execute_python, code="print('hello')", project_path=None
             )
 
             assert "error" in result or "MISSING_PROJECT_PATH" in str(result)
@@ -206,12 +205,13 @@ class TestExecutePythonTool:
     ):
         """Tool should return violation when capability revoked."""
         from daem0nmcp import server
+        from daem0nmcp.tools import agency_tools
 
         workspace = covenant_workspace_factory(tmp_path)
         await workspace.brief()
 
         # Revoke capability
-        server._capability_manager.revoke_capability(
+        agency_tools._capability_manager.revoke_capability(
             workspace, CapabilityScope.EXECUTE_CODE
         )
 
@@ -226,7 +226,7 @@ class TestExecutePythonTool:
             assert result["violation"] == "CAPABILITY_DENIED"
         finally:
             # Restore
-            server._capability_manager.reset_capabilities(workspace)
+            agency_tools._capability_manager.reset_capabilities(workspace)
 
     @pytest.mark.asyncio
     async def test_sandbox_unavailable_returns_error(
@@ -234,19 +234,20 @@ class TestExecutePythonTool:
     ):
         """Tool should return error when sandbox unavailable."""
         from daem0nmcp import server
+        from daem0nmcp.tools import agency_tools
 
         workspace = covenant_workspace_factory(tmp_path)
         await workspace.brief()
 
         # Ensure capability is granted
-        server._capability_manager.grant_capability(
+        agency_tools._capability_manager.grant_capability(
             workspace, CapabilityScope.EXECUTE_CODE
         )
 
         # Mock sandbox as unavailable
-        original_available = server._sandbox_executor._sandbox_available
+        original_available = agency_tools._sandbox_executor._sandbox_available
         try:
-            server._sandbox_executor._sandbox_available = False
+            agency_tools._sandbox_executor._sandbox_available = False
 
             result = await workspace.call(
                 server.execute_python,
@@ -257,14 +258,13 @@ class TestExecutePythonTool:
             assert result["status"] == "error"
             assert result["error"] == "SANDBOX_UNAVAILABLE"
         finally:
-            server._sandbox_executor._sandbox_available = original_available
+            agency_tools._sandbox_executor._sandbox_available = original_available
 
     @pytest.mark.asyncio
-    async def test_execution_logged(
-        self, caplog, tmp_path, covenant_workspace_factory
-    ):
+    async def test_execution_logged(self, caplog, tmp_path, covenant_workspace_factory):
         """Tool should log execution for anomaly detection."""
         from daem0nmcp import server
+        from daem0nmcp.tools import agency_tools
 
         workspace = covenant_workspace_factory(tmp_path)
         await workspace.brief()
@@ -278,8 +278,8 @@ class TestExecutePythonTool:
             mock.return_value = mock_result
 
             # Force sandbox available
-            original = server._sandbox_executor._sandbox_available
-            server._sandbox_executor._sandbox_available = True
+            original = agency_tools._sandbox_executor._sandbox_available
+            agency_tools._sandbox_executor._sandbox_available = True
             try:
                 with caplog.at_level(logging.INFO):
                     await workspace.call(
@@ -295,7 +295,7 @@ class TestExecutePythonTool:
                     for msg in log_messages
                 ), f"Expected execute_python log, got: {log_messages}"
             finally:
-                server._sandbox_executor._sandbox_available = original
+                agency_tools._sandbox_executor._sandbox_available = original
 
 
 # Integration tests - skip without E2B_API_KEY

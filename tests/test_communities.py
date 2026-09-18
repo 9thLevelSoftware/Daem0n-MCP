@@ -8,6 +8,12 @@ import pytest
 from daem0nmcp.models import MemoryCommunity
 
 
+@pytest.fixture(autouse=True)
+def graph_enabled(monkeypatch):
+    """Run this graph-profile suite only with its explicit capability enabled."""
+    monkeypatch.setenv("DAEM0NMCP_GRAPH_ENABLED", "true")
+
+
 @pytest.fixture
 def temp_storage():
     """Create a temporary storage directory."""
@@ -267,7 +273,8 @@ async def test_mcp_get_community_details(covenant_compliant_project):
         community_id = communities["communities"][0]["id"]
         result = await covenant_compliant_project.call(
             server.get_community_details,
-            community_id=community_id, project_path=covenant_compliant_project
+            community_id=community_id,
+            project_path=covenant_compliant_project,
         )
 
         assert "community_id" in result
@@ -312,7 +319,8 @@ async def test_mcp_recall_hierarchical(covenant_compliant_project):
 
     result = await covenant_compliant_project.call(
         server.recall_hierarchical,
-        topic="authentication", project_path=covenant_compliant_project
+        topic="authentication",
+        project_path=covenant_compliant_project,
     )
 
     assert "communities" in result
