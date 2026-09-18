@@ -9,19 +9,22 @@
 - Runtime data lives under `.daem0nmcp/` (e.g., `.daem0nmcp/storage/daem0nmcp.db`); do not commit it.
 
 ## Build, Test, and Development Commands
-- `pip install -e ".[dev]"` installs the package in editable mode with test deps.
+- `pip install -e ".[dev,apps,graph]"` installs the package in editable mode with the extras CI tests against.
 - `python -m daem0nmcp.server` runs the MCP server directly.
 - `python start_server.py --port 9876` starts the Windows HTTP launcher.
 - `python -m daem0nmcp.cli <command>` runs CLI tasks (example: `python -m daem0nmcp.cli index`).
-- `pytest tests/ -v --asyncio-mode=auto` runs the test suite.
-- `ruff check daem0nmcp/ tests/` runs the CI lint step.
-- `mypy daem0nmcp/ --ignore-missing-imports` runs the optional type check (CI does not fail on errors).
+
+CI (`.github/workflows/ci.yml`) blocks merges on these gates; run them before pushing:
+- Tests: `pytest tests/ -v --asyncio-mode=auto` (Ubuntu, Windows and macOS on Python 3.10-3.12).
+- Lint and format: `ruff check daem0nmcp/ tests/` and `ruff format --check daem0nmcp/ tests/`, with ruff pinned to the `uv.lock` version (0.16.8).
+- Type check: `mypy daem0nmcp/api/v7 --ignore-missing-imports --follow-imports=silent` (CI runs it on Linux; add `--platform linux` locally on Windows or macOS).
+- Release inventory: `python scripts/v7_release_inventory.py --check`.
 
 ## Coding Style & Naming Conventions
 - Use 4-space indentation and follow PEP 8 layout.
 - `snake_case` for functions/variables, `PascalCase` for classes, `UPPER_SNAKE_CASE` for constants.
 - Keep modules focused and add new features under `daem0nmcp/` with corresponding tests.
-- Aim for lint-clean code under `ruff check`; no formatter is enforced, so match nearby style.
+- Code must pass `ruff check` and `ruff format --check`.
 
 ## Testing Guidelines
 - Tests use `pytest` with `pytest-asyncio`; stick to `test_*.py` and `test_*` names.
