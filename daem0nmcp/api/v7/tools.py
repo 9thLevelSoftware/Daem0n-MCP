@@ -59,6 +59,7 @@ from .models import (
     VersionId,
     WireModel,
     WorkspaceId,
+    contains_absolute_filesystem_path,
 )
 from .policy import V7_TOOL_LEVELS, V7ArgumentNormalizer
 from .registry import PINNED_TOOL_NAMES, ManifestError, ToolSpec
@@ -676,7 +677,12 @@ class SandboxExecutionData(WireModel):
     stderr: Annotated[UserText, StringConstraints(strict=True, max_length=100_000)]
     exit_status: Annotated[int, Field(ge=-1, le=255)]
     execution_time_ms: Annotated[int, Field(ge=0, le=60_000)]
-    sanitized_logs: list[MediumText] = Field(default_factory=list, max_length=100)
+    # The same lines as stdout/stderr (see external_operations), so user text.
+    sanitized_logs: list[
+        Annotated[
+            UserText, StringConstraints(strict=True, min_length=1, max_length=4096)
+        ]
+    ] = Field(default_factory=list, max_length=100)
 
 
 class CodeIndexData(WireModel):
@@ -869,7 +875,15 @@ class ExportEvent(WireModel):
     event_type: NameText
     happened_at: UtcDateTime
     content_hash: ContentHash
+    # Only the envelope's ``data`` holds user text; the rest stays guarded.
     payload: UserJsonObject
+
+    @model_validator(mode="after")
+    def guard_envelope(self) -> ExportEvent:
+        envelope = {k: v for k, v in self.payload.items() if k != "data"}
+        if contains_absolute_filesystem_path(envelope):
+            raise ValueError("absolute filesystem paths are forbidden on the v7 wire")
+        return self
 
 
 TransferSessionId = Annotated[
@@ -887,7 +901,7 @@ class PortableVectorPoint(WireModel):
     point_id: Annotated[
         str, StringConstraints(strict=True, min_length=1, max_length=256)
     ]
-    payload: UserJsonObject
+    payload: JsonObject
     vector: list[Annotated[float, Field(allow_inf_nan=False)]] = Field(
         min_length=1, max_length=4096
     )

@@ -118,19 +118,29 @@ def _response_model(tool: str) -> type[BaseModel]:
     return ApiResponse[TOOL_DATA_MODELS[tool]]  # type: ignore[name-defined]
 
 
+# Marks the one piece of user text allowed to name a host path: the note each
+# target stores about its own root.
+NOTE_MARKER = "sweepnote4b1d"
+
+
 def _host_path_leaks(
     model: type[BaseModel], document: Any, needles: set[str]
 ) -> list[str]:
-    """Strings outside ``UserText`` fields that contain a host path needle.
+    """Strings that contain a host path needle, other than the stored note.
 
-    Validating against the response model also refuses any absolute path in
-    a server-generated field, whatever its spelling.
+    Every string is scanned, UserText fields included, so server-assembled
+    user-text fields (excerpts, rendered context, TODO text, mermaid) stay
+    watched.  A hit is allowed only in a UserText field whose text carries the
+    note's marker.  Validating against the response model also refuses any
+    absolute path in a server-generated field, whatever its spelling.
     """
     validated = model.model_validate(document, strict=False)
+    guarded = set(guarded_strings(validated))
     return [
         value
-        for value in guarded_strings(validated)
+        for value in _strings(document)
         if any(needle in value.lower() for needle in needles)
+        and (value in guarded or NOTE_MARKER not in value)
     ]
 
 
@@ -685,7 +695,7 @@ def test_leak_check_exempts_user_text_by_annotation_only(tmp_path):
     summary = {
         "record_id": "mem_" + "1" * 64,
         "record_type": "warning",
-        "excerpt": f"Target note: see {tmp_path}",
+        "excerpt": f"Target note {NOTE_MARKER}: see {tmp_path}",
         "tags": ["/health"],
         "current_status": "current",
         "content_hash": "a" * 64,
@@ -693,6 +703,11 @@ def test_leak_check_exempts_user_text_by_annotation_only(tmp_path):
         "updated_at": "2026-08-08T12:00:00Z",
     }
     assert _host_path_leaks(RecordSummary, summary, needles) == []
+    # A root in user text the server assembled on its own is still caught.
+    unmarked = {**summary, "excerpt": f"Rendered from {tmp_path}"}
+    assert _host_path_leaks(RecordSummary, unmarked, needles) == [
+        f"Rendered from {tmp_path}"
+    ]
     # The same root in a server-generated field is refused by the model...
     with pytest.raises(ValidationError):
         _host_path_leaks(
@@ -752,7 +767,7 @@ class Sweep:
         # UserText fields; the leak check must pass without a name exemption.
         note = {
             "record_type": "warning",
-            "content": f"Target note: see {root / 'src' / 'neutral.py'}",
+            "content": f"Target note {NOTE_MARKER}: see {root / 'src' / 'neutral.py'}",
             "idempotency_key": f"sweep-{name}-host-note-0001",
         }
         assert (await _protected(invoke, target, "memory_store", note))["ok"]

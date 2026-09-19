@@ -250,14 +250,16 @@ class PrimitiveBoundaryTests(unittest.TestCase):
     def test_wire_models_reject_absolute_paths_outside_user_text(self) -> None:
         _, models = _load(self)
 
+        # A remedy echoes the caller's own arguments, which may mention paths.
+        models.ErrorRemedy(
+            tool="memory_store",
+            arguments={"context": {"note": "Inspect C:\\private\\secret.txt"}},
+        )
         with self.assertRaises(ValidationError):
-            models.ErrorRemedy(
-                tool="memory_store",
-                arguments={
-                    "context": {
-                        "note": "Inspect C:\\private\\secret.txt before release"
-                    }
-                },
+            models.CapabilityState(
+                name="storage",
+                status="failed",
+                remediation="Repair C:\\private\\storage",
             )
 
         summary = {

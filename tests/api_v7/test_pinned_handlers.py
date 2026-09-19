@@ -109,9 +109,14 @@ class _FailingPreflightService:
 
 
 class _LeakyPreflightService:
+    """Guidance whose structured path field holds a host path.
+
+    The rule warning also names a path, which user text may do (UD-3); only
+    ``relative_file_path`` makes the guidance invalid.
+    """
+
     async def guidance(self, *args: object, **kwargs: object) -> object:
         del args, kwargs
-        # Rule text may mention paths (UD-3); a path field may not.
         return {
             "warnings": [r"Inspect D:\private\workspace\notes.txt"],
             "records": [
@@ -1011,7 +1016,7 @@ class PinnedHandlerTests(unittest.TestCase):
         self.assertEqual(gate.state_store.status(scope)["active_capabilities"], 0)
 
     def test_path_bearing_guidance_fails_before_capability_issue(self) -> None:
-        # Catches issuing a usable token for a response that must be redacted.
+        # Catches issuing a usable token for guidance whose path field is invalid.
         from daem0nmcp.api.v7.errors import ErrorCode
         from daem0nmcp.api.v7.pinned import build_pinned_handlers
         from daem0nmcp.api.v7.tools import MemoryPreflightOutput

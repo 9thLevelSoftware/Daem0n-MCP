@@ -62,7 +62,6 @@ _MAX_COMMUNITIES = 1_000
 _MAX_COMMUNITY_MEMBERS = 20_000
 _CLAIM_SPLIT_RE = re.compile(r"(?<=[.!?])\s+|[\r\n]+")
 _WORD_RE = re.compile(r"[A-Za-z0-9]+(?:[-_][A-Za-z0-9]+)*")
-_CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 _NEGATIONS = frozenset({"no", "not", "never", "none", "without"})
 _STOP_WORDS = frozenset(
     {
@@ -368,7 +367,8 @@ def _verified_event(row: sqlite3.Row) -> dict[str, Any]:
 
 
 def _safe_text(value: object) -> str:
-    if not isinstance(value, str) or not value or _CONTROL_RE.search(value) is not None:
+    # Stored user text reads back as stored (UD-3).
+    if not isinstance(value, str) or not value:
         raise IntelligenceOperationError("CAPABILITY_DEGRADED")
     return value
 

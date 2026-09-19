@@ -72,16 +72,22 @@ def is_host_absolute_path(value: str) -> bool:
     )
 
 
-class _UserTextMarker:
-    """``Annotated`` marker for user-authored or user-derived text."""
+class _Exempt:
+    """``Annotated`` marker for strings the substring path scan skips."""
 
-    __slots__ = ()
+    __slots__ = ("name",)
+
+    def __init__(self, name: str) -> None:
+        self.name = name
 
     def __repr__(self) -> str:
-        return "UserText"
+        return self.name
 
 
-_USER_TEXT = _UserTextMarker()
+_USER_TEXT = _Exempt("UserText")
+# RelativePath's own validator refuses absolute and escaping paths exactly;
+# the prose scan would also refuse valid names such as ``src/__pycache__/x``.
+_RELATIVE_PATH = _Exempt("RelativePath")
 
 # Memory content, queries, rule text and server text quoting them may mention
 # routes and file paths ("/health", "C:\proj\app.py").  Fields typed with it,
@@ -90,19 +96,28 @@ _USER_TEXT = _UserTextMarker()
 UserText = Annotated[str, _USER_TEXT]
 
 
-def _carries_user_text(annotation: object) -> bool:
-    return annotation is _USER_TEXT or any(
-        _carries_user_text(argument) for argument in get_args(annotation)
+def _carries(annotation: object, marker: _Exempt) -> bool:
+    return annotation is marker or any(
+        _carries(argument, marker) for argument in get_args(annotation)
+    )
+
+
+def _fields_marked(model: type[BaseModel], marker: _Exempt) -> frozenset[str]:
+    return frozenset(
+        name
+        for name, field in model.model_fields.items()
+        if marker in field.metadata or _carries(field.annotation, marker)
     )
 
 
 @cache
 def _user_text_fields(model: type[BaseModel]) -> frozenset[str]:
-    return frozenset(
-        name
-        for name, field in model.model_fields.items()
-        if _USER_TEXT in field.metadata or _carries_user_text(field.annotation)
-    )
+    return _fields_marked(model, _USER_TEXT)
+
+
+@cache
+def _exempt_fields(model: type[BaseModel]) -> frozenset[str]:
+    return _user_text_fields(model) | _fields_marked(model, _RELATIVE_PATH)
 
 
 def guarded_strings(value: object, user_text: bool = False) -> Iterator[str]:
@@ -113,7 +128,7 @@ def guarded_strings(value: object, user_text: bool = False) -> Iterator[str]:
     """
 
     if isinstance(value, BaseModel):
-        exempt = _user_text_fields(type(value))
+        exempt = _exempt_fields(type(value))
         for name, item in value.__dict__.items():
             yield from guarded_strings(item, name in exempt)
     elif isinstance(value, Mapping):
@@ -339,6 +354,7 @@ RelativePath = Annotated[
     str,
     StringConstraints(strict=True, min_length=1, max_length=1024),
     AfterValidator(_relative_path),
+    _RELATIVE_PATH,
 ]
 AwareDateTime = Annotated[datetime, BeforeValidator(parse_wire_datetime)]
 UtcDateTime = Annotated[AwareDateTime, AfterValidator(_utc)]
@@ -407,7 +423,6 @@ ToolName = Annotated[
 Tag = Annotated[
     UserText,
     StringConstraints(strict=True, min_length=1, max_length=80),
-    AfterValidator(_sanitized),
 ]
 ProviderName = Annotated[
     str,
@@ -528,7 +543,8 @@ ApiFieldError = FieldError
 
 class ErrorRemedy(WireModel):
     tool: ToolName
-    arguments: JsonObject = Field(default_factory=dict)
+    # The caller's own validated arguments, echoed back for the retry.
+    arguments: UserJsonObject = Field(default_factory=dict)
 
 
 Remedy = ErrorRemedy
@@ -645,7 +661,6 @@ class RecordSummary(WireModel):
     excerpt: Annotated[
         UserText,
         StringConstraints(strict=True, min_length=1, max_length=4000),
-        AfterValidator(_sanitized),
     ]
     tags: Annotated[list[Tag], AfterValidator(_unique_strings)] = Field(
         default_factory=list,
@@ -680,7 +695,6 @@ class EvidenceItem(WireModel):
     bounded_excerpt: Annotated[
         UserText,
         StringConstraints(strict=True, min_length=1, max_length=8000),
-        AfterValidator(_sanitized),
     ]
     channels: Annotated[list[ProviderName], AfterValidator(_unique_strings)] = Field(
         min_length=1,

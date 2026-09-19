@@ -78,7 +78,6 @@ _MAX_ENTITY_RECORDS = 200
 _MAX_ENTITY_EVENTS = 200
 _MAX_IMPACT_ENTITIES = 500
 _MAX_IMPACT_EDGES = 5_000
-_CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 _EVENT_TYPE_RE = re.compile(r"^[a-z][a-z0-9_.-]{2,79}$")
 _EVENT_COLUMNS = (
     "event_id,workspace_id,stream_id,stream_kind,stream_version,event_type,"
@@ -934,11 +933,8 @@ def _entity_row(
 
 def _safe_event_content(state: Mapping[str, Any]) -> str:
     content = state.get("content")
-    if (
-        not isinstance(content, str)
-        or not content
-        or _CONTROL_RE.search(content) is not None
-    ):
+    # Stored user text reads back as stored (UD-3).
+    if not isinstance(content, str) or not content:
         raise CodeEntityOperationError("CAPABILITY_DEGRADED")
     return content
 

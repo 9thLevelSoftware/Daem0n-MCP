@@ -24,6 +24,8 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Any
 
+from pydantic import TypeAdapter, ValidationError
+
 from ...bounded_workers import BoundedWorkerBusyError, BoundedWorkerPool
 from ...covenant import CovenantGate, InvocationScope
 from ...event_store import (
@@ -51,7 +53,7 @@ from ...storage_activation import (
 from ...workspace import Workspace
 from .application import AdmittedRequest
 from .errors import STABLE_ERROR_CODE_SET
-from .models import EvidenceRef, Page, RecordSummary, is_host_absolute_path
+from .models import EvidenceRef, Page, RecordSummary, RelativePath
 from .portable_projections import (
     ImportFinalizationLease,
     PortableTransferError,
@@ -92,6 +94,7 @@ _CURSOR_RE = re.compile(r"^cur_([0-9a-f]{64})$")
 # Host-path columns that are always empty in v7 payloads.
 _RAW_PATH_KEYS = frozenset({"file_path", "project_path", "database_path"})
 _RELATIVE_PATH_KEYS = frozenset({"relative_file_path", "file_path_relative"})
+_RELATIVE_PATH_ADAPTER: TypeAdapter[str] = TypeAdapter(RelativePath)
 _EVENT_COLUMNS = (
     "event_id,workspace_id,stream_id,stream_kind,stream_version,event_type,"
     "event_schema_version,occurred_at_us,recorded_at_us,actor_type,actor_id,"
@@ -457,12 +460,11 @@ def _reject_raw_paths(value: object) -> None:
         for key, item in value.items():
             if key in _RAW_PATH_KEYS and item is not None and item != "":
                 raise CoreOperationError("WORKSPACE_PATH_ESCAPE")
-            if (
-                key in _RELATIVE_PATH_KEYS
-                and isinstance(item, str)
-                and is_host_absolute_path(item)
-            ):
-                raise CoreOperationError("WORKSPACE_PATH_ESCAPE")
+            if key in _RELATIVE_PATH_KEYS and item is not None:
+                try:
+                    _RELATIVE_PATH_ADAPTER.validate_python(item)
+                except ValidationError:
+                    raise CoreOperationError("WORKSPACE_PATH_ESCAPE") from None
             if key != "context":
                 _reject_raw_paths(item)
     elif isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
@@ -996,6 +998,8 @@ def _export_sync(
             content = page["content"]
             manifest = page["manifest"]
             items = content["items"]
+            if page["page_kind"] == "legacy":
+                _reject_raw_paths(items)
             descriptor = page.get(
                 "page_descriptor",
                 {
@@ -1054,6 +1058,7 @@ def _portable_page(bundle: ExportBundle) -> dict[str, Any]:
         items = [event.model_dump(mode="json") for event in bundle.events]
     elif bundle.page_kind == "legacy":
         items = list(bundle.legacy_rows)
+        _reject_raw_paths(items)
     else:
         items = [point.model_dump(mode="json") for point in bundle.vector_points]
     return {
