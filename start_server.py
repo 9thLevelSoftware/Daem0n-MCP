@@ -22,12 +22,17 @@ def main():
     parser.add_argument("--host", default="127.0.0.1", help="Host to bind to")
     parser.add_argument(
         "--project",
-        help="Project directory for storage (default: current directory)",
+        help=(
+            "Project directory to serve (default: DAEM0NMCP_PROJECT_ROOT if set, "
+            "else the current directory)"
+        ),
     )
     args = parser.parse_args()
 
-    project_root = Path(args.project or os.getcwd()).resolve()
-    os.environ["DAEM0NMCP_PROJECT_ROOT"] = str(project_root)
+    if args.project:
+        os.environ["DAEM0NMCP_PROJECT_ROOT"] = str(Path(args.project).resolve())
+    elif not os.environ.get("DAEM0NMCP_PROJECT_ROOT"):
+        os.environ["DAEM0NMCP_PROJECT_ROOT"] = str(Path.cwd().resolve())
 
     # Import only after the workspace environment is fixed.  Both public
     # launchers use the same v7 composition and transport-security boundary.
