@@ -63,7 +63,6 @@ from tests.api_v7.process_client import initialize_workspaces
 from tests.api_v7.test_process_workspace_isolation_sweep import (
     CANARY,
     CROSS_WORKSPACE_TOOLS,
-    GATE_CODES,
     PROFILE_ENVIRONMENT,
     _code,
     _is_protected,
@@ -79,8 +78,15 @@ PATH_CONTENT = ("\\\\d+", "/health", "GET /api/v1/users", "C:\\proj\\src\\app.py
 SEEDS = ("C:\\proj\\x.py", "/health", "\\d+")
 NEUTRAL = "plain neutral words"
 # A path in text is the user's business; these outcomes mean it was refused.
+# Readers turn a row that fails its output model into CAPABILITY_DEGRADED.
 REFUSALS = frozenset(
-    {"INVALID_ARGUMENT", "INTERNAL_ERROR", "WORKSPACE_PATH_ESCAPE", "SCHEMA_REJECTED"}
+    {
+        "INVALID_ARGUMENT",
+        "INTERNAL_ERROR",
+        "WORKSPACE_PATH_ESCAPE",
+        "SCHEMA_REJECTED",
+        "CAPABILITY_DEGRADED",
+    }
 )
 RESOURCE_KINDS = ("warnings", "failures", "rules", "active-context")
 TOKEN = "preflight-token-placeholder-0001"
@@ -328,7 +334,9 @@ def _insert_rows(root: Path, workspace_id: str, texts: tuple[str, ...]) -> list[
                     actor_type="migration",
                     payload={
                         "trigger_id": "trg_" + _hex("trigger", text),
-                        "trigger_type": "tag",
+                        # A file glob: a tag pattern is a regex, which
+                        # "C:\proj\x.py" is not.
+                        "trigger_type": "file",
                         "pattern": text,
                         "recall_query": text,
                         "categories": [],
@@ -360,6 +368,15 @@ def _insert_rows(root: Path, workspace_id: str, texts: tuple[str, ...]) -> list[
                     member_record_ids=tuple(record_ids),
                 ),
             ),
+        )
+        # The graph rebuild queued by the events above just ran here; retire
+        # it so a later drain cannot swap the inserted entities for a new
+        # generation mid-test.
+        connection.execute(
+            "UPDATE background_jobs SET status='succeeded',updated_at_us=?,"
+            "finished_at_us=? WHERE workspace_id=? AND status='queued' "
+            "AND idempotency_key='active-projection:graph'",
+            (_now_us(), _now_us(), workspace_id),
         )
         connection.commit()
     return record_ids
@@ -556,12 +573,23 @@ async def _seed_free_text(invoke, workspace_id: str, tool: str, arguments: dict)
     return labels
 
 
+async def _read_everything(invoke, workspace_id: str, seed) -> dict[str, str]:
+    """Every read tool with the workspace's own objects, then each resource."""
+    codes: dict[str, str] = {}
+    for tool, arguments in sorted(_sweep_arguments(seed).items()):
+        if _is_protected(tool) or tool in CROSS_WORKSPACE_TOOLS:
+            continue
+        plain = _fresh_keys(_own_read_arguments(arguments), f"{tool}-{len(codes)}")
+        codes[tool] = _code(await invoke(tool, {"workspace_id": workspace_id, **plain}))
+    return codes
+
+
 async def test_every_free_text_field_accepts_paths_and_every_read_survives(tmp_path):
     """Seed every free-text input field and DB row with paths; read everything.
 
-    An input field typed as free text but not ``UserText`` refuses the seed
-    (``INVALID_ARGUMENT``), and an output field carrying it fails the read
-    (``INTERNAL_ERROR``); either fails this test.
+    An input field typed as free text but not ``UserText`` refuses the seed,
+    and an output field carrying it fails or degrades the read; either fails
+    this test.
     """
     a_root, b_root = tmp_path / "alpha", tmp_path / "beta"
     alpha, beta = await initialize_workspaces((a_root, b_root))
@@ -576,6 +604,8 @@ async def test_every_free_text_field_accepts_paths_and_every_read_survives(tmp_p
         invoke = _invoker(client)
         seed = await _seed_workspace_a(invoke, a, b)
         await _mint_tokens(invoke, a, b, seed)
+        # Outcomes before any path is stored.
+        baseline = await _read_everything(invoke, a, seed)
         writes = {
             **_sweep_arguments(seed),
             "workspace_link": {"linked_workspace_id": b},
@@ -593,23 +623,26 @@ async def test_every_free_text_field_accepts_paths_and_every_read_survives(tmp_p
         entities = await invoke("entity_list", {"workspace_id": a, "limit": 100})
         assert set(SEEDS) <= {item["name"] for item in entities["data"]["items"]}
         seed.ids["entity"] = entities["data"]["items"][0]["entity_id"]
+        # The inserted graph generation replaces the seed's community IDs.
         communities = await invoke("community_list", {"workspace_id": a})
-        if communities["ok"] and communities["data"]["items"]:
-            seed.ids["community"] = communities["data"]["items"][0]["community_id"]
-        failures: dict[str, str] = {}
+        seed.ids["community"] = communities["data"]["items"][0]["community_id"]
+        after = await _read_everything(invoke, a, seed)
         for tool, arguments in sorted(_sweep_arguments(seed).items()):
-            if _is_protected(tool) or tool in CROSS_WORKSPACE_TOOLS:
-                continue
-            plain = _fresh_keys(_own_read_arguments(arguments), tool)
-            response = await invoke(tool, {"workspace_id": a, **plain})
-            if _code(response) != "ok" and _code(response) not in GATE_CODES:
-                failures[tool] = _code(response)
-            # Query-like fields searching for the paths.
-            await _seed_free_text(invoke, a, tool, arguments)
+            if tool in after:
+                # Query-like fields searching for the paths.
+                await _seed_free_text(invoke, a, tool, arguments)
         for kind in RESOURCE_KINDS:
             await client.read_resource(f"memory://workspaces/{a}/{kind}")
-    # edit_preflight needs a native edit request, which only the edit hook makes.
-    assert failures == {"edit_preflight": "NOT_FOUND"}, failures
+    # Stored paths never turn a read into a failure.  (Entity reads use a real
+    # entity only after the rows exist.)
+    changed = {
+        tool: (baseline[tool], code)
+        for tool, code in after.items()
+        if code not in {"ok", baseline[tool]}
+    }
+    assert not changed, changed
+    assert after["entity_evolution_trace"] == "ok", after
+    assert after["context_trigger_list"] == "ok", after
     # Nested and cross-workspace inputs are reached too.
     assert {
         "memory_store.context",
