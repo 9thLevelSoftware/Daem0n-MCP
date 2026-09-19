@@ -11,6 +11,8 @@ from datetime import datetime, timezone
 from types import MappingProxyType
 from typing import Any, Protocol, TypeVar
 
+from pydantic import ValidationError
+
 from ...covenant import (
     ArgumentNormalizationError,
     CovenantGate,
@@ -21,7 +23,13 @@ from ...event_store import AppendedEvent, EventStreamConflict
 from ...retrieval import RetrievalQuery
 from ...workspace import Workspace
 from .errors import ErrorCode
-from .models import ApiResponse, CapabilityState, RecordSummary, RetrievalData
+from .models import (
+    ApiResponse,
+    ApiWarning,
+    CapabilityState,
+    RecordSummary,
+    RetrievalData,
+)
 from .responses import ResponseContext, ResponseFactory
 from .tasks import (
     durable_task_execution_var,
@@ -104,10 +112,46 @@ def _contains_raw_path(value: object) -> bool:
 T = TypeVar("T")
 
 
-def _path_safe_success(response: ResponseContext, data: T) -> ApiResponse[T]:
+def _path_safe_success(
+    response: ResponseContext,
+    data: T,
+    *,
+    warnings: list[ApiWarning] | None = None,
+) -> ApiResponse[T]:
     if _contains_raw_path(data):
         return response.internal_error()
-    return response.success(data)
+    return response.success(data, warnings=warnings or ())
+
+
+_FIELD_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,63}$")
+
+
+def _token_not_issued_warning(error: ArgumentNormalizationError) -> ApiWarning:
+    """Say why a description-only preflight carries no token.
+
+    Only schema field names and pydantic error types are echoed; supplied
+    values and unknown keys never reach the wire.
+    """
+
+    problems: list[str] = []
+    cause = error.__cause__
+    if isinstance(cause, ValidationError):
+        for item in cause.errors():
+            location = ".".join(
+                str(part)
+                if isinstance(part, int) or _FIELD_NAME.match(str(part))
+                else "?"
+                for part in item["loc"]
+            )
+            problems.append(f"{location or 'target_arguments'} ({item['type']})")
+    detail = "; ".join(problems)[:360] or "they do not match the target tool schema"
+    return ApiWarning(
+        code="PREFLIGHT_TOKEN_NOT_ISSUED",
+        message=(
+            f"Target arguments did not validate: {detail}. "
+            "No preflight token issued; fix them and call memory_preflight again."
+        ),
+    )
 
 
 _EXPECTED_SERVICE_ERRORS = MappingProxyType(
@@ -192,7 +236,12 @@ def _expected_service_failure(
     if mapped is None:
         return None
     code, message, retryable = mapped
-    return response.failure(code, message, retryable=retryable)
+    return response.failure(
+        code,
+        message,
+        retryable=retryable,
+        retry_after_ms=250 if code is ErrorCode.DATABASE_IN_USE else None,
+    )
 
 
 def _utc_now() -> datetime:
@@ -507,13 +556,14 @@ class PinnedHandlers:
             **request.target_arguments,
         }
         target_is_complete = True
+        draft_warning: ApiWarning | None = None
         try:
             normalized_arguments = self._dependencies.argument_normalizer(
                 request.target_tool,
                 target_call_arguments,
                 scope.canonical_workspace,
             )
-        except ArgumentNormalizationError:
+        except ArgumentNormalizationError as normalization_error:
             if request.description is None:
                 return response.failure(
                     ErrorCode.INVALID_ARGUMENT,
@@ -524,6 +574,7 @@ class PinnedHandlers:
             # can never become capability material until full normalization
             # succeeds.
             target_is_complete = False
+            draft_warning = _token_not_issued_warning(normalization_error)
             normalized_arguments = dict(request.target_arguments)
         try:
             guidance_value = self._dependencies.preflight_service.guidance(
@@ -549,6 +600,7 @@ class PinnedHandlers:
                         target_tool=request.target_tool,
                         expires_at=None,
                     ),
+                    warnings=[draft_warning] if draft_warning is not None else None,
                 )
             token = self._dependencies.covenant_gate.issue_preflight(
                 scope,

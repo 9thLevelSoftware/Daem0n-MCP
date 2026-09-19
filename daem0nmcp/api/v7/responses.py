@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import logging
 import secrets
+import sys
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -21,6 +23,8 @@ from .models import (
 )
 
 T = TypeVar("T")
+
+_LOGGER = logging.getLogger(__name__)
 
 
 def _utc_now() -> datetime:
@@ -118,9 +122,17 @@ class ResponseContext:
         )
 
     def internal_error(self, error: BaseException | None = None) -> ApiResponse[Any]:
-        """Return the one deliberately opaque internal failure envelope."""
+        """Return the one deliberately opaque internal failure envelope.
 
-        del error
+        The cause is logged (stderr by default, never the MCP wire) under the
+        correlation ID the caller receives, so the owner can find it.
+        """
+
+        _LOGGER.error(
+            "v7 internal error correlation_id=%s",
+            self.request_id,
+            exc_info=error if error is not None else sys.exc_info()[1],
+        )
         return self.failure(
             ErrorCode.INTERNAL_ERROR,
             INTERNAL_ERROR_MESSAGE,

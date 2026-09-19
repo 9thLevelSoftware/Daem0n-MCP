@@ -6,8 +6,11 @@ must update the schema/conformance fixture in the same review.
 
 from __future__ import annotations
 
+import sqlite3
 from enum import Enum
 from types import MappingProxyType
+
+from ...bounded_workers import BoundedWorkerBusyError
 
 
 class ErrorCode(str, Enum):
@@ -63,11 +66,28 @@ def is_stable_error_code(value: object) -> bool:
     return isinstance(value, str) and value in STABLE_ERROR_CODE_SET
 
 
+def is_database_busy(error: BaseException | None) -> bool:
+    """Return whether *error* is transient contention a caller may retry.
+
+    A full worker pool and a SQLite lock or busy timeout both clear once the
+    competing writer finishes, so they map to retryable ``DATABASE_IN_USE``.
+    """
+
+    if isinstance(error, BoundedWorkerBusyError):
+        return True
+    if getattr(error, "code", None) == ErrorCode.DATABASE_IN_USE.value:
+        return True
+    return isinstance(error, sqlite3.OperationalError) and any(
+        word in str(error).casefold() for word in ("locked", "busy")
+    )
+
+
 __all__ = [
     "ERROR_CODE_REGISTRY",
     "INTERNAL_ERROR_MESSAGE",
     "STABLE_ERROR_CODES",
     "STABLE_ERROR_CODE_SET",
     "ErrorCode",
+    "is_database_busy",
     "is_stable_error_code",
 ]

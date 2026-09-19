@@ -30,6 +30,7 @@ from ...bounded_workers import BoundedWorkerPool
 from ...schema_version import CURRENT_SCHEMA_VERSION
 from ...storage_activation import DatabaseFileLock, ResolvedActiveDatabase
 from ...workspace import Workspace, normalize_resolved_path
+from .errors import is_database_busy
 from .models import RecordSummary
 from .public_ids import PublicObjectIdRepository
 from .resources import (
@@ -209,8 +210,9 @@ class ResourceRepositoryError(RuntimeError):
 
     code = "RESOURCE_REPOSITORY_UNAVAILABLE"
 
-    def __init__(self) -> None:
-        super().__init__(self.code)
+    def __init__(self, code: str = "RESOURCE_REPOSITORY_UNAVAILABLE") -> None:
+        self.code = code
+        super().__init__(code)
 
 
 ActiveDatabaseResolver = Callable[[Workspace], ResolvedActiveDatabase]
@@ -978,12 +980,14 @@ class SQLiteResourceRepository:
                 continue
             except Exception:
                 break
-        if worker.done():
-            with suppress(Exception):
-                worker.result()
+        failure: BaseException | None = None
+        if worker.done() and not worker.cancelled():
+            failure = worker.exception()
         if cancellation is not None:
             raise cancellation
-        raise ResourceRepositoryError()
+        if is_database_busy(failure):
+            raise ResourceRepositoryError("DATABASE_IN_USE") from failure
+        raise ResourceRepositoryError() from failure
 
     def _open_connection(
         self,
