@@ -1,8 +1,9 @@
-"""Claude Code Stop hook for fail-closed v7 memory reminders.
+"""Claude Code Stop hook: remind about v7 memory calls, never block.
 
-The hook analyzes the transcript but never writes memory directly. It emits
-scoped, replay-safe ``memory_store`` and ``memory_record_outcome`` suggestions
-that the authenticated MCP host can execute.
+The hook reads the stdin event (``cwd``, ``transcript_path``, ``session_id``),
+analyzes the transcript, and never writes memory. Its replay-safe
+``memory_store`` and ``memory_record_outcome`` suggestions are shown to the
+user as a ``systemMessage``; it never emits ``decision`` and always exits 0.
 """
 
 import contextlib
@@ -14,7 +15,7 @@ import sys
 from pathlib import Path
 
 from ..workspace import WorkspaceRegistry
-from ._client import get_project_path, run_async, succeed
+from ._client import read_hook_event, run_async
 
 # ─── transcript analysis ───────────────────────────────────────────
 
@@ -86,14 +87,13 @@ def _state_dir() -> Path:
     return d
 
 
-def _state_file() -> Path:
-    session_id = os.environ.get("CLAUDE_SESSION_ID", "default")
+def _state_file(session_id: str) -> Path:
     safe = re.sub(r"[^\w\-]", "_", session_id)
     return _state_dir() / f"stop_{safe}.json"
 
 
-def _load_state() -> dict:
-    f = _state_file()
+def _load_state(session_id: str) -> dict:
+    f = _state_file(session_id)
     if f.exists():
         try:
             return json.loads(f.read_text(encoding="utf-8"))
@@ -102,17 +102,17 @@ def _load_state() -> dict:
     return {"reminder_count": 0, "last_reminder_turn": -1}
 
 
-def _save_state(state: dict) -> None:
+def _save_state(session_id: str, state: dict) -> None:
     with contextlib.suppress(OSError):
-        _state_file().write_text(json.dumps(state), encoding="utf-8")
+        _state_file(session_id).write_text(json.dumps(state), encoding="utf-8")
 
 
 # ─── transcript reading ───────────────────────────────────────────
 
 
-def _read_transcript() -> list[dict]:
-    path = os.environ.get("CLAUDE_TRANSCRIPT_PATH", "")
-    if not path or not Path(path).exists():
+def _read_transcript(path: object) -> list[dict]:
+    """Read Claude Code JSONL records, unwrapping the nested ``message``."""
+    if not isinstance(path, str) or not path or not Path(path).is_file():
         return []
     messages = []
     try:
@@ -121,9 +121,15 @@ def _read_transcript() -> list[dict]:
                 line = line.strip()
                 if line:
                     try:
-                        messages.append(json.loads(line))
+                        record = json.loads(line)
                     except json.JSONDecodeError:
                         continue
+                    if isinstance(record, dict) and isinstance(
+                        record.get("message"), dict
+                    ):
+                        record = record["message"]
+                    if isinstance(record, dict):
+                        messages.append(record)
     except OSError:
         pass
     return messages
@@ -359,20 +365,28 @@ async def analyse_and_remember(
 
 
 def main() -> None:
-    project_path = get_project_path()
-    if project_path is None:
+    event = read_hook_event()
+    project_path = event.get("cwd") or os.environ.get("CLAUDE_PROJECT_DIR")
+    if not isinstance(project_path, str) or not project_path:
+        sys.exit(0)
+    if not (Path(project_path) / ".daem0nmcp").is_dir():
         sys.exit(0)
 
-    messages = _read_transcript()
+    messages = _read_transcript(event.get("transcript_path"))
     if not messages:
         sys.exit(0)
 
-    state = _load_state()
+    session_id = event.get("session_id")
+    if not isinstance(session_id, str) or not session_id:
+        session_id = "default"
+    state = _load_state(session_id)
     result = run_async(analyse_and_remember(project_path, messages, state))
-    _save_state(state)
+    _save_state(session_id, state)
 
     if result.message:
-        succeed(result.message)
+        # systemMessage is shown to the user; the hook never returns a
+        # "decision", so it cannot keep the agent running.
+        print(json.dumps({"systemMessage": result.message}))
     sys.exit(0)
 
 

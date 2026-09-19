@@ -7,11 +7,25 @@ hook scripts. Also handles uninstallation and legacy hook replacement.
 
 import argparse
 import json
+import shutil
 import sys
 from pathlib import Path
 from typing import Any
 
-from ..edit_host import provision_client_bridge_installation
+from ..edit_host import (
+    local_bridge_layout,
+    provision_client_bridge_installation,
+)
+
+# Every env key pairing can write into <project>/.claude/settings.local.json.
+_BRIDGE_ENV_KEYS = (
+    "DAEM0NMCP_EDIT_BRIDGE_CREDENTIAL_FILE",
+    "DAEM0NMCP_EDIT_BRIDGE_RUNTIME_DIR",
+    "DAEM0NMCP_EDIT_BRIDGE_MODE",
+    "DAEM0NMCP_EDIT_HOST_WORKSPACE_BINDING_FILE",
+    "DAEM0NMCP_PROJECT_ROOT",
+    "DAEM0NMCP_STORAGE_PATH",
+)
 
 
 def _settings_path() -> Path:
@@ -236,11 +250,41 @@ def install_claude_hooks(
     return True, message
 
 
-def uninstall_claude_hooks(dry_run: bool = False) -> tuple[bool, str]:
+def _unconfigure_project_bridge(project_root: Path, dry_run: bool) -> Path | None:
+    """Strip the env keys pairing added; return the settings path if changed."""
+    path = project_root / ".claude" / "settings.local.json"
+    if not path.is_file():
+        return None
+    value = json.loads(path.read_text(encoding="utf-8"))
+    configured = value.get("env") if isinstance(value, dict) else None
+    if not isinstance(configured, dict):
+        return None
+    removed = [key for key in _BRIDGE_ENV_KEYS if key in configured]
+    if not removed:
+        return None
+    for key in removed:
+        del configured[key]
+    if not configured:
+        del value["env"]
+    if not dry_run:
+        path.write_text(json.dumps(value, indent=2) + "\n", encoding="utf-8")
+    return path
+
+
+def uninstall_claude_hooks(
+    dry_run: bool = False,
+    *,
+    project_path: str | Path | None = None,
+    remove_credentials: bool = False,
+    bridge_config_root: Path | None = None,
+) -> tuple[bool, str]:
     """
     Remove all Daem0n Claude Code hooks.
 
-    Preserves all other hooks. Cleans up empty event lists.
+    Preserves all other hooks. Cleans up empty event lists. With
+    *project_path*, also strips the pairing env keys from that project's
+    ``.claude/settings.local.json``; with *remove_credentials*, also deletes
+    the project's local edit-bridge credential and socket directories.
 
     Returns (success, message).
     """
@@ -258,21 +302,43 @@ def uninstall_claude_hooks(dry_run: bool = False) -> tuple[bool, str]:
         else:
             del hooks_section[event]
 
-    if not removed_events:
-        return True, "No Daem0n hooks found to remove."
+    lines: list[str] = []
+    if removed_events:
+        settings["hooks"] = hooks_section
+        if dry_run:
+            formatted = json.dumps(settings, indent=2)
+            lines.append(f"[dry-run] Would write to {_settings_path()}:\n{formatted}")
+        else:
+            try:
+                _write_settings(settings)
+            except OSError as exc:
+                return False, f"Failed to write settings: {exc}"
+            lines.append(
+                f"Removed Daem0n hooks from: {', '.join(sorted(removed_events))}"
+            )
+    else:
+        lines.append("No Daem0n hooks found to remove.")
 
-    settings["hooks"] = hooks_section
+    if project_path is not None:
+        prefix = "[dry-run] Would remove" if dry_run else "Removed"
+        try:
+            project_root = Path(project_path).resolve(strict=True)
+            changed = _unconfigure_project_bridge(project_root, dry_run)
+            if changed is not None:
+                lines.append(f"{prefix} edit bridge settings from {changed}")
+            if remove_credentials:
+                _, _, *directories = local_bridge_layout(
+                    project_root, bridge_config_root
+                )
+                for directory in directories:
+                    if directory.is_dir():
+                        if not dry_run:
+                            shutil.rmtree(directory)
+                        lines.append(f"{prefix} {directory}")
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            return False, f"Edit bridge cleanup failed: {exc}"
 
-    if dry_run:
-        formatted = json.dumps(settings, indent=2)
-        return True, f"[dry-run] Would write to {_settings_path()}:\n{formatted}"
-
-    try:
-        _write_settings(settings)
-    except OSError as exc:
-        return False, f"Failed to write settings: {exc}"
-
-    return True, f"Removed Daem0n hooks from: {', '.join(sorted(removed_events))}"
+    return True, "\n".join(lines)
 
 
 if __name__ == "__main__":
@@ -285,10 +351,15 @@ if __name__ == "__main__":
     parser.add_argument("--remote-url")
     parser.add_argument("--remote-ca-file")
     parser.add_argument("--remote-origin")
+    parser.add_argument("--remove-credentials", action="store_true")
     args = parser.parse_args()
 
     if args.uninstall:
-        ok, msg = uninstall_claude_hooks(dry_run=args.dry_run)
+        ok, msg = uninstall_claude_hooks(
+            dry_run=args.dry_run,
+            project_path=args.project_path,
+            remove_credentials=args.remove_credentials,
+        )
     else:
         ok, msg = install_claude_hooks(
             dry_run=args.dry_run,

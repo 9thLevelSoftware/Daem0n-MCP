@@ -295,3 +295,99 @@ class TestUninstall:
 
         # File should be unchanged
         assert fake_settings.read_text() == original
+
+    def test_removes_legacy_manual_hook_entries(self, fake_settings):
+        fake_settings.write_text(
+            json.dumps(
+                {
+                    "hooks": {
+                        name: [
+                            {
+                                "matcher": "",
+                                "hooks": [
+                                    {
+                                        "type": "command",
+                                        "command": f'python3 "$HOME/Daem0nMCP/hooks/{script}"',
+                                    }
+                                ],
+                            }
+                        ]
+                        for name, script in (
+                            ("UserPromptSubmit", "daem0n_prompt_hook.py"),
+                            ("PreToolUse", "daem0n_pre_edit_hook.py"),
+                            ("PostToolUse", "daem0n_post_edit_hook.py"),
+                            ("Stop", "daem0n_stop_hook.py"),
+                        )
+                    }
+                }
+            )
+        )
+
+        ok, _msg = uninstall_claude_hooks()
+
+        assert ok
+        assert json.loads(fake_settings.read_text())["hooks"] == {}
+
+    def test_project_cleanup_strips_pairing_env_and_credentials(
+        self, fake_settings, tmp_path
+    ):
+        project = tmp_path / "project"
+        project.mkdir()
+        host_config = tmp_path / "host-config"
+        ok, message = install_claude_hooks(
+            project_path=project, bridge_config_root=host_config
+        )
+        assert ok, message
+        local_settings = project / ".claude" / "settings.local.json"
+        value = json.loads(local_settings.read_text(encoding="utf-8"))
+        value["env"]["USER_KEY"] = "kept"
+        value["permissions"] = {"allow": ["Bash(ls)"]}
+        local_settings.write_text(json.dumps(value), encoding="utf-8")
+        credential = Path(value["env"]["DAEM0NMCP_EDIT_BRIDGE_CREDENTIAL_FILE"])
+        runtime = Path(value["env"]["DAEM0NMCP_EDIT_BRIDGE_RUNTIME_DIR"])
+        runtime.mkdir(parents=True)
+
+        ok, message = uninstall_claude_hooks(
+            dry_run=True,
+            project_path=project,
+            remove_credentials=True,
+            bridge_config_root=host_config,
+        )
+        assert ok, message
+        assert credential.is_file() and runtime.is_dir()
+        assert "DAEM0NMCP_PROJECT_ROOT" in local_settings.read_text(encoding="utf-8")
+
+        ok, message = uninstall_claude_hooks(
+            project_path=project,
+            remove_credentials=True,
+            bridge_config_root=host_config,
+        )
+
+        assert ok, message
+        assert json.loads(local_settings.read_text(encoding="utf-8")) == {
+            "env": {"USER_KEY": "kept"},
+            "permissions": {"allow": ["Bash(ls)"]},
+        }
+        assert not credential.parent.exists()
+        assert not runtime.exists()
+        assert runtime.parent.name == "run"
+
+    def test_project_cleanup_without_credentials_keeps_them(
+        self, fake_settings, tmp_path
+    ):
+        project = tmp_path / "project"
+        project.mkdir()
+        host_config = tmp_path / "host-config"
+        install_claude_hooks(project_path=project, bridge_config_root=host_config)
+        local_settings = project / ".claude" / "settings.local.json"
+        credential = Path(
+            json.loads(local_settings.read_text(encoding="utf-8"))["env"][
+                "DAEM0NMCP_EDIT_BRIDGE_CREDENTIAL_FILE"
+            ]
+        )
+
+        ok, message = uninstall_claude_hooks(project_path=project)
+
+        assert ok, message
+        assert json.loads(local_settings.read_text(encoding="utf-8")) == {}
+        assert credential.is_file()

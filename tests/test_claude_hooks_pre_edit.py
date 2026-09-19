@@ -1,109 +1,121 @@
-"""Tests for the pre_edit Claude Code hook (blocking)."""
+"""Tests for the pre_edit Claude Code hook (remind only, never block)."""
 
-import pytest
-import pytest_asyncio
+import json
+import os
+import subprocess
+import sys
+from pathlib import Path
 
-from daem0nmcp.claude_hooks.pre_edit import async_main, handle_pre_edit
-from daem0nmcp.database import DatabaseManager
-from daem0nmcp.edit_bridge_transport import provision_bridge_credential
-
-
-@pytest_asyncio.fixture
-async def tmp_project(tmp_path):
-    """Create a temp project with initialised database."""
-    daem0n_dir = tmp_path / ".daem0nmcp"
-    daem0n_dir.mkdir()
-    storage = daem0n_dir / "storage"
-    storage.mkdir()
-
-    db = DatabaseManager(str(storage))
-    await db.init_db()
-    yield tmp_path
-    await db.close()
+ROOT = Path(__file__).resolve().parents[1]
 
 
-@pytest.mark.asyncio
-async def test_blocks_without_preflight(tmp_project):
-    file_path = str(tmp_project / "server.py")
-    result = await async_main(str(tmp_project), file_path)
-    assert not result.allowed
-    assert result.message == "EDIT_BRIDGE_UNAVAILABLE"
-    assert str(tmp_project) not in result.message
+def _run(args: list[str], event: dict, env: dict | None = None):
+    environment = {**os.environ, "PYTHONPATH": str(ROOT)}
+    environment.pop("CLAUDE_PROJECT_DIR", None)
+    environment.update(env or {})
+    return subprocess.run(
+        [sys.executable, *args],
+        input=json.dumps(event),
+        capture_output=True,
+        text=True,
+        env=environment,
+        timeout=30,
+        check=False,
+    )
 
 
-@pytest.mark.asyncio
-async def test_legacy_context_state_cannot_bypass_v7_preflight(tmp_project):
-    file_path = str(tmp_project / "server.py")
-    result = await async_main(str(tmp_project), file_path)
-    assert not result.allowed
-    assert result.message == "EDIT_BRIDGE_UNAVAILABLE"
+def _write_event(cwd: Path, file_path: str) -> dict:
+    return {
+        "session_id": "s-1",
+        "transcript_path": str(cwd / "t.jsonl"),
+        "cwd": str(cwd),
+        "hook_event_name": "PreToolUse",
+        "tool_name": "Write",
+        "tool_input": {"file_path": file_path, "content": "x = 1\n"},
+        "tool_use_id": "toolu_1",
+    }
 
 
-@pytest.mark.asyncio
-async def test_permissive_mode_allows_through(tmp_project, monkeypatch):
-    """In permissive mode the block message is returned but allowed=False still."""
-    monkeypatch.setenv("DAEM0N_HOOKS_PERMISSIVE", "1")
-
-    file_path = str(tmp_project / "server.py")
-    result = await async_main(str(tmp_project), file_path)
-
-    # async_main still returns allowed=False (it doesn't know about permissive mode)
-    # but the message is what block() would print. main() handles the permissive exit.
-    assert not result.allowed
-    assert result.message == "EDIT_BRIDGE_UNAVAILABLE"
+def test_non_daem0n_directory_exits_zero_silently(tmp_path):
+    result = _run(
+        ["-m", "daem0nmcp.claude_hooks.pre_edit"],
+        _write_event(tmp_path, str(tmp_path / "app.py")),
+    )
+    assert result.returncode == 0
+    assert result.stdout == ""
 
 
-@pytest.mark.asyncio
-async def test_does_not_read_or_surface_legacy_file_memories(tmp_project):
-    file_path = str(tmp_project / "server.py")
-    result = await async_main(str(tmp_project), file_path)
-    assert not result.allowed
-    assert "race condition" not in result.message
-    assert result.message == "EDIT_BRIDGE_UNAVAILABLE"
-
-
-def test_no_file_path_exits_clean(tmp_path, monkeypatch):
+def test_daem0n_project_exits_zero_with_reminder(tmp_path):
     (tmp_path / ".daem0nmcp").mkdir()
-    monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path))
-    monkeypatch.setenv("TOOL_INPUT", '{"command": "ls -la"}')
-
-    from daem0nmcp.claude_hooks.pre_edit import main
-
-    with pytest.raises(SystemExit) as exc_info:
-        main()
-    assert exc_info.value.code == 2
-
-
-def test_remote_mode_without_workspace_binding_fails_recoverably(tmp_path, monkeypatch):
-    target = tmp_path / "target.txt"
-    target.write_text("before", encoding="utf-8")
-    credential = tmp_path / "host" / "credential.json"
-    provision_bridge_credential(
-        credential,
-        principal_id="remote-principal",
-        transports=frozenset({"remote-https"}),
+    result = _run(
+        ["-m", "daem0nmcp.claude_hooks.pre_edit"],
+        _write_event(tmp_path, str(tmp_path / "src" / "app.py")),
     )
-    ca_file = tmp_path / "ca.pem"
-    ca_file.write_text("unused", encoding="utf-8")
-    monkeypatch.setenv("DAEM0NMCP_EDIT_BRIDGE_CREDENTIAL_FILE", str(credential))
-    monkeypatch.setenv("DAEM0NMCP_EDIT_BRIDGE_MODE", "remote-https")
-    monkeypatch.setenv("DAEM0NMCP_EDIT_BRIDGE_REMOTE_URL", "https://server.example")
-    monkeypatch.setenv("DAEM0NMCP_EDIT_BRIDGE_CA_FILE", str(ca_file))
-    monkeypatch.delenv("DAEM0NMCP_EDIT_HOST_WORKSPACE_BINDING_FILE", raising=False)
-
-    result = handle_pre_edit(
-        {
-            "session_id": "remote-session",
-            "tool_use_id": "remote-request",
-            "tool_name": "Edit",
-            "tool_input": {
-                "file_path": str(target),
-                "old_string": "before",
-                "new_string": "after",
-            },
-        },
-        str(tmp_path),
+    assert result.returncode == 0
+    payload = json.loads(result.stdout)
+    output = payload["hookSpecificOutput"]
+    assert output["hookEventName"] == "PreToolUse"
+    assert "permissionDecision" not in output
+    assert "memory_preflight" in output["additionalContext"]
+    assert (
+        'memory_recall_file(relative_file_path="src/app.py")'
+        in output["additionalContext"]
     )
+    assert "\n" not in output["additionalContext"]
 
-    assert not result.allowed
-    assert result.message == "EDIT_BRIDGE_UNAVAILABLE"
+
+def test_falls_back_to_claude_project_dir(tmp_path):
+    (tmp_path / ".daem0nmcp").mkdir()
+    event = _write_event(tmp_path, "notes.md")
+    del event["cwd"]
+    result = _run(
+        ["-m", "daem0nmcp.claude_hooks.pre_edit"],
+        event,
+        env={"CLAUDE_PROJECT_DIR": str(tmp_path)},
+    )
+    assert result.returncode == 0
+    context = json.loads(result.stdout)["hookSpecificOutput"]["additionalContext"]
+    assert 'relative_file_path="notes.md"' in context
+
+
+def test_path_outside_project_and_malformed_input_still_exit_zero(tmp_path):
+    (tmp_path / "project" / ".daem0nmcp").mkdir(parents=True)
+    outside = _run(
+        ["-m", "daem0nmcp.claude_hooks.pre_edit"],
+        _write_event(tmp_path / "project", str(tmp_path / "elsewhere.py")),
+    )
+    assert outside.returncode == 0
+    context = json.loads(outside.stdout)["hookSpecificOutput"]["additionalContext"]
+    assert "relative_file_path" not in context
+
+    environment = {**os.environ, "PYTHONPATH": str(ROOT)}
+    garbage = subprocess.run(
+        [sys.executable, "-m", "daem0nmcp.claude_hooks.pre_edit"],
+        input="not json",
+        capture_output=True,
+        text=True,
+        env=environment,
+        timeout=30,
+        check=False,
+    )
+    assert garbage.returncode == 0
+    assert garbage.stdout == ""
+
+
+def test_imports_no_api_or_retrieval_modules(tmp_path):
+    (tmp_path / ".daem0nmcp").mkdir()
+    probe = (
+        "import sys, runpy\n"
+        "try:\n"
+        "    runpy.run_module('daem0nmcp.claude_hooks.pre_edit', run_name='__main__')\n"
+        "except SystemExit:\n"
+        "    pass\n"
+        "heavy = sorted(m for m in sys.modules if m.startswith(("
+        "'daem0nmcp.api', 'daem0nmcp.retrieval', 'daem0nmcp.edit_host',"
+        " 'daem0nmcp.database', 'sqlalchemy', 'pydantic')))\n"
+        "print(heavy, file=sys.stderr)\n"
+        "sys.exit(1 if heavy else 0)\n"
+    )
+    result = _run(["-c", probe], _write_event(tmp_path, str(tmp_path / "a.py")))
+    assert result.returncode == 0, result.stderr
+    assert "additionalContext" in result.stdout

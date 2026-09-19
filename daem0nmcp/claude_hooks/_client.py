@@ -5,7 +5,6 @@ Provides direct Python imports (no HTTP/subprocess) for accessing
 Daem0n-MCP's database, memory, and rules from hook scripts.
 """
 
-import asyncio
 import json
 import os
 import sys
@@ -75,28 +74,18 @@ def get_managers(project_path: str):
 
 def run_async(coro) -> Any:
     """Run an async coroutine synchronously."""
+    import asyncio  # lazy: keeps the stdlib-only pre_edit hook fast
+
     return asyncio.run(coro)
 
 
-def get_tool_input() -> dict:
-    """Parse TOOL_INPUT env var as JSON, returning {} on failure."""
-    raw = os.environ.get("TOOL_INPUT", "{}")
-    try:
-        return json.loads(raw)
-    except (json.JSONDecodeError, TypeError):
-        return {}
-
-
-def get_file_path_from_input() -> str | None:
-    """Extract file_path or notebook_path from tool input."""
-    data = get_tool_input()
-    return data.get("file_path") or data.get("notebook_path")
-
-
 def get_command_from_input() -> str | None:
-    """Extract command from tool input (for Bash hooks)."""
-    data = get_tool_input()
-    return data.get("command")
+    """Extract command from the legacy TOOL_INPUT env var (for Bash hooks)."""
+    try:
+        data = json.loads(os.environ.get("TOOL_INPUT", "{}"))
+    except (json.JSONDecodeError, TypeError):
+        return None
+    return data.get("command") if isinstance(data, dict) else None
 
 
 def block(message: str) -> NoReturn:

@@ -12,7 +12,6 @@ from daem0nmcp.claude_hooks.post_edit import handle_post_edit
 from daem0nmcp.claude_hooks.post_edit_preflight import (
     handle_edit_preflight_response,
 )
-from daem0nmcp.claude_hooks.pre_edit import handle_pre_edit
 from daem0nmcp.database import DatabaseManager
 from daem0nmcp.edit_host import (
     EditHostConfig,
@@ -21,6 +20,7 @@ from daem0nmcp.edit_host import (
 )
 from daem0nmcp.workspace import WorkspaceRegistry
 from tests.api_v7.process_client import call, process_client, succeed
+from tests.native_edit_host import drive_native_edit
 
 
 @pytest.fixture
@@ -68,8 +68,8 @@ async def test_actual_stdio_mcp_shares_bridge_authority_and_promotes_capture(
     ) as session:
         await succeed(session, "session_brief", scope)
         with patch.dict(os.environ, environment, clear=False):
-            denied = handle_pre_edit(first_event, str(workspace.root))
-        assert not denied.allowed
+            denied = drive_native_edit(first_event, str(workspace.root))
+        assert not denied
         normalized = native_edit_request(
             project_path=workspace.root,
             tool_name="Edit",
@@ -112,8 +112,8 @@ async def test_actual_stdio_mcp_shares_bridge_authority_and_promotes_capture(
         )
         retry_event = {**first_event, "tool_use_id": "tool-use-allowed-2"}
         with patch.dict(os.environ, environment, clear=False):
-            allowed = handle_pre_edit(retry_event, str(workspace.root))
-        assert allowed.allowed
+            allowed = drive_native_edit(retry_event, str(workspace.root))
+        assert allowed
         target.write_text("after", encoding="utf-8")
         with patch.dict(os.environ, environment, clear=False):
             assert handle_post_edit(retry_event, str(workspace.root))
