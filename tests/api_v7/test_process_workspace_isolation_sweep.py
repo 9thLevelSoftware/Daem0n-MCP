@@ -1,22 +1,33 @@
 """Workspace isolation and host-path leak sweep across every v7 tool and resource.
 
 Pass 1 drives the real production server in-process as the default loopback
-principal, which may use both registered workspaces.  Every manifest tool and
-workspace resource is called against workspace B with workspace A's IDs,
-cursors, tokens and idempotency keys.  No B response may carry A's seeded text
-or IDs, A's database may not change, a rejected call may not change B, and no
-response field outside user text may carry a registered root, a storage path
-or the home directory.
+principal, which may use every registered workspace.  Every manifest tool and
+workspace resource is called against a target workspace with workspace A's
+IDs, cursors, tokens and idempotency keys, then again with the target's own
+arguments where A's would only be refused.  Two targets are swept:
 
-Pass 2 relaunches the same workspaces over HTTP with a JWT principal granted
-only A.  Every call that targets B, directly or as a consolidation or
-federation source, must return UNAUTHORIZED_WORKSPACE.
+* B, an ordinary second workspace with its own database;
+* C, a registered root whose storage is a byte copy of A's (a re-cloned or
+  copied project).  C's database physically holds A's rows, so only the
+  ``workspace_id`` predicates keep them out of C's responses.
+
+No target response may carry A's text, A's canary token, A's IDs or A's
+workspace ID; A's database may not change; a rejected call may not change the
+target; and no string or key anywhere may carry a registered root or the home
+directory.  Every call's outcome is pinned.
+
+Pass 2 relaunches A and B over HTTP with a JWT principal granted only A.
+Every call that targets B, directly or as a consolidation or federation
+source, must return UNAUTHORIZED_WORKSPACE and write nothing.
 """
 
 from __future__ import annotations
 
 import hashlib
+import importlib.util
 import json
+import re
+import shutil
 import sqlite3
 from collections.abc import Awaitable, Callable
 from contextlib import closing
@@ -33,6 +44,7 @@ from daem0nmcp.api.v7.production import create_v7_server
 from daem0nmcp.config import Settings
 from daem0nmcp.covenant import CovenantLevel
 from daem0nmcp.storage_activation import resolve_active_database
+from daem0nmcp.workspace import WorkspaceRegistry
 from tests.api_v7.process_client import (
     call,
     initialize_workspaces,
@@ -44,10 +56,16 @@ from tests.api_v7.process_client import (
 )
 
 CANARY = "canary7f3a9d1e"
+APPS_AVAILABLE = importlib.util.find_spec("tree_sitter_language_pack") is not None
+PROFILE_ENVIRONMENT = {
+    "DAEM0NMCP_PROFILE": "core",
+    "DAEM0NMCP_APPS_ENABLED": "true",
+    "DAEM0NMCP_GRAPH_ENABLED": "true",
+}
 
-# Tools whose purpose is to read or move data between workspaces.  Each is
-# gated by a directional link (or a preview token that required one) plus an
-# authorization check for every workspace involved; see the cross checks below.
+# Tools whose purpose is to read or move data between workspaces.  Each needs a
+# directional link (or a preview token that required one) plus authorization
+# for every workspace involved; see the cross checks below.
 CROSS_WORKSPACE_TOOLS = (
     "workspace_consolidation_preview",
     "workspace_consolidate",
@@ -56,26 +74,9 @@ CROSS_WORKSPACE_TOOLS = (
     "workspace_unlink",
 )
 
-# Fields that echo text the caller wrote.  They are exempt from the host-path
-# assertion only (KD-2); A's seeded text and IDs are forbidden in every field.
-USER_TEXT_FIELDS = frozenset(
-    {
-        "content",
-        "excerpt",
-        "bounded_excerpt",
-        "rationale",
-        "context",
-        "outcome_text",
-        "summary",
-        "text",
-        "description",
-        "label",
-        "topic",
-        "trigger",
-        "recall_query",
-        "proposed_action",
-    }
-)
+# Responses that stop at a gate before any workspace data is read.  Tools whose
+# every response is one of these are reported separately from the swept list.
+GATE_CODES = frozenset({"TASK_REQUIRED", "CAPABILITY_DEGRADED", "CAPABILITY_DISABLED"})
 
 # Derived tables that background projection jobs rewrite after a commit,
 # including lazily allocated projection-scoped public IDs.
@@ -114,24 +115,40 @@ def _ledger_counts(root: Path) -> dict[str, int]:
         }
 
 
-def _strings(value: Any, key: str | None = None):
+def _strings(value: Any):
+    """Every string in a JSON value, dictionary keys included."""
     if isinstance(value, dict):
         for child_key, child in value.items():
-            yield from _strings(child, child_key)
+            yield str(child_key)
+            yield from _strings(child)
     elif isinstance(value, list):
         for child in value:
-            yield from _strings(child, key)
+            yield from _strings(child)
     elif isinstance(value, str):
-        yield key, value
+        yield value
+
+
+def _invoker(client: Client) -> Invoke:
+    async def invoke(tool: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        result = await client.call_tool(tool, arguments, raise_on_error=False)
+        assert isinstance(result.structured_content, dict), tool
+        return result.structured_content
+
+    return invoke
+
+
+def _code(response: dict[str, Any]) -> str:
+    return "ok" if response["ok"] else response["error"]["code"]
 
 
 class Seed:
-    """Everything workspace A owns that B must never see or resolve."""
+    """Everything workspace A owns that another workspace must never see."""
 
     def __init__(self) -> None:
         self.texts: list[str] = []
         self.ids: dict[str, str] = {}
         self.tokens: dict[str, str] = {}
+        self.placeholders: set[str] = set()
 
     def text(self, label: str) -> str:
         value = f"{CANARY} {label} owned by workspace A"
@@ -139,14 +156,20 @@ class Seed:
         return value
 
     def id(self, name: str, prefix: str) -> str:
-        return self.ids.get(name) or _placeholder(prefix)
+        if name not in self.ids:
+            self.placeholders.add(name)
+            return _placeholder(prefix)
+        return self.ids[name]
 
     def token(self, name: str) -> str:
-        return self.tokens.get(name) or f"{name}-{CANARY}-placeholder"
+        if name not in self.tokens:
+            self.placeholders.add(name)
+            return f"{name}-{CANARY}-placeholder"
+        return self.tokens[name]
 
     @staticmethod
     def key(name: str) -> str:
-        """A's idempotency keys, replayed against B."""
+        """A's idempotency keys, replayed against the target."""
         return f"sweep-{name}-0001"
 
 
@@ -171,21 +194,20 @@ async def _protected(invoke: Invoke, workspace_id: str, tool: str, arguments: di
     )
 
 
+async def _target_call(invoke: Invoke, workspace_id: str, tool: str, arguments: dict):
+    if _is_protected(tool):
+        return await _protected(invoke, workspace_id, tool, arguments)
+    return await invoke(tool, {"workspace_id": workspace_id, **arguments})
+
+
 async def _seed_workspace_a(invoke: Invoke, a: str, b: str) -> Seed:
+    """Write A's objects (and one B record so a consolidation preview exists)."""
     seed = Seed()
 
-    async def ok(tool, arguments, protected=False):
-        result = await (
-            _protected(invoke, a, tool, arguments)
-            if protected
-            else invoke(tool, {"workspace_id": a, **arguments})
-        )
+    async def ok(tool, arguments):
+        result = await _target_call(invoke, a, tool, arguments)
         assert result["ok"], f"seed {tool}: {result['error']}"
         return result["data"]
-
-    async def optional(tool, arguments):
-        result = await invoke(tool, {"workspace_id": a, **arguments})
-        return result["data"] if result["ok"] else None
 
     await ok("session_brief", {})
     for name, record_type in (("record", "decision"), ("other_record", "warning")):
@@ -198,7 +220,6 @@ async def _seed_workspace_a(invoke: Invoke, a: str, b: str) -> Seed:
                 "relative_file_path": "src/owned.py",
                 "idempotency_key": seed.key(name),
             },
-            protected=True,
         )
         seed.ids[name] = stored["record"]["record_id"]
         seed.ids[f"{name}_event"] = stored["event_id"]
@@ -220,7 +241,6 @@ async def _seed_workspace_a(invoke: Invoke, a: str, b: str) -> Seed:
             "relationship_type": "related_to",
             "idempotency_key": seed.key("link"),
         },
-        protected=True,
     )
     seed.ids["relationship"] = next(
         value for value in linked["affected_ids"] if value.startswith("rel_")
@@ -232,7 +252,6 @@ async def _seed_workspace_a(invoke: Invoke, a: str, b: str) -> Seed:
             "must_do": [seed.text("rule must do")],
             "idempotency_key": seed.key("rule"),
         },
-        protected=True,
     )
     seed.ids["rule"] = rule["rule_id"]
     trigger = await ok(
@@ -243,33 +262,26 @@ async def _seed_workspace_a(invoke: Invoke, a: str, b: str) -> Seed:
             "recall_query": seed.text("trigger recall query"),
             "idempotency_key": seed.key("trigger"),
         },
-        protected=True,
     )
     seed.ids["trigger"] = trigger["trigger_id"]
     active = await ok(
         "active_context_add",
         {"record_id": seed.ids["record"], "reason": seed.text("active reason")},
-        protected=True,
     )
     seed.ids["active_context"] = active["active_context_id"]
-    page = await ok("active_context_list", {})
-    seed.tokens["active_context_selection"] = page["selection_token"]
-    search = await ok("memory_search_text", {"query": CANARY, "limit": 1})
-    seed.tokens["cursor"] = search["next_cursor"]
-    updates = await ok("session_updates_get", {})
-    seed.tokens["session_cursor"] = updates["cursor"]
-    for tool, arguments in (
-        ("memory_prune_preview", {}),
-        ("memory_duplicates_preview", {}),
-        ("memory_compaction_preview", {"summary": "sweep", "query": CANARY}),
-        ("dream_duplicates_preview", {}),
-    ):
-        data = await optional(tool, arguments)
-        if data and data.get("selection_token"):
-            seed.tokens[tool] = data["selection_token"]
-    export = await ok("workspace_export", {})
-    if export.get("export_session_id"):
-        seed.ids["export_session"] = export["export_session_id"]
+    if APPS_AVAILABLE:
+        await ok("code_index", {"relative_root": "src"})
+        found = await ok("code_search", {"query": CANARY})
+        seed.ids["code_entity"] = found["items"][0]["code_entity_id"]
+    # The core graph profile extracts no named entities, so entity and
+    # community IDs stay placeholders unless an extractor is installed.
+    await ok("entity_backfill", {"idempotency_key": seed.key("entity_backfill")})
+    entities = await ok("entity_list", {})
+    if entities["items"]:
+        seed.ids["entity"] = entities["items"][0]["entity_id"]
+    communities = await ok("community_list", {})
+    if communities["items"]:
+        seed.ids["community"] = communities["items"][0]["community_id"]
     # A consolidation preview needs a linked source with at least one record.
     assert (await invoke("session_brief", {"workspace_id": b}))["ok"]
     b_record = {
@@ -278,26 +290,41 @@ async def _seed_workspace_a(invoke: Invoke, a: str, b: str) -> Seed:
         "idempotency_key": "sweep-b-own-record-0001",
     }
     assert (await _protected(invoke, b, "memory_store", b_record))["ok"]
-    await ok("workspace_link", {"linked_workspace_id": b}, protected=True)
-    preview = await ok("workspace_consolidation_preview", {"source_workspace_ids": [b]})
-    seed.tokens["consolidation"] = preview["selection_token"]
-    # Optional-profile objects: real IDs when the profile is installed.
-    code = await optional("code_index", {"relative_root": "src"})
-    if code is not None:
-        found = await optional("code_search", {"query": CANARY})
-        if found and found["items"]:
-            seed.ids["code_entity"] = found["items"][0]["code_entity_id"]
-    entities = await optional("entity_list", {})
-    if entities and entities["items"]:
-        seed.ids["entity"] = entities["items"][0]["entity_id"]
-    communities = await optional("community_list", {})
-    if communities and communities["items"]:
-        seed.ids["community"] = communities["items"][0]["community_id"]
+    await ok("workspace_link", {"linked_workspace_id": b})
     return seed
 
 
+async def _mint_tokens(invoke: Invoke, a: str, b: str, seed: Seed) -> None:
+    """Cursors and tokens are bound to one server process; mint them per run."""
+
+    async def ok(tool, arguments):
+        result = await invoke(tool, {"workspace_id": a, **arguments})
+        assert result["ok"], f"mint {tool}: {result['error']}"
+        return result["data"]
+
+    await ok("session_brief", {})
+    seed.tokens["active_context_selection"] = (await ok("active_context_list", {}))[
+        "selection_token"
+    ]
+    seed.tokens["cursor"] = (
+        await ok("memory_search_text", {"query": CANARY, "limit": 1})
+    )["next_cursor"]
+    seed.tokens["session_cursor"] = (await ok("session_updates_get", {}))["cursor"]
+    for tool, arguments in (
+        ("memory_prune_preview", {}),
+        ("memory_duplicates_preview", {}),
+        ("memory_compaction_preview", {"summary": "sweep", "query": CANARY}),
+        ("dream_duplicates_preview", {}),
+    ):
+        seed.tokens[tool] = (await ok(tool, arguments))["selection_token"]
+    export = await ok("workspace_export", {})
+    seed.ids["export_session"] = export["export_session_id"]
+    preview = await ok("workspace_consolidation_preview", {"source_workspace_ids": [b]})
+    seed.tokens["consolidation"] = preview["selection_token"]
+
+
 def _sweep_arguments(seed: Seed) -> dict[str, dict[str, Any]]:
-    """Arguments for every non-cross tool, aimed at B but naming A's objects."""
+    """Arguments for every non-cross tool, naming A's objects."""
 
     record = seed.id("record", "mem")
     cursor = seed.token("cursor")
@@ -359,7 +386,7 @@ def _sweep_arguments(seed: Seed) -> dict[str, dict[str, Any]]:
             "edit_request_id": _placeholder("edt"),
             "description": "sweep",
         },
-        "entity_backfill": {"idempotency_key": seed.key("record")},
+        "entity_backfill": {"idempotency_key": seed.key("entity_backfill")},
         "entity_evolution_trace": {"entity_id": seed.id("entity", "ent")},
         "entity_list": {"cursor": cursor},
         "knowledge_graph_get": {"record_ids": [record], "query": CANARY},
@@ -418,11 +445,11 @@ def _sweep_arguments(seed: Seed) -> dict[str, dict[str, Any]]:
         "memory_search_text": {"query": CANARY, "cursor": cursor},
         "memory_store": {
             "record_type": "decision",
-            "content": "Workspace B sweep decision.",
+            "content": "Target sweep decision.",
             "idempotency_key": seed.key("record"),
         },
         "memory_store_batch": {
-            "records": [{"record_type": "learning", "content": "B batch sweep."}],
+            "records": [{"record_type": "learning", "content": "Target batch sweep."}],
             "idempotency_key": seed.key("other_record"),
         },
         "memory_unlink": {"relationship_id": seed.id("relationship", "rel")},
@@ -453,8 +480,146 @@ def _sweep_arguments(seed: Seed) -> dict[str, dict[str, Any]]:
     }
 
 
-def _cross_arguments(seed: Seed, source: str) -> dict[str, dict[str, Any]]:
-    token = seed.token("consolidation")
+# The target's own arguments for tools whose A-argument call is only refused,
+# so their success responses are scanned too.  They run first, so the target
+# is indexed before A's code entity is looked up in it.
+OWN_VARIANTS: tuple[tuple[str, dict[str, Any]], ...] = (
+    ("code_index", {"relative_root": "src"}),
+    ("code_search", {"query": "neutral"}),
+    ("code_todos_scan", {"relative_root": "src"}),
+    ("code_refactor_propose", {"relative_file_path": "src/neutral.py"}),
+    ("workspace_export", {}),
+)
+
+# Pinned outcomes per tool, in call order: A's arguments, then the variant
+# without A's cursor or session (when there is one), then the target's own
+# arguments (OWN_VARIANTS).  B and the copied-storage C behave identically.
+EXPECTED: dict[str, tuple[str, ...]] = {
+    "active_context_add": ("NOT_FOUND",),
+    "active_context_clear": ("TOKEN_TAMPERED",),
+    "active_context_list": (
+        "INVALID_ARGUMENT",
+        "ok",
+    ),
+    "active_context_remove": ("NOT_FOUND",),
+    "code_impact_analyze": ("NOT_FOUND",),
+    "code_index": (
+        "ok",
+        "ok",
+    ),
+    "code_refactor_propose": (
+        "WORKSPACE_PATH_ESCAPE",
+        "ok",
+    ),
+    "code_search": (
+        "INVALID_ARGUMENT",
+        "ok",
+        "ok",
+    ),
+    "code_todos_scan": (
+        "INVALID_ARGUMENT",
+        "ok",
+        "ok",
+    ),
+    "code_todos_scan_and_store": ("ok",),
+    "community_get": ("CAPABILITY_DEGRADED",),
+    "community_list": (
+        "CAPABILITY_DEGRADED",
+        "CAPABILITY_DEGRADED",
+    ),
+    "community_rebuild": ("ok",),
+    "context_compress": ("ok",),
+    "context_trigger_create": ("ok",),
+    "context_trigger_delete": ("NOT_FOUND",),
+    "context_trigger_list": (
+        "INVALID_ARGUMENT",
+        "ok",
+    ),
+    "context_triggers_match": ("ok",),
+    "covenant_status": ("ok",),
+    "decision_debate": ("ok",),
+    "decision_simulate": ("NOT_FOUND",),
+    "document_ingest_url": ("INVALID_ARGUMENT",),
+    "dream_duplicates_preview": ("ok",),
+    "dream_duplicates_purge": ("TOKEN_SCOPE_MISMATCH",),
+    "edit_preflight": ("NOT_FOUND",),
+    "entity_backfill": ("ok",),
+    "entity_evolution_trace": ("NOT_FOUND",),
+    "entity_list": (
+        "INVALID_ARGUMENT",
+        "ok",
+    ),
+    "knowledge_graph_get": ("TASK_REQUIRED",),
+    "knowledge_graph_render": ("TASK_REQUIRED",),
+    "knowledge_graph_stats": ("ok",),
+    "memory_archive_set": ("NOT_FOUND",),
+    "memory_at_time_get": ("NOT_FOUND",),
+    "memory_capture_list": (
+        "INVALID_ARGUMENT",
+        "ok",
+    ),
+    "memory_capture_promote": ("NOT_FOUND",),
+    "memory_chain_trace": ("NOT_FOUND",),
+    "memory_compact": ("TOKEN_SCOPE_MISMATCH",),
+    "memory_compaction_preview": ("ok",),
+    "memory_duplicates_cleanup": ("TOKEN_SCOPE_MISMATCH",),
+    "memory_duplicates_preview": ("ok",),
+    "memory_link": ("NOT_FOUND",),
+    "memory_pin_set": ("NOT_FOUND",),
+    "memory_preflight": ("ok",),
+    "memory_prune": ("TOKEN_SCOPE_MISMATCH",),
+    "memory_prune_preview": ("ok",),
+    "memory_recall": ("ok",),
+    "memory_recall_entity": ("NOT_FOUND",),
+    "memory_recall_file": (
+        "INVALID_ARGUMENT",
+        "ok",
+    ),
+    "memory_recall_hierarchical": ("ok",),
+    "memory_record_outcome": ("NOT_FOUND",),
+    "memory_related": ("NOT_FOUND",),
+    "memory_search_text": (
+        "INVALID_ARGUMENT",
+        "ok",
+    ),
+    "memory_store": ("ok",),
+    "memory_store_batch": ("ok",),
+    "memory_unlink": ("NOT_FOUND",),
+    "memory_verify": ("ok",),
+    "memory_versions_list": (
+        "NOT_FOUND",
+        "NOT_FOUND",
+    ),
+    "projection_rebuild": ("ok",),
+    "rule_check": ("ok",),
+    "rule_create": ("ok",),
+    "rule_evolution_analyze": ("NOT_FOUND",),
+    "rule_list": (
+        "INVALID_ARGUMENT",
+        "ok",
+    ),
+    "rule_update": ("NOT_FOUND",),
+    "sandbox_execute_python": ("TASK_REQUIRED",),
+    "session_brief": ("ok",),
+    "session_updates_get": (
+        "INVALID_ARGUMENT",
+        "ok",
+    ),
+    "system_health": ("ok",),
+    "workspace_export": (
+        "IMPORT_INVALID",
+        "ok",
+        "ok",
+    ),
+    "workspace_import": ("IMPORT_INVALID",),
+    "workspace_links_list": (
+        "INVALID_ARGUMENT",
+        "ok",
+    ),
+}
+
+
+def _cross_arguments(token: str, source: str) -> dict[str, dict[str, Any]]:
     return {
         "workspace_consolidation_preview": {"source_workspace_ids": [source]},
         "workspace_consolidate": {
@@ -485,192 +650,252 @@ def test_every_manifest_tool_is_swept_or_declared_cross_workspace():
     )
 
 
-async def test_workspace_isolation_and_path_leak_sweep(tmp_path, capsys):
-    roots = (tmp_path / "alpha", tmp_path / "beta")
-    alpha, beta = await initialize_workspaces(roots)
-    a, b = alpha.workspace_id, beta.workspace_id
-    source = roots[0] / "src"
-    source.mkdir()
-    (source / "owned.py").write_text(
-        f"def {CANARY}_owned_function():\n    return 1  # TODO: {CANARY} owned todo\n",
-        encoding="utf-8",
-    )
-    settings = Settings(
-        project_root=str(roots[0]),
-        workspace_roots=[str(root) for root in roots],
-        dream_enabled=False,
-    )
-    server = create_v7_server(
-        "stdio",
-        settings=settings,
-        environ={
-            "DAEM0NMCP_PROFILE": "core",
-            "DAEM0NMCP_APPS_ENABLED": "true",
-            "DAEM0NMCP_GRAPH_ENABLED": "true",
-        },
-    )
-    path_needles = {
-        str(path).lower()
-        for base in (*roots, Path.home())
-        for path in (base, base.resolve())
-    }
-    path_needles |= {str(root / ".daem0nmcp" / "storage").lower() for root in roots}
-    path_needles |= {Path(needle).as_posix().lower() for needle in path_needles}
+class Sweep:
+    """Pass-1 assertions shared by every target workspace."""
 
-    swept: list[str] = []
-    async with Client(server) as client:
+    def __init__(self, roots: dict[str, Path], a_root: Path, seed: Seed, a: str):
+        self.a_root = a_root
+        self.seed = seed
+        self.forbidden = [*seed.texts, *seed.ids.values(), a]
+        self.a_ledger = _ledger_counts(a_root)
+        needles = {
+            str(path).lower()
+            for base in (*roots.values(), Path.home())
+            for path in (base, base.resolve())
+        }
+        self.needles = needles | {Path(n).as_posix().lower() for n in needles}
+        self.observed: dict[str, dict[str, list[str]]] = {}
 
-        async def invoke(tool: str, arguments: dict[str, Any]) -> dict[str, Any]:
-            result = await client.call_tool(tool, arguments, raise_on_error=False)
-            assert isinstance(result.structured_content, dict), tool
-            return result.structured_content
+    def check(self, label: str, response: Any, request: Any) -> None:
+        echoed = set(_strings(request))
+        for value in _strings(response):
+            for secret in self.forbidden:
+                assert secret not in value, f"{label}: A's {secret!r} leaked"
+            # A bare canary may appear only as an exact echo of the request
+            # (memory_verify returns its claim).
+            assert CANARY not in value or value in echoed, f"{label}: {value!r}"
+            lowered = value.lower()
+            for needle in self.needles:
+                assert needle not in lowered, f"{label}: host path in {value!r}"
+        assert _ledger_counts(self.a_root) == self.a_ledger, f"{label} changed A"
 
-        served = {tool.name for tool in await client.list_tools()}
-        assert served == set(V7_TOOL_LEVELS)
-        seed = await _seed_workspace_a(invoke, a, b)
-        forbidden = [*seed.texts, *seed.ids.values(), a]
-        a_ledger = _ledger_counts(roots[0])
-
-        def assert_isolated(label: str, response: Any) -> None:
-            for key, value in _strings(response):
-                for secret in forbidden:
-                    assert secret not in value, f"{label}: A's {secret!r} in {key}"
-                if key in USER_TEXT_FIELDS:
-                    continue
-                lowered = value.lower()
-                for needle in path_needles:
-                    assert needle not in lowered, f"{label}: host path in {key}"
-            assert _ledger_counts(roots[0]) == a_ledger, f"{label} changed A"
-
-        assert (await invoke("session_brief", {"workspace_id": b}))["ok"]
-        for tool, arguments in sorted(_sweep_arguments(seed).items()):
+    async def run(self, client, name: str, target: str, root: Path) -> None:
+        invoke = _invoker(client)
+        observed = self.observed.setdefault(name, {})
+        assert (await invoke("session_brief", {"workspace_id": target}))["ok"]
+        own: dict[str, str] = {}
+        for tool, arguments in OWN_VARIANTS:
+            response = await _target_call(invoke, target, tool, arguments)
+            self.check(f"{name}:{tool} (own)", response, arguments)
+            own[tool] = _code(response)
+        for tool, arguments in sorted(_sweep_arguments(self.seed).items()):
             variants = [arguments]
-            if {"cursor", "after_cursor"} & set(arguments):
-                # A's cursor is refused, so also read B's own first page.
+            if {"cursor", "after_cursor", "export_session_id"} & set(arguments):
+                # A's cursor or session is refused; also read the target's own.
                 variants.append(
                     {
                         key: value
                         for key, value in arguments.items()
-                        if key not in {"cursor", "after_cursor"}
+                        if key not in {"cursor", "after_cursor", "export_session_id"}
                     }
                 )
             for variant in variants:
-                before = _ledger_counts(roots[1])
-                if _is_protected(tool):
-                    response = await _protected(invoke, b, tool, variant)
-                else:
-                    response = await invoke(tool, {"workspace_id": b, **variant})
-                assert_isolated(tool, response)
+                before = _ledger_counts(root)
+                response = await _target_call(invoke, target, tool, variant)
+                self.check(f"{name}:{tool}", response, variant)
                 if not response["ok"]:
-                    assert _ledger_counts(roots[1]) == before, (
-                        f"rejected {tool} wrote B"
-                    )
-            swept.append(tool)
-
-        templates = await client.list_resource_templates()
-        workspace_templates = [
-            template.uriTemplate
-            for template in templates
-            if template.uriTemplate.startswith("memory://workspaces/{workspace_id}/")
+                    assert _ledger_counts(root) == before, f"{name}:{tool} wrote"
+                observed.setdefault(tool, []).append(_code(response))
+        for tool, code in own.items():
+            observed[tool].append(code)
+        templates = [
+            f"memory://workspaces/{target}/{kind}"
+            for kind in ("warnings", "failures", "rules", "active-context")
         ]
-        assert workspace_templates
-        for template in workspace_templates:
-            uri = template.replace("{workspace_id}", b)
+        for uri in templates:
             contents = await client.read_resource(uri)
-            assert_isolated(uri, [json.loads(content.text) for content in contents])
-            swept.append(uri)
+            self.check(uri, [json.loads(item.text) for item in contents], uri)
 
-        # Cross-workspace tools: B has no link to A (only A -> B exists), so
-        # every B-side read or move of A must be refused; a federated recall is
-        # refused the same way.
-        federated = await invoke(
-            "memory_recall",
-            {"workspace_id": b, "query": CANARY, "linked_workspace_ids": [a]},
-        )
-        assert not federated["ok"]
-        assert_isolated("memory_recall linked", federated)
-        for tool, arguments in _cross_arguments(seed, a).items():
-            if tool in {"workspace_link", "workspace_unlink"}:
-                continue
-            before = _ledger_counts(roots[1])
-            if _is_protected(tool):
-                response = await _protected(invoke, b, tool, arguments)
-            else:
-                response = await invoke(tool, {"workspace_id": b, **arguments})
-            assert not response["ok"], f"{tool} crossed without a link"
-            assert_isolated(tool, response)
-            assert _ledger_counts(roots[1]) == before
-        # Linking needs a preflight bound to the exact target, then the
-        # direction it names is what consolidation honours.
-        unbound = await invoke(
-            "workspace_link",
-            {
-                "workspace_id": b,
-                "linked_workspace_id": a,
-                "preflight_token": seed.token("consolidation"),
-            },
-        )
-        assert not unbound["ok"]
-        link = _cross_arguments(seed, a)["workspace_link"]
-        assert (await _protected(invoke, b, "workspace_link", link))["ok"]
-        preview = await invoke(
-            "workspace_consolidation_preview",
-            {"workspace_id": b, "source_workspace_ids": [a]},
-        )
-        assert preview["ok"], preview["error"]
-        unlink = _cross_arguments(seed, a)["workspace_unlink"]
-        assert (await _protected(invoke, b, "workspace_unlink", unlink))["ok"]
-        after_unlink = await invoke(
-            "workspace_consolidation_preview",
-            {"workspace_id": b, "source_workspace_ids": [a]},
-        )
-        assert not after_unlink["ok"]
+    def assert_pinned(self, name: str) -> None:
+        for tool, codes in sorted(self.observed[name].items()):
+            if APPS_AVAILABLE or not tool.startswith("code_"):
+                assert tuple(codes) == EXPECTED[tool], (name, tool, codes)
 
-    # Pass 2: a JWT principal granted only A is refused B everywhere.
+    def gated(self, name: str) -> list[str]:
+        return sorted(
+            tool
+            for tool, codes in self.observed[name].items()
+            if all(code in GATE_CODES for code in codes)
+        )
+
+
+async def test_workspace_isolation_and_path_leak_sweep(tmp_path, capsys):
+    a_root, b_root, c_root = (tmp_path / name for name in ("alpha", "beta", "gamma"))
+    alpha, beta = await initialize_workspaces((a_root, b_root))
+    a, b = alpha.workspace_id, beta.workspace_id
+    c = WorkspaceRegistry([c_root], default_root=c_root).default.workspace_id
+    for root, text in (
+        (a_root, f"def {CANARY}_owned_function():\n    return 1  # TODO: {CANARY}\n"),
+        (b_root, "def neutral_function():\n    return 1  # TODO: neutral\n"),
+    ):
+        (root / "src").mkdir()
+        (root / "src" / f"{'owned' if root == a_root else 'neutral'}.py").write_text(
+            text, encoding="utf-8"
+        )
+
+    def server(roots):
+        return create_v7_server(
+            "stdio",
+            settings=Settings(
+                project_root=str(a_root),
+                workspace_roots=[str(root) for root in roots],
+                dream_enabled=False,
+            ),
+            environ=PROFILE_ENVIRONMENT,
+        )
+
+    # Pass 1, target B.
+    async with Client(server((a_root, b_root))) as client:
+        invoke = _invoker(client)
+        assert {tool.name for tool in await client.list_tools()} == set(V7_TOOL_LEVELS)
+        seed = await _seed_workspace_a(invoke, a, b)
+        await _mint_tokens(invoke, a, b, seed)
+        required = {"record", "other_record", "relationship", "rule", "trigger"}
+        required |= {"active_context"}
+        required |= {"export_session"} | ({"code_entity"} if APPS_AVAILABLE else set())
+        assert required <= set(seed.ids), required - set(seed.ids)
+        roots = {"A": a_root, "B": b_root, "C": c_root}
+        sweep = Sweep(roots, a_root, seed, a)
+        await sweep.run(client, "B", b, b_root)
+        cross = await _cross_workspace_checks(invoke, sweep, a, b, b_root, seed)
+
+    # Pass 1, target C: a registered root holding a byte copy of A's storage.
+    shutil.copytree(a_root / ".daem0nmcp", c_root / ".daem0nmcp")
+    (c_root / "src").mkdir()
+    (c_root / "src" / "neutral.py").write_text(
+        "def neutral_function():\n    return 1  # TODO: neutral\n", encoding="utf-8"
+    )
+    async with Client(server((a_root, b_root, c_root))) as client:
+        invoke = _invoker(client)
+        await _mint_tokens(invoke, a, b, seed)
+        sweep.a_ledger = _ledger_counts(a_root)
+        await sweep.run(client, "C", c, c_root)
+    for name in ("B", "C"):
+        sweep.assert_pinned(name)
+
+    await _jwt_pass(tmp_path, a_root, b_root, a, b, seed)
+
+    with capsys.disabled():
+        swept = sorted(sweep.observed["B"])
+        print(f"\nswept ({len(swept)} tools + 4 resources, targets B and C)")
+        print(f"gate-only on B (no data path reached): {sweep.gated('B')}")
+        print(f"placeholder seeds (no real A object): {sorted(seed.placeholders)}")
+        print(f"cross-workspace ({len(cross)}): {', '.join(cross)}")
+
+
+async def _cross_workspace_checks(invoke, sweep, a, b, b_root, seed) -> list[str]:
+    """B may read or move A only through a B -> A link it created itself."""
+
+    async def refused(tool, arguments, code):
+        before = _ledger_counts(b_root)
+        response = await _target_call(invoke, b, tool, arguments)
+        sweep.check(f"B:{tool}", response, arguments)
+        assert _code(response) == code, (tool, response)
+        assert _ledger_counts(b_root) == before, tool
+
+    # Only A -> B exists, so every B-side read or move of A is refused.
+    await refused(
+        "memory_recall",
+        {"query": CANARY, "linked_workspace_ids": [a]},
+        "UNAUTHORIZED_WORKSPACE",
+    )
+    for tool, arguments in _cross_arguments(seed.token("consolidation"), a).items():
+        if tool in {"workspace_link", "workspace_unlink"}:
+            continue
+        await refused(tool, arguments, "UNAUTHORIZED_WORKSPACE")
+    # Linking needs a preflight bound to exactly that link.
+    unbound = await invoke(
+        "workspace_link",
+        {
+            "workspace_id": b,
+            "linked_workspace_id": a,
+            "preflight_token": seed.token("consolidation"),
+        },
+    )
+    assert _code(unbound) == "TOKEN_TAMPERED", unbound
+    link = {"linked_workspace_id": a}
+    assert (await _protected(invoke, b, "workspace_link", link))["ok"]
+    preview = await invoke(
+        "workspace_consolidation_preview",
+        {"workspace_id": b, "source_workspace_ids": [a]},
+    )
+    assert preview["ok"], preview["error"]
+    token = preview["data"]["selection_token"]
+    assert (await _protected(invoke, b, "workspace_unlink", link))["ok"]
+    # With B's own valid preview token, only the removed link refuses the move.
+    for tool, arguments in _cross_arguments(token, a).items():
+        if tool in {"workspace_link", "workspace_unlink"}:
+            continue
+        await refused(tool, arguments, "UNAUTHORIZED_WORKSPACE")
+    return list(CROSS_WORKSPACE_TOOLS)
+
+
+async def _jwt_pass(tmp_path, a_root, b_root, a, b, seed) -> None:
+    """Pass 2: a JWT principal granted only A is refused B everywhere."""
     policy_path = tmp_path / "protected" / "access.json"
     write_workspace_grants(policy_path, [a])
+    placeholder_token = f"preflight-{CANARY}-placeholder"
     with jwt_issuer() as (issuer_url, token):
         async with process_client(
-            roots[0],
+            a_root,
             "streamable-http",
-            workspace_roots=roots,
+            workspace_roots=(a_root, b_root),
             environment_overrides=jwt_environment(issuer_url, policy_path),
             http_headers={"Authorization": "Bearer " + token()},
         ) as session:
-
-            async def remote(tool: str, arguments: dict[str, Any]) -> dict[str, Any]:
-                return await call(session, tool, arguments)
-
             await succeed(session, "session_brief", {"workspace_id": a})
-            placeholder_token = f"preflight-{CANARY}-placeholder"
+            ledgers = {root: _ledger_counts(root) for root in (a_root, b_root)}
+
+            def assert_denied(tool, denied):
+                assert not denied["ok"], (tool, "succeeded for an ungranted workspace")
+                assert denied["error"]["code"] == "UNAUTHORIZED_WORKSPACE", (
+                    tool,
+                    denied,
+                )
+
             targets = {
                 **_sweep_arguments(seed),
-                **_cross_arguments(seed, a),
+                **_cross_arguments(seed.token("consolidation"), a),
             }
             for tool, arguments in sorted(targets.items()):
                 if _is_protected(tool):
                     arguments = {**arguments, "preflight_token": placeholder_token}
-                denied = await remote(tool, {"workspace_id": b, **arguments})
-                assert denied["error"]["code"] == "UNAUTHORIZED_WORKSPACE", tool
-            for template in workspace_templates:
-                with pytest.raises(McpError):
-                    await session.read_resource(template.replace("{workspace_id}", b))
-            # B as a source of an A-side federated read or consolidation.
-            denied = await remote(
+                denied = await call(session, tool, {"workspace_id": b, **arguments})
+                assert_denied(tool, denied)
+            for kind in ("warnings", "failures", "rules", "active-context"):
+                # The server masks the reason, so the same read succeeding for
+                # A is what shows B's failure is the authorization refusal.
+                await session.read_resource(f"memory://workspaces/{a}/{kind}")
+                uri = f"memory://workspaces/{b}/{kind}"
+                with pytest.raises(
+                    McpError, match=f"^Error reading resource '{re.escape(uri)}'$"
+                ):
+                    await session.read_resource(uri)
+            # B as the source of an A-side federated read or consolidation.
+            denied = await call(
+                session,
                 "memory_recall",
                 {"workspace_id": a, "query": CANARY, "linked_workspace_ids": [b]},
             )
-            assert denied["error"]["code"] == "UNAUTHORIZED_WORKSPACE"
-            for tool, arguments in _cross_arguments(seed, b).items():
-                if _is_protected(tool):
-                    denied = await _protected(remote, a, tool, arguments)
-                else:
-                    denied = await remote(tool, {"workspace_id": a, **arguments})
-                assert denied["error"]["code"] == "UNAUTHORIZED_WORKSPACE", tool
+            assert_denied("memory_recall linked", denied)
 
-    with capsys.disabled():
-        print(f"\nswept ({len(swept)}): {', '.join(swept)}")
-        print(
-            f"cross-workspace ({len(CROSS_WORKSPACE_TOOLS)}): "
-            + ", ".join(CROSS_WORKSPACE_TOOLS)
-        )
+            async def remote(tool, arguments):
+                return await call(session, tool, arguments)
+
+            for tool, arguments in _cross_arguments(
+                seed.token("consolidation"), b
+            ).items():
+                denied = await _target_call(remote, a, tool, arguments)
+                assert_denied(f"{tool} from B", denied)
+    for root, counts in ledgers.items():
+        assert _ledger_counts(root) == counts, f"denied calls wrote {root.name}"
