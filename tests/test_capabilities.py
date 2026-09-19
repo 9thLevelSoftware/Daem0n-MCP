@@ -169,7 +169,10 @@ class TestCapabilityRegistry(unittest.TestCase):
             module_available=lambda _: False,
         )
 
-        capability = registry.get("models-local")
+        # models-local needs Python 3.11+ (its extra installs nothing on 3.10,
+        # see test_models_local_reports_python_floor); pin a supported version.
+        with patch("daem0nmcp.capabilities.sys.version_info", (3, 11, 0)):
+            capability = registry.get("models-local")
 
         self.assertEqual(capability["status"], "degraded")
         self.assertEqual(capability["remediation"]["action"], "install_extra")
@@ -242,7 +245,8 @@ class TestCapabilityRegistry(unittest.TestCase):
             module_available=lambda module: probes.append(module) or True,
         )
 
-        capability = registry.get("models-local")
+        with patch("daem0nmcp.capabilities.sys.version_info", (3, 11, 0)):
+            capability = registry.get("models-local")
 
         self.assertEqual(capability["status"], "ready")
         self.assertEqual(
