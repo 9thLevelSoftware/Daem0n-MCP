@@ -60,6 +60,9 @@ class ProjectionGenerationGrowthTests(unittest.IsolatedAsyncioTestCase):
         # Pre-PR-8 databases on POSIX still use the rollback journal, where
         # readers block a committing writer; GC must stay safe there.
         self.connection.execute("PRAGMA journal_mode=DELETE")
+        # Durability is irrelevant here; skipping fsync keeps the hundreds of
+        # seeding rebuilds fast on slow CI disks.
+        self.connection.execute("PRAGMA synchronous=OFF")
         for version, _description, statements in MIGRATIONS:
             if 16 <= version <= 18:
                 for statement in statements:
