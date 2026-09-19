@@ -331,9 +331,21 @@ class RetrievalProjectionJobTests(unittest.TestCase):
             self.connection.execute(
                 "UPDATE background_jobs SET result_json=result_json"
             )
-            time.sleep(0.25)
+            # Hold the writer lock past the whole lease, so a renewal computed
+            # from a pre-lock clock sample would already be expired.
+            time.sleep(0.75)
             self.connection.commit()
-            time.sleep(0.08)
+            committed_us = time.time_ns() // 1_000
+            # Wait for the heartbeat's post-lock renewal instead of a fixed
+            # sleep; slow runners may take longer than one interval.
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline:
+                (expires_us,) = self.connection.execute(
+                    "SELECT lease_expires_at_us FROM background_jobs"
+                ).fetchone()
+                if expires_us > committed_us:
+                    break
+                time.sleep(0.01)
             competitor_connection = sqlite3.connect(self.database_path)
             competitor_connection.row_factory = sqlite3.Row
             try:
@@ -343,8 +355,8 @@ class RetrievalProjectionJobTests(unittest.TestCase):
                     clock_us=lambda: time.time_ns() // 1_000,
                     lease_owner="competing-worker",
                     token_factory=lambda: "competing-token",
-                    lease_duration_us=100_000,
-                    heartbeat_interval_us=20_000,
+                    lease_duration_us=500_000,
+                    heartbeat_interval_us=100_000,
                     retry_delay_us=1,
                 )
                 competing_results.append(competitor.run_once())
@@ -357,8 +369,8 @@ class RetrievalProjectionJobTests(unittest.TestCase):
             clock_us=lambda: time.time_ns() // 1_000,
             lease_owner="test-worker",
             token_factory=lambda: "lease-token",
-            lease_duration_us=100_000,
-            heartbeat_interval_us=20_000,
+            lease_duration_us=500_000,
+            heartbeat_interval_us=100_000,
             retry_delay_us=1,
         )
 
