@@ -56,6 +56,51 @@ def test_windows_rejects_extra_users_access(tmp_path):
         verify_owner_only_file(target)
 
 
+def _fake_windows_security(monkeypatch, owners):
+    """Replay owner SIDs ("USER" = current user) and record SetFileSecurityW."""
+    from daem0nmcp import protected_files
+
+    expected_descriptor, expected = protected_files._converted_sddl(
+        protected_files._desired_sddl(directory=False)
+    )
+    protected_files._KERNEL32.LocalFree(expected_descriptor)
+    dacl = expected.split("D:", 1)[1]
+    user = expected.split("D:", 1)[0][2:]
+    sequence = iter(
+        f"O:{user if owner == 'USER' else owner}D:{dacl}" for owner in owners
+    )
+    calls = []
+    monkeypatch.setattr(protected_files, "_actual_sddl", lambda _path: next(sequence))
+    monkeypatch.setattr(
+        protected_files._ADVAPI32,
+        "SetFileSecurityW",
+        lambda _path, information, _descriptor: calls.append(information) or True,
+    )
+    return protected_files, calls
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows owner test")
+def test_windows_takes_ownership_only_from_builtin_administrators(
+    tmp_path, monkeypatch
+):
+    target = tmp_path / "file"
+    target.write_bytes(b"")
+    module, calls = _fake_windows_security(monkeypatch, ["BA", "USER"])
+    module._protect_windows(target, directory=False)
+    assert calls[-1] == module._OWNER_SECURITY_INFORMATION
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows owner test")
+def test_windows_refuses_any_other_foreign_owner(tmp_path, monkeypatch):
+    target = tmp_path / "file"
+    target.write_bytes(b"")
+    foreign = "S-1-5-21-1-2-3-1001"
+    module, calls = _fake_windows_security(monkeypatch, [foreign, foreign])
+    with pytest.raises(ProtectedPathError, match="verification failed"):
+        module._protect_windows(target, directory=False)
+    assert module._OWNER_SECURITY_INFORMATION not in calls
+
+
 def test_rejects_linked_ancestry(tmp_path):
     real = tmp_path / "real"
     real.mkdir()

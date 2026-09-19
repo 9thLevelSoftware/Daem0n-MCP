@@ -264,13 +264,17 @@ if os.name == "nt":
             ):
                 raise _win_error("setting protected path security")
             # An elevated administrator's new files are owned by
-            # BUILTIN\Administrators.  The owner-only DACL just applied grants
-            # this user WRITE_OWNER, so take ownership explicitly.
+            # BUILTIN\Administrators (BA).  The owner-only DACL just applied
+            # grants this user WRITE_OWNER, so take ownership from BA only;
+            # any other foreign owner is refused by the check below.
+            actual = _actual_sddl(path)
             owner = expected.split("D:", 1)[0] + "D:"
-            if not _actual_sddl(path).startswith(
-                owner
-            ) and not _ADVAPI32.SetFileSecurityW(
-                str(path), _OWNER_SECURITY_INFORMATION, descriptor
+            if (
+                not actual.startswith(owner)
+                and actual.startswith("O:BAD:")
+                and not _ADVAPI32.SetFileSecurityW(
+                    str(path), _OWNER_SECURITY_INFORMATION, descriptor
+                )
             ):
                 raise _win_error("setting protected path owner")
         finally:
