@@ -11,6 +11,10 @@ from unittest.mock import patch
 
 import pytest
 
+# Import before patch.dict(sys.modules) snapshots it, so the patched launcher is
+# the one start_server imports in every test (not a fresh re-import).
+import daem0nmcp.api.v7.launcher  # noqa: F401
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
