@@ -616,18 +616,20 @@ python -m daem0nmcp.cli install-claude-hooks
 
 This writes six hook entries to the user-level `~/.claude/settings.json`, so
 they run in every project; each runs `"<python>" -m daem0nmcp.claude_hooks.<hook>`
-with the interpreter you installed from, and stays silent in directories without
-`.daem0nmcp/`. Other hooks in that file are kept, and any old
+with the interpreter you installed from. A hook only acts inside a Daem0n
+project: the session directory, `CLAUDE_PROJECT_DIR`, or one of their parent
+directories contains `.daem0nmcp/` (your home directory does not count, since
+Daem0n keeps its own state in `~/.daem0nmcp/`). Other hooks in that file are kept, and any old
 `hooks/daem0n_*.py` entries are removed.
 
 | Event (matcher) | Hook | What it does | Input | Reminds only |
 |-----------------|------|--------------|-------|--------------|
 | `SessionStart` | `session_start` | Adds a line to the model's context asking it to call `session_brief` with this workspace's `workspace_id` | `CLAUDE_PROJECT_DIR` env | Yes |
-| `PreToolUse` (`Edit\|Write\|NotebookEdit`) | `pre_edit` | In a project with `.daem0nmcp/`, adds a one-line `additionalContext` reminder to call `memory_recall_file` for the file and `memory_preflight` for the change; silent elsewhere | stdin event | Yes |
+| `PreToolUse` (`Edit\|Write\|NotebookEdit`) | `pre_edit` | Inside a Daem0n project, adds a one-line `additionalContext` reminder to call `memory_recall_file` for the file and `memory_preflight` for the change; silent elsewhere | stdin event | Yes |
 | `PreToolUse` (`Bash`) | `pre_bash` | Checks the command against Daem0n rules. Currently inert: it reads a `TOOL_INPUT` env var that Claude Code does not set | `TOOL_INPUT` env | Yes (always exits 0) |
 | `PostToolUse` (`mcp__.*__edit_preflight`) | `post_edit_preflight` | Edit-bridge plumbing: stages an `edit_preflight` receipt for a bridge edit request. Nothing in Claude Code creates those requests any more, so it is a no-op | stdin event | Yes |
 | `PostToolUse` (`Edit\|Write\|NotebookEdit`) | `post_edit` | Edit-bridge plumbing: reports a bridge-approved edit as a capture candidate. Only loads the bridge when the project is paired; a no-op in Claude Code today | stdin event | Yes |
-| `Stop`, `SubagentStop` | `stop` | When the transcript shows a finished task with no recorded outcome, shows you suggested `memory_preflight`/`memory_store`/`memory_record_outcome` calls as a `systemMessage`. Never writes memory | stdin event (`transcript_path`) | Yes |
+| `Stop`, `SubagentStop` | `stop` | When the transcript shows a finished task with no recorded outcome, shows you suggested `memory_preflight`/`memory_store`/`memory_record_outcome` calls to ask Claude for, as a `systemMessage`. Never writes memory | stdin event (`transcript_path`) | Yes |
 
 No hook blocks a tool call or keeps the agent running: every hook exits 0 and none
 returns a `permissionDecision` or `decision`.
@@ -642,10 +644,12 @@ returns a `permissionDecision` or `decision`.
   `DAEM0NMCP_EDIT_BRIDGE_RUNTIME_DIR`, `DAEM0NMCP_PROJECT_ROOT` and
   `DAEM0NMCP_STORAGE_PATH` in `<project>/.claude/settings.local.json`.
 
-To remove the hooks, and optionally the project's pairing and credential:
+To remove the hooks, the project's pairing env keys (only if the installer
+paired it) and, optionally, its credential (the project defaults to the current
+directory):
 
 ```bash
-python -m daem0nmcp.cli --project-path <project> uninstall-claude-hooks [--remove-credentials]
+python -m daem0nmcp.cli uninstall-claude-hooks [--project-path <project>] [--remove-credentials]
 ```
 
 The old manual scripts in `hooks/` are deprecated stubs that only print a
