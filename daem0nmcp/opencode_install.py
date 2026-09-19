@@ -1,8 +1,8 @@
 """Installer for OpenCode integration.
 
-Creates .opencode/ directory structure, ensures opencode.json exists
-at project root, and writes the TypeScript covenant enforcement plugin
-for MCP server connectivity and hook discipline.
+Creates the .opencode/ directory structure and slash-command files, ensures
+opencode.json exists at project root, and writes the TypeScript covenant
+enforcement plugin for MCP server connectivity and hook discipline.
 """
 
 import argparse
@@ -44,12 +44,14 @@ OPENCODE_JSON_TEMPLATE: dict[str, Any] = {
 # Subdirectories to scaffold inside .opencode/
 _OPENCODE_SUBDIRS = ["commands", "plugins", "agents"]
 
-# The packaged TypeScript resource is the sole installer source of truth.
-PLUGIN_TEMPLATE = (
-    importlib.resources.files("daem0nmcp.opencode_assets")
-    .joinpath("daem0n.ts")
-    .read_text(encoding="utf-8")
-)
+# The packaged resources are the sole installer source of truth.
+_ASSETS = importlib.resources.files("daem0nmcp.opencode_assets")
+PLUGIN_TEMPLATE = _ASSETS.joinpath("daem0n.ts").read_text(encoding="utf-8")
+COMMAND_TEMPLATES = {
+    command.name: command.read_text(encoding="utf-8")
+    for command in _ASSETS.joinpath("commands").iterdir()
+    if command.name.endswith(".md")
+}
 
 
 def detect_clients(project_path: Path) -> dict[str, Any]:
@@ -296,6 +298,13 @@ def install_opencode(
         plugin_path = opencode_root / "plugins" / "daem0n.ts"
         status = _ensure_file(plugin_path, PLUGIN_TEMPLATE, dry_run, force)
         lines.append(f"  {status} .opencode/plugins/daem0n.ts")
+
+        # -- Ensure slash-command files ----------------------------------
+        for name, content in sorted(COMMAND_TEMPLATES.items()):
+            status = _ensure_file(
+                opencode_root / "commands" / name, content, dry_run, force
+            )
+            lines.append(f"  {status} .opencode/commands/{name}")
 
         # -- AGENTS.md status (do NOT create) ----------------------------
         if oc["agents_md"]:

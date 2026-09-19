@@ -228,3 +228,27 @@ def test_install_preserves_existing_opencode_json(tmp_path):
     assert plugin.exists(), (
         "Plugin file should be created even when opencode.json exists"
     )
+
+
+def test_install_creates_repo_command_files_without_overwriting(tmp_path):
+    """The installer ships the repo's slash commands and keeps user edits."""
+    repo_commands = Path(__file__).resolve().parents[1] / ".opencode" / "commands"
+    expected = {
+        path.name: path.read_text(encoding="utf-8")
+        for path in repo_commands.glob("*.md")
+    }
+    assert set(expected) == {"commune.md", "counsel.md", "inscribe.md", "recall.md"}
+    commands = tmp_path / ".opencode" / "commands"
+    commands.mkdir(parents=True)
+    (commands / "recall.md").write_text("my recall", encoding="utf-8")
+
+    ok, msg = install_opencode(
+        str(tmp_path), bridge_config_root=tmp_path / "host-config"
+    )
+
+    assert ok, msg
+    assert "[exists] .opencode/commands/recall.md" in msg
+    assert "[create] .opencode/commands/commune.md" in msg
+    assert (commands / "recall.md").read_text(encoding="utf-8") == "my recall"
+    for name in ("commune.md", "counsel.md", "inscribe.md"):
+        assert (commands / name).read_text(encoding="utf-8") == expected[name]
