@@ -765,9 +765,12 @@ class Sweep:
         assert (await invoke("session_brief", {"workspace_id": target}))["ok"]
         # The target's own note names its root.  Reads echo it only in
         # UserText fields; the leak check must pass without a name exemption.
+        # The marker is in the file name too, so a file entity the graph
+        # extracts from the note (POSIX paths only) carries it as well.
+        marked = root / "src" / f"{NOTE_MARKER}.py"
         note = {
             "record_type": "warning",
-            "content": f"Target note {NOTE_MARKER}: see {root / 'src' / 'neutral.py'}",
+            "content": f"Target note {NOTE_MARKER}: see {marked}",
             "idempotency_key": f"sweep-{name}-host-note-0001",
         }
         assert (await _protected(invoke, target, "memory_store", note))["ok"]
