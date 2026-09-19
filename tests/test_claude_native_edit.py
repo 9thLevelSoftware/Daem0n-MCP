@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import sys
 
 import pytest
 
@@ -106,8 +107,10 @@ def test_opencode_apply_patch_binds_raw_arguments_and_all_path_preimages(tmp_pat
     (tmp_path / "src" / "update.py").write_text("before\n", encoding="utf-8")
     (tmp_path / "src" / "delete.py").write_text("delete\n", encoding="utf-8")
     (tmp_path / "src" / "move.py").write_text("move\n", encoding="utf-8")
-    patch_text = """*** Begin Patch
-*** Update File: src\\update.py
+    # OpenCode on Windows may emit backslash separators; POSIX never does.
+    separator = "\\" if sys.platform == "win32" else "/"
+    patch_text = f"""*** Begin Patch
+*** Update File: src{separator}update.py
 @@
 -before
 +after
@@ -142,6 +145,17 @@ def test_opencode_apply_patch_binds_raw_arguments_and_all_path_preimages(tmp_pat
         "missing",
         "file",
     ]
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="backslash is a separator")
+def test_posix_backslash_filename_is_a_normalization_error(tmp_path):
+    with pytest.raises(NativeEditNormalizationError):
+        native_edit_request(
+            project_path=tmp_path,
+            tool_name="Write",
+            tool_input={"file_path": "src\\new.py", "content": "x"},
+            configured_tools=frozenset({"Write"}),
+        )
 
 
 def test_opencode_apply_patch_post_paths_do_not_recheck_changed_state(tmp_path):

@@ -37,11 +37,12 @@ async def initialized_workspace(tmp_path):
 
 async def test_actual_stdio_mcp_shares_bridge_authority_and_promotes_capture(
     initialized_workspace,
+    socket_tmp_path,
 ):
     workspace = initialized_workspace
     installation = provision_local_bridge_installation(
         workspace.root,
-        config_root=workspace.root.parent / f"{workspace.root.name}-host",
+        config_root=socket_tmp_path / "host",
     )
     environment = installation.environment()
     scope = {"workspace_id": workspace.workspace_id}

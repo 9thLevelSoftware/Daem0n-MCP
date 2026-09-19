@@ -610,7 +610,10 @@ def provision_local_bridge_installation(
     reject_linked_ancestry(base)
     authority_directory = ensure_owner_only_directory(base.absolute() / authority_id)
     credential_path = authority_directory / "credential.json"
-    runtime_directory = authority_directory / "run"
+    # AF_UNIX socket paths are limited to 104-108 bytes, and the authority
+    # directory name alone is 64 characters, so sockets live in a short
+    # sibling directory instead.
+    runtime_directory = base.absolute() / "run" / authority_id[:16]
     created = False
     if credential_path.exists():
         _, identity = load_bridge_credential(credential_path)

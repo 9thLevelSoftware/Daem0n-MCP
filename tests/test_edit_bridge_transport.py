@@ -154,10 +154,10 @@ async def test_every_scoped_route_rechecks_workspace_authority(
 
 @pytest.mark.asyncio
 async def test_local_ipc_requires_transport_auth_and_consumes_exact_retry(
-    tmp_path, transport_context
+    socket_tmp_path, transport_context
 ):
     workspace, identity, broker, protocol = transport_context
-    address = local_bridge_address(tmp_path / "run", identity.credential_id)
+    address = local_bridge_address(socket_tmp_path / "run", identity.credential_id)
     server = LocalBridgeServer(protocol=protocol, address=address, authkey=AUTHKEY)
     server.start()
     client = LocalBridgeClient(address=address, authkey=AUTHKEY, bearer=SECRET)
@@ -300,10 +300,12 @@ def _local_raw_client(address):
 
 @pytest.mark.asyncio
 async def test_local_ipc_bounds_idle_bad_auth_duplicate_json_and_shutdown(
-    tmp_path, transport_context
+    socket_tmp_path, transport_context
 ):
     workspace, identity, _, protocol = transport_context
-    address = local_bridge_address(tmp_path / "adversarial", identity.credential_id)
+    address = local_bridge_address(
+        socket_tmp_path / "adversarial", identity.credential_id
+    )
     server = LocalBridgeServer(protocol=protocol, address=address, authkey=AUTHKEY)
     server.start()
     client = LocalBridgeClient(
@@ -354,8 +356,8 @@ async def test_local_ipc_bounds_idle_bad_auth_duplicate_json_and_shutdown(
         assert time.monotonic() - shutdown_started < 4
 
 
-def test_local_client_deadline_interrupts_a_stalled_server(tmp_path) -> None:
-    address = local_bridge_address(tmp_path / "stalled", "credential-stalled")
+def test_local_client_deadline_interrupts_a_stalled_server(socket_tmp_path) -> None:
+    address = local_bridge_address(socket_tmp_path / "stalled", "credential-stalled")
     family = "AF_PIPE" if sys.platform == "win32" else "AF_UNIX"
     listener = multiprocessing.connection.Listener(address, family=family)
     release = threading.Event()
