@@ -111,7 +111,11 @@ async def test_production_code_index_search_and_impact(code_workspace, transport
 
 async def test_production_code_index_disabled_profile_has_remedy(code_workspace):
     scope = {"workspace_id": code_workspace.workspace_id}
-    async with process_client(code_workspace.root, "stdio") as session:
+    async with process_client(
+        code_workspace.root,
+        "stdio",
+        environment_overrides={"DAEM0NMCP_APPS_ENABLED": "false"},
+    ) as session:
         await succeed(session, "session_brief", scope)
         disabled = await call(
             session,
@@ -122,4 +126,4 @@ async def test_production_code_index_disabled_profile_has_remedy(code_workspace)
         assert disabled["error"]["code"] == "CAPABILITY_DISABLED"
         states = disabled["meta"]["capability_states"]
         assert states[0]["name"] == "apps"
-        assert "DAEM0NMCP_APPS_ENABLED=true" in states[0]["remediation"]
+        assert "unless DAEM0NMCP_APPS_ENABLED=false" in states[0]["remediation"]

@@ -62,16 +62,16 @@ class TestHybridSearch:
 class TestEncodeDecode:
     """Test vector encoding and decoding."""
 
-    def test_encode_reports_models_local_remediation_when_unavailable(self):
+    def test_encode_reports_models_local_remediation_when_unavailable(
+        self, monkeypatch
+    ):
         """The disabled models-local profile exposes its explicit remediation."""
-        if not vectors.is_available():
-            from daem0nmcp.capabilities import CapabilityUnavailableError
+        from daem0nmcp.capabilities import CapabilityUnavailableError
 
-            with pytest.raises(
-                CapabilityUnavailableError, match="models-local"
-            ) as error:
-                vectors.encode("test text")
-            assert "DAEM0NMCP_MODELS_LOCAL_ENABLED" in str(error.value)
+        monkeypatch.setenv("DAEM0NMCP_MODELS_LOCAL_ENABLED", "false")
+        with pytest.raises(CapabilityUnavailableError, match="models-local") as error:
+            vectors.encode("test text")
+        assert "DAEM0NMCP_MODELS_LOCAL_ENABLED" in str(error.value)
 
     def test_decode_empty_returns_none(self):
         """decode returns None for empty bytes."""

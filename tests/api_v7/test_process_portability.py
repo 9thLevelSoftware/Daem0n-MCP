@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import sqlite3
 from contextlib import closing
 from datetime import datetime, timedelta, timezone
@@ -78,7 +79,17 @@ async def test_production_export_restores_retained_workspace(
     retained = tmp_path / ".daem0nmcp" / "retained-before-restore"
     assert storage.resolve().is_relative_to(tmp_path.resolve())
     assert retained.resolve().is_relative_to(tmp_path.resolve())
-    storage.rename(retained)
+    # Windows may briefly keep a handle open inside storage after the server
+    # exits (seen with the graph profile on), so retry within a bounded deadline.
+    rename_deadline = asyncio.get_running_loop().time() + 15
+    while True:
+        try:
+            storage.rename(retained)
+            break
+        except PermissionError:
+            if asyncio.get_running_loop().time() >= rename_deadline:
+                raise
+            await asyncio.sleep(0.2)
     async with process_client(tmp_path, transport) as session:
         await succeed(session, "session_brief", scope)
         import_id = None
