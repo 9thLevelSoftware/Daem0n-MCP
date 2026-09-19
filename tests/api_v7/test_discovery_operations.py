@@ -1162,6 +1162,65 @@ class DiscoveryOperationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(1, len(second.items))
         self.assertNotEqual(first.items[0].record_id, second.items[0].record_id)
 
+    async def test_memory_recall_entity_missing_members_retry_only_while_stale(
+        self,
+    ) -> None:
+        """A lexical index still catching up is transient; a current one is not."""
+        from daem0nmcp.api.v7.discovery_operations import DiscoveryOperationError
+        from daem0nmcp.api.v7.models import (
+            ProviderDiagnostic,
+            RetrievalData,
+            TokenUsage,
+        )
+
+        self._activate_discovery()
+
+        class RecallService:
+            status = "degraded"
+
+            async def retrieve(self, workspace, query, linked_workspace_ids):
+                return RetrievalData(
+                    provider_diagnostics=[
+                        ProviderDiagnostic(
+                            provider="lexical",
+                            status=self.status,
+                            manifest_generation=1,
+                            elapsed_ms=0.0,
+                            reason=(
+                                None
+                                if self.status == "ready"
+                                else "LEXICAL_REBUILD_REQUIRED"
+                            ),
+                            returned_count=0,
+                        )
+                    ],
+                    abstained=True,
+                    abstention_reason="NO_EVIDENCE",
+                    token_usage=TokenUsage(
+                        budget=query.token_budget,
+                        requested=0,
+                        selected=0,
+                        rendered=0,
+                        dropped=0,
+                    ),
+                )
+
+        recall = RecallService()
+        operation = self._operations(recall_service=recall)["memory_recall_entity"]
+        request = _request(
+            "memory_recall_entity",
+            workspace_id=self.workspace.workspace_id,
+            entity_name="Authentication",
+        )
+        for status, code in (
+            ("degraded", "DATABASE_IN_USE"),
+            ("ready", "CAPABILITY_DEGRADED"),
+        ):
+            recall.status = status
+            with self.assertRaises(DiscoveryOperationError) as raised:
+                await operation(workspace=self.workspace, request=request)
+            self.assertEqual(code, raised.exception.code)
+
     async def test_stats_read_the_active_canonical_graph_snapshot(self) -> None:
         """Counting retained-v6 graph rows would misreport the v7 projection."""
         from daem0nmcp.api.v7.tools import KnowledgeGraphStatsData

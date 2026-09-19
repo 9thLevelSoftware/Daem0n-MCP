@@ -2093,6 +2093,13 @@ async def _memory_recall_entity(
                 raise DiscoveryOperationError("CAPABILITY_DEGRADED")
             indexed[record_id] = item.record
         if set(indexed) != set(selection.record_ids):
+            # A lexical index that is stale, contended, or mid-swap has not
+            # caught up with the entity's records yet; the caller may retry.
+            if not any(
+                diagnostic.provider == "lexical" and diagnostic.status == "ready"
+                for diagnostic in result.provider_diagnostics
+            ):
+                raise DiscoveryOperationError("DATABASE_IN_USE")
             raise DiscoveryOperationError("CAPABILITY_DEGRADED")
         await _run_blocking(
             dependencies,

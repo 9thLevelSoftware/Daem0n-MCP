@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
 import importlib.util
 
 import pytest
 
 from daem0nmcp.database import DatabaseManager
 from daem0nmcp.workspace import WorkspaceRegistry
-from tests.api_v7.process_client import process_client, succeed
+from tests.api_v7.process_client import call, process_client, succeed
 
 
 @pytest.fixture
@@ -132,15 +133,22 @@ async def test_production_graph_discovery_surface(initialized_workspace, transpo
             {**scope, "entity_id": entity["entity_id"]},
         )
         assert traced["entity"]["entity_id"] == entity["entity_id"]
-        recalled = await succeed(
-            session,
-            "memory_recall_entity",
-            {**scope, "entity_name": entity["name"]},
-        )
-        assert {item["record_id"] for item in recalled["items"]} & {
-            first["record_id"],
-            second["record_id"],
-        }
+        # The lexical projection may still be catching up with the link and
+        # backfill events; recall reports that as retryable until it has.
+        recall_deadline = asyncio.get_running_loop().time() + 30
+        while True:
+            recalled = await call(
+                session,
+                "memory_recall_entity",
+                {**scope, "entity_name": entity["name"]},
+            )
+            if recalled["ok"] and {
+                item["record_id"] for item in recalled["data"]["items"]
+            } & {first["record_id"], second["record_id"]}:
+                break
+            assert recalled["ok"] or recalled["error"]["retryable"], recalled
+            assert asyncio.get_running_loop().time() < recall_deadline, recalled
+            await asyncio.sleep(0.25)
         graph = await succeed(
             session,
             "knowledge_graph_get",
