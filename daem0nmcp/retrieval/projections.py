@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import re
 import sqlite3
 import time
@@ -11,14 +12,21 @@ from collections.abc import Callable
 from dataclasses import dataclass
 
 from ..event_store import canonical_json_bytes, deterministic_id, sha256_json
+from .jobs import ProjectionJobRunner
 from .lexical_config import (
+    GENERATION_TABLES,
     LEXICAL_TOKENIZER,
     lexical_build_config_hash,
     lexical_fts_table_name,
 )
+from .specialized_contract import procedure_fts_table_name
+
+logger = logging.getLogger(__name__)
 
 _WORKSPACE_ID = re.compile(r"^ws_[0-9a-f]{24}$")
 _LEXICAL_BUILDER_VERSION = "retrieval-lexical-1"
+_COLLECTABLE_PROJECTIONS = frozenset({"lexical", "procedure", "outcome", "temporal"})
+_GC_BUSY_TIMEOUT_MS = 250
 
 
 class ProjectionBuildError(RuntimeError):
@@ -284,11 +292,19 @@ class LexicalProjectionBuilder:
                 self.connection.execute(f"RELEASE SAVEPOINT {savepoint}")
             if isinstance(exc, ProjectionBuildError):
                 raise
+            if isinstance(
+                exc, sqlite3.OperationalError
+            ) and ProjectionJobRunner._is_lock_contention(exc):
+                raise ProjectionBuildError(
+                    "DATABASE_IN_USE", "lexical projection build was contended"
+                ) from exc
             if isinstance(exc, sqlite3.Error):
                 raise ProjectionBuildError(
                     "LEXICAL_UNAVAILABLE", "FTS5 projection build is unavailable"
                 ) from exc
             raise
+        if owns_transaction:
+            collect_superseded_generations(self.connection, workspace_id, "lexical")
         return result
 
     def apply_active_delta(self, workspace_id: str, record_id: str) -> bool:
@@ -748,8 +764,92 @@ class LexicalProjectionBuilder:
         return value
 
 
+def collect_superseded_generations(
+    connection: sqlite3.Connection,
+    workspace_id: str,
+    projection: str,
+    limit: int = 5,
+) -> int:
+    """Drop up to *limit* superseded generations of one local projection.
+
+    Runs after an activation commits, in its own short transaction. Victims
+    are chosen by manifest status: ``ready`` or ``failed`` rows only, never
+    the active generation, a ``building`` or ``rebuild_required`` one, or the
+    most recently deactivated generation (a reader that looked up the old
+    manifest just before the switch may still be querying it). Best effort:
+    on contention or any SQLite error it gives up and the next activation
+    retries. Returns the number of generations removed.
+    """
+
+    if (
+        projection not in _COLLECTABLE_PROJECTIONS
+        or _WORKSPACE_ID.fullmatch(workspace_id) is None
+        or connection.in_transaction
+    ):
+        return 0
+    generation_table = GENERATION_TABLES.get(projection)
+    try:
+        previous_timeout = int(connection.execute("PRAGMA busy_timeout").fetchone()[0])
+        connection.execute(f"PRAGMA busy_timeout={_GC_BUSY_TIMEOUT_MS}")
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                victims = [
+                    int(row[0])
+                    for row in connection.execute(
+                        "SELECT generation FROM projection_manifests "
+                        "WHERE workspace_id=? AND projection_name=? "
+                        "AND status IN ('ready','failed') "
+                        "AND manifest_id IS NOT ("
+                        "SELECT manifest_id FROM projection_manifests "
+                        "WHERE workspace_id=? AND projection_name=? "
+                        "AND status='ready' AND activated_at_us IS NOT NULL "
+                        "ORDER BY activated_at_us DESC, generation DESC LIMIT 1) "
+                        "ORDER BY generation LIMIT ?",
+                        (workspace_id, projection, workspace_id, projection, limit),
+                    ).fetchall()
+                ]
+                for generation in victims:
+                    fts_table = (
+                        lexical_fts_table_name(workspace_id, generation)
+                        if projection == "lexical"
+                        else procedure_fts_table_name(workspace_id, generation)
+                        if projection == "procedure"
+                        else None
+                    )
+                    if fts_table is not None:
+                        connection.execute(f'DROP TABLE IF EXISTS "{fts_table}"')
+                    if generation_table is not None:
+                        connection.execute(
+                            f'DELETE FROM "{generation_table}" '
+                            "WHERE workspace_id=? AND projection_generation=?",
+                            (workspace_id, generation),
+                        )
+                    connection.execute(
+                        "DELETE FROM projection_manifests WHERE workspace_id=? "
+                        "AND projection_name=? AND generation=?",
+                        (workspace_id, projection, generation),
+                    )
+                connection.commit()
+            except BaseException:
+                connection.rollback()
+                raise
+        finally:
+            connection.execute(f"PRAGMA busy_timeout={previous_timeout}")
+    except sqlite3.Error as exc:
+        if isinstance(
+            exc, sqlite3.OperationalError
+        ) and ProjectionJobRunner._is_lock_contention(exc):
+            logger.debug("projection generation GC skipped: database busy")
+        else:
+            logger.warning("projection generation GC failed", exc_info=True)
+        return 0
+    return len(victims)
+
+
 __all__ = [
     "LexicalProjectionBuilder",
     "ProjectionBuildError",
     "ProjectionBuildResult",
+    "collect_superseded_generations",
 ]

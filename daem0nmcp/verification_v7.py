@@ -35,6 +35,7 @@ from .event_store import (
 )
 from .migrations import MIGRATIONS
 from .migrations.v7 import _source_row_hash, inventory_database
+from .retrieval.lexical_config import GENERATION_TABLES
 from .schema_version import CURRENT_SCHEMA_VERSION, REQUIRED_V7_SCHEMA_VERSIONS
 from .storage_activation import (
     ActiveDatabasePointer,
@@ -91,11 +92,6 @@ _SUPPORTED_PROJECTIONS = _LOCAL_PROJECTIONS | {
     "code",
     "entities",
     "communities",
-}
-_GENERATION_TABLES = {
-    "lexical": "retrieval_documents",
-    "procedure": "record_procedures",
-    "outcome": "record_outcome_view",
 }
 
 
@@ -679,7 +675,7 @@ def _verify_manifests(connection: sqlite3.Connection) -> tuple[int, int, int]:
         "source_event_root_hash,details_json,generation,row_count,"
         "cursor_recorded_at_us,cursor_event_id FROM projection_manifests"
     ).fetchall()
-    for name, generation_table in _GENERATION_TABLES.items():
+    for name, generation_table in GENERATION_TABLES.items():
         if connection.execute(
             f'SELECT 1 FROM "{generation_table}" rows WHERE NOT EXISTS '
             "(SELECT 1 FROM projection_manifests manifest WHERE "
@@ -1115,7 +1111,7 @@ def _refresh_manifests(candidate: Path, workspace_ids: list[str]) -> None:
         )
         # Remove only orphaned local generations in the candidate. Otherwise a
         # renamed/deleted manifest can leave an FTS table occupying the next ID.
-        for name, table in _GENERATION_TABLES.items():
+        for name, table in GENERATION_TABLES.items():
             connection.execute(
                 f'DELETE FROM "{table}" AS rows WHERE NOT EXISTS '
                 "(SELECT 1 FROM projection_manifests manifest WHERE "
