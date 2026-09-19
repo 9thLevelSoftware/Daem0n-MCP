@@ -149,14 +149,16 @@ def _readonly_connection(path: Path) -> sqlite3.Connection:
     # Migration dry-run must not write any byte.  On Windows the no-lock VFS
     # keeps read-only connections off the ``-shm`` read marks.  POSIX has no
     # equivalent: ``unix-none`` lacks shared memory, so it cannot open a WAL
-    # database at all.  There, with no ``-wal``/``-shm`` the main file is the
-    # whole database and is read as immutable (SQLite would otherwise create
-    # both files); a live WAL is read through the default VFS, whose only
-    # write is the volatile ``-shm`` wal-index.
+    # database at all.  There, with no ``-wal``, ``-shm`` or ``-journal`` the
+    # main file is the whole database and is read as immutable (SQLite would
+    # otherwise create the WAL files); anything else is read through the
+    # default VFS, whose only write is the volatile ``-shm`` wal-index.
     resolved = path.resolve()
     if sys.platform == "win32":
         parameters = "&vfs=win32-none"
-    elif not any(Path(f"{resolved}{suffix}").exists() for suffix in ("-wal", "-shm")):
+    elif not any(
+        Path(f"{resolved}{suffix}").exists() for suffix in ("-wal", "-shm", "-journal")
+    ):
         parameters = "&immutable=1"
     else:
         parameters = ""
