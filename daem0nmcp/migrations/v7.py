@@ -146,11 +146,21 @@ def _quoted_identifier(name: str) -> str:
 
 
 def _readonly_connection(path: Path) -> sqlite3.Connection:
-    # The platform no-lock VFS is essential here: ordinary SQLite read-only WAL
-    # connections still mutate shared-memory read marks.  Migration dry-run is a
-    # byte-for-byte read-only operation, so it must not touch ``-shm``.
-    vfs = "win32-none" if sys.platform == "win32" else "unix-none"
-    uri = "file:" + quote(path.resolve().as_posix(), safe="/:") + f"?mode=ro&vfs={vfs}"
+    # Migration dry-run must not write any byte.  On Windows the no-lock VFS
+    # keeps read-only connections off the ``-shm`` read marks.  POSIX has no
+    # equivalent: ``unix-none`` lacks shared memory, so it cannot open a WAL
+    # database at all.  There, with no ``-wal``/``-shm`` the main file is the
+    # whole database and is read as immutable (SQLite would otherwise create
+    # both files); a live WAL is read through the default VFS, whose only
+    # write is the volatile ``-shm`` wal-index.
+    resolved = path.resolve()
+    if sys.platform == "win32":
+        parameters = "&vfs=win32-none"
+    elif not any(Path(f"{resolved}{suffix}").exists() for suffix in ("-wal", "-shm")):
+        parameters = "&immutable=1"
+    else:
+        parameters = ""
+    uri = "file:" + quote(resolved.as_posix(), safe="/:") + f"?mode=ro{parameters}"
     connection = sqlite3.connect(uri, uri=True)
     connection.row_factory = sqlite3.Row
     connection.execute("PRAGMA query_only=ON")
