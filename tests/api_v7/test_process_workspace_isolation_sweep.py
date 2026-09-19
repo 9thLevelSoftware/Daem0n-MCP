@@ -688,6 +688,9 @@ class Sweep:
             response = await _target_call(invoke, target, tool, arguments)
             self.check(f"{name}:{tool} (own)", response, arguments)
             own[tool] = _code(response)
+            if tool == "code_search" and APPS_AVAILABLE:
+                # The scan must cover real results, not an empty page.
+                assert response["data"]["items"], (name, response)
         for tool, arguments in sorted(_sweep_arguments(self.seed).items()):
             variants = [arguments]
             if {"cursor", "after_cursor", "export_session_id"} & set(arguments):
