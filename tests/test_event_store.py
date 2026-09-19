@@ -257,6 +257,43 @@ class SQLiteEventStoreTests(unittest.TestCase):
             self.connection.execute("SELECT count(*) FROM memory_events").fetchone()[0],
         )
 
+    def test_only_integrity_errors_on_insert_are_stream_conflicts(self):
+        """A lock or I/O failure must not be reported as a retryable conflict."""
+        command_type, store_type = self._api()
+        from daem0nmcp.event_store import EventStreamConflict
+
+        connection = self.connection
+
+        class FailingInsert:
+            error: Exception
+
+            def execute(self, sql, *arguments):
+                if "INSERT INTO memory_events" in sql:
+                    raise self.error
+                return connection.execute(sql, *arguments)
+
+            def __getattr__(self, name):
+                return getattr(connection, name)
+
+        command = command_type(
+            workspace_id=self.workspace_id,
+            stream_id="mem_" + "c" * 64,
+            stream_kind="memory",
+            event_type="memory.created",
+            occurred_at_us=1,
+            recorded_at_us=1,
+            actor_type="system",
+            payload={"record": self._state()},
+        )
+        failing = FailingInsert()
+        failing.error = sqlite3.OperationalError("disk I/O error")
+        with self.assertRaisesRegex(sqlite3.OperationalError, "disk I/O error"):
+            store_type(failing).append_and_project(command)
+        failing.error = sqlite3.IntegrityError("UNIQUE constraint failed")
+        with self.assertRaises(EventStreamConflict):
+            store_type(failing).append_and_project(command)
+        connection.rollback()
+
     def test_projection_failure_rolls_back_event_with_savepoint(self):
         """No immutable event may survive a failed projection in caller transaction."""
         command_type, store_type = self._api()
