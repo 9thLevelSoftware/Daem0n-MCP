@@ -52,7 +52,7 @@ def test_unpaired_project_exits_zero_without_importing_the_bridge(tmp_path):
     assert result.stdout.split() == ["0", "False"]
 
 
-def test_paired_project_without_consumed_edit_exits_zero_silently(tmp_path):
+def test_misconfigured_credential_still_exits_zero(tmp_path):
     (tmp_path / ".daem0nmcp").mkdir()
     result = _run(
         _event(tmp_path),
@@ -60,3 +60,31 @@ def test_paired_project_without_consumed_edit_exits_zero_silently(tmp_path):
     )
     assert result.returncode == 0, result.stderr
     assert result.stdout.split() == ["0", "True"]
+
+
+def test_paired_project_without_consumed_edit_captures_nothing(tmp_path, monkeypatch):
+    from daem0nmcp.claude_hooks.post_edit import handle_post_edit
+    from daem0nmcp.edit_host import (
+        EditHostStateStore,
+        provision_local_bridge_installation,
+    )
+
+    project = tmp_path / "project"
+    (project / ".daem0nmcp").mkdir(parents=True)
+    installation = provision_local_bridge_installation(
+        project, config_root=tmp_path / "host"
+    )
+    for name, value in installation.environment().items():
+        monkeypatch.setenv(name, value)
+    lookups = []
+    original = EditHostStateStore.get_consumed
+
+    def spy(self, **kwargs):
+        result = original(self, **kwargs)
+        lookups.append(result)
+        return result
+
+    monkeypatch.setattr(EditHostStateStore, "get_consumed", spy)
+
+    assert handle_post_edit(_event(project), str(project)) is False
+    assert lookups == [None]

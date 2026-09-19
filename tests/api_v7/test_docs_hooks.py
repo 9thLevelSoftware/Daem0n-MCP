@@ -10,6 +10,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -295,8 +296,14 @@ class HookFailClosedTests(unittest.IsolatedAsyncioTestCase):
     def test_pre_edit_reminds_without_blocking(self) -> None:
         from daem0nmcp.claude_hooks.pre_edit import reminder
 
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            project = Path(tmp_dir)
+        with (
+            tempfile.TemporaryDirectory() as tmp_dir,
+            # Bound the upward project search to the temp dir.
+            mock.patch.object(Path, "home", return_value=Path(tmp_dir)),
+            mock.patch.dict(os.environ, {"CLAUDE_PROJECT_DIR": ""}),
+        ):
+            project = Path(tmp_dir) / "project"
+            project.mkdir()
             event = {
                 "cwd": str(project),
                 "tool_name": "Edit",

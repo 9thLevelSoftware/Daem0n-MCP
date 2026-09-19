@@ -33,6 +33,59 @@ def read_hook_event() -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
+def find_project_root(event: dict[str, Any]) -> Path | None:
+    """Return the nearest Daem0n project containing the event cwd.
+
+    Tries ``cwd`` (which follows ``cd`` in Bash), then ``CLAUDE_PROJECT_DIR``,
+    walking up to the first ancestor with ``.daem0nmcp/``.  The home directory
+    never counts: Daem0n keeps its own global state in ``~/.daem0nmcp/``.
+    """
+    home = Path.home()
+    for raw in (event.get("cwd"), os.environ.get("CLAUDE_PROJECT_DIR")):
+        if not isinstance(raw, str) or not raw:
+            continue
+        start = Path(os.path.abspath(raw))
+        for candidate in (start, *start.parents):
+            if candidate == home:
+                break
+            if (candidate / ".daem0nmcp").is_dir():
+                return candidate
+    return None
+
+
+def _is_unc(path: str) -> bool:
+    return path.startswith(("\\\\", "//"))
+
+
+def relative_project_path(
+    project: Path, raw: object, base: object = None
+) -> str | None:
+    """Return *raw* (relative to *base*, default *project*) relative to *project*.
+
+    The result is in POSIX form, or None when *raw* is not inside *project*.
+
+    Purely lexical: the path comes from the model, and resolving it on
+    Windows could open a ``\\\\host\\share`` path (SMB authentication) before
+    the user has approved anything.
+    """
+    if not isinstance(raw, str) or not raw or "\0" in raw or _is_unc(raw):
+        return None
+    root = os.path.normpath(str(project))
+    start = base if isinstance(base, str) and base else root
+    full = os.path.normpath(os.path.join(root, start, raw))
+    if _is_unc(full):
+        return None
+    try:
+        inside = os.path.commonpath(
+            [os.path.normcase(root), os.path.normcase(full)]
+        ) == os.path.normcase(root)
+    except ValueError:  # different drives, or mixed absolute/relative
+        return None
+    if not inside or os.path.normcase(full) == os.path.normcase(root):
+        return None
+    return Path(os.path.relpath(full, root)).as_posix()
+
+
 def get_project_path() -> str | None:
     """
     Detect the project path from environment variables.

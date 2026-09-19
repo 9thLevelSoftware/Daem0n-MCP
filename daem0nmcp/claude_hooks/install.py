@@ -16,30 +16,48 @@ from ..edit_host import (
     local_bridge_layout,
     provision_client_bridge_installation,
 )
+from ..protected_files import reject_linked_ancestry
 
-# Every env key pairing can write into <project>/.claude/settings.local.json.
+# Env keys only pairing writes into <project>/.claude/settings.local.json.
+# Pairing always writes the credential key, so it marks a paired project.
+_PAIRING_MARKER = "DAEM0NMCP_EDIT_BRIDGE_CREDENTIAL_FILE"
 _BRIDGE_ENV_KEYS = (
-    "DAEM0NMCP_EDIT_BRIDGE_CREDENTIAL_FILE",
+    _PAIRING_MARKER,
     "DAEM0NMCP_EDIT_BRIDGE_RUNTIME_DIR",
     "DAEM0NMCP_EDIT_BRIDGE_MODE",
     "DAEM0NMCP_EDIT_HOST_WORKSPACE_BINDING_FILE",
-    "DAEM0NMCP_PROJECT_ROOT",
-    "DAEM0NMCP_STORAGE_PATH",
 )
+# General Daem0n keys that pairing also sets; removed only from paired projects.
+_SHARED_ENV_KEYS = ("DAEM0NMCP_PROJECT_ROOT", "DAEM0NMCP_STORAGE_PATH")
 
 
 def _settings_path() -> Path:
     return Path.home() / ".claude" / "settings.json"
 
 
+def _read_json_object(path: Path) -> dict[str, Any]:
+    """Read a JSON object (a UTF-8 BOM is fine); raise ValueError otherwise."""
+    try:
+        value = json.loads(path.read_text(encoding="utf-8-sig"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise ValueError(f"{path} is not readable JSON ({exc})") from exc
+    if not isinstance(value, dict):
+        raise ValueError(f"{path} must contain a JSON object")
+    return value
+
+
 def _read_settings() -> dict[str, Any]:
+    """Read ``~/.claude/settings.json``; raise ValueError rather than lose it."""
     path = _settings_path()
-    if path.exists():
-        try:
-            return json.loads(path.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError):
-            return {}
-    return {}
+    if not path.exists():
+        return {}
+    settings = _read_json_object(path)
+    hooks = settings.get("hooks", {})
+    if not isinstance(hooks, dict) or not all(
+        isinstance(entries, list) for entries in hooks.values()
+    ):
+        raise ValueError(f"{path}: 'hooks' must map each event to a list")
+    return settings
 
 
 def _write_settings(data: dict[str, Any]) -> None:
@@ -50,8 +68,11 @@ def _write_settings(data: dict[str, Any]) -> None:
 
 def _is_daem0n_entry(entry: dict) -> bool:
     """Check if a hook entry belongs to Daem0n (current or legacy)."""
-    for hook in entry.get("hooks", []):
-        cmd = hook.get("command", "")
+    hooks = entry.get("hooks") if isinstance(entry, dict) else None
+    for hook in hooks if isinstance(hooks, list) else []:
+        cmd = hook.get("command") if isinstance(hook, dict) else None
+        if not isinstance(cmd, str):
+            continue
         if "daem0nmcp.claude_hooks" in cmd:
             return True
         # Legacy hook scripts
@@ -155,12 +176,7 @@ def _configure_project_bridge(
     environment: dict[str, str],
 ) -> Path:
     path = project_root / ".claude" / "settings.local.json"
-    if path.exists():
-        value = json.loads(path.read_text(encoding="utf-8"))
-        if not isinstance(value, dict):
-            raise ValueError("project-local Claude settings must be an object")
-    else:
-        value = {}
+    value = _read_json_object(path) if path.exists() else {}
     configured = value.setdefault("env", {})
     if not isinstance(configured, dict):
         raise ValueError("project-local Claude env settings must be an object")
@@ -189,7 +205,10 @@ def install_claude_hooks(
 
     Returns (success, message).
     """
-    settings = _read_settings()
+    try:
+        settings = _read_settings()
+    except ValueError as exc:
+        return False, f"{exc}; fix or move it and retry. Nothing was changed."
     new_defs = _build_hook_definitions()
     project_root = (
         None if project_path is None else Path(project_path).resolve(strict=True)
@@ -250,25 +269,19 @@ def install_claude_hooks(
     return True, message
 
 
-def _unconfigure_project_bridge(project_root: Path, dry_run: bool) -> Path | None:
-    """Strip the env keys pairing added; return the settings path if changed."""
-    path = project_root / ".claude" / "settings.local.json"
+def _strip_pairing_env(path: Path) -> dict[str, Any] | None:
+    """Return *path*'s settings without the pairing env keys, or None if unpaired."""
     if not path.is_file():
         return None
-    value = json.loads(path.read_text(encoding="utf-8"))
-    configured = value.get("env") if isinstance(value, dict) else None
-    if not isinstance(configured, dict):
+    value = _read_json_object(path)
+    configured = value.get("env")
+    if not isinstance(configured, dict) or _PAIRING_MARKER not in configured:
         return None
-    removed = [key for key in _BRIDGE_ENV_KEYS if key in configured]
-    if not removed:
-        return None
-    for key in removed:
-        del configured[key]
+    for key in _BRIDGE_ENV_KEYS + _SHARED_ENV_KEYS:
+        configured.pop(key, None)
     if not configured:
         del value["env"]
-    if not dry_run:
-        path.write_text(json.dumps(value, indent=2) + "\n", encoding="utf-8")
-    return path
+    return value
 
 
 def uninstall_claude_hooks(
@@ -286,12 +299,45 @@ def uninstall_claude_hooks(
     ``.claude/settings.local.json``; with *remove_credentials*, also deletes
     the project's local edit-bridge credential and socket directories.
 
-    Returns (success, message).
+    Returns (success, message); the message lists everything that was done,
+    including after a partial failure.
     """
-    settings = _read_settings()
+    try:
+        settings = _read_settings()
+    except ValueError as exc:
+        return False, f"{exc}; fix or move it and retry. Nothing was changed."
+
+    # Read everything that can fail before writing anything.
+    notes: list[str] = []
+    ok = True
+    local_path: Path | None = None
+    local_value: dict[str, Any] | None = None
+    directories: list[Path] = []
+    if project_path is not None:
+        project_root = Path(project_path).resolve(strict=False)
+        local_path = project_root / ".claude" / "settings.local.json"
+        try:
+            local_value = _strip_pairing_env(local_path)
+        except ValueError as exc:
+            notes.append(f"Left {local_path} unchanged: {exc}")
+            ok = False
+        if remove_credentials:
+            try:
+                _, _, *layout = local_bridge_layout(project_root, bridge_config_root)
+            except (OSError, ValueError) as exc:
+                notes.append(
+                    f"Could not locate edit bridge credentials for {project_root} "
+                    f"({exc}); delete its directory under "
+                    "~/.daem0nmcp/edit-bridges/ by hand."
+                )
+                ok = False
+            else:
+                directories = [path for path in layout if path.is_dir()]
+    elif remove_credentials:
+        notes.append("No project given; edit bridge credentials kept.")
+
     hooks_section = settings.get("hooks", {})
     removed_events: list[str] = []
-
     for event in list(hooks_section.keys()):
         entries = hooks_section[event]
         filtered = [e for e in entries if not _is_daem0n_entry(e)]
@@ -303,42 +349,43 @@ def uninstall_claude_hooks(
             del hooks_section[event]
 
     lines: list[str] = []
-    if removed_events:
-        settings["hooks"] = hooks_section
-        if dry_run:
-            formatted = json.dumps(settings, indent=2)
-            lines.append(f"[dry-run] Would write to {_settings_path()}:\n{formatted}")
-        else:
-            try:
-                _write_settings(settings)
-            except OSError as exc:
-                return False, f"Failed to write settings: {exc}"
-            lines.append(
-                f"Removed Daem0n hooks from: {', '.join(sorted(removed_events))}"
-            )
-    else:
+    if not removed_events:
         lines.append("No Daem0n hooks found to remove.")
-
-    if project_path is not None:
-        prefix = "[dry-run] Would remove" if dry_run else "Removed"
+    elif dry_run:
+        settings["hooks"] = hooks_section
+        formatted = json.dumps(settings, indent=2)
+        lines.append(f"[dry-run] Would write to {_settings_path()}:\n{formatted}")
+    else:
+        settings["hooks"] = hooks_section
         try:
-            project_root = Path(project_path).resolve(strict=True)
-            changed = _unconfigure_project_bridge(project_root, dry_run)
-            if changed is not None:
-                lines.append(f"{prefix} edit bridge settings from {changed}")
-            if remove_credentials:
-                _, _, *directories = local_bridge_layout(
-                    project_root, bridge_config_root
-                )
-                for directory in directories:
-                    if directory.is_dir():
-                        if not dry_run:
-                            shutil.rmtree(directory)
-                        lines.append(f"{prefix} {directory}")
-        except (OSError, ValueError, json.JSONDecodeError) as exc:
-            return False, f"Edit bridge cleanup failed: {exc}"
+            _write_settings(settings)
+        except OSError as exc:
+            return False, f"Failed to write settings: {exc}"
+        lines.append(f"Removed Daem0n hooks from: {', '.join(sorted(removed_events))}")
+    lines.extend(notes)
 
-    return True, "\n".join(lines)
+    prefix = "[dry-run] Would remove" if dry_run else "Removed"
+    if local_path is not None and local_value is not None:
+        try:
+            if not dry_run:
+                local_path.write_text(
+                    json.dumps(local_value, indent=2) + "\n", encoding="utf-8"
+                )
+            lines.append(f"{prefix} edit bridge settings from {local_path}")
+        except OSError as exc:
+            lines.append(f"Could not update {local_path}: {exc}")
+            ok = False
+    for directory in directories:
+        try:
+            reject_linked_ancestry(directory)
+            if not dry_run:
+                shutil.rmtree(directory)
+            lines.append(f"{prefix} {directory}")
+        except OSError as exc:
+            lines.append(f"Could not remove {directory}: {exc}")
+            ok = False
+
+    return ok, "\n".join(lines)
 
 
 if __name__ == "__main__":

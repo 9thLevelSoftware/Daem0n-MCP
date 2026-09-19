@@ -473,8 +473,13 @@ def main():
     uninstall_claude_parser.add_argument(
         "--remove-credentials",
         action="store_true",
-        help="Also delete the project's local edit-bridge credential (with --project-path)",
+        help="Also delete the project's local edit-bridge credential",
     )
+    for claude_parser in (install_claude_parser, uninstall_claude_parser):
+        # Also accept --project-path after the subcommand (default: cwd).
+        claude_parser.add_argument(
+            "--project-path", default=argparse.SUPPRESS, help="Project root path"
+        )
 
     # install-opencode command
     install_oc_parser = subparsers.add_parser(
@@ -935,7 +940,7 @@ def main():
 
         success, message = uninstall_claude_hooks(
             dry_run=getattr(args, "dry_run", False),
-            project_path=args.project_path,
+            project_path=args.project_path or os.getcwd(),
             remove_credentials=args.remove_credentials,
         )
         if args.json:

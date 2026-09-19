@@ -1,6 +1,7 @@
 """Tests for the Claude Code hook installer."""
 
 import json
+import shutil
 import ssl
 from pathlib import Path
 
@@ -391,3 +392,112 @@ class TestUninstall:
         assert ok, message
         assert json.loads(local_settings.read_text(encoding="utf-8")) == {}
         assert credential.is_file()
+
+
+def _paired_project(tmp_path):
+    project = tmp_path / "project"
+    project.mkdir()
+    host_config = tmp_path / "host-config"
+    ok, message = install_claude_hooks(
+        project_path=project, bridge_config_root=host_config
+    )
+    assert ok, message
+    local_settings = project / ".claude" / "settings.local.json"
+    env = json.loads(local_settings.read_text(encoding="utf-8"))["env"]
+    credential_dir = Path(env["DAEM0NMCP_EDIT_BRIDGE_CREDENTIAL_FILE"]).parent
+    runtime = Path(env["DAEM0NMCP_EDIT_BRIDGE_RUNTIME_DIR"])
+    runtime.mkdir(parents=True)
+    return project, host_config, local_settings, credential_dir, runtime
+
+
+class TestUninstallRobustness:
+    def test_unpaired_project_keeps_general_daem0n_keys(self, fake_settings, tmp_path):
+        project = tmp_path / "project"
+        (project / ".claude").mkdir(parents=True)
+        local_settings = project / ".claude" / "settings.local.json"
+        original = json.dumps(
+            {"env": {"DAEM0NMCP_PROJECT_ROOT": "x", "DAEM0NMCP_STORAGE_PATH": "y"}}
+        )
+        local_settings.write_text(original, encoding="utf-8")
+
+        ok, _message = uninstall_claude_hooks(project_path=project)
+
+        assert ok
+        assert local_settings.read_text(encoding="utf-8") == original
+
+    def test_bom_prefixed_local_settings_are_cleaned(self, fake_settings, tmp_path):
+        project, _host, local_settings, _cred, _runtime = _paired_project(tmp_path)
+        text = local_settings.read_text(encoding="utf-8")
+        local_settings.write_bytes(b"\xef\xbb\xbf" + text.encode("utf-8"))
+
+        ok, message = uninstall_claude_hooks(project_path=project)
+
+        assert ok, message
+        assert json.loads(local_settings.read_text(encoding="utf-8")) == {}
+
+    def test_malformed_local_settings_report_partial_success(
+        self, fake_settings, tmp_path
+    ):
+        project, host, local_settings, credential_dir, runtime = _paired_project(
+            tmp_path
+        )
+        local_settings.write_bytes(b'{"env": {bad json')
+
+        ok, message = uninstall_claude_hooks(
+            project_path=project, remove_credentials=True, bridge_config_root=host
+        )
+
+        assert not ok
+        assert "Removed Daem0n hooks from" in message
+        assert f"Left {local_settings.resolve()} unchanged" in message
+        assert local_settings.read_bytes() == b'{"env": {bad json'
+        assert json.loads(fake_settings.read_text())["hooks"] == {}
+        assert not credential_dir.exists() and not runtime.exists()
+
+    def test_deleted_project_reports_what_was_and_was_not_done(
+        self, fake_settings, tmp_path
+    ):
+        project, host, _local, credential_dir, _runtime = _paired_project(tmp_path)
+        shutil.rmtree(project)
+
+        ok, message = uninstall_claude_hooks(
+            project_path=project, remove_credentials=True, bridge_config_root=host
+        )
+
+        assert not ok
+        assert "Removed Daem0n hooks from" in message
+        assert "Could not locate edit bridge credentials" in message
+        assert "by hand" in message
+        assert credential_dir.exists()
+
+    def test_remove_credentials_without_project_says_so(self, fake_settings):
+        ok, message = uninstall_claude_hooks(remove_credentials=True)
+        assert ok
+        assert "No project given; edit bridge credentials kept." in message
+
+    @pytest.mark.parametrize(
+        "content",
+        ['{bad json, "theme": "dark"', '{"hooks": []}', '{"hooks": {"Stop": {}}}'],
+    )
+    def test_malformed_user_settings_are_never_overwritten(
+        self, fake_settings, content
+    ):
+        fake_settings.write_text(content, encoding="utf-8")
+
+        installed, install_message = install_claude_hooks()
+        removed, uninstall_message = uninstall_claude_hooks()
+
+        assert not installed and not removed
+        assert "Nothing was changed" in install_message
+        assert "Nothing was changed" in uninstall_message
+        assert fake_settings.read_text(encoding="utf-8") == content
+
+    def test_non_object_hook_entries_are_kept(self, fake_settings):
+        fake_settings.write_text(
+            json.dumps({"hooks": {"Stop": ["odd", {"hooks": "odd"}]}}),
+            encoding="utf-8",
+        )
+        ok, message = install_claude_hooks()
+        assert ok, message
+        stop = json.loads(fake_settings.read_text())["hooks"]["Stop"]
+        assert stop[:2] == ["odd", {"hooks": "odd"}]

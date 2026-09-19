@@ -9,13 +9,19 @@ user as a ``systemMessage``; it never emits ``decision`` and always exits 0.
 import contextlib
 import hashlib
 import json
-import os
 import re
 import sys
+import time
+from collections import deque
 from pathlib import Path
 
 from ..workspace import WorkspaceRegistry
-from ._client import read_hook_event, run_async
+from ._client import (
+    find_project_root,
+    read_hook_event,
+    relative_project_path,
+    run_async,
+)
 
 # ─── transcript analysis ───────────────────────────────────────────
 
@@ -102,37 +108,56 @@ def _load_state(session_id: str) -> dict:
     return {"reminder_count": 0, "last_reminder_turn": -1}
 
 
+_STATE_MAX_AGE_SECONDS = 7 * 24 * 3600
+
+
 def _save_state(session_id: str, state: dict) -> None:
     with contextlib.suppress(OSError):
-        _state_file(session_id).write_text(json.dumps(state), encoding="utf-8")
+        target = _state_file(session_id)
+        target.write_text(json.dumps(state), encoding="utf-8")
+        # One file per session: drop the ones no session has touched in a week.
+        cutoff = time.time() - _STATE_MAX_AGE_SECONDS
+        for old in target.parent.glob("stop_*.json"):
+            with contextlib.suppress(OSError):
+                if old.stat().st_mtime < cutoff:
+                    old.unlink()
 
 
 # ─── transcript reading ───────────────────────────────────────────
 
 
-def _read_transcript(path: object) -> list[dict]:
-    """Read Claude Code JSONL records, unwrapping the nested ``message``."""
+_TRANSCRIPT_TAIL_RECORDS = 50
+
+
+def _read_transcript(path: object) -> tuple[list[dict], int]:
+    """Return the last Claude Code JSONL records and the total record count.
+
+    Only the tail is JSON-parsed (the analysis looks at the last 10 records);
+    nested ``message`` objects are unwrapped.
+    """
     if not isinstance(path, str) or not path or not Path(path).is_file():
-        return []
-    messages = []
+        return [], 0
+    tail: deque[str] = deque(maxlen=_TRANSCRIPT_TAIL_RECORDS)
+    total = 0
     try:
-        with open(path, encoding="utf-8") as f:
+        with open(path, encoding="utf-8", errors="replace") as f:
             for line in f:
-                line = line.strip()
-                if line:
-                    try:
-                        record = json.loads(line)
-                    except json.JSONDecodeError:
-                        continue
-                    if isinstance(record, dict) and isinstance(
-                        record.get("message"), dict
-                    ):
-                        record = record["message"]
-                    if isinstance(record, dict):
-                        messages.append(record)
+                if line.strip():
+                    total += 1
+                    tail.append(line)
     except OSError:
-        pass
-    return messages
+        return [], 0
+    messages = []
+    for line in tail:
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(record, dict) and isinstance(record.get("message"), dict):
+            record = record["message"]
+        if isinstance(record, dict):
+            messages.append(record)
+    return messages, total
 
 
 def _get_recent_assistant_content(messages: list[dict], lookback: int = 5) -> str:
@@ -222,14 +247,7 @@ def _workspace_id(project_path: str) -> str:
 def _relative_record_path(project_path: str, mentioned_path: str | None) -> str | None:
     if not mentioned_path:
         return None
-    try:
-        root = Path(project_path).resolve(strict=True)
-        candidate = Path(mentioned_path)
-        if not candidate.is_absolute():
-            candidate = root / candidate
-        return candidate.resolve(strict=False).relative_to(root).as_posix()
-    except (OSError, RuntimeError, ValueError):
-        return None
+    return relative_project_path(Path(project_path), mentioned_path)
 
 
 def _memory_store_suggestion(
@@ -293,6 +311,7 @@ async def analyse_and_remember(
     project_path: str,
     messages: list[dict],
     state: dict,
+    turn: int | None = None,
 ) -> StopResult:
     """
     Core logic extracted for in-process testing.
@@ -302,7 +321,7 @@ async def analyse_and_remember(
     * Returns result message (empty = nothing to say)
     * Updates *state* in-place for anti-loop tracking
     """
-    current_turn = len(messages)
+    current_turn = len(messages) if turn is None else turn
 
     # Anti-loop check
     reminded_recently = state.get("last_reminder_turn", -1) >= current_turn - 2
@@ -337,10 +356,11 @@ async def analyse_and_remember(
         )
         return StopResult(
             message=(
-                "[Daem0n suggests] Completion detected. The hook did not write "
-                "memory. Review each extracted decision, then execute:\n"
+                "Daem0n: this task looks finished and no outcome was recorded. "
+                "The hook wrote nothing. To keep these decisions, ask Claude "
+                "to run:\n"
                 f"{suggestions}\n"
-                "When results are known, call "
+                "Once the result is known, ask Claude to call "
                 "mcp__daem0nmcp__memory_record_outcome("
                 f'workspace_id="{workspace_id}", record_id="<mem_id>", '
                 'outcome_text="<verified result>", worked=true, '
@@ -350,10 +370,10 @@ async def analyse_and_remember(
 
     return StopResult(
         message=(
-            "[Daem0n whispers] Task completion detected. "
-            "If you made a durable decision, use memory_preflight for the exact "
-            "memory_store arguments before writing it. When a stored result is "
-            "known, call mcp__daem0nmcp__memory_record_outcome("
+            "Daem0n: this task looks finished and no outcome was recorded. "
+            "The hook wrote nothing. To keep a durable decision, ask Claude to "
+            "run memory_preflight and then memory_store for it. Once the result "
+            "is known, ask Claude to call mcp__daem0nmcp__memory_record_outcome("
             f'workspace_id="{workspace_id}", record_id="<mem_id>", '
             'outcome_text="<verified result>", worked=true, '
             f'idempotency_key="{outcome_key}").'
@@ -366,13 +386,12 @@ async def analyse_and_remember(
 
 def main() -> None:
     event = read_hook_event()
-    project_path = event.get("cwd") or os.environ.get("CLAUDE_PROJECT_DIR")
-    if not isinstance(project_path, str) or not project_path:
+    project = find_project_root(event)
+    if project is None:
         sys.exit(0)
-    if not (Path(project_path) / ".daem0nmcp").is_dir():
-        sys.exit(0)
+    project_path = str(project)
 
-    messages = _read_transcript(event.get("transcript_path"))
+    messages, turn = _read_transcript(event.get("transcript_path"))
     if not messages:
         sys.exit(0)
 
@@ -380,7 +399,7 @@ def main() -> None:
     if not isinstance(session_id, str) or not session_id:
         session_id = "default"
     state = _load_state(session_id)
-    result = run_async(analyse_and_remember(project_path, messages, state))
+    result = run_async(analyse_and_remember(project_path, messages, state, turn))
     _save_state(session_id, state)
 
     if result.message:

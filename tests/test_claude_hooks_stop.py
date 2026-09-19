@@ -71,7 +71,8 @@ async def test_suggests_decisions_without_writing_memory(tmp_project):
     ]
     state = {"reminder_count": 0, "last_reminder_turn": -1}
     result = await analyse_and_remember(str(tmp_project), messages, state)
-    assert "hook did not write memory" in result.message
+    assert "The hook wrote nothing" in result.message
+    assert "ask Claude" in result.message
     assert "mcp__daem0nmcp__memory_preflight" in result.message
     assert "mcp__daem0nmcp__memory_store" in result.message
 
@@ -138,8 +139,19 @@ def _run_stop(event: dict, home: Path) -> subprocess.CompletedProcess[str]:
 def test_main_reads_stdin_event_and_nested_transcript(tmp_path):
     project = tmp_path / "project"
     (project / ".daem0nmcp").mkdir(parents=True)
+    (project / "src").mkdir()
+    state_dir = tmp_path / ".daem0nmcp" / "hook_state"
+    state_dir.mkdir(parents=True)
+    stale = state_dir / "stop_old-session.json"
+    stale.write_text("{}", encoding="utf-8")
+    os.utime(stale, (0, 0))
     transcript = tmp_path / "transcript.jsonl"
+    filler = [
+        {"type": "user", "message": {"role": "user", "content": f"step {n}"}}
+        for n in range(300)
+    ]
     records = [
+        *filler,
         {"type": "summary", "summary": "Caching work"},
         {
             "type": "user",
@@ -169,7 +181,7 @@ def test_main_reads_stdin_event_and_nested_transcript(tmp_path):
     event = {
         "session_id": "s-1",
         "transcript_path": str(transcript),
-        "cwd": str(project),
+        "cwd": str(project / "src"),
         "hook_event_name": "Stop",
         "stop_hook_active": False,
     }
@@ -182,7 +194,9 @@ def test_main_reads_stdin_event_and_nested_transcript(tmp_path):
     assert "mcp__daem0nmcp__memory_store" in message
     assert "memory_record_outcome" in message
     assert not (project / ".daem0nmcp" / "storage").exists()
-    assert (tmp_path / ".daem0nmcp" / "hook_state" / "stop_s-1.json").is_file()
+    state = json.loads((state_dir / "stop_s-1.json").read_text(encoding="utf-8"))
+    assert state["last_reminder_turn"] == len(records)
+    assert not stale.exists()
 
 
 def test_main_is_silent_outside_a_daem0n_project(tmp_path):

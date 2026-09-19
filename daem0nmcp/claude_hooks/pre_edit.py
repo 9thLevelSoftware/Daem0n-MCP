@@ -1,6 +1,6 @@
 """Claude Code PreToolUse hook for edits: remind, never block.
 
-Stdlib only (plus ``read_hook_event``) so it stays fast on every edit.  Outside
+Stdlib only (plus the ``_client`` helpers) so it stays fast on every edit.  Outside
 a Daem0n project it is silent; inside one it adds a one-line reminder to the
 model's context and always exits 0.
 """
@@ -8,36 +8,25 @@ model's context and always exits 0.
 from __future__ import annotations
 
 import json
-import os
 import sys
-from pathlib import Path
 
-from ._client import read_hook_event
-
-
-def _relative_path(project: Path, tool_input: object) -> str | None:
-    if not isinstance(tool_input, dict):
-        return None
-    raw = tool_input.get("file_path") or tool_input.get("notebook_path")
-    if not isinstance(raw, str) or not raw:
-        return None
-    try:
-        return (project / raw).resolve().relative_to(project.resolve()).as_posix()
-    except (OSError, ValueError):
-        return None
+from ._client import find_project_root, read_hook_event, relative_project_path
 
 
 def reminder(event: dict) -> str | None:
     """Return the reminder JSON for this event, or None to stay silent."""
-    root = event.get("cwd") or os.environ.get("CLAUDE_PROJECT_DIR")
-    if not isinstance(root, str) or not root:
+    project = find_project_root(event)
+    if project is None:
         return None
-    project = Path(root)
-    if not (project / ".daem0nmcp").is_dir():
-        return None
-    path = _relative_path(project, event.get("tool_input"))
+    tool_input = event.get("tool_input")
+    raw = (
+        tool_input.get("file_path") or tool_input.get("notebook_path")
+        if isinstance(tool_input, dict)
+        else None
+    )
+    path = relative_project_path(project, raw, event.get("cwd"))
     recall = (
-        f'memory_recall_file(relative_file_path="{path}")'
+        f"memory_recall_file(relative_file_path={json.dumps(path)})"
         if path
         else "memory_recall_file"
     )
