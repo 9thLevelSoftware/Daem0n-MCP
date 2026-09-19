@@ -9,15 +9,15 @@
 - Runtime data lives under `.daem0nmcp/` (e.g., `.daem0nmcp/storage/daem0nmcp.db`); do not commit it.
 
 ## Build, Test, and Development Commands
-- `pip install -e ".[dev,apps,graph]"` installs the package in editable mode with the extras CI tests against.
+- `pip install -e ".[dev,apps,graph]"` installs the package in editable mode with the extras CI tests against; the `dev` extra pins the ruff and mypy versions CI uses. (The locked `cryptography` ships wheels only for 64-bit Windows, Apple-silicon macOS and Linux; elsewhere `uv sync --frozen` builds it from source and needs a Rust toolchain.)
 - `python -m daem0nmcp.server` runs the MCP server directly.
 - `python start_server.py --port 9876` starts the Windows HTTP launcher.
 - `python -m daem0nmcp.cli <command>` runs CLI tasks (example: `python -m daem0nmcp.cli index`).
 
 CI (`.github/workflows/ci.yml`) blocks merges on these gates; run them before pushing:
 - Tests: `pytest tests/ -v --asyncio-mode=auto` (Ubuntu, Windows and macOS on Python 3.10-3.12).
-- Lint and format: `ruff check daem0nmcp/ tests/` and `ruff format --check daem0nmcp/ tests/`, with ruff pinned to the `uv.lock` version (0.16.8).
-- Type check: `mypy daem0nmcp/api/v7 --ignore-missing-imports --follow-imports=silent` (CI runs it on Linux; add `--platform linux` locally on Windows or macOS).
+- Lint and format: `ruff check daem0nmcp/ tests/` and `ruff format --check daem0nmcp/ tests/`, with ruff 0.16.8 (pinned in the `dev` extra).
+- Type check (mypy 2.3.1, pinned in the `dev` extra): `mypy daem0nmcp/api/v7 --ignore-missing-imports --follow-imports=silent` (CI runs it on Linux; add `--platform linux` locally on Windows or macOS).
 - Release inventory: `python scripts/v7_release_inventory.py --check`.
 
 ## Coding Style & Naming Conventions
