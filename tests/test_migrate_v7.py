@@ -191,9 +191,9 @@ class V7DryRunTests(unittest.TestCase):
             uris = []
             connect = sqlite3.connect
 
-            def recording_connect(uri, **kwargs):
-                uris.append(uri)
-                return connect(uri, **kwargs)
+            def recording_connect(database, **kwargs):
+                uris.append(database)
+                return connect(database, **kwargs)
 
             with mock.patch.object(v7.sqlite3, "connect", recording_connect):
                 v7._readonly_connection(database).close()
