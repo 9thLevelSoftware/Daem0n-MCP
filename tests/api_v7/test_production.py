@@ -409,6 +409,8 @@ class ProductionCompositionTests(unittest.TestCase):
         )
 
         self.assertEqual(len(calls), 1)
+        # Guidance never shows git changes, so it must not spawn git for them.
+        self.assertIs(calls[0]["include_git_changes"], False)
         self.assertEqual(result["records"], [relevant_failure])
         self.assertEqual(result["rules"], [relevant_rule])
         self.assertIn(

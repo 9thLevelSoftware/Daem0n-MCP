@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import inspect
+import logging
 import os
 import re
 from collections.abc import Awaitable, Callable, Mapping
@@ -238,6 +239,13 @@ def _expected_service_failure(
     if mapped is None:
         return None
     code, message, retryable = mapped
+    if error_code == "ACTIVE_V7_UNAVAILABLE":
+        # Opaque on the wire like INTERNAL_ERROR, so keep the cause findable.
+        logging.getLogger(__name__).warning(
+            "v7 workspace unavailable correlation_id=%s",
+            response.request_id,
+            exc_info=error,
+        )
     return response.failure(
         code,
         message,

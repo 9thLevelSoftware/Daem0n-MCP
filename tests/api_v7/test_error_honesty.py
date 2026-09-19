@@ -232,6 +232,27 @@ async def test_contended_briefing_snapshot_is_retryable_database_in_use(
     assert caught.value.code == "DATABASE_IN_USE"
 
 
+async def test_exclusive_storage_lock_is_database_in_use_not_unavailable(tmp_path):
+    """A migration/bootstrap holding the storage lock is transient contention."""
+    from daem0nmcp.api.v7.runtime_services import WorkspaceStorageResolver
+    from daem0nmcp.storage_activation import DatabaseFileLock
+
+    [workspace] = await initialize_workspaces((tmp_path,))
+    holder = DatabaseFileLock(tmp_path / ".daem0nmcp" / "storage", "exclusive")
+    holder.acquire()
+    try:
+        with (
+            pytest.raises(RuntimeServiceError) as caught,
+            WorkspaceStorageResolver().locked_active(workspace),
+        ):
+            pytest.fail("a shared read was admitted under an exclusive lock")
+    finally:
+        holder.release()
+    assert caught.value.code == "DATABASE_IN_USE"
+    with WorkspaceStorageResolver().locked_active(workspace) as active:
+        assert active.format_version == 7
+
+
 def test_internal_error_log_omits_pydantic_input_values(caplog):
     from pydantic import BaseModel, ValidationError
 

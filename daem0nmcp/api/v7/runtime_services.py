@@ -197,6 +197,10 @@ class WorkspaceStorageResolver:
             raise
         except Exception as exc:
             lock.release()
+            # DatabaseInUseError: another process holds the storage lock
+            # exclusively (fresh bootstrap, migration) - transient, retryable.
+            if is_database_busy(exc):
+                raise RuntimeServiceError("DATABASE_IN_USE") from exc
             raise RuntimeServiceError("ACTIVE_V7_UNAVAILABLE") from exc
         try:
             yield active

@@ -521,8 +521,13 @@ class SQLiteResourceRepository:
         failure_limit: int,
         rule_limit: int = 50,
         active_context_limit: int = 50,
+        include_git_changes: bool = True,
     ) -> ResourceRepositorySnapshot:
-        """Read all briefing resources without a pointer-generation gap."""
+        """Read all briefing resources without a pointer-generation gap.
+
+        Git changes cost two ``git`` subprocesses per read (plus a system-wide
+        thread walk on Windows); callers that never show them skip them.
+        """
 
         if not isinstance(workspace, Workspace):
             raise ValueError("workspace must be a registered Workspace")
@@ -563,6 +568,7 @@ class SQLiteResourceRepository:
                 failure_request=failure_request,
                 rule_request=rule_request,
                 active_request=active_request,
+                include_git_changes=include_git_changes is True,
             )
         )
 
@@ -574,6 +580,7 @@ class SQLiteResourceRepository:
         failure_request: ResourceReadRequest | None,
         rule_request: ResourceReadRequest,
         active_request: ResourceReadRequest,
+        include_git_changes: bool = True,
     ) -> ResourceRepositorySnapshot:
         connection, storage_lock = self._open_connection(workspace)
         try:
@@ -645,7 +652,9 @@ class SQLiteResourceRepository:
             rules=rules,
             active_context=active_context,
             decisions=decisions,
-            git_changes=self._read_git_changes_sync(workspace),
+            git_changes=(
+                self._read_git_changes_sync(workspace) if include_git_changes else []
+            ),
             projection_freshness=projection_freshness,
             workspace_statistics=workspace_statistics,
             stale_projection_count=stale_projection_count,
