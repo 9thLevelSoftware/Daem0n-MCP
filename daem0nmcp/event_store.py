@@ -1937,7 +1937,8 @@ class GovernanceEventStore:
                 "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 values,
             )
-        except Exception as exc:
+        except sqlite3.IntegrityError as exc:
+            # As for memory events: only a constraint collision is a conflict.
             raise EventStreamConflict(
                 "governance event identity or stream version is occupied"
             ) from exc

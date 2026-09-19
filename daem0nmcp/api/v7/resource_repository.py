@@ -951,6 +951,7 @@ class SQLiteResourceRepository:
     async def _run(self, operation: Callable[[], T]) -> T:
         worker = asyncio.create_task(self._worker_pool.run(operation))
         cancellation: asyncio.CancelledError | None = None
+        timed_out = False
         try:
             return cast(
                 T,
@@ -960,7 +961,7 @@ class SQLiteResourceRepository:
                 ),
             )
         except asyncio.TimeoutError:
-            pass
+            timed_out = True
         except asyncio.CancelledError as exc:
             cancellation = exc
         except Exception:
@@ -985,7 +986,9 @@ class SQLiteResourceRepository:
             failure = worker.exception()
         if cancellation is not None:
             raise cancellation
-        if is_database_busy(failure):
+        # A read that overran its deadline but did not itself fail was slowed
+        # by contention (lock waits, a saturated host), so it is retryable.
+        if is_database_busy(failure) or (timed_out and failure is None):
             raise ResourceRepositoryError("DATABASE_IN_USE") from failure
         raise ResourceRepositoryError() from failure
 

@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 import logging
+import re
 import secrets
 import sys
+import traceback
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, TypeVar
+
+from pydantic import ValidationError
 
 from .errors import INTERNAL_ERROR_MESSAGE, ErrorCode
 from .models import (
@@ -25,6 +29,50 @@ from .models import (
 T = TypeVar("T")
 
 _LOGGER = logging.getLogger(__name__)
+_LOCATION_PART = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,63}$")
+
+
+def _exception_chain(error: BaseException) -> list[BaseException]:
+    """Return *error* and its causes, root cause first, as tracebacks do."""
+
+    chain: list[BaseException] = []
+    link: BaseException | None = error
+    while link is not None and all(link is not seen for seen in chain):
+        chain.append(link)
+        link = link.__cause__ or (
+            None if link.__suppress_context__ else link.__context__
+        )
+    return chain[::-1]
+
+
+def _without_input_values(chain: list[BaseException]) -> str:
+    """Render a traceback whose pydantic errors omit the offending values.
+
+    ``str(ValidationError)`` quotes a slice of each invalid input, which for
+    service output can be stored memory content or a token.
+    """
+
+    rendered = []
+    for link in chain:
+        if isinstance(link, ValidationError):
+            detail = "; ".join(
+                ".".join(
+                    str(part)
+                    if isinstance(part, int) or _LOCATION_PART.match(str(part))
+                    else "?"
+                    for part in item["loc"]
+                )
+                + f" ({item['type']})"
+                for item in link.errors(include_url=False)
+            )
+        else:
+            detail = str(link)
+        rendered.append(
+            "Traceback (most recent call last):\n"
+            + "".join(traceback.format_tb(link.__traceback__))
+            + f"{type(link).__module__}.{type(link).__qualname__}: {detail}"
+        )
+    return "\n\nThe above exception led to:\n\n".join(rendered)
 
 
 def _utc_now() -> datetime:
@@ -125,14 +173,25 @@ class ResponseContext:
         """Return the one deliberately opaque internal failure envelope.
 
         The cause is logged (stderr by default, never the MCP wire) under the
-        correlation ID the caller receives, so the owner can find it.
+        correlation ID the caller receives, so the owner can find it.  Logs
+        may still hold short exception messages such as local paths; redact
+        them before sharing.  Pydantic input values are never logged.
         """
 
-        _LOGGER.error(
-            "v7 internal error correlation_id=%s",
-            self.request_id,
-            exc_info=error if error is not None else sys.exc_info()[1],
-        )
+        cause = error if error is not None else sys.exc_info()[1]
+        chain = [] if cause is None else _exception_chain(cause)
+        if any(isinstance(link, ValidationError) for link in chain):
+            _LOGGER.error(
+                "v7 internal error correlation_id=%s\n%s",
+                self.request_id,
+                _without_input_values(chain),
+            )
+        else:
+            _LOGGER.error(
+                "v7 internal error correlation_id=%s",
+                self.request_id,
+                exc_info=cause,
+            )
         return self.failure(
             ErrorCode.INTERNAL_ERROR,
             INTERNAL_ERROR_MESSAGE,

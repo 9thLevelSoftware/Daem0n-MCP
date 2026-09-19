@@ -22,7 +22,7 @@ from ...covenant import (
 from ...event_store import AppendedEvent, EventStreamConflict
 from ...retrieval import RetrievalQuery
 from ...workspace import Workspace
-from .errors import ErrorCode
+from .errors import DATABASE_IN_USE_RETRY_AFTER_MS, ErrorCode
 from .models import (
     ApiResponse,
     ApiWarning,
@@ -129,8 +129,10 @@ _FIELD_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,63}$")
 def _token_not_issued_warning(error: ArgumentNormalizationError) -> ApiWarning:
     """Say why a description-only preflight carries no token.
 
-    Only schema field names and pydantic error types are echoed; supplied
-    values and unknown keys never reach the wire.
+    Supplied values are never echoed: only pydantic error types and the
+    locations of the failing arguments.  A location part is echoed only when
+    it is an int index or identifier-shaped (which may include a key the
+    caller sent); anything else, such as a path-like key, becomes ``?``.
     """
 
     problems: list[str] = []
@@ -240,7 +242,11 @@ def _expected_service_failure(
         code,
         message,
         retryable=retryable,
-        retry_after_ms=250 if code is ErrorCode.DATABASE_IN_USE else None,
+        retry_after_ms=(
+            DATABASE_IN_USE_RETRY_AFTER_MS
+            if code is ErrorCode.DATABASE_IN_USE
+            else None
+        ),
     )
 
 
@@ -849,6 +855,14 @@ class PinnedHandlers:
         if failure is not None:
             return failure
         assert scope is not None
+        preflight_remedy = {
+            "workspace_id": request.workspace_id,
+            "target_tool": "memory_store",
+            "target_arguments": request.model_dump(
+                mode="json",
+                exclude={"workspace_id", "preflight_token"},
+            ),
+        }
         violation = self._dependencies.covenant_gate.authorize(
             "memory_store",
             request.model_dump(),
@@ -875,14 +889,7 @@ class PinnedHandlers:
                 ErrorCode.TOKEN_LEGACY_UNSUPPORTED,
             }:
                 remedy_tool = "memory_preflight"
-                remedy_arguments = {
-                    "workspace_id": request.workspace_id,
-                    "target_tool": "memory_store",
-                    "target_arguments": request.model_dump(
-                        mode="json",
-                        exclude={"workspace_id", "preflight_token"},
-                    ),
-                }
+                remedy_arguments = preflight_remedy
             return response.failure(
                 stable_code,
                 "The preflight capability was rejected.",
@@ -931,6 +938,18 @@ class PinnedHandlers:
                 retryable=True,
             )
         except Exception as exc:
+            if getattr(exc, "code", None) == ErrorCode.DATABASE_IN_USE.value:
+                # authorize() already spent the token, so a retry needs a new
+                # one; the idempotency key keeps the retry replay-safe.
+                return response.failure(
+                    ErrorCode.DATABASE_IN_USE,
+                    "The workspace database is currently in use. Request a new "
+                    "preflight token, then retry with the same idempotency_key.",
+                    retryable=True,
+                    retry_after_ms=DATABASE_IN_USE_RETRY_AFTER_MS,
+                    remedy_tool="memory_preflight",
+                    remedy_arguments=preflight_remedy,
+                )
             return _expected_service_failure(response, exc) or response.internal_error(
                 exc
             )

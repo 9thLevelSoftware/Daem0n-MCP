@@ -15,12 +15,18 @@ import pytest
 from fastmcp import Client
 
 from daem0nmcp.api.v7 import runtime_services
-from daem0nmcp.api.v7.production import create_v7_server
-from daem0nmcp.api.v7.resource_repository import (
-    ResourceRepositoryError,
-    SQLiteResourceRepository,
+from daem0nmcp.api.v7.production import (
+    _briefing_reader,
+    _guidance_reader,
+    create_v7_server,
 )
-from daem0nmcp.api.v7.resources import ResourceReadRequest
+from daem0nmcp.api.v7.resource_repository import build_sqlite_resource_readers
+from daem0nmcp.api.v7.runtime_services import (
+    BasicBriefingService,
+    BasicPreflightService,
+    RuntimeServiceError,
+)
+from daem0nmcp.api.v7.tools import SessionBriefInput
 from daem0nmcp.bounded_workers import BoundedWorkerPool
 from daem0nmcp.config import Settings
 from daem0nmcp.storage_activation import resolve_active_database
@@ -108,6 +114,8 @@ async def test_parallel_stores_are_ok_or_retryable_and_land_exactly_once(tmp_pat
 
     for observed in results:
         assert observed[-1]["ok"], observed
+    # Logged, not asserted: a fast host may never contend.
+    print("DATABASE_IN_USE retries:", sum(len(observed) - 1 for observed in results))
     with closing(sqlite3.connect(_database(tmp_path))) as connection:
         records = connection.execute("SELECT count(*) FROM memory_records").fetchone()
         events = connection.execute(
@@ -166,27 +174,85 @@ async def test_internal_error_is_logged_under_the_returned_correlation_id(
     assert "MEMORY_STORE_FAILED" in caplog.text
 
 
-async def test_resource_reads_report_a_full_worker_pool_as_database_in_use(tmp_path):
+@pytest.mark.parametrize("contention", ["full_pool", "overrun_read"])
+@pytest.mark.parametrize("service", ["memory_preflight", "session_brief"])
+async def test_contended_briefing_snapshot_is_retryable_database_in_use(
+    tmp_path, service, contention
+):
+    """The CI failure path: guidance/briefing -> read_briefing_snapshot -> _run.
+
+    MCP resource URIs still report an opaque access failure; the repository
+    code only matters on these two service paths.
+    """
     [workspace] = await initialize_workspaces((tmp_path,))
-    pool = BoundedWorkerPool(max_workers=1, thread_name_prefix="test-busy")
+    storage = tmp_path / ".daem0nmcp" / "storage"
+    pool = BoundedWorkerPool(max_workers=1, thread_name_prefix="test-contention")
     release = threading.Event()
-    occupant = asyncio.create_task(pool.run(lambda: release.wait(timeout=30)))
-    for _ in range(100):
-        if pool.in_flight:
-            break
-        await asyncio.sleep(0)
-    try:
-        repository = SQLiteResourceRepository(
-            lambda _workspace: pytest.fail("a full pool must not open storage"),
-            worker_pool=pool,
+
+    def resolve(_workspace):
+        if contention == "overrun_read":
+            release.wait(timeout=30)  # overrun the 0.05 s deadline, then succeed
+        return resolve_active_database(storage)
+
+    readers = build_sqlite_resource_readers(
+        resolve, timeout_seconds=0.05, worker_pool=pool
+    )
+
+    async def pool_occupied() -> None:
+        deadline = asyncio.get_running_loop().time() + 10
+        while not pool.in_flight:
+            assert asyncio.get_running_loop().time() < deadline
+            await asyncio.sleep(0.01)
+
+    occupant = None
+    if contention == "full_pool":
+        occupant = asyncio.create_task(pool.run(lambda: release.wait(timeout=30)))
+        await pool_occupied()
+    if service == "memory_preflight":
+        call = BasicPreflightService(reader=_guidance_reader(readers)).guidance(
+            workspace, "memory_store", {}, "Plan a decision."
         )
-        with pytest.raises(ResourceRepositoryError) as caught:
-            await repository.read_warnings(
-                workspace,
-                ResourceReadRequest("warnings", 10, "updated_at_desc"),
-            )
-        assert caught.value.code == "DATABASE_IN_USE"
+    else:
+        call = BasicBriefingService(reader=_briefing_reader(readers)).assemble(
+            workspace, SessionBriefInput(workspace_id=workspace.workspace_id)
+        )
+    task = asyncio.ensure_future(call)
+    try:
+        if contention == "overrun_read":
+            await pool_occupied()
+            await asyncio.sleep(0.2)
+            release.set()
+        with pytest.raises(RuntimeServiceError) as caught:
+            await task
     finally:
         release.set()
-        await occupant
+        if occupant is not None:
+            await occupant
         pool.shutdown()
+    assert caught.value.code == "DATABASE_IN_USE"
+
+
+def test_internal_error_log_omits_pydantic_input_values(caplog):
+    from pydantic import BaseModel, ValidationError
+
+    from daem0nmcp.api.v7.responses import ResponseFactory
+
+    class Guidance(BaseModel):
+        priority: int
+
+    # Built at runtime so the traceback's source lines cannot contain it.
+    stored_content = "-".join(("secret", "memory", "fragment", "canary"))
+    try:
+        try:
+            Guidance.model_validate({"priority": stored_content})
+        except ValidationError as invalid:
+            raise RuntimeError("PREFLIGHT_FAILED") from invalid
+    except RuntimeError as error:
+        with caplog.at_level(logging.ERROR, logger="daem0nmcp.api.v7.responses"):
+            response = ResponseFactory().begin(None).internal_error(error)
+
+    assert response.error.correlation_id in caplog.text
+    assert "priority (int_parsing)" in caplog.text
+    assert "PREFLIGHT_FAILED" in caplog.text
+    assert "test_internal_error_log_omits_pydantic_input_values" in caplog.text
+    assert "secret-memory-fragment-canary" not in caplog.text

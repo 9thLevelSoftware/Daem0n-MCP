@@ -1797,17 +1797,25 @@ class PinnedHandlerTests(unittest.TestCase):
             )
         )
 
-        response = asyncio.run(
-            handlers["memory_store"](
-                **MemoryStoreInput(**target, preflight_token=token).model_dump()
-            )
-        )
+        request = MemoryStoreInput(**target, preflight_token=token).model_dump()
+        response = asyncio.run(handlers["memory_store"](**request))
 
         validated = MemoryStoreOutput.model_validate(response)
         self.assertFalse(validated.ok)
         self.assertEqual(ErrorCode.DATABASE_IN_USE, validated.error.code)
         self.assertTrue(validated.error.retryable)
         self.assertEqual(250, validated.error.retry_after_ms)
+        # authorize() spent the token before the write, so the documented
+        # retry is a fresh preflight with the same idempotency_key.
+        self.assertEqual("memory_preflight", validated.error.remedy.tool)
+        remedy_target = validated.error.remedy.arguments["target_arguments"]
+        self.assertEqual("decision-busy-1", remedy_target["idempotency_key"])
+        self.assertNotIn("preflight_token", remedy_target)
+        replayed = MemoryStoreOutput.model_validate(
+            asyncio.run(handlers["memory_store"](**request))
+        )
+        self.assertEqual(ErrorCode.TOKEN_REPLAYED, replayed.error.code)
+        self.assertEqual("memory_preflight", replayed.error.remedy.tool)
 
     def test_record_outcome_maps_runtime_not_found(self) -> None:
         from daem0nmcp.api.v7 import pinned

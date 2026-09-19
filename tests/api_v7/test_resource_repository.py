@@ -716,8 +716,10 @@ class SQLiteResourceRepositoryTests(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(read.done())
             self.assertEqual(pool.in_flight, 1)
             release.set()
-            with self.assertRaises(ResourceRepositoryError):
+            with self.assertRaises(ResourceRepositoryError) as caught:
                 await read
+            # An overrun read that did not itself fail is retryable contention.
+            self.assertEqual(caught.exception.code, "DATABASE_IN_USE")
             self.assertEqual(pool.in_flight, 0)
         finally:
             release.set()

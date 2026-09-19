@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import sqlite3
+from collections.abc import Callable
 from contextlib import closing
+from pathlib import Path
 from typing import Any
 
 from mcp import ClientSession
@@ -14,6 +16,19 @@ from tests.api_v7.process_client import call, initialize_workspaces, process_cli
 
 SAME_KEY_STORES = 5
 DISTINCT_KEY_STORES = 10
+LOG_NAMES = ("stdio-server-a.log", "stdio-server-b.log")
+
+
+def _server_log_tails(root: Path, lines: int = 40) -> str:
+    """Server stderr (tracebacks by correlation ID) for assertion messages."""
+    tails = []
+    for name in LOG_NAMES:
+        try:
+            text = (root / name).read_text(encoding="utf-8", errors="replace")
+        except OSError as error:
+            text = f"<unreadable: {error}>"
+        tails.append(f"--- {name} ---\n" + "\n".join(text.splitlines()[-lines:]))
+    return "\n".join(tails)
 
 
 async def _store_until_ok(
@@ -21,6 +36,7 @@ async def _store_until_ok(
     workspace_id: str,
     key: str,
     content: str,
+    diagnostics: Callable[[], str],
 ) -> list[dict[str, Any]]:
     """Preflight and store, retrying only what the server marks retryable."""
     scope = {"workspace_id": workspace_id}
@@ -43,9 +59,12 @@ async def _store_until_ok(
         observed.append(response)
         if response["ok"]:
             return observed
-        assert response["error"]["code"] == "DATABASE_IN_USE", observed
-        assert response["error"]["retryable"] is True, observed
-        assert asyncio.get_running_loop().time() < deadline, observed
+        retryable = (
+            response["error"]["code"] == "DATABASE_IN_USE"
+            and response["error"]["retryable"] is True
+        )
+        assert retryable, (observed, diagnostics())
+        assert asyncio.get_running_loop().time() < deadline, (observed, diagnostics())
         await asyncio.sleep(response["error"]["retry_after_ms"] / 1000)
 
 
@@ -53,8 +72,8 @@ async def test_two_stdio_servers_store_each_key_exactly_once(tmp_path):
     [workspace] = await initialize_workspaces((tmp_path,))
     scope = {"workspace_id": workspace.workspace_id}
     async with (
-        process_client(tmp_path, "stdio", log_name="stdio-server-a.log") as first,
-        process_client(tmp_path, "stdio", log_name="stdio-server-b.log") as second,
+        process_client(tmp_path, "stdio", log_name=LOG_NAMES[0]) as first,
+        process_client(tmp_path, "stdio", log_name=LOG_NAMES[1]) as second,
     ):
         sessions = (first, second)
         for session in sessions:
@@ -68,17 +87,18 @@ async def test_two_stdio_servers_store_each_key_exactly_once(tmp_path):
         results = await asyncio.gather(
             *(
                 _store_until_ok(
-                    sessions[index % 2], workspace.workspace_id, key, content
+                    sessions[index % 2],
+                    workspace.workspace_id,
+                    key,
+                    content,
+                    lambda: _server_log_tails(tmp_path),
                 )
                 for index, (key, content) in enumerate(stores)
             )
         )
 
-    responses = [response for observed in results for response in observed]
-    assert all(
-        response["ok"] or response["error"]["code"] == "DATABASE_IN_USE"
-        for response in responses
-    ), responses
+    # Logged, not asserted: a fast host may never contend.
+    print("DATABASE_IN_USE retries:", sum(len(observed) - 1 for observed in results))
     record_ids = {observed[-1]["data"]["record"]["record_id"] for observed in results}
     assert len(record_ids) == 1 + DISTINCT_KEY_STORES
     replays = [observed[-1]["data"]["idempotent_replay"] for observed in results]

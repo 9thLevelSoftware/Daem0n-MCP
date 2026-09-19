@@ -66,23 +66,39 @@ def is_stable_error_code(value: object) -> bool:
     return isinstance(value, str) and value in STABLE_ERROR_CODE_SET
 
 
+# Clients back off this long before retrying DATABASE_IN_USE.
+DATABASE_IN_USE_RETRY_AFTER_MS = 250
+
+
 def is_database_busy(error: BaseException | None) -> bool:
     """Return whether *error* is transient contention a caller may retry.
 
     A full worker pool and a SQLite lock or busy timeout both clear once the
     competing writer finishes, so they map to retryable ``DATABASE_IN_USE``.
+    The ``code`` check keeps an already-classified repository error (which is
+    not a ``RuntimeServiceError``) busy through the briefing/preflight wrappers.
     """
 
     if isinstance(error, BoundedWorkerBusyError):
         return True
     if getattr(error, "code", None) == ErrorCode.DATABASE_IN_USE.value:
         return True
-    return isinstance(error, sqlite3.OperationalError) and any(
-        word in str(error).casefold() for word in ("locked", "busy")
-    )
+    if not isinstance(error, sqlite3.OperationalError):
+        return False
+    code = getattr(error, "sqlite_errorcode", None)
+    if isinstance(code, int):
+        return code & 0xFF in {5, 6}  # SQLITE_BUSY, SQLITE_LOCKED
+    # sqlite_errorcode is unavailable on Python 3.10; match SQLite's fixed
+    # lock diagnostics only, never arbitrary detail text.
+    return str(error).casefold() in {
+        "database is locked",
+        "database table is locked",
+        "database schema is locked",
+    }
 
 
 __all__ = [
+    "DATABASE_IN_USE_RETRY_AFTER_MS",
     "ERROR_CODE_REGISTRY",
     "INTERNAL_ERROR_MESSAGE",
     "STABLE_ERROR_CODES",
