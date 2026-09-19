@@ -361,7 +361,11 @@ def run_leiden_bounded(
 
 
 def _apply_self_memory_limit(limit_bytes: int) -> None:
-    if sys.platform == "win32":
+    # Windows bounds the worker with a job object instead.  macOS reserves far
+    # more address space than any sane cap at startup, so setrlimit(RLIMIT_AS)
+    # is rejected there and cannot bound the worker; the deadline and the
+    # request-size limits still apply.
+    if sys.platform in {"win32", "darwin"}:
         return
     try:
         import resource

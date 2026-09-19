@@ -498,7 +498,13 @@ async def _bootstrap_posix_staged(
 ) -> None:
     """Build privately, then publish only through the retained directory FD."""
 
-    with tempfile.TemporaryDirectory(prefix="daem0nmcp-v7-bootstrap-") as raw:
+    # The system temp root is resolved first: on macOS it lives below the
+    # /var -> /private/var (or /tmp -> /private/tmp) symlink, which the
+    # linked-ancestry guard on the staging lock would otherwise reject.
+    with tempfile.TemporaryDirectory(
+        prefix="daem0nmcp-v7-bootstrap-",
+        dir=Path(tempfile.gettempdir()).resolve(strict=True),
+    ) as raw:
         staging = Path(raw) / "storage"
         manager = await _construct_staging_manager(staging, workspace.root)
         try:
