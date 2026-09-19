@@ -263,6 +263,16 @@ if os.name == "nt":
                 str(path), _SECURITY_INFORMATION, descriptor
             ):
                 raise _win_error("setting protected path security")
+            # An elevated administrator's new files are owned by
+            # BUILTIN\Administrators.  The owner-only DACL just applied grants
+            # this user WRITE_OWNER, so take ownership explicitly.
+            owner = expected.split("D:", 1)[0] + "D:"
+            if not _actual_sddl(path).startswith(
+                owner
+            ) and not _ADVAPI32.SetFileSecurityW(
+                str(path), _OWNER_SECURITY_INFORMATION, descriptor
+            ):
+                raise _win_error("setting protected path owner")
         finally:
             _KERNEL32.LocalFree(descriptor)
         if _actual_sddl(path) != expected:
