@@ -558,11 +558,9 @@ class EditApprovalBroker:
         description: str,
     ) -> EditReceipt:
         now_us = _datetime_us(self.clock())
-        if (
-            not isinstance(description, str)
-            or not 1 <= len(description) <= 2_000
-            or contains_absolute_filesystem_path(description)
-        ):
+        # The description is user text (it may mention paths) and only its
+        # hash is stored.
+        if not isinstance(description, str) or not 1 <= len(description) <= 2_000:
             raise EditBridgeError("INVALID_ARGUMENT", "edit description rejected")
         if os.path.normcase(str(workspace.root.resolve())) != scope.canonical_workspace:
             raise EditBridgeError("TOKEN_SCOPE_MISMATCH", "workspace scope changed")

@@ -34,7 +34,6 @@ from .errors import STABLE_ERROR_CODE_SET
 from .models import (
     EvidenceRef,
     RecordSummary,
-    contains_absolute_filesystem_path,
     parse_wire_datetime,
 )
 from .public_ids import PublicObjectIdNotFound, PublicObjectIdRepository
@@ -369,12 +368,7 @@ def _verified_event(row: sqlite3.Row) -> dict[str, Any]:
 
 
 def _safe_text(value: object) -> str:
-    if (
-        not isinstance(value, str)
-        or not value
-        or _CONTROL_RE.search(value) is not None
-        or contains_absolute_filesystem_path(value)
-    ):
+    if not isinstance(value, str) or not value or _CONTROL_RE.search(value) is not None:
         raise IntelligenceOperationError("CAPABILITY_DEGRADED")
     return value
 

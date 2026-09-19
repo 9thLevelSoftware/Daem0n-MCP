@@ -49,7 +49,6 @@ from .errors import STABLE_ERROR_CODE_SET
 from .models import (
     EvidenceRef,
     RecordSummary,
-    contains_absolute_filesystem_path,
 )
 from .public_ids import (
     PublicObjectIdNotFound,
@@ -939,7 +938,6 @@ def _safe_event_content(state: Mapping[str, Any]) -> str:
         not isinstance(content, str)
         or not content
         or _CONTROL_RE.search(content) is not None
-        or contains_absolute_filesystem_path(content)
     ):
         raise CodeEntityOperationError("CAPABILITY_DEGRADED")
     return content

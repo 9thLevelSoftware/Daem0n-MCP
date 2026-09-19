@@ -110,12 +110,23 @@ class _FailingPreflightService:
 
 class _LeakyPreflightService:
     async def guidance(self, *args: object, **kwargs: object) -> object:
-        from daem0nmcp.api.v7.tools import PreflightGuidance
-
         del args, kwargs
-        return PreflightGuidance(
-            warnings=[r"Inspect D:\private\workspace\policy.txt"],
-        )
+        # Rule text may mention paths (UD-3); a path field may not.
+        return {
+            "warnings": [r"Inspect D:\private\workspace\notes.txt"],
+            "records": [
+                {
+                    "record_id": "mem_" + "1" * 64,
+                    "record_type": "warning",
+                    "excerpt": "Guarded path field.",
+                    "relative_file_path": r"D:\private\workspace\policy.txt",
+                    "current_status": "current",
+                    "content_hash": "a" * 64,
+                    "created_at": "2026-08-08T12:00:00Z",
+                    "updated_at": "2026-08-08T12:00:00Z",
+                }
+            ],
+        }
 
 
 class _ExplodingRecallService:

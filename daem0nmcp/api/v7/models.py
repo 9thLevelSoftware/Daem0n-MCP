@@ -10,7 +10,9 @@ from __future__ import annotations
 import json
 import posixpath
 import re
+from collections.abc import Iterator, Mapping
 from datetime import datetime, timezone
+from functools import cache
 from typing import (
     TYPE_CHECKING,
     Annotated,
@@ -19,6 +21,7 @@ from typing import (
     Literal,
     TypeAlias,
     TypeVar,
+    get_args,
 )
 
 from pydantic import (
@@ -55,26 +58,79 @@ _FILE_URI = re.compile(r"(?i)\bfile:(?://)?/")
 _CONTROL_CHAR = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 
 
-def contains_absolute_filesystem_path(value: object) -> bool:
-    """Return whether a nested public value contains an absolute path."""
+def is_host_absolute_path(value: str) -> bool:
+    """Return whether text contains an absolute host path or file URI.
 
-    if isinstance(value, str):
-        return bool(
-            _WINDOWS_ABSOLUTE_PATH.search(value)
-            or _POSIX_ABSOLUTE_PATH.search(value)
-            or _FILE_URI.search(value)
-        )
-    if isinstance(value, dict):
-        return any(
-            contains_absolute_filesystem_path(key)
-            or contains_absolute_filesystem_path(item)
-            for key, item in value.items()
-        )
-    if isinstance(value, (list, tuple, set, frozenset)):
-        return any(contains_absolute_filesystem_path(item) for item in value)
+    This is the only absolute-path predicate on the v7 wire.  ``WireModel``
+    applies it to every string except ``UserText`` fields.
+    """
+
+    return bool(
+        _WINDOWS_ABSOLUTE_PATH.search(value)
+        or _POSIX_ABSOLUTE_PATH.search(value)
+        or _FILE_URI.search(value)
+    )
+
+
+class _UserTextMarker:
+    """``Annotated`` marker for user-authored or user-derived text."""
+
+    __slots__ = ()
+
+    def __repr__(self) -> str:
+        return "UserText"
+
+
+_USER_TEXT = _UserTextMarker()
+
+# Memory content, queries, rule text and server text quoting them may mention
+# routes and file paths ("/health", "C:\proj\app.py").  Fields typed with it,
+# alone or inside a list, set or dict, are exempt from the absolute-path rule in
+# both directions, so anything accepted on input can always be read back.
+UserText = Annotated[str, _USER_TEXT]
+
+
+def _carries_user_text(annotation: object) -> bool:
+    return annotation is _USER_TEXT or any(
+        _carries_user_text(argument) for argument in get_args(annotation)
+    )
+
+
+@cache
+def _user_text_fields(model: type[BaseModel]) -> frozenset[str]:
+    return frozenset(
+        name
+        for name, field in model.model_fields.items()
+        if _USER_TEXT in field.metadata or _carries_user_text(field.annotation)
+    )
+
+
+def guarded_strings(value: object, user_text: bool = False) -> Iterator[str]:
+    """Yield every string, keys included, that the absolute-path rule covers.
+
+    Nested models are walked with their own field annotations, so a model
+    inside a ``UserText`` container is still checked.
+    """
+
     if isinstance(value, BaseModel):
-        return contains_absolute_filesystem_path(value.__dict__)
-    return False
+        exempt = _user_text_fields(type(value))
+        for name, item in value.__dict__.items():
+            yield from guarded_strings(item, name in exempt)
+    elif isinstance(value, Mapping):
+        for key, item in value.items():
+            yield from guarded_strings(key, user_text)
+            yield from guarded_strings(item, user_text)
+    elif isinstance(value, (list, tuple, set, frozenset)):
+        for item in value:
+            yield from guarded_strings(item, user_text)
+    elif isinstance(value, str) and not user_text:
+        yield value
+
+
+def contains_absolute_filesystem_path(value: object) -> bool:
+    """Return whether a nested value has a guarded string with a host path."""
+
+    return any(is_host_absolute_path(text) for text in guarded_strings(value))
 
 
 def _relative_path(value: str) -> str:
@@ -326,7 +382,8 @@ else:
             Field(max_length=MAX_JSON_COLLECTION_ITEMS),
         ],
     )
-ContextJsonObject = Annotated[JsonObject, AfterValidator(_context_size)]
+UserJsonObject = Annotated[JsonObject, _USER_TEXT]
+ContextJsonObject = Annotated[UserJsonObject, AfterValidator(_context_size)]
 
 ErrorCodeValue = Annotated[ErrorCode, BeforeValidator(_error_code)]
 UpperSnakeCode = Annotated[
@@ -348,7 +405,7 @@ ToolName = Annotated[
     ),
 ]
 Tag = Annotated[
-    str,
+    UserText,
     StringConstraints(strict=True, min_length=1, max_length=80),
     AfterValidator(_sanitized),
 ]
@@ -430,7 +487,7 @@ class WireModel(BaseModel):
 
     @model_validator(mode="after")
     def reject_absolute_filesystem_paths(self) -> WireModel:
-        if contains_absolute_filesystem_path(self.__dict__):
+        if contains_absolute_filesystem_path(self):
             raise ValueError("absolute filesystem paths are forbidden on the v7 wire")
         return self
 
@@ -586,7 +643,7 @@ class RecordSummary(WireModel):
     record_id: RecordId
     record_type: RecordType
     excerpt: Annotated[
-        str,
+        UserText,
         StringConstraints(strict=True, min_length=1, max_length=4000),
         AfterValidator(_sanitized),
     ]
@@ -621,7 +678,7 @@ class EvidenceItem(WireModel):
     citation: Citation
     record: RecordSummary
     bounded_excerpt: Annotated[
-        str,
+        UserText,
         StringConstraints(strict=True, min_length=1, max_length=8000),
         AfterValidator(_sanitized),
     ]
@@ -694,7 +751,7 @@ class RetrievalData(WireModel):
     items: list[EvidenceItem] = Field(default_factory=list, max_length=50)
     rendered_context: (
         Annotated[
-            str,
+            UserText,
             StringConstraints(strict=True, min_length=1, max_length=500_000),
         ]
         | None
@@ -790,6 +847,8 @@ __all__ = [
     "EventId",
     "FactId",
     "FieldError",
+    "guarded_strings",
+    "is_host_absolute_path",
     "JsonObject",
     "JsonValue",
     "MAX_CONTEXT_JSON_BYTES",
@@ -822,6 +881,8 @@ __all__ = [
     "TokenUsage",
     "ToolName",
     "TriggerId",
+    "UserJsonObject",
+    "UserText",
     "UtcDateTime",
     "VersionId",
     "WireModel",

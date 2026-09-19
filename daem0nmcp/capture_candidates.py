@@ -151,8 +151,6 @@ def _validated_record(value: Mapping[str, Any]) -> dict[str, Any]:
         raise ValueError("capture tags are invalid")
     if len(tags) != len(set(tags)):
         raise ValueError("capture tags must be unique")
-    if contains_absolute_filesystem_path(record):
-        raise ValueError("capture record contains a public absolute path")
     return {
         "record_type": record["record_type"],
         "content": content,

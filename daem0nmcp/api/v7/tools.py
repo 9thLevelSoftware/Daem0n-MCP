@@ -53,6 +53,8 @@ from .models import (
     Tag,
     ToolName,
     TriggerId,
+    UserJsonObject,
+    UserText,
     UtcDateTime,
     VersionId,
     WireModel,
@@ -62,10 +64,6 @@ from .policy import V7_TOOL_LEVELS, V7ArgumentNormalizer
 from .registry import PINNED_TOOL_NAMES, ManifestError, ToolSpec
 from .resources import ActiveContextItem, RuleView
 
-ShortText = Annotated[
-    str,
-    StringConstraints(strict=True, min_length=1, max_length=80),
-]
 NameText = Annotated[
     str,
     StringConstraints(strict=True, min_length=1, max_length=256),
@@ -74,17 +72,34 @@ MediumText = Annotated[
     str,
     StringConstraints(strict=True, min_length=1, max_length=2000),
 ]
-LongText = Annotated[
-    str,
+# User-authored or user-derived text, which may mention paths (see UserText).
+UserShortText = Annotated[
+    UserText,
+    StringConstraints(strict=True, min_length=1, max_length=80),
+]
+UserNameText = Annotated[
+    UserText,
+    StringConstraints(strict=True, min_length=1, max_length=256),
+]
+UserMediumText = Annotated[
+    UserText,
+    StringConstraints(strict=True, min_length=1, max_length=2000),
+]
+UserLongText = Annotated[
+    UserText,
     StringConstraints(strict=True, min_length=1, max_length=100_000),
 ]
-OptionalMediumText = (
-    Annotated[
-        str,
-        StringConstraints(strict=True, min_length=1, max_length=2000),
-    ]
-    | None
-)
+OptionalUserMediumText = UserMediumText | None
+RecordVisibility = Literal["workspace", "private", "shared"]
+
+
+def _record_visibility(context: dict[str, object]) -> dict[str, object]:
+    if context.get("visibility", "workspace") not in get_args(RecordVisibility):
+        raise ValueError("context.visibility must be workspace, private or shared")
+    return context
+
+
+RecordContext = Annotated[ContextJsonObject, AfterValidator(_record_visibility)]
 IdempotencyKey = Annotated[
     str,
     StringConstraints(
@@ -330,8 +345,8 @@ class DiagnosticSummary(WireModel):
 class TriggerView(WireModel):
     trigger_id: TriggerId
     trigger_type: TriggerType
-    pattern: MediumText
-    recall_query: MediumText
+    pattern: UserMediumText
+    recall_query: UserMediumText
     categories: RecordTypeSet | None = None
     enabled: bool
     updated_at: UtcDateTime
@@ -346,7 +361,7 @@ class OutcomeSummary(WireModel):
     record_id: RecordId
     worked: bool
     outcome_excerpt: Annotated[
-        str,
+        UserText,
         StringConstraints(strict=True, min_length=1, max_length=4000),
     ]
     happened_at: UtcDateTime
@@ -378,10 +393,10 @@ class SessionBriefData(WireModel):
 class PreflightGuidance(WireModel):
     records: list[RecordSummary] = Field(default_factory=list, max_length=20)
     rules: list[RuleView] = Field(default_factory=list, max_length=20)
-    must_do: list[MediumText] = Field(default_factory=list, max_length=50)
-    must_not: list[MediumText] = Field(default_factory=list, max_length=50)
-    ask_first: list[MediumText] = Field(default_factory=list, max_length=50)
-    warnings: list[MediumText] = Field(default_factory=list, max_length=50)
+    must_do: list[UserMediumText] = Field(default_factory=list, max_length=50)
+    must_not: list[UserMediumText] = Field(default_factory=list, max_length=50)
+    ask_first: list[UserMediumText] = Field(default_factory=list, max_length=50)
+    warnings: list[UserMediumText] = Field(default_factory=list, max_length=50)
 
 
 class PreflightData(WireModel):
@@ -413,7 +428,7 @@ class EditPreflightData(WireModel):
 class CaptureCandidateView(WireModel):
     candidate_id: CaptureCandidateId
     source_kind: Literal["native_edit", "tool_result", "dreaming", "system"]
-    proposed_record: JsonObject
+    proposed_record: UserJsonObject
     provenance: JsonObject
     created_at: UtcDateTime
 
@@ -521,7 +536,7 @@ class HealthData(WireModel):
 
 class TriggerMatch(WireModel):
     trigger: TriggerView
-    matched_value: NameText
+    matched_value: UserNameText
     records: list[RecordSummary] = Field(default_factory=list, max_length=20)
 
 
@@ -564,7 +579,7 @@ class HierarchyLayer(WireModel):
 
 class CommunitySummary(WireModel):
     community_id: CommunityId
-    label: NameText
+    label: UserNameText
     level: Annotated[int, Field(ge=0, le=32)]
     member_count: Annotated[int, Field(ge=0, le=1_000_000)]
     parent_community_id: CommunityId | None = None
@@ -591,7 +606,7 @@ class HighlightSpan(WireModel):
 class TextSearchHit(WireModel):
     record: RecordSummary
     bounded_excerpt: Annotated[
-        str,
+        UserText,
         StringConstraints(strict=True, min_length=1, max_length=8000),
     ]
     highlights: list[HighlightSpan] = Field(default_factory=list, max_length=100)
@@ -600,15 +615,15 @@ class TextSearchHit(WireModel):
 
 class RuleCheckData(WireModel):
     matched_rules: list[RuleView] = Field(default_factory=list, max_length=50)
-    must_do: list[MediumText] = Field(default_factory=list, max_length=50)
-    must_not: list[MediumText] = Field(default_factory=list, max_length=50)
-    ask_first: list[MediumText] = Field(default_factory=list, max_length=50)
-    warnings: list[MediumText] = Field(default_factory=list, max_length=50)
+    must_do: list[UserMediumText] = Field(default_factory=list, max_length=50)
+    must_not: list[UserMediumText] = Field(default_factory=list, max_length=50)
+    ask_first: list[UserMediumText] = Field(default_factory=list, max_length=50)
+    warnings: list[UserMediumText] = Field(default_factory=list, max_length=50)
 
 
 class ContextCompressData(WireModel):
     text: Annotated[
-        str,
+        UserText,
         StringConstraints(strict=True, min_length=1, max_length=500_000),
     ]
     original_tokens: Annotated[int, Field(ge=0, le=1_000_000)]
@@ -625,7 +640,7 @@ class MemoryStoreBatchData(WireModel):
 
 class DocumentSource(WireModel):
     url: HttpsUrl
-    topic: MediumText
+    topic: UserMediumText
     content_hash: ContentHash
 
 
@@ -637,13 +652,13 @@ class DocumentIngestData(WireModel):
 
 
 class VerifiedClaim(WireModel):
-    claim: MediumText
+    claim: UserMediumText
     status: Literal["supported", "contradicted", "unknown"]
     evidence_refs: list[EvidenceRef] = Field(default_factory=list, max_length=32)
 
 
 class Contradiction(WireModel):
-    claim: MediumText
+    claim: UserMediumText
     explanation: MediumText
     evidence_refs: list[EvidenceRef] = Field(min_length=1, max_length=32)
 
@@ -657,8 +672,8 @@ class MemoryVerifyData(WireModel):
 
 class SandboxExecutionData(WireModel):
     success: bool
-    stdout: Annotated[str, StringConstraints(strict=True, max_length=100_000)]
-    stderr: Annotated[str, StringConstraints(strict=True, max_length=100_000)]
+    stdout: Annotated[UserText, StringConstraints(strict=True, max_length=100_000)]
+    stderr: Annotated[UserText, StringConstraints(strict=True, max_length=100_000)]
     exit_status: Annotated[int, Field(ge=-1, le=255)]
     execution_time_ms: Annotated[int, Field(ge=0, le=60_000)]
     sanitized_logs: list[MediumText] = Field(default_factory=list, max_length=100)
@@ -675,7 +690,7 @@ class CodeIndexData(WireModel):
 class CodeEntitySummary(WireModel):
     code_entity_id: CodeEntityId
     kind: CodeEntityKind
-    qualified_name: NameText
+    qualified_name: UserNameText
     relative_file_path: RelativePath
     start_line: Annotated[int, Field(ge=1)]
     end_line: Annotated[int, Field(ge=1)]
@@ -703,7 +718,7 @@ class TodoFinding(WireModel):
     relative_file_path: RelativePath
     line: Annotated[int, Field(ge=1)]
     todo_type: TodoType
-    text: MediumText
+    text: UserMediumText
 
 
 class CodeTodosStoreData(WireModel):
@@ -714,7 +729,7 @@ class CodeTodosStoreData(WireModel):
 
 class RefactorProposalData(WireModel):
     proposal: Annotated[
-        str,
+        UserText,
         StringConstraints(strict=True, min_length=1, max_length=100_000),
     ]
     affected_entities: list[CodeEntitySummary] = Field(
@@ -729,7 +744,7 @@ class RelationshipView(WireModel):
     source_record_id: RecordId
     target_record_id: RecordId
     relationship_type: RelationshipType
-    description: OptionalMediumText = None
+    description: OptionalUserMediumText = None
     confidence: Annotated[float, Field(ge=0, le=1, allow_inf_nan=False)]
 
 
@@ -752,7 +767,7 @@ class MemoryChainTraceData(WireModel):
 
 class KnowledgeGraphNode(WireModel):
     record: RecordSummary
-    label: NameText
+    label: UserNameText
     node_type: Literal["record", "entity", "community"]
 
 
@@ -769,7 +784,7 @@ class KnowledgeGraphData(WireModel):
 class KnowledgeGraphRenderData(WireModel):
     format: Literal["mermaid"] = "mermaid"
     text: Annotated[
-        str,
+        UserText,
         StringConstraints(strict=True, min_length=1, max_length=500_000),
     ]
     evidence_refs: list[EvidenceRef] = Field(default_factory=list, max_length=200)
@@ -795,7 +810,7 @@ class CommunityRebuildData(WireModel):
 
 class EntitySummary(WireModel):
     entity_id: EntityId
-    name: NameText
+    name: UserNameText
     entity_type: EntityType
     mention_count: Annotated[int, Field(ge=0)]
     manifest_generation: Annotated[int, Field(ge=1)]
@@ -810,7 +825,7 @@ class EntityBackfillData(WireModel):
 
 class EntityEvolutionItem(WireModel):
     happened_at: UtcDateTime
-    summary: MediumText
+    summary: UserMediumText
     event_id: EventId
 
 
@@ -854,7 +869,7 @@ class ExportEvent(WireModel):
     event_type: NameText
     happened_at: UtcDateTime
     content_hash: ContentHash
-    payload: JsonObject
+    payload: UserJsonObject
 
 
 TransferSessionId = Annotated[
@@ -872,7 +887,7 @@ class PortableVectorPoint(WireModel):
     point_id: Annotated[
         str, StringConstraints(strict=True, min_length=1, max_length=256)
     ]
-    payload: JsonObject
+    payload: UserJsonObject
     vector: list[Annotated[float, Field(allow_inf_nan=False)]] = Field(
         min_length=1, max_length=4096
     )
@@ -898,7 +913,7 @@ class ExportBundle(WireModel):
     page_proof: list[ContentHash] = Field(default_factory=list, max_length=32)
     next_cursor: Cursor | None = None
     complete: bool = True
-    legacy_rows: list[JsonObject] = Field(default_factory=list, max_length=4096)
+    legacy_rows: list[UserJsonObject] = Field(default_factory=list, max_length=4096)
     vector_points: list[PortableVectorPoint] = Field(
         default_factory=list, max_length=4096
     )
@@ -970,7 +985,7 @@ class WorkspaceLinkView(WireModel):
     workspace_id: WorkspaceId
     linked_workspace_id: WorkspaceId
     relationship: WorkspaceRelationship
-    label: OptionalMediumText = None
+    label: OptionalUserMediumText = None
 
 
 class WorkspaceConsolidateData(WireModel):
@@ -1016,14 +1031,14 @@ class RuleEvolutionData(WireModel):
 
 class DebateRound(WireModel):
     round_number: Annotated[int, Field(ge=1, le=20)]
-    advocate: MediumText
-    challenger: MediumText
+    advocate: UserMediumText
+    challenger: UserMediumText
 
 
 class DecisionDebateData(WireModel):
     rounds: list[DebateRound] = Field(min_length=1, max_length=20)
     synthesis: Annotated[
-        str,
+        UserText,
         StringConstraints(strict=True, min_length=1, max_length=50_000),
     ]
     consensus_record_id: RecordId
@@ -1033,7 +1048,7 @@ class DecisionDebateData(WireModel):
 
 class SessionBriefInput(WireModel):
     workspace_id: WorkspaceId
-    focus_areas: list[ShortText] = Field(default_factory=list, max_length=10)
+    focus_areas: list[UserShortText] = Field(default_factory=list, max_length=10)
     warning_limit: Annotated[int, Field(ge=0, le=50)] = 10
     failure_limit: Annotated[int, Field(ge=0, le=50)] = 10
 
@@ -1041,10 +1056,10 @@ class SessionBriefInput(WireModel):
 class MemoryPreflightInput(WireModel):
     workspace_id: WorkspaceId
     target_tool: ProtectedToolName
-    target_arguments: JsonObject
+    target_arguments: UserJsonObject
     description: (
         Annotated[
-            str,
+            UserText,
             StringConstraints(strict=True, min_length=1, max_length=1000),
         ]
         | None
@@ -1054,7 +1069,7 @@ class MemoryPreflightInput(WireModel):
 class MemoryRecallInput(WireModel):
     workspace_id: WorkspaceId
     query: Annotated[
-        str,
+        UserText,
         StringConstraints(strict=True, min_length=1, max_length=2000),
     ]
     limit: Annotated[int, Field(ge=1, le=50)] = 10
@@ -1080,19 +1095,19 @@ class MemoryRecallInput(WireModel):
 class MemoryStoreInput(WireModel):
     workspace_id: WorkspaceId
     record_type: RecordType
-    content: LongText
+    content: UserLongText
     rationale: (
         Annotated[
-            str,
+            UserText,
             StringConstraints(strict=True, min_length=1, max_length=20_000),
         ]
         | None
     ) = None
-    context: ContextJsonObject = Field(default_factory=dict)
+    context: RecordContext = Field(default_factory=dict)
     tags: list[Tag] = Field(default_factory=list, max_length=32)
     relative_file_path: RelativePath | None = None
     happened_at: AwareDateTime | None = None
-    procedure_steps: list[MediumText] = Field(default_factory=list, max_length=100)
+    procedure_steps: list[UserMediumText] = Field(default_factory=list, max_length=100)
     idempotency_key: IdempotencyKey
     preflight_token: PreflightToken
 
@@ -1106,7 +1121,7 @@ class MemoryStoreInput(WireModel):
 class EditPreflightInput(WireModel):
     workspace_id: WorkspaceId
     edit_request_id: EditRequestId
-    description: MediumText
+    description: UserMediumText
 
 
 class MemoryCaptureListInput(WireModel):
@@ -1120,11 +1135,11 @@ class MemoryCapturePromoteInput(WireModel):
     candidate_id: CaptureCandidateId
     record_type: RecordType
     content: Annotated[
-        str,
+        UserText,
         StringConstraints(strict=True, min_length=1, max_length=8_000),
     ]
-    rationale: OptionalMediumText = None
-    context: ContextJsonObject = Field(default_factory=dict)
+    rationale: OptionalUserMediumText = None
+    context: RecordContext = Field(default_factory=dict)
     tags: list[Tag] = Field(default_factory=list, max_length=16)
     idempotency_key: IdempotencyKey
     preflight_token: PreflightToken
@@ -1134,7 +1149,7 @@ class MemoryRecordOutcomeInput(WireModel):
     workspace_id: WorkspaceId
     record_id: RecordId
     outcome_text: Annotated[
-        str,
+        UserText,
         StringConstraints(strict=True, min_length=1, max_length=50_000),
     ]
     worked: bool
@@ -1157,7 +1172,7 @@ class ContextTriggersMatchInput(WireModel):
     workspace_id: WorkspaceId
     relative_file_path: RelativePath | None = None
     tags: list[Tag] = Field(default_factory=list, max_length=32)
-    entities: list[NameText] = Field(default_factory=list, max_length=32)
+    entities: list[UserNameText] = Field(default_factory=list, max_length=32)
     limit: Annotated[int, Field(ge=1, le=20)] = 5
 
 
@@ -1182,7 +1197,7 @@ class MemoryRecallFileInput(WireModel):
 class MemoryRecallEntityInput(WireModel):
     workspace_id: WorkspaceId
     entity_id: EntityId | None = None
-    entity_name: NameText | None = None
+    entity_name: UserNameText | None = None
     entity_type: EntityType | None = None
     cursor: Cursor | None = None
     limit: Annotated[int, Field(ge=1, le=100)] = 20
@@ -1197,7 +1212,7 @@ class MemoryRecallEntityInput(WireModel):
 class MemoryRecallHierarchicalInput(WireModel):
     workspace_id: WorkspaceId
     query: Annotated[
-        str,
+        UserText,
         StringConstraints(strict=True, min_length=1, max_length=2000),
     ]
     include_members: bool = False
@@ -1207,7 +1222,7 @@ class MemoryRecallHierarchicalInput(WireModel):
 class MemorySearchTextInput(WireModel):
     workspace_id: WorkspaceId
     query: Annotated[
-        str,
+        UserText,
         StringConstraints(strict=True, min_length=1, max_length=2000),
     ]
     cursor: Cursor | None = None
@@ -1218,36 +1233,36 @@ class MemorySearchTextInput(WireModel):
 
 class RuleCheckInput(WireModel):
     workspace_id: WorkspaceId
-    proposed_action: MediumText
+    proposed_action: UserMediumText
     context: ContextJsonObject = Field(default_factory=dict)
 
 
 class ContextCompressInput(WireModel):
     workspace_id: WorkspaceId
     text: Annotated[
-        str,
+        UserText,
         StringConstraints(strict=True, min_length=1, max_length=500_000),
     ]
     rate: Annotated[float, Field(ge=0.1, le=1, allow_inf_nan=False)] | None = None
-    content_type: ShortText | None = None
+    content_type: UserShortText | None = None
     preserve_code: bool = True
 
 
 class MemoryCreate(WireModel):
     record_type: RecordType
-    content: LongText
+    content: UserLongText
     rationale: (
         Annotated[
-            str,
+            UserText,
             StringConstraints(strict=True, min_length=1, max_length=20_000),
         ]
         | None
     ) = None
-    context: ContextJsonObject = Field(default_factory=dict)
+    context: RecordContext = Field(default_factory=dict)
     tags: list[Tag] = Field(default_factory=list, max_length=32)
     relative_file_path: RelativePath | None = None
     happened_at: AwareDateTime | None = None
-    procedure_steps: list[MediumText] = Field(default_factory=list, max_length=100)
+    procedure_steps: list[UserMediumText] = Field(default_factory=list, max_length=100)
 
     @model_validator(mode="after")
     def validate_procedure_steps(self) -> MemoryCreate:
@@ -1268,7 +1283,7 @@ class MemoryLinkInput(WireModel):
     source_record_id: RecordId
     target_record_id: RecordId
     relationship_type: RelationshipType
-    description: OptionalMediumText = None
+    description: OptionalUserMediumText = None
     confidence: Annotated[float, Field(ge=0, le=1, allow_inf_nan=False)] = 1.0
     idempotency_key: IdempotencyKey
     preflight_token: PreflightToken
@@ -1296,7 +1311,7 @@ class MemoryPinSetInput(WireModel):
 class ActiveContextAddInput(WireModel):
     workspace_id: WorkspaceId
     record_id: RecordId
-    reason: OptionalMediumText = None
+    reason: OptionalUserMediumText = None
     priority: Annotated[int, Field(ge=-100, le=100)] = 0
     expires_at: AwareDateTime | None = None
     preflight_token: PreflightToken
@@ -1317,7 +1332,7 @@ class ActiveContextClearInput(WireModel):
 class DocumentIngestUrlInput(WireModel):
     workspace_id: WorkspaceId
     url: HttpsUrl
-    topic: MediumText
+    topic: UserMediumText
     chunk_size: Annotated[int, Field(ge=256, le=16_000)] = 2000
     idempotency_key: IdempotencyKey
     preflight_token: PreflightToken
@@ -1326,7 +1341,7 @@ class DocumentIngestUrlInput(WireModel):
 class MemoryVerifyInput(WireModel):
     workspace_id: WorkspaceId
     text: Annotated[
-        str,
+        UserText,
         StringConstraints(strict=True, min_length=1, max_length=100_000),
     ]
     categories: RecordTypeSet | None = None
@@ -1337,7 +1352,7 @@ class MemoryVerifyInput(WireModel):
 class SandboxExecutePythonInput(WireModel):
     workspace_id: WorkspaceId
     code: Annotated[
-        str,
+        UserText,
         StringConstraints(strict=True, min_length=1, max_length=100_000),
     ]
     timeout_seconds: Annotated[int, Field(ge=1, le=60)] = 30
@@ -1356,7 +1371,7 @@ class CodeIndexInput(WireModel):
 class CodeSearchInput(WireModel):
     workspace_id: WorkspaceId
     query: Annotated[
-        str,
+        UserText,
         StringConstraints(strict=True, min_length=1, max_length=2000),
     ]
     cursor: Cursor | None = None
@@ -1367,7 +1382,7 @@ class CodeSearchInput(WireModel):
 class CodeImpactAnalyzeInput(WireModel):
     workspace_id: WorkspaceId
     code_entity_id: CodeEntityId | None = None
-    qualified_name: NameText | None = None
+    qualified_name: UserNameText | None = None
     max_depth: Annotated[int, Field(ge=1, le=10)] = 3
 
     @model_validator(mode="after")
@@ -1401,27 +1416,27 @@ class CodeTodosScanAndStoreInput(WireModel):
 class CodeRefactorProposeInput(WireModel):
     workspace_id: WorkspaceId
     relative_file_path: RelativePath
-    objective: OptionalMediumText = None
+    objective: OptionalUserMediumText = None
 
 
 class RuleCreateInput(WireModel):
     workspace_id: WorkspaceId
-    trigger: MediumText
-    must_do: list[MediumText] = Field(default_factory=list, max_length=50)
-    must_not: list[MediumText] = Field(default_factory=list, max_length=50)
-    ask_first: list[MediumText] = Field(default_factory=list, max_length=50)
-    warnings: list[MediumText] = Field(default_factory=list, max_length=50)
+    trigger: UserMediumText
+    must_do: list[UserMediumText] = Field(default_factory=list, max_length=50)
+    must_not: list[UserMediumText] = Field(default_factory=list, max_length=50)
+    ask_first: list[UserMediumText] = Field(default_factory=list, max_length=50)
+    warnings: list[UserMediumText] = Field(default_factory=list, max_length=50)
     priority: Annotated[int, Field(ge=-1000, le=1000)] = 0
     idempotency_key: IdempotencyKey
     preflight_token: PreflightToken
 
 
 class RulePatch(WireModel):
-    trigger: MediumText | None = None
-    must_do: list[MediumText] | None = Field(default=None, max_length=50)
-    must_not: list[MediumText] | None = Field(default=None, max_length=50)
-    ask_first: list[MediumText] | None = Field(default=None, max_length=50)
-    warnings: list[MediumText] | None = Field(default=None, max_length=50)
+    trigger: UserMediumText | None = None
+    must_do: list[UserMediumText] | None = Field(default=None, max_length=50)
+    must_not: list[UserMediumText] | None = Field(default=None, max_length=50)
+    ask_first: list[UserMediumText] | None = Field(default=None, max_length=50)
+    warnings: list[UserMediumText] | None = Field(default=None, max_length=50)
     priority: Annotated[int, Field(ge=-1000, le=1000)] | None = None
     enabled: bool | None = None
 
@@ -1449,8 +1464,8 @@ class RuleListInput(WireModel):
 class ContextTriggerCreateInput(WireModel):
     workspace_id: WorkspaceId
     trigger_type: TriggerType
-    pattern: MediumText
-    recall_query: MediumText
+    pattern: UserMediumText
+    recall_query: UserMediumText
     categories: RecordTypeSet | None = None
     enabled: bool = True
     idempotency_key: IdempotencyKey
@@ -1490,7 +1505,7 @@ class KnowledgeGraphGetInput(WireModel):
     record_ids: RecordIdSet500 | None = None
     query: (
         Annotated[
-            str,
+            UserText,
             StringConstraints(strict=True, min_length=1, max_length=2000),
         ]
         | None
@@ -1548,7 +1563,7 @@ class EntityBackfillInput(WireModel):
 class EntityEvolutionTraceInput(WireModel):
     workspace_id: WorkspaceId
     entity_id: EntityId | None = None
-    entity_name: NameText | None = None
+    entity_name: UserNameText | None = None
     entity_type: EntityType | None = None
     include_invalidated: bool = False
 
@@ -1606,13 +1621,13 @@ class MemoryDuplicatesCleanupInput(MemoryDuplicatesPreviewInput):
 class MemoryCompactionPreviewInput(WireModel):
     workspace_id: WorkspaceId
     summary: Annotated[
-        str,
+        UserText,
         StringConstraints(strict=True, min_length=1, max_length=50_000),
     ]
     limit: Annotated[int, Field(ge=1, le=100)] = 10
     query: (
         Annotated[
-            str,
+            UserText,
             StringConstraints(strict=True, min_length=1, max_length=2000),
         ]
         | None
@@ -1674,7 +1689,7 @@ class WorkspaceLinkInput(WireModel):
     workspace_id: WorkspaceId
     linked_workspace_id: WorkspaceId
     relationship: WorkspaceRelationship = "related"
-    label: OptionalMediumText = None
+    label: OptionalUserMediumText = None
     preflight_token: PreflightToken
 
     @model_validator(mode="after")
@@ -1740,13 +1755,13 @@ class RuleEvolutionAnalyzeInput(WireModel):
 
 class DecisionDebateInput(WireModel):
     workspace_id: WorkspaceId
-    topic: MediumText
+    topic: UserMediumText
     advocate_position: Annotated[
-        str,
+        UserText,
         StringConstraints(strict=True, min_length=1, max_length=20_000),
     ]
     challenger_position: Annotated[
-        str,
+        UserText,
         StringConstraints(strict=True, min_length=1, max_length=20_000),
     ]
     max_rounds: Annotated[int, Field(ge=1, le=20)] = 5

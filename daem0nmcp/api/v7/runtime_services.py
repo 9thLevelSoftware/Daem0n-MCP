@@ -11,7 +11,6 @@ import asyncio
 import inspect
 import json
 import os
-import re
 import sqlite3
 import threading
 import time
@@ -89,8 +88,6 @@ from .tools import (
     SessionBriefInput,
 )
 
-_WINDOWS_ABSOLUTE_PATH = re.compile(r"(?<![A-Za-z0-9])(?:[A-Za-z]:[\\/]|\\\\)")
-_POSIX_ABSOLUTE_PATH = re.compile(r"(?:^|[\s\"'=(])/(?!/)[A-Za-z0-9_.-]")
 _SCHEMA_VERSION = CURRENT_SCHEMA_VERSION
 _FORMAT_VERSION = 7
 _PROTOCOL_VERSION = "2025-11-25"
@@ -119,24 +116,6 @@ class RuntimeServiceError(RuntimeError):
 
 class _WorkerCancelledError(RuntimeError):
     pass
-
-
-def _contains_raw_path(value: object) -> bool:
-    if isinstance(value, str):
-        return bool(
-            _WINDOWS_ABSOLUTE_PATH.search(value) or _POSIX_ABSOLUTE_PATH.search(value)
-        )
-    if isinstance(value, Mapping):
-        return any(
-            _contains_raw_path(key) or _contains_raw_path(item)
-            for key, item in value.items()
-        )
-    if isinstance(value, (list, tuple, set, frozenset)):
-        return any(_contains_raw_path(item) for item in value)
-    model_dump = getattr(value, "model_dump", None)
-    if callable(model_dump):
-        return _contains_raw_path(model_dump(mode="python"))
-    return False
 
 
 def _validated_workspace(workspace: Workspace) -> Workspace:
@@ -1134,8 +1113,6 @@ class Task8RecallService:
             raise
         except Exception:
             raise RuntimeServiceError("RETRIEVAL_FAILED") from None
-        if _contains_raw_path(hydrated):
-            raise RuntimeServiceError("UNSAFE_SERVICE_OUTPUT")
         return hydrated
 
     async def _retrieve_source(
@@ -1254,8 +1231,6 @@ class Task8RecallService:
                         if inspect.isawaitable(value):
                             await value
                     hydrated = compose_federated_results(dict(pairs), query)
-                    if _contains_raw_path(hydrated):
-                        raise RuntimeServiceError("UNSAFE_SERVICE_OUTPUT")
                 finally:
                     guard.release()
         except asyncio.TimeoutError:
@@ -1613,8 +1588,6 @@ class BasicBriefingService:
                 value = self._reader(workspace, request)
                 if inspect.isawaitable(value):
                     value = await value
-            if _contains_raw_path(value):
-                raise RuntimeServiceError("UNSAFE_SERVICE_OUTPUT")
             data = SessionBriefData.model_validate(value)
         except asyncio.CancelledError:
             raise
@@ -1624,8 +1597,6 @@ class BasicBriefingService:
             raise RuntimeServiceError("BRIEFING_FAILED") from None
         if data.workspace_id != workspace.workspace_id:
             raise RuntimeServiceError("BRIEFING_FAILED")
-        if _contains_raw_path(data):
-            raise RuntimeServiceError("UNSAFE_SERVICE_OUTPUT")
         return data
 
 
@@ -1680,8 +1651,6 @@ class BasicPreflightService:
             raise
         except Exception:
             raise RuntimeServiceError("PREFLIGHT_FAILED") from None
-        if _contains_raw_path(data):
-            raise RuntimeServiceError("UNSAFE_SERVICE_OUTPUT")
         return data
 
 
@@ -1824,8 +1793,6 @@ class BasicHealthService:
             )
         except Exception:
             raise ValueError("health service configuration is invalid") from None
-        if _contains_raw_path(self._data):
-            raise ValueError("health service configuration is unsafe")
         self._workers = BoundedWorkerPool(
             max_workers=2,
             thread_name_prefix="daem0nmcp-v7-health",
@@ -1904,8 +1871,6 @@ class BasicHealthService:
                     "runtime_diagnostics": diagnostics,
                 }
             )
-        if _contains_raw_path(data):
-            raise RuntimeServiceError("UNSAFE_SERVICE_OUTPUT")
         return data
 
 
