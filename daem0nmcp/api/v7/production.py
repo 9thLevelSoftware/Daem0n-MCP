@@ -336,6 +336,10 @@ def _capability_states(
 def _active_database(workspace: Workspace):
     storage = resolve_workspace_storage(workspace)
     active = resolve_active_database(storage)
+    if active.format_version == 6:
+        # The store is intact but still v6; retrying never helps, so say so
+        # and name the offline command that migrates it.
+        raise ProductionConfigurationError("MIGRATION_REQUIRED")
     if active.format_version != 7:
         raise ProductionConfigurationError("ACTIVE_V7_UNAVAILABLE")
     return active
@@ -460,6 +464,8 @@ def _briefing_reader(readers: ResourceRepositoryReaders):
     ) -> dict[str, object]:
         try:
             _active_database(workspace)
+        except ProductionConfigurationError as exc:
+            raise RuntimeServiceError(exc.code) from None
         except Exception:
             raise RuntimeServiceError("ACTIVE_V7_UNAVAILABLE") from None
         warning_limit = request.warning_limit

@@ -22,6 +22,7 @@ class ErrorCode(str, Enum):
     STALE_PROJECTION_ID = "STALE_PROJECTION_ID"
     CAPABILITY_DISABLED = "CAPABILITY_DISABLED"
     CAPABILITY_DEGRADED = "CAPABILITY_DEGRADED"
+    MIGRATION_REQUIRED = "MIGRATION_REQUIRED"
     LEXICAL_UNAVAILABLE = "LEXICAL_UNAVAILABLE"
     COMMUNION_REQUIRED = "COMMUNION_REQUIRED"
     COUNSEL_REQUIRED = "COUNSEL_REQUIRED"
@@ -56,6 +57,15 @@ ERROR_CODE_REGISTRY = MappingProxyType({code.value: code for code in ErrorCode})
 # caller; server-side logs may contain the corresponding private details.
 INTERNAL_ERROR_MESSAGE = "Internal error."
 
+# A retained v6 store cannot be read by v7 and retrying never helps.  The
+# remedy is an offline command, not an MCP tool, so it is stated in the message
+# with a placeholder instead of a machine-readable ``remedy``.
+MIGRATION_REQUIRED_MESSAGE = (
+    "This workspace still uses the v6 storage format. Stop the server, then "
+    "run: python -m daem0nmcp.cli --project-path <project root> migrate-v7 "
+    "--apply"
+)
+
 
 def is_stable_error_code(value: object) -> bool:
     """Return whether *value* is an exact reviewed v7 error code."""
@@ -66,6 +76,7 @@ def is_stable_error_code(value: object) -> bool:
 __all__ = [
     "ERROR_CODE_REGISTRY",
     "INTERNAL_ERROR_MESSAGE",
+    "MIGRATION_REQUIRED_MESSAGE",
     "STABLE_ERROR_CODES",
     "STABLE_ERROR_CODE_SET",
     "ErrorCode",

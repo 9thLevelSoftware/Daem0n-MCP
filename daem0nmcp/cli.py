@@ -353,6 +353,14 @@ def main():
         help="Roll back the active migration run (default: latest)",
     )
     migrate_v7_parser.add_argument(
+        "--discard-v7-writes",
+        action="store_true",
+        help=(
+            "Roll back even though events recorded after activation would "
+            "become unreachable"
+        ),
+    )
+    migrate_v7_parser.add_argument(
         "--batch-size",
         type=_v7_batch_size,
         default=500,
@@ -637,7 +645,11 @@ def main():
         service = MigrationV7Service(registry)
         try:
             if args.rollback is not None:
-                result = service.rollback(args.project_path, args.rollback)
+                result = service.rollback(
+                    args.project_path,
+                    args.rollback,
+                    discard_v7_writes=args.discard_v7_writes,
+                )
             elif args.apply:
                 result = service.apply(args.project_path, batch_size=args.batch_size)
             else:

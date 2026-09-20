@@ -19,7 +19,7 @@ from ...covenant import (
 from ...event_store import AppendedEvent, EventStreamConflict
 from ...retrieval import RetrievalQuery
 from ...workspace import Workspace
-from .errors import ErrorCode
+from .errors import MIGRATION_REQUIRED_MESSAGE, ErrorCode
 from .models import ApiResponse, CapabilityState, RecordSummary, RetrievalData
 from .responses import ResponseContext, ResponseFactory
 from .tasks import (
@@ -113,6 +113,11 @@ _EXPECTED_SERVICE_ERRORS = MappingProxyType(
             ErrorCode.CAPABILITY_DEGRADED,
             "The active v7 workspace is unavailable.",
             True,
+        ),
+        "MIGRATION_REQUIRED": (
+            ErrorCode.MIGRATION_REQUIRED,
+            MIGRATION_REQUIRED_MESSAGE,
+            False,
         ),
         "FEDERATION_UNAVAILABLE": (
             ErrorCode.CAPABILITY_DISABLED,

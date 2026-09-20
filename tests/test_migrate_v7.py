@@ -1430,7 +1430,9 @@ class V7ApplyRollbackTests(unittest.TestCase):
             candidate.commit()
             candidate.close()
 
-            service.rollback(root, migrated.migration_run_id)
+            # The v7 event written above is deliberate, so the operator
+            # acknowledges that rolling back hides it until reactivation.
+            service.rollback(root, migrated.migration_run_id, discard_v7_writes=True)
             reactivated = service.apply(root)
 
             self.assertEqual("reactivate", reactivated.action)
@@ -1500,7 +1502,9 @@ class V7ApplyRollbackTests(unittest.TestCase):
             )
             candidate.commit()
             candidate.close()
-            service.rollback(root, migrated.migration_run_id)
+            # The v7 event written above is deliberate, so the operator
+            # acknowledges that rolling back hides it until reactivation.
+            service.rollback(root, migrated.migration_run_id, discard_v7_writes=True)
 
             candidate = sqlite3.connect(candidate_path)
             candidate.execute(
@@ -1621,7 +1625,9 @@ class V7ApplyRollbackTests(unittest.TestCase):
             )
             candidate.commit()
             candidate.close()
-            service.rollback(root, migrated.migration_run_id)
+            # The v7 event written above is deliberate, so the operator
+            # acknowledges that rolling back hides it until reactivation.
+            service.rollback(root, migrated.migration_run_id, discard_v7_writes=True)
 
             with self.assertRaisesRegex(MigrationV7Error, "VALIDATION_FAILED"):
                 service.apply(root)
