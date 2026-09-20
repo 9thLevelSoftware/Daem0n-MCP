@@ -240,6 +240,18 @@ def test_export_structured_fields_stay_guarded():
             _reject_raw_paths([{"record": {"file_path_relative": relative}}])
     with pytest.raises(CoreOperationError):
         _reject_raw_paths([{"record": {"file_path": "C:\\proj\\x.py"}}])
+    # A migrated event carries its v6 row as ``[name, value]`` pairs, so the
+    # guard checks that shape too -- without mistaking an ordinary two-element
+    # list for one, whose members may be unhashable.
+    _reject_raw_paths({"legacy": {"columns": [["keywords", "x"], ["id", 1]]}})
+    _reject_raw_paths({"legacy": {"columns": [[1, 2], [3, 4]]}})
+    _reject_raw_paths([[{"a": 1}, {"b": 2}]])
+    for pair in (
+        ["file_path", "C:\\proj\\x.py"],
+        ["file_path_relative", "../outside/x.py"],
+    ):
+        with pytest.raises(CoreOperationError):
+            _reject_raw_paths({"legacy": {"columns": [pair]}})
     event = {
         "event_id": "evt_" + "2" * 64,
         "event_type": "memory.created",

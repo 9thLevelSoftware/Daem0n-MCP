@@ -102,6 +102,7 @@ _CURSOR_RE = re.compile(r"^cur_([0-9a-f]{64})$")
 _RAW_PATH_KEYS = frozenset({"file_path", "project_path", "database_path"})
 _RELATIVE_PATH_KEYS = frozenset({"relative_file_path", "file_path_relative"})
 _RELATIVE_PATH_ADAPTER: TypeAdapter[str] = TypeAdapter(RelativePath)
+_PATH_PAIR_NAMES = _RAW_PATH_KEYS | _RELATIVE_PATH_KEYS
 _EVENT_COLUMNS = (
     "event_id,workspace_id,stream_id,stream_kind,stream_version,event_type,"
     "event_schema_version,occurred_at_us,recorded_at_us,actor_type,actor_id,"
@@ -511,7 +512,10 @@ def _reject_raw_paths(value: object) -> None:
         # regression must fail here rather than reach the wire.
         if (
             len(value) == 2
-            and value[0] in _RAW_PATH_KEYS | _RELATIVE_PATH_KEYS
+            # A column name is a string; anything else here is an ordinary
+            # two-element list, whose members may be unhashable.
+            and isinstance(value[0], str)
+            and value[0] in _PATH_PAIR_NAMES
             and isinstance(value[1], str)
             and value[1]
         ):
