@@ -207,8 +207,20 @@ retention, verification, atomic activation, and rollback are required.
 
 Stop the server before applying or rolling back: both commands take the
 storage lock, and a running server on the old pointer sees the generation
-change. Until a v6 workspace is migrated, every tool answers
-`MIGRATION_REQUIRED` (non-retryable) with the command to run.
+change. Until a v6 workspace is migrated, `session_brief` answers
+`MIGRATION_REQUIRED` (non-retryable) with the command to run, and every other
+tool is blocked behind it with `COMMUNION_REQUIRED`; the resource surface and
+the export/import path answer `MIGRATION_REQUIRED` too, the latter without the
+command because the generic router returns the code alone.
+
+The migration keeps the v6 row exactly as it was inside the migrated
+database — in the event log's `legacy` payload and in the retained v6 tables —
+but that copy is not part of `workspace_export`, which carries the v7
+projection. Host paths are never exported: the columns that hold one are
+recorded as a digest, and the usable form is derived into
+`relative_file_path`. A workspace migrated before this release keeps the raw
+value inside its own hash-chained events, so its exports need a re-migration
+to be path-free; reads, recall, outcomes and resources do not.
 
 `migrate-v7 --apply` reports what it could not copy faithfully in `warnings`
 and counts it in `validation`: memory file links that pointed outside the
