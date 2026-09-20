@@ -353,7 +353,9 @@ async def _run_read(
 def _record_summary(row: sqlite3.Row) -> RecordSummary:
     try:
         content = row["content"]
-        if not isinstance(content, str) or not content or row["file_path"] is not None:
+        # A migrated v6 row keeps the host-absolute ``file_path`` v6 wrote; it
+        # is legacy provenance, never emitted, so it must not deny the read.
+        if not isinstance(content, str) or not content:
             raise ValueError
         tags = json.loads(str(row["tags_json"]))
         if not isinstance(tags, list):

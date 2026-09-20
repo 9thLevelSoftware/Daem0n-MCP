@@ -505,6 +505,22 @@ def _reject_raw_paths(value: object) -> None:
             if key != "context":
                 _reject_raw_paths(item)
     elif isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        # A migrated event carries its v6 row as ``[name, value]`` pairs, so a
+        # path column is a list element rather than a mapping key.  Check that
+        # shape too: the migration replaces these with a digest, and a
+        # regression must fail here rather than reach the wire.
+        if (
+            len(value) == 2
+            and value[0] in _RAW_PATH_KEYS | _RELATIVE_PATH_KEYS
+            and isinstance(value[1], str)
+            and value[1]
+        ):
+            if value[0] in _RAW_PATH_KEYS:
+                raise CoreOperationError("WORKSPACE_PATH_ESCAPE")
+            try:
+                _RELATIVE_PATH_ADAPTER.validate_python(value[1])
+            except ValidationError:
+                raise CoreOperationError("WORKSPACE_PATH_ESCAPE") from None
         for item in value:
             _reject_raw_paths(item)
     elif isinstance(value, (bytes, bytearray, memoryview)):

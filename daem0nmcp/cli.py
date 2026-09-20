@@ -704,7 +704,15 @@ def main():
                 "checkpoints": {},
                 "validation": {},
                 "warnings": [],
-                "error": {"code": exc.code, "message": exc.code},
+                # Migration details stay redacted to the code, except the
+                # rollback refusal, whose detail is the operator signal: a
+                # count and the storage-relative candidate, never a host path.
+                "error": {
+                    "code": exc.code,
+                    "message": str(exc)
+                    if exc.code == "ROLLBACK_WOULD_HIDE_WRITES"
+                    else exc.code,
+                },
             }
             exit_code = 2 if exc.code == "UNSAFE_MIGRATION_PATH" else 1
         except Exception:
@@ -738,8 +746,10 @@ def main():
                 )
             if payload.get("active_generation") is not None:
                 print(f"Generation: {payload['active_generation']}")
+            for warning in payload.get("warnings") or ():
+                print(f"Warning: {warning}")
             if payload.get("error"):
-                print(f"Error: {payload['error']['code']}")
+                print(f"Error: {payload['error']['message']}")
         sys.exit(exit_code)
 
     if args.command == "recover-consolidation":

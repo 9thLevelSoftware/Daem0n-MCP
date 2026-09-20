@@ -2891,8 +2891,9 @@ def _retained_trigger_states(
         "SELECT id,project_path,trigger_type,pattern,recall_topic,recall_categories,"
         "is_active,priority,created_at FROM context_triggers ORDER BY id"
     ).fetchall()
-    recorded = {row[1] for row in rows if isinstance(row[1], str) and row[1]}
-    sole_root = recorded.pop() if len(recorded) == 1 else None
+    from daem0nmcp.migrations.v7 import sole_recorded_project_root
+
+    sole_root = sole_recorded_project_root(connection)
     public_types = {
         "file_pattern": "file",
         "tag_match": "tag",
@@ -2902,7 +2903,17 @@ def _retained_trigger_states(
     foreign = 0
     for row in rows:
         source_id = _retained_source_id(row[0])
-        if row[1] != sole_root and _retained_path_workspace_id(row[1]) != workspace_id:
+        # A trigger that records no project root names no workspace, so it
+        # stays foreign exactly as it was before the sole-root rule existed.
+        local = (
+            isinstance(row[1], str)
+            and bool(row[1])
+            and (
+                row[1] == sole_root
+                or _retained_path_workspace_id(row[1]) == workspace_id
+            )
+        )
+        if not local:
             foreign += 1
             continue
         trigger_type = public_types.get(row[2])
@@ -2938,6 +2949,21 @@ def _retained_trigger_states(
             },
         )
     return states, foreign
+
+
+def _migration_authored_streams(
+    connection: sqlite3.Connection, workspace_id: str
+) -> set[str]:
+    """The governance streams the retained backfill created, not v7 clients."""
+
+    return {
+        str(row[0])
+        for row in connection.execute(
+            "SELECT stream_id FROM governance_events WHERE workspace_id=? "
+            "AND stream_version=1 AND actor_type='migration'",
+            (workspace_id,),
+        )
+    }
 
 
 def _governance_stream_exists(
@@ -3030,9 +3056,17 @@ def reconcile_retained_governance(
     stream that already exists, so without this pass the edit or the deletion
     would never reach v7 and a `must_not` could silently disappear.
 
+    Only streams the backfill itself created are reconciled.  A reactivated
+    candidate is the database that *was* live, so it also holds rules and
+    triggers authored through v7, which have no retained v6 row; inferring
+    "deleted in v6" from their absence would disable or delete them.  The
+    creating event's `actor_type` separates the two: the backfill writes
+    `migration`, a v7 client writes `client`.
+
     The governance event vocabulary has `rule.updated` and
-    `context_trigger.deleted`; a rule that no longer exists in v6 is therefore
-    recorded as disabled rather than removed.
+    `context_trigger.deleted` but no `context_trigger.updated`, so a rule that
+    no longer exists in v6 is recorded as disabled, and a trigger whose
+    content changed in v6 is counted and reported instead of rewritten.
     """
 
     from daem0nmcp.event_store import (
@@ -3043,7 +3077,13 @@ def reconcile_retained_governance(
     if not _table_exists(connection, "governance_events"):
         raise RuntimeError("GOVERNANCE_SCHEMA_INCOMPLETE")
     store = GovernanceEventStore(connection, assume_transaction=True)
-    counts = {"rules_updated": 0, "triggers_deleted": 0}
+    counts = {
+        "rules_updated": 0,
+        "rules_disabled": 0,
+        "triggers_deleted": 0,
+        "triggers_unreconciled": 0,
+    }
+    migrated = _migration_authored_streams(connection, workspace_id)
 
     rule_states = _retained_rule_states(connection, workspace_id)
     for row in connection.execute(
@@ -3053,6 +3093,8 @@ def reconcile_retained_governance(
         (workspace_id,),
     ).fetchall():
         public_id = str(row[0])
+        if public_id not in migrated:
+            continue
         entry = rule_states.get(public_id)
         current = {
             "rule_id": public_id,
@@ -3064,7 +3106,8 @@ def reconcile_retained_governance(
             "priority": row[6],
             "enabled": bool(row[7]),
         }
-        if entry is None:
+        removed = entry is None
+        if removed:
             desired = dict(current, enabled=False)
             correlation = f"migration21:rule-removed:{public_id}"
         else:
@@ -3094,7 +3137,7 @@ def reconcile_retained_governance(
                 expected_stream_version=int(row[8]) + 1,
             )
         )
-        counts["rules_updated"] += 1
+        counts["rules_disabled" if removed else "rules_updated"] += 1
 
     trigger_states, _foreign = _retained_trigger_states(connection, workspace_id)
     for row in connection.execute(
@@ -3105,7 +3148,23 @@ def reconcile_retained_governance(
         (workspace_id,),
     ).fetchall():
         public_id = str(row[0])
-        if public_id in trigger_states:
+        if public_id not in migrated:
+            continue
+        entry = trigger_states.get(public_id)
+        if entry is not None:
+            # No `context_trigger.updated` event type exists, so a v6 edit (or
+            # a rowid reused by a different trigger) cannot be replayed.  Count
+            # it so the operator is told rather than left with a stale pattern.
+            state = entry[1]
+            if (
+                state["trigger_type"] != row[1]
+                or state["pattern"] != row[2]
+                or state["recall_query"] != row[3]
+                or state["categories"] != json.loads(row[4])
+                or state["enabled"] != bool(row[5])
+                or state["priority"] != row[6]
+            ):
+                counts["triggers_unreconciled"] += 1
             continue
         store.append_and_project(
             GovernanceEventCommand(

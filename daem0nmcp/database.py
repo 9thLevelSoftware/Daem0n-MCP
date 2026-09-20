@@ -209,13 +209,21 @@ class DatabaseManager:
 
         self._migrated = True
 
-    def _v6_migration_ceiling(self) -> int | None:
-        """The migration ceiling for a retained format-6 store, else ``None``."""
+    def _v6_migration_ceiling(self, previous_schema_version: int) -> int | None:
+        """The migration ceiling for a retained format-6 store, else ``None``.
+
+        A brand-new database whose creation crashed part-way through its own
+        migration run is pointerless and therefore reads as format 6, but it
+        holds no user rows and is finished by the recovery branch in
+        ``init_db``; capping it would leave it permanently incomplete.
+        """
+
+        from .migrations.schema import _LAST_V6_SCHEMA_VERSION
 
         if self.format_version != 6:
             return None
-        from .migrations.schema import _LAST_V6_SCHEMA_VERSION
-
+        if previous_schema_version >= 16 and not self._has_user_rows():
+            return None
         return _LAST_V6_SCHEMA_VERSION
 
     async def init_db(self):
@@ -237,7 +245,9 @@ class DatabaseManager:
             # to.  Applying the v7 ledger to it in place would rewrite the
             # source without a backup, and its governance backfill then goes
             # stale against later v6 edits, so cap it at the last v6 version.
-            self._run_migrations(maximum_version=self._v6_migration_ceiling())
+            self._run_migrations(
+                maximum_version=self._v6_migration_ceiling(previous_schema_version)
+            )
 
         # Then create any new tables
         async with self.engine.begin() as conn:

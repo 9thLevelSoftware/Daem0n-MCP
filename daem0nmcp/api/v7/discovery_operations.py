@@ -50,7 +50,13 @@ from ...workspace import (
 )
 from .application import AdmittedRequest
 from .errors import STABLE_ERROR_CODE_SET
-from .models import CapabilityState, Page, RecordSummary, RetrievalData
+from .models import (
+    CapabilityState,
+    Page,
+    RecordSummary,
+    RetrievalData,
+    stored_relative_path,
+)
 from .public_ids import (
     PublicObjectIdNotFound,
     PublicObjectIdRepository,
@@ -1042,24 +1048,24 @@ def _record_summary(row: sqlite3.Row) -> RecordSummary:
     try:
         content = row["content"]
         tags = json.loads(str(row["tags_json"]))
+        # A migrated v6 row keeps the host-absolute ``file_path`` v6 wrote and
+        # may carry a valid time ahead of its transaction time; neither is
+        # corruption, and ``RecordSummary`` bounds what is emitted.
         if (
             not isinstance(content, str)
             or not content
             or not isinstance(tags, list)
-            or row["file_path"] is not None
             or row["deleted_at_us"] is not None
         ):
             raise ValueError
         created = _datetime_from_us(row["created_at_us"])
         updated = _datetime_from_us(row["updated_at_us"])
-        if updated < created:
-            raise ValueError
         return RecordSummary(
             record_id=row["record_id"],
             record_type=row["record_type"],
             excerpt=content[:4000],
             tags=tags,
-            relative_file_path=row["file_path_relative"],
+            relative_file_path=stored_relative_path(row["file_path_relative"]),
             current_status="archived" if bool(row["archived"]) else "current",
             content_hash=row["content_hash"],
             created_at=created,

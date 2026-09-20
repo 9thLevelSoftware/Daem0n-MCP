@@ -216,6 +216,15 @@ class ResourceRepositoryError(RuntimeError):
         super().__init__(code)
 
 
+class ResourceMigrationRequiredError(RuntimeError):
+    """The workspace still uses the v6 storage format."""
+
+    code = "MIGRATION_REQUIRED"
+
+    def __init__(self) -> None:
+        super().__init__(self.code)
+
+
 ActiveDatabaseResolver = Callable[[Workspace], ResolvedActiveDatabase]
 
 
@@ -1000,6 +1009,10 @@ class SQLiteResourceRepository:
                 raise TypeError(
                     "active database resolver returned an invalid selection"
                 )
+            if selected.format_version == 6:
+                # Retrying never helps, and "outside its workspace" below would
+                # be a more misleading answer than naming the real reason.
+                raise ResourceMigrationRequiredError()
             if selected.format_version != 7:
                 raise ValueError("active database is not architecture format 7")
             storage = normalize_resolved_path(
@@ -1007,6 +1020,9 @@ class SQLiteResourceRepository:
             )
             database_path = normalize_resolved_path(selected.path.resolve(strict=True))
             database_path.relative_to(storage)
+        except ResourceMigrationRequiredError:
+            storage_lock.release()
+            raise
         except (OSError, RuntimeError, ValueError) as exc:
             storage_lock.release()
             raise ValueError(

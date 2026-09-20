@@ -305,9 +305,10 @@ def _verified_snapshot(row: sqlite3.Row) -> _RecordSnapshot:
     try:
         state = _record_state(row)
         payload = _parse_json(row["payload_json"], dict)
+        # A migrated v6 row keeps the host-absolute ``file_path`` v6 wrote;
+        # ``_record_state`` already drops it from the compared state.
         if (
-            row["file_path"] is not None
-            or row["workspace_id"] != row["event_workspace_id"]
+            row["workspace_id"] != row["event_workspace_id"]
             or row["record_id"] != row["event_stream_id"]
             or payload.get("record") != state
             or canonical_json_bytes(payload).decode("utf-8") != str(row["payload_json"])

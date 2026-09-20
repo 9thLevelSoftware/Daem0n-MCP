@@ -410,6 +410,11 @@ Tag = Annotated[
     UserText,
     StringConstraints(strict=True, min_length=1, max_length=80),
 ]
+# Every stored tag list.  ``RecordSummary.tags`` requires uniqueness on the
+# way out, so the inputs that feed it require it on the way in; without it a
+# plain ``memory_store(tags=['a','a'])`` wrote a record no reader could
+# render.
+UniqueTags = Annotated[list[Tag], AfterValidator(_unique_strings)]
 ProviderName = Annotated[
     str,
     StringConstraints(
@@ -939,6 +944,7 @@ __all__ = [
     "RuleId",
     "SelectionToken",
     "Tag",
+    "UniqueTags",
     "TokenUsage",
     "ToolName",
     "TriggerId",

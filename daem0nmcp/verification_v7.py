@@ -78,17 +78,19 @@ _REQUIRED_TABLES = frozenset(
         "workspace_link_events",
     }
 )
-# The snapshots `migrate-v7` records for the tables it fills directly; no
-# retrieval provider serves them.
+# The snapshots `migrate-v7` activates for the tables it fills directly; no
+# retrieval provider serves them, so nothing rebuilds them and the live
+# manifest invariants cannot hold once anything is written.  The migration's
+# `entities`/`communities` manifests are written `rebuild_required`, so they
+# keep their own row-count verification.
 _TABLE_SNAPSHOT_PROJECTIONS = frozenset(
     {
         "memory_records",
         "memory_fact_versions",
         "memory_relationship_versions",
-        "entities",
-        "communities",
     }
 )
+_DISCOVERY_PROJECTIONS = frozenset({"entities", "communities"})
 _LOCAL_PROJECTIONS = frozenset(
     {
         "memory_records",
@@ -101,7 +103,9 @@ _LOCAL_PROJECTIONS = frozenset(
         "outcome",
     }
 )
-_SUPPORTED_PROJECTIONS = _TABLE_SNAPSHOT_PROJECTIONS | RETRIEVAL_PROJECTION_NAMES
+_SUPPORTED_PROJECTIONS = (
+    _TABLE_SNAPSHOT_PROJECTIONS | _DISCOVERY_PROJECTIONS | RETRIEVAL_PROJECTION_NAMES
+)
 
 
 class VerificationV7Error(RuntimeError):

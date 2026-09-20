@@ -278,8 +278,8 @@ def _json_string_list(value: object) -> list[str]:
 
 
 def _record_summary(row: sqlite3.Row) -> RecordSummary:
-    if row["file_path"] is not None:
-        raise LocalStateOperationError("CAPABILITY_DEGRADED")
+    # A migrated v6 row keeps the host-absolute ``file_path`` v6 wrote; it
+    # is legacy provenance, never emitted, so it must not deny the read.
     content = row["content"]
     record_type = row["record_type"]
     archived = row["archived"]

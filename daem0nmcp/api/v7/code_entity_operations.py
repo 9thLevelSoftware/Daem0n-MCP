@@ -49,6 +49,7 @@ from .errors import STABLE_ERROR_CODE_SET
 from .models import (
     EvidenceRef,
     RecordSummary,
+    stored_relative_path,
 )
 from .public_ids import (
     PublicObjectIdNotFound,
@@ -364,7 +365,6 @@ def _validated_record_row(
         or row["stream_version"] != expected_version
         or row["state_hash"] != memory_state_hash(state)
         or row["content_hash"] != memory_content_hash(state)
-        or row["file_path"] is not None
     ):
         raise CodeEntityOperationError("CAPABILITY_DEGRADED")
     return row
@@ -380,17 +380,17 @@ def _event_record_summary(
     content = state["content"]
     if not isinstance(content, str) or not content:
         raise CodeEntityOperationError("CAPABILITY_DEGRADED")
+    # A record's valid time may precede or follow the transaction time it was
+    # written at; ``RecordSummary`` shows the earlier of the two.
     created = _datetime_from_us(occurred_at_us)
     updated = _datetime_from_us(recorded_at_us)
-    if created > updated:
-        raise CodeEntityOperationError("CAPABILITY_DEGRADED")
     try:
         return RecordSummary(
             record_id=record_id,
             record_type=state["record_type"],
             excerpt=content[:4000],
             tags=state["tags"],
-            relative_file_path=state["file_path_relative"],
+            relative_file_path=stored_relative_path(state["file_path_relative"]),
             current_status=(
                 "invalidated"
                 if state["deleted_at_us"] is not None
