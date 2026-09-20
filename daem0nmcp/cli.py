@@ -378,6 +378,19 @@ def main():
         "--workspace-id", required=True, help="Registered opaque workspace ID"
     )
 
+    compact_projections_parser = subparsers.add_parser(
+        "compact-projections",
+        help="Offline: drop every superseded projection generation and VACUUM",
+    )
+    compact_projections_parser.add_argument(
+        "--workspace-id", required=True, help="Registered opaque workspace ID"
+    )
+    compact_projections_parser.add_argument(
+        "--no-vacuum",
+        action="store_true",
+        help="Drop the superseded generations without reclaiming the file",
+    )
+
     rebuild_projection_parser = subparsers.add_parser(
         "rebuild-projection", help="Build and activate one v7 retrieval projection"
     )
@@ -770,11 +783,16 @@ def main():
             print(f"Runs: {len(payload['runs'])}")
         sys.exit(exit_code)
 
-    if args.command in {"projection-status", "rebuild-projection"}:
+    if args.command in {
+        "compact-projections",
+        "projection-status",
+        "rebuild-projection",
+    }:
         import sqlite3
 
         from .retrieval.operations import (
             ProjectionOperationError,
+            compact_projections,
             projection_status,
             rebuild_projection,
         )
@@ -802,7 +820,12 @@ def main():
                     update={"project_root": str(workspace.root)}
                 )
             storage_path = Path(workspace_settings.get_storage_path())
-            with DatabaseFileLock(storage_path, "shared"):
+            # Compaction drops generations a running server could be reading,
+            # so it takes the offline exclusive lock.
+            lock_mode = (
+                "exclusive" if args.command == "compact-projections" else "shared"
+            )
+            with DatabaseFileLock(storage_path, lock_mode):
                 active = resolve_active_database(storage_path)
                 if active.format_version != 7:
                     raise ProjectionOperationError("FORMAT_7_REQUIRED")
@@ -813,6 +836,12 @@ def main():
                     connection.execute("PRAGMA foreign_keys=ON")
                     if args.command == "projection-status":
                         payload = projection_status(connection, workspace.workspace_id)
+                    elif args.command == "compact-projections":
+                        payload = compact_projections(
+                            connection,
+                            workspace.workspace_id,
+                            vacuum=not args.no_vacuum,
+                        )
                     else:
                         builders = create_projection_builders(
                             connection,

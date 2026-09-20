@@ -602,5 +602,54 @@ class ProductionCompositionTests(unittest.TestCase):
         self.assertEqual([False], observed)
 
 
+async def test_memory_preflight_spawns_no_subprocess(tmp_path):
+    """Preflight guidance must not pay for git (F-040); session_brief still does."""
+    import subprocess
+
+    from fastmcp import Client
+
+    from daem0nmcp.api.v7.production import create_v7_server
+    from tests.api_v7.process_client import initialize_workspaces
+
+    [workspace] = await initialize_workspaces((tmp_path,))
+    spawned: list[list[str]] = []
+
+    def record_spawn(argv, *args, **kwargs):
+        spawned.append(list(argv))
+        raise FileNotFoundError(argv[0])
+
+    server = create_v7_server(
+        "stdio",
+        settings=Settings(
+            project_root=str(tmp_path),
+            workspace_roots=[str(tmp_path)],
+            dream_enabled=False,
+        ),
+        environ={},
+    )
+    scope = {"workspace_id": workspace.workspace_id}
+    async with Client(server) as client:
+        with patch.object(subprocess, "Popen", side_effect=record_spawn):
+            brief = await client.call_tool("session_brief", scope, raise_on_error=False)
+            assert brief.structured_content["ok"], brief.structured_content
+            assert any(argv[0] == "git" for argv in spawned), spawned
+            spawned.clear()
+            preflight = await client.call_tool(
+                "memory_preflight",
+                {
+                    **scope,
+                    "target_tool": "memory_store",
+                    "target_arguments": {
+                        "record_type": "decision",
+                        "content": "Preflight must not spawn processes.",
+                        "idempotency_key": "preflight-no-subprocess-0001",
+                    },
+                },
+                raise_on_error=False,
+            )
+    assert preflight.structured_content["ok"], preflight.structured_content
+    assert spawned == []
+
+
 if __name__ == "__main__":
     unittest.main()

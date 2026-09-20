@@ -35,6 +35,7 @@ from .event_store import (
 )
 from .migrations import MIGRATIONS
 from .migrations.v7 import _source_row_hash, inventory_database
+from .retrieval.lexical_config import GENERATION_TABLES
 from .schema_version import CURRENT_SCHEMA_VERSION, REQUIRED_V7_SCHEMA_VERSIONS
 from .storage_activation import (
     ActiveDatabasePointer,
@@ -91,11 +92,6 @@ _SUPPORTED_PROJECTIONS = _LOCAL_PROJECTIONS | {
     "code",
     "entities",
     "communities",
-}
-_GENERATION_TABLES = {
-    "lexical": "retrieval_documents",
-    "procedure": "record_procedures",
-    "outcome": "record_outcome_view",
 }
 
 
@@ -664,6 +660,34 @@ def _verify_mappings(connection: sqlite3.Connection, replay: sqlite3.Connection)
     return count
 
 
+def _generation_inventory(connection: sqlite3.Connection) -> dict[str, int]:
+    """Count superseded local generations so a stalled GC is visible."""
+
+    from .retrieval.projections import COLLECTABLE_PROJECTIONS
+
+    projections = sorted(COLLECTABLE_PROJECTIONS)
+    placeholders = ",".join("?" for _ in projections)
+    superseded = {
+        str(row[0]): int(row[1])
+        for row in connection.execute(
+            "SELECT projection_name,COUNT(*) FROM projection_manifests "
+            f"WHERE projection_name IN ({placeholders}) AND status<>'active' "
+            "GROUP BY projection_name",
+            projections,
+        )
+    }
+    inventory = {name: superseded.get(name, 0) for name in projections}
+    inventory["fts_partitions"] = int(
+        connection.execute(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' "
+            "AND sql GLOB 'CREATE VIRTUAL TABLE*' "
+            "AND (name GLOB 'retrieval_fts_*_g*' "
+            "OR name GLOB 'retrieval_procedure_fts_*_g*')"
+        ).fetchone()[0]
+    )
+    return inventory
+
+
 def _verify_manifests(connection: sqlite3.Connection) -> tuple[int, int, int]:
     from .retrieval.projections import LexicalProjectionBuilder
     from .retrieval.specialized_projection import SpecializedProjectionBuilder
@@ -679,7 +703,7 @@ def _verify_manifests(connection: sqlite3.Connection) -> tuple[int, int, int]:
         "source_event_root_hash,details_json,generation,row_count,"
         "cursor_recorded_at_us,cursor_event_id FROM projection_manifests"
     ).fetchall()
-    for name, generation_table in _GENERATION_TABLES.items():
+    for name, generation_table in GENERATION_TABLES.items():
         if connection.execute(
             f'SELECT 1 FROM "{generation_table}" rows WHERE NOT EXISTS '
             "(SELECT 1 FROM projection_manifests manifest WHERE "
@@ -935,6 +959,14 @@ def _verify_database(
         except Exception as exc:
             checks["projection_manifests"] = _check(False, error=type(exc).__name__)
         try:
+            # Superseded generations should stay near zero. A number that
+            # keeps growing means the activation-time GC is failing.
+            checks["projection_generations"] = _check(
+                True, **_generation_inventory(source)
+            )
+        except Exception as exc:
+            checks["projection_generations"] = _check(False, error=type(exc).__name__)
+        try:
             invalid = int(
                 source.execute(
                     "SELECT COUNT(*) FROM dreaming_strategy_state WHERE "
@@ -1115,7 +1147,7 @@ def _refresh_manifests(candidate: Path, workspace_ids: list[str]) -> None:
         )
         # Remove only orphaned local generations in the candidate. Otherwise a
         # renamed/deleted manifest can leave an FTS table occupying the next ID.
-        for name, table in _GENERATION_TABLES.items():
+        for name, table in GENERATION_TABLES.items():
             connection.execute(
                 f'DELETE FROM "{table}" AS rows WHERE NOT EXISTS '
                 "(SELECT 1 FROM projection_manifests manifest WHERE "
