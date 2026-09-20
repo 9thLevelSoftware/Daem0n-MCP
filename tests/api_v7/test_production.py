@@ -649,9 +649,12 @@ async def test_memory_preflight_spawns_no_subprocess(tmp_path):
     from fastmcp import Client
 
     from daem0nmcp.api.v7.production import create_v7_server
+    from daem0nmcp.retrieval.runtime import await_projection_job_drains
+    from daem0nmcp.storage_activation import resolve_active_database
     from tests.api_v7.process_client import initialize_workspaces
 
     [workspace] = await initialize_workspaces((tmp_path,))
+    database = resolve_active_database(tmp_path / ".daem0nmcp" / "storage").path
     spawned: list[list[str]] = []
 
     def record_spawn(argv, *args, **kwargs):
@@ -673,6 +676,15 @@ async def test_memory_preflight_spawns_no_subprocess(tmp_path):
             brief = await client.call_tool("session_brief", scope, raise_on_error=False)
             assert brief.structured_content["ok"], brief.structured_content
             assert any(argv[0] == "git" for argv in spawned), spawned
+            # ``Popen`` is patched process-wide, so anything running
+            # concurrently lands in ``spawned`` too.  The brief's write
+            # schedules a projection drain, and with the graph profile
+            # installed that drain rebuilds communities on its own thread
+            # and spawns the Leiden worker.  Let the drains it scheduled
+            # finish before the window opens, so the assertion below can
+            # stay literal -- no subprocess at all -- instead of being
+            # narrowed to git or excused for a thread name.
+            await await_projection_job_drains((database,))
             spawned.clear()
             preflight = await client.call_tool(
                 "memory_preflight",
