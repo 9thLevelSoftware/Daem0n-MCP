@@ -35,6 +35,7 @@ from .models import (
     EvidenceRef,
     RecordSummary,
     parse_wire_datetime,
+    stored_relative_path,
 )
 from .public_ids import PublicObjectIdNotFound, PublicObjectIdRepository
 from .resources import RuleView
@@ -436,7 +437,7 @@ def _record_evidence_from_events(
         content = _safe_text(state.get("content"))
         try:
             tags = state.get("tags", [])
-            relative_path = state.get("file_path_relative")
+            relative_path = stored_relative_path(state.get("file_path_relative"))
             content_hash = memory_content_hash(state)
             recorded_at_us = int(row["recorded_at_us"])
             created = _datetime_from_us(created_at_us)

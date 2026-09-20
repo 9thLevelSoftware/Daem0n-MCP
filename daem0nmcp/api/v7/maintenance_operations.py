@@ -35,7 +35,12 @@ from ...storage_activation import ResolvedActiveDatabase
 from ...workspace import Workspace, WorkspaceRegistry
 from .application import AdmittedRequest
 from .errors import STABLE_ERROR_CODE_SET
-from .models import DestructiveMutationReceipt, Preview, RecordSummary
+from .models import (
+    DestructiveMutationReceipt,
+    Preview,
+    RecordSummary,
+    stored_relative_path,
+)
 from .runtime_protocols import ActiveStorageResolver, WorkerPool
 from .runtime_services import WorkspaceStorageResolver
 from .tasks import await_task_terminal
@@ -672,7 +677,9 @@ def _record_summary(record: _RecordSnapshot) -> RecordSummary:
                 "record_type": record.state["record_type"],
                 "excerpt": content[:4000],
                 "tags": tags,
-                "relative_file_path": record.state["file_path_relative"],
+                "relative_file_path": stored_relative_path(
+                    record.state["file_path_relative"]
+                ),
                 "current_status": status,
                 "content_hash": record.content_hash,
                 "created_at": created_at,

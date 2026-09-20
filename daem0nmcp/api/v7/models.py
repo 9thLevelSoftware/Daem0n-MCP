@@ -8,7 +8,6 @@ retrieval/storage integrations.
 from __future__ import annotations
 
 import json
-import posixpath
 import re
 from collections.abc import Iterator, Mapping
 from datetime import datetime, timezone
@@ -36,6 +35,7 @@ from pydantic import (
 )
 from typing_extensions import Self, TypeAliasType
 
+from ...workspace import is_workspace_relative_path
 from .errors import INTERNAL_ERROR_MESSAGE, ErrorCode
 
 MAX_JSON_COLLECTION_ITEMS = 4096
@@ -149,20 +149,7 @@ def contains_absolute_filesystem_path(value: object) -> bool:
 
 
 def _relative_path(value: str) -> str:
-    if value == ".":
-        return value
-    if (
-        not value
-        or "\\" in value
-        or "\x00" in value
-        or value.startswith(("/", "~"))
-        or _WINDOWS_DRIVE.match(value) is not None
-    ):
-        raise ValueError("path must be a normalized workspace-relative POSIX path")
-    components = value.split("/")
-    if any(component in {"", ".", ".."} for component in components):
-        raise ValueError("path must be a normalized workspace-relative POSIX path")
-    if posixpath.normpath(value) != value:
+    if not is_workspace_relative_path(value):
         raise ValueError("path must be a normalized workspace-relative POSIX path")
     return value
 
@@ -655,7 +642,41 @@ class Page(WireModel, Generic[T]):
     truncated: bool
 
 
+MIGRATED_EMPTY_CONTENT = "<empty>"
+
+
+def stored_relative_path(value: object) -> str | None:
+    """Return a stored path only when it is a workspace-relative POSIX path.
+
+    v6 stored an absolute ``file_path`` plus a relative form that is
+    ``../outside/x.py`` for a file above the project (and the absolute path
+    itself across Windows drives).  Neither may leave the workspace, so a
+    migrated record reads back without its file link instead of failing.
+    """
+
+    if not isinstance(value, str):
+        return None
+    try:
+        return _relative_path(value)
+    except ValueError:
+        return None
+
+
 class RecordSummary(WireModel):
+    """The bounded public view of a stored record.
+
+    It is only ever built from storage, never parsed from a caller, so it
+    clips rows that predate v7's bounds -- v6 tags had no length,
+    uniqueness or count limit, v6 content could be empty, and v6 kept
+    valid time and transaction time independently -- rather than denying
+    every read of a migrated workspace.  A v7-written record already
+    satisfies the bounds, so clipping is a no-op for it.
+
+    ``relative_file_path`` is a containment rule rather than a bound, so
+    it stays refused here; a stored value is normalized by
+    ``stored_relative_path`` where the row is read.
+    """
+
     record_id: RecordId
     record_type: RecordType
     excerpt: Annotated[
@@ -672,11 +693,37 @@ class RecordSummary(WireModel):
     created_at: AwareDateTime
     updated_at: AwareDateTime
 
-    @model_validator(mode="after")
-    def validate_timeline(self) -> RecordSummary:
-        if self.updated_at < self.created_at:
-            raise ValueError("updated_at cannot precede created_at")
-        return self
+    @model_validator(mode="before")
+    @classmethod
+    def clip_stored_record(cls, data: object) -> object:
+        if not isinstance(data, Mapping):
+            return data
+        values = dict(data)
+        tags = values.get("tags")
+        if isinstance(tags, (list, tuple)):
+            clipped: list[str] = []
+            for tag in tags:
+                if not isinstance(tag, str) or not tag:
+                    continue
+                tag = tag[:80]
+                if tag not in clipped:
+                    clipped.append(tag)
+            values["tags"] = clipped[:32]
+        excerpt = values.get("excerpt")
+        if isinstance(excerpt, str):
+            values["excerpt"] = excerpt[:4000] or MIGRATED_EMPTY_CONTENT
+        # A record's creation carries its valid time, which may be backdated
+        # or in the future relative to the transaction time it was written at,
+        # and v6 kept the two independently.  The summary shows the earlier of
+        # the two as the creation rather than refusing the record.
+        try:
+            created = parse_wire_datetime(values["created_at"])
+            updated = parse_wire_datetime(values["updated_at"])
+        except (KeyError, TypeError, ValueError):
+            return values
+        if updated < created:
+            values["created_at"] = updated
+        return values
 
 
 class EvidenceRef(WireModel):
@@ -863,6 +910,7 @@ __all__ = [
     "FieldError",
     "guarded_strings",
     "is_host_absolute_path",
+    "stored_relative_path",
     "JsonObject",
     "JsonValue",
     "MAX_CONTEXT_JSON_BYTES",

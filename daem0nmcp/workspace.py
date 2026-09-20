@@ -5,9 +5,13 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import posixpath
+import re
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+
+_WINDOWS_DRIVE = re.compile(r"^[A-Za-z]:")
 
 
 class WorkspaceAccessError(ValueError):
@@ -180,6 +184,55 @@ class WorkspaceRegistry:
         if workspace is None:
             raise WorkspaceAccessError()
         return workspace
+
+
+def is_workspace_relative_path(value: object) -> bool:
+    """Return whether a string is a normalized workspace-relative POSIX path."""
+
+    if not isinstance(value, str) or not 1 <= len(value) <= 1024:
+        return False
+    if value == ".":
+        return True
+    if (
+        "\\" in value
+        or "\x00" in value
+        or value.startswith(("/", "~"))
+        or _WINDOWS_DRIVE.match(value) is not None
+    ):
+        return False
+    if any(component in {"", ".", ".."} for component in value.split("/")):
+        return False
+    return posixpath.normpath(value) == value
+
+
+def relative_to_root(
+    path: str | os.PathLike[str],
+    root: str | os.PathLike[str],
+) -> str | None:
+    """Return ``path`` inside ``root`` as a POSIX relative path, else ``None``.
+
+    Containment is decided with ``Path.relative_to`` on resolved, normalized
+    paths, never with a string prefix, so ``C:\\proj2\\a.py`` is not treated as
+    living under ``C:\\proj``.  The returned string always satisfies the wire's
+    relative-path rule.
+    """
+
+    try:
+        resolved_root = normalize_resolved_path(Path(root).expanduser().resolve())
+        resolved = normalize_resolved_path(Path(path).expanduser().resolve())
+        depth = len(
+            Path(os.path.normcase(str(resolved)))
+            .relative_to(os.path.normcase(str(resolved_root)))
+            .parts
+        )
+    except (OSError, RuntimeError, ValueError):
+        return None
+    if depth < 1:
+        return None
+    # Join the resolved path's own tail so the result keeps the filesystem's
+    # spelling rather than the case-folded form containment was decided on.
+    value = "/".join(resolved.parts[-depth:])
+    return value if is_workspace_relative_path(value) else None
 
 
 def _has_parent_component(value: str) -> bool:

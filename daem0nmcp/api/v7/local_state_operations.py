@@ -42,6 +42,7 @@ from .models import (
     MutationReceipt,
     RecordSummary,
     parse_wire_datetime,
+    stored_relative_path,
 )
 from .resources import ActiveContextItem
 from .runtime_services import WorkspaceStorageResolver
@@ -305,7 +306,7 @@ def _record_summary(row: sqlite3.Row) -> RecordSummary:
                 "record_type": record_type,
                 "excerpt": content[:4000],
                 "tags": _json_string_list(row["tags_json"]),
-                "relative_file_path": row["file_path_relative"],
+                "relative_file_path": stored_relative_path(row["file_path_relative"]),
                 "current_status": status,
                 "content_hash": row["content_hash"],
                 "created_at": _datetime_from_us(row["created_at_us"]),

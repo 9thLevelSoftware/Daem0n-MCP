@@ -51,6 +51,7 @@ from .models import (
     Page,
     RecordSummary,
     parse_wire_datetime,
+    stored_relative_path,
 )
 from .pinned import IdempotencyConflict
 from .runtime_services import WorkspaceStorageResolver
@@ -307,8 +308,10 @@ def _load_record(
     ).fetchall()
     if not rows:
         raise RecordOperationError("NOT_FOUND")
-    if len(rows) != 1 or rows[0]["file_path"] is not None:
+    if len(rows) != 1:
         raise RecordOperationError("CAPABILITY_DEGRADED")
+    # A migrated v6 row keeps the host-absolute ``file_path`` v6 wrote; it is
+    # legacy provenance, never emitted, so it must not deny the read.
     return rows[0]
 
 
@@ -329,12 +332,10 @@ def _summary(
     if not isinstance(content, str) or not content:
         raise RecordOperationError("CAPABILITY_DEGRADED")
     tags = _parse_json(row["tags_json"], list)
+    # A future valid-time may be recorded now; ``RecordSummary`` exposes the
+    # transaction-time creation while the event retains the exact valid time.
     created_at = _datetime_from_us(row["created_at_us"])
     updated_at = _datetime_from_us(row["updated_at_us"])
-    # A future valid-time may be recorded now.  The bounded summary exposes
-    # its transaction-time creation while the event retains exact valid-time.
-    if created_at > updated_at:
-        created_at = updated_at
     try:
         return RecordSummary.model_validate(
             {
@@ -342,9 +343,9 @@ def _summary(
                 "record_type": str(row["record_type"]),
                 "excerpt": content[:4000],
                 "tags": tags if include_metadata else [],
-                "relative_file_path": None
-                if not include_metadata or row["file_path_relative"] is None
-                else str(row["file_path_relative"]),
+                "relative_file_path": stored_relative_path(row["file_path_relative"])
+                if include_metadata
+                else None,
                 "current_status": _record_status(row),
                 "content_hash": str(row["content_hash"]),
                 "created_at": created_at,
@@ -366,7 +367,7 @@ def _record_state(row: sqlite3.Row) -> dict[str, Any]:
         "context": _parse_json(row["context_json"], dict),
         "tags": _parse_json(row["tags_json"], list),
         "file_path": None,
-        "file_path_relative": row["file_path_relative"],
+        "file_path_relative": stored_relative_path(row["file_path_relative"]),
         "keywords": row["keywords"],
         "is_permanent": bool(row["is_permanent"]),
         "pinned": bool(row["pinned"]),

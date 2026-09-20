@@ -125,7 +125,7 @@ class WriterServiceTests(
         (other_storage / "daem0nmcp.db").touch()
         pointerless = WorkspaceRegistry([other], default_root=other).default
         with (
-            self.assertRaisesRegex(RuntimeServiceError, "ACTIVE_V7_UNAVAILABLE"),
+            self.assertRaisesRegex(RuntimeServiceError, "MIGRATION_REQUIRED"),
             resolver.locked_active(pointerless),
         ):
             self.fail("pointerless storage was admitted")
@@ -830,16 +830,17 @@ class RecallAdapterTests(
         ):
             await run(self._retrieval_result(stored, provider=""))
 
+        # A row migrated from v6 keeps the host-absolute ``file_path`` v6
+        # wrote.  It is legacy provenance, so it must not deny the recall, and
+        # it must never leave the server.
         with closing(sqlite3.connect(self.database)) as connection:
             connection.execute(
                 "UPDATE memory_records SET file_path=? WHERE record_id=?",
                 (str(self.root / "private.txt"), stored.record.record_id),
             )
             connection.commit()
-        with self.assertRaisesRegex(
-            RuntimeServiceError, "EVIDENCE_AUTHENTICATION_FAILED"
-        ):
-            await run(self._retrieval_result(stored))
+        legacy = await run(self._retrieval_result(stored))
+        self.assertNotIn("private.txt", legacy.model_dump_json())
 
     async def test_recall_rejects_federation_and_preserves_abstention(
         self,

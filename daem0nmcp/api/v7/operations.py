@@ -53,7 +53,13 @@ from ...storage_activation import (
 from ...workspace import Workspace
 from .application import AdmittedRequest
 from .errors import STABLE_ERROR_CODE_SET
-from .models import EvidenceRef, Page, RecordSummary, RelativePath
+from .models import (
+    EvidenceRef,
+    Page,
+    RecordSummary,
+    RelativePath,
+    stored_relative_path,
+)
 from .portable_projections import (
     ImportFinalizationLease,
     PortableTransferError,
@@ -244,6 +250,9 @@ def _active_connection(
     try:
         with DatabaseFileLock(storage, "shared"):
             active = resolve_active_database(storage)
+            if active.format_version == 6:
+                # An intact but un-migrated v6 store: retrying never helps.
+                raise CoreOperationError("MIGRATION_REQUIRED")
             if active.format_version != _FORMAT_VERSION:
                 raise CoreOperationError("CAPABILITY_DEGRADED")
             connection = sqlite3.connect(active.path, timeout=5.0)
@@ -633,7 +642,7 @@ def _summary(
     record = _record_from_event(event)
     content = record.get("content")
     tags = record.get("tags", [])
-    relative = record.get("file_path_relative")
+    relative = stored_relative_path(record.get("file_path_relative"))
     if not isinstance(content, str) or not content or not isinstance(tags, list):
         raise CoreOperationError("IMPORT_INVALID")
     if record.get("deleted_at_us") is not None:
