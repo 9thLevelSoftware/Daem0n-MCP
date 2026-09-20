@@ -564,8 +564,9 @@ def ensure_workspace_identity(
             # same device and inode, so it never reaches this branch (R-28).
             _write_identity_file(root, identity.workspace_id, identity.forked_from)
         _ensure_storage_gitignore(root)
-    reset_workspace_identity_cache()
-    return _resolve_identities(canonical)
+    # Resolve once more through the cache, so the registry built next reuses
+    # this answer instead of reading every store again.
+    return resolve_workspace_identities(canonical)
 
 
 def _parse_workspace_roots(raw: str | None) -> list[str]:
