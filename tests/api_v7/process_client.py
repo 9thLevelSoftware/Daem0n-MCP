@@ -150,6 +150,29 @@ def server_environment(
     return environment
 
 
+_LOG_TAIL_BYTES = 8000
+
+
+def dump_server_log(path: Path) -> None:
+    """Print the server's own log when a process test fails.
+
+    CI shows only the assertion, so an INTERNAL_ERROR or a crash inside the
+    server is otherwise invisible; the tmp directory is gone by then.
+    """
+
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError as error:
+        print(f"\n----- {path.name} unavailable: {error} -----", flush=True)
+        return
+    tail = text[-_LOG_TAIL_BYTES:]
+    print(
+        f"\n----- {path.name} (last {len(tail)} of {len(text)} chars) -----\n{tail}"
+        f"\n----- end {path.name} -----",
+        flush=True,
+    )
+
+
 @asynccontextmanager
 async def process_client(
     workspace: Path,
@@ -192,10 +215,12 @@ async def process_client(
                         # SDK stdout-reader BrokenResourceError during shutdown.
                         body_error = error
         except BaseException as cleanup_error:
+            dump_server_log(workspace / log_name)
             if body_error is not None:
                 raise body_error from cleanup_error
             raise
         if body_error is not None:
+            dump_server_log(workspace / log_name)
             raise body_error
         return
     if transport != "streamable-http":
@@ -203,6 +228,7 @@ async def process_client(
     with socket.socket() as reservation:
         reservation.bind(("127.0.0.1", 0))
         port = reservation.getsockname()[1]
+    failed = False
     with (workspace / "http-server.log").open("w", encoding="utf-8") as log:
         process = subprocess.Popen(
             [
@@ -257,6 +283,9 @@ async def process_client(
             ):
                 await session.initialize()
                 yield session
+        except BaseException:
+            failed = True
+            raise
         finally:
             if process.poll() is None:
                 process.terminate()
@@ -265,6 +294,9 @@ async def process_client(
             except subprocess.TimeoutExpired:
                 process.kill()
                 await asyncio.to_thread(process.wait, timeout=10)
+            if failed:
+                log.flush()
+                dump_server_log(workspace / "http-server.log")
 
 
 async def call(session: ClientSession, tool: str, arguments: dict) -> dict:

@@ -45,28 +45,46 @@ async def _import_retrying_while_busy(session, scope, arguments):
     """Import one page, waiting out a concurrent writer's SQLite write lock.
 
     A projection drain or dreaming job can hold the write lock past the server's
-    busy timeout, which the transfer reports as the retryable DATABASE_IN_USE.
-    A real client retries it; so does this test, within a bounded deadline.
+    busy timeout, which both the preflight and the transfer report as the
+    retryable DATABASE_IN_USE. A real client retries those; so does this test,
+    within a bounded deadline and a bounded number of attempts.
     """
 
     deadline = asyncio.get_running_loop().time() + 30
-    while True:
-        result = await call(
+    for attempt in range(8):
+        contended = None
+        preflight = await call(
             session,
-            "workspace_import",
+            "memory_preflight",
             {
                 **scope,
-                **arguments,
-                "preflight_token": await _preflight(
-                    session, scope, "workspace_import", arguments
-                ),
+                "target_tool": "workspace_import",
+                "target_arguments": arguments,
+                "description": "Exercise workspace_import through the transport",
             },
         )
-        if result["ok"]:
-            return result["data"]
-        assert result["error"]["code"] == "DATABASE_IN_USE", result["error"]
-        assert asyncio.get_running_loop().time() < deadline, result["error"]
+        if preflight["ok"]:
+            result = await call(
+                session,
+                "workspace_import",
+                {
+                    **scope,
+                    **arguments,
+                    "preflight_token": preflight["data"]["preflight_token"],
+                },
+            )
+            if result["ok"]:
+                # Contention is occasional; a transfer that always contends is
+                # a regression, not slowness.
+                assert attempt < 4, f"import needed {attempt + 1} attempts"
+                return result["data"]
+            contended = result["error"]
+        else:
+            contended = preflight["error"]
+        assert contended["code"] == "DATABASE_IN_USE", contended
+        assert asyncio.get_running_loop().time() < deadline, contended
         await asyncio.sleep(0.5)
+    raise AssertionError("the import stayed contended for 8 attempts")
 
 
 @pytest.mark.parametrize("transport", ["stdio", "streamable-http"])
