@@ -237,7 +237,7 @@ def _open_identity_reader(root: Path) -> sqlite3.Connection | None:
     storage = _identity_directory(root) / "storage"
     if not storage.is_dir():
         return None
-    from .storage_activation import resolve_active_database
+    from .storage_activation import readonly_database_uri, resolve_active_database
 
     try:
         database = resolve_active_database(storage).path
@@ -246,11 +246,11 @@ def _open_identity_reader(root: Path) -> sqlite3.Connection | None:
     if not database.is_file():
         return None
     try:
-        return sqlite3.connect(
-            f"file:{database.as_posix()}?mode=ro",
-            uri=True,
-            timeout=2,
-        )
+        # The shared read-only URI leaves no ``-shm`` behind, so resolving an
+        # identity stays a read even inside an offline dry run.
+        connection = sqlite3.connect(readonly_database_uri(database), uri=True)
+        connection.execute("PRAGMA query_only=ON")
+        return connection
     except sqlite3.Error:
         return None
 

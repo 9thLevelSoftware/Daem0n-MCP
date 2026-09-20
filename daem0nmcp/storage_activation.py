@@ -12,11 +12,13 @@ import json
 import os
 import sqlite3
 import stat
+import sys
 import threading
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from pathlib import Path, PurePosixPath
 from typing import BinaryIO, Literal
+from urllib.parse import quote
 
 from .event_store import canonical_json_bytes
 from .protected_files import reject_linked_ancestry
@@ -153,6 +155,31 @@ def _resolve_storage_file(storage: Path, relative_name: str, field: str) -> Path
     if not resolved.is_file():
         raise _invalid(f"{field} target is not a file")
     return resolved
+
+
+def readonly_database_uri(path: str | os.PathLike[str]) -> str:
+    """Return a URI that reads a database without writing a byte beside it.
+
+    An ordinary read-only connection still creates the ``-shm`` wal-index,
+    which an offline inspection may not do.  On Windows the no-lock VFS keeps
+    read-only connections off the read marks.  POSIX has no equivalent --
+    ``unix-none`` lacks shared memory, so it cannot open a WAL database at all
+    -- so with no ``-wal``, ``-shm`` or ``-journal`` the main file is the whole
+    database and is read as immutable (SQLite would otherwise create the WAL
+    files); anything else is read through the default VFS, whose only write is
+    the volatile ``-shm`` wal-index.
+    """
+
+    resolved = Path(path).resolve()
+    if sys.platform == "win32":
+        parameters = "&vfs=win32-none"
+    elif not any(
+        Path(f"{resolved}{suffix}").exists() for suffix in ("-wal", "-shm", "-journal")
+    ):
+        parameters = "&immutable=1"
+    else:
+        parameters = ""
+    return "file:" + quote(resolved.as_posix(), safe="/:") + f"?mode=ro{parameters}"
 
 
 def validate_pointer(pointer: ActiveDatabasePointer) -> ActiveDatabasePointer:
