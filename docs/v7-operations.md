@@ -170,6 +170,39 @@ record its outcome; then call `system_health(workspace_id="ws_<opaque>")`.
 `system_health` reports the enabled services and capability states. Missing
 profiles are remediation signals, not successful execution.
 
+## Moving, renaming, and re-cloning a project
+
+Each workspace records its identity in `.daem0nmcp/workspace-id`, so its
+memories follow the folder when it is moved or renamed. The file holds only the
+opaque workspace ID, a device-and-inode key for the folder it was written for,
+and, after a fork, the ID it was forked from. It names no path, and no value in
+it is ever used to reach the filesystem. Bootstrap also writes
+`.daem0nmcp/.gitignore` so the file and the database are never committed.
+
+To move a project, move the whole folder, `.daem0nmcp/` included. To re-clone
+one, copy `.daem0nmcp/` into the new clone; the clone then works in its own
+server process, even while the old clone still exists. Edit-bridge pairings are
+keyed by path and must be re-run after a move.
+
+Two registered folders may not claim one identity. If they do, the folder whose
+recorded key still matches keeps the ID and the others answer every call with
+`WORKSPACE_IDENTITY_DUPLICATE`; if none or several match, all of them are
+refused. A workspace whose stored events do not match its recorded ID answers
+`WORKSPACE_IDENTITY_AMBIGUOUS`. Neither is retryable; both are settled offline:
+
+```bash
+python -m daem0nmcp.cli --project-path /srv/project-a workspace-id
+python -m daem0nmcp.cli --project-path /srv/project-a workspace-id --new
+python -m daem0nmcp.cli --project-path /srv/project-a workspace-id --adopt ws_<opaque>
+```
+
+With no option it prints the resolved ID, or the reason it is blocked with the
+stored event count per ID. `--new` records an explicit fork: the folder gets a
+fresh ID, the inherited events stay in the database untouched and hidden, and
+`--adopt` of the previous ID undoes the fork. Run these with the server stopped.
+The server, and `migrate-v7 --apply`, are the only other writers; hooks and the
+read-only CLI never write an identity.
+
 ## Migration, projections, exports, and consolidation
 
 Use the explicit v7 lifecycle commands against a registered project root:
@@ -388,7 +421,8 @@ The current CLI commands are `briefing`, `check`, `index`,
 `install-claude-hooks`, `install-hooks`, `install-opencode`, `migrate`,
 `migrate-v7`, `pre-commit`, `projection-status`, `rebuild-projection`,
 `record-outcome`, `recover-consolidation`, `remember`, `scan-todos`, `status`,
-`uninstall-claude-hooks`, `uninstall-hooks`, `verify-v7`, and `watch`.
+`uninstall-claude-hooks`, `uninstall-hooks`, `verify-v7`, `watch`, and
+`workspace-id`.
 The deprecated `migrate --backfill-vectors` is format-6-only; v7 uses projection
 rebuilds.
 

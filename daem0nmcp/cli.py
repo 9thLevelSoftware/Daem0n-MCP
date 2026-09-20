@@ -302,6 +302,93 @@ def format_check_result(result: dict) -> str:
     return "\n".join(lines)
 
 
+def _identity_payload(root, identity, counts: dict) -> dict:
+    """Describe one workspace identity without naming any host path."""
+
+    hidden = {
+        stored: total
+        for stored, total in sorted(counts.items())
+        if stored != identity.workspace_id
+    }
+    payload: dict = {
+        "workspace_id": identity.workspace_id,
+        "recorded": identity.has_file,
+        "root_key_matches": identity.root_key_matches,
+        "blocked": identity.blocked,
+        "forked_from": identity.forked_from,
+        "events_by_workspace_id": dict(sorted(counts.items())),
+        "hidden_event_count": sum(hidden.values()),
+    }
+    return payload
+
+
+def _render_identity(payload: dict) -> str:
+    lines = []
+    if payload["blocked"]:
+        lines.append(f"Blocked: {payload['blocked']}")
+    else:
+        lines.append(f"Workspace: {payload['workspace_id']}")
+    lines.append("Recorded: " + ("yes" if payload["recorded"] else "no"))
+    if payload["recorded"] and not payload["root_key_matches"]:
+        lines.append(
+            "This folder looks moved or copied; if a shared server also serves "
+            "the original, run `workspace-id --new` here."
+        )
+    if payload["forked_from"]:
+        lines.append(f"Forked from: {payload['forked_from']}")
+    if payload["hidden_event_count"]:
+        lines.append(f"Hidden events: {payload['hidden_event_count']}")
+    if payload["events_by_workspace_id"]:
+        lines.append("Stored events by workspace ID:")
+        for stored, total in payload["events_by_workspace_id"].items():
+            lines.append(f"  {stored}  {total}")
+    return "\n".join(lines)
+
+
+def _workspace_id_command(args, active_settings) -> int:
+    """Show, adopt, or fork the identity recorded with this project."""
+
+    from .workspace import (
+        WorkspaceIdentityError,
+        path_hash_workspace_id,
+        stored_event_counts,
+        workspace_identity,
+        write_workspace_identity,
+    )
+
+    other_roots = tuple(getattr(active_settings, "workspace_roots", ()) or ())
+    root = Path(getattr(active_settings, "project_root", ".")).expanduser().resolve()
+    try:
+        identity = workspace_identity(root, other_roots=other_roots)
+        if args.adopt is not None:
+            write_workspace_identity(root, workspace_id=args.adopt)
+        elif args.new:
+            fresh = path_hash_workspace_id(root)
+            previous = identity.workspace_id if identity.has_file else None
+            if previous is None and len(identity.stored_ids) == 1:
+                previous = next(iter(identity.stored_ids))
+            write_workspace_identity(
+                root,
+                workspace_id=fresh,
+                forked_from=None if previous in (None, fresh) else previous,
+            )
+        if args.adopt is not None or args.new:
+            identity = workspace_identity(root, other_roots=other_roots)
+    except WorkspaceIdentityError as exc:
+        payload = {"error": {"code": exc.code, "message": exc.code}}
+        if args.json:
+            print(json.dumps(payload, sort_keys=True, separators=(",", ":")))
+        else:
+            print(f"Error: {exc.code}")
+        return 2
+    payload = _identity_payload(root, identity, stored_event_counts(root))
+    if args.json:
+        print(json.dumps(payload, sort_keys=True, separators=(",", ":")))
+    else:
+        safe_print(_render_identity(payload))
+    return 1 if payload["blocked"] else 0
+
+
 def main():
     """CLI entry point."""
     parser = argparse.ArgumentParser(description="Daem0nMCP CLI")
@@ -365,6 +452,22 @@ def main():
         type=_v7_batch_size,
         default=500,
         help="Rows per checkpoint batch",
+    )
+
+    workspace_id_parser = subparsers.add_parser(
+        "workspace-id",
+        help="Show or settle the workspace identity recorded with this project",
+    )
+    workspace_id_choice = workspace_id_parser.add_mutually_exclusive_group()
+    workspace_id_choice.add_argument(
+        "--adopt",
+        metavar="ID",
+        help="Record an existing workspace ID for this project",
+    )
+    workspace_id_choice.add_argument(
+        "--new",
+        action="store_true",
+        help="Record a fresh ID and keep the inherited events hidden",
     )
 
     verify_v7_parser = subparsers.add_parser(
@@ -581,6 +684,9 @@ def main():
         os.environ["DAEM0NMCP_PROJECT_ROOT"] = args.project_path
         # Create new settings instance to pick up the env var
         active_settings = Settings()
+
+    if args.command == "workspace-id":
+        sys.exit(_workspace_id_command(args, active_settings))
 
     if args.command == "verify-v7":
         from .storage_activation import DatabaseInUseError, PointerValidationError

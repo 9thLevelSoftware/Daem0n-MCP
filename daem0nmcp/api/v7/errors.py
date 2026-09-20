@@ -26,6 +26,8 @@ class ErrorCode(str, Enum):
     CAPABILITY_DISABLED = "CAPABILITY_DISABLED"
     CAPABILITY_DEGRADED = "CAPABILITY_DEGRADED"
     MIGRATION_REQUIRED = "MIGRATION_REQUIRED"
+    WORKSPACE_IDENTITY_AMBIGUOUS = "WORKSPACE_IDENTITY_AMBIGUOUS"
+    WORKSPACE_IDENTITY_DUPLICATE = "WORKSPACE_IDENTITY_DUPLICATE"
     LEXICAL_UNAVAILABLE = "LEXICAL_UNAVAILABLE"
     COMMUNION_REQUIRED = "COMMUNION_REQUIRED"
     COUNSEL_REQUIRED = "COUNSEL_REQUIRED"
@@ -70,6 +72,40 @@ MIGRATION_REQUIRED_MESSAGE = (
 )
 
 
+# Two registered folders claim one identity, or the stored events do not
+# match the recorded one.  Both are settled offline with the ``workspace-id``
+# command, so the remedy is stated in the message with a placeholder.
+WORKSPACE_IDENTITY_DUPLICATE_MESSAGE = (
+    "This folder and another registered folder claim the same workspace "
+    "identity. Stop the server, then run: python -m daem0nmcp.cli "
+    "--project-path <project root> workspace-id --new"
+)
+WORKSPACE_IDENTITY_AMBIGUOUS_MESSAGE = (
+    "This folder's stored memories do not match its recorded workspace "
+    "identity. Stop the server, then run: python -m daem0nmcp.cli "
+    "--project-path <project root> workspace-id"
+)
+IDENTITY_BLOCK_MESSAGES = MappingProxyType(
+    {
+        ErrorCode.WORKSPACE_IDENTITY_DUPLICATE.value: (
+            WORKSPACE_IDENTITY_DUPLICATE_MESSAGE
+        ),
+        ErrorCode.WORKSPACE_IDENTITY_AMBIGUOUS.value: (
+            WORKSPACE_IDENTITY_AMBIGUOUS_MESSAGE
+        ),
+    }
+)
+
+
+def identity_block_failure(code: str) -> tuple[ErrorCode, str] | None:
+    """Return the wire code and path-free remedy for a blocked workspace."""
+
+    message = IDENTITY_BLOCK_MESSAGES.get(code)
+    if message is None:
+        return None
+    return ERROR_CODE_REGISTRY[code], message
+
+
 def is_stable_error_code(value: object) -> bool:
     """Return whether *value* is an exact reviewed v7 error code."""
 
@@ -111,10 +147,14 @@ __all__ = [
     "DATABASE_IN_USE_RETRY_AFTER_MS",
     "ERROR_CODE_REGISTRY",
     "INTERNAL_ERROR_MESSAGE",
+    "IDENTITY_BLOCK_MESSAGES",
     "MIGRATION_REQUIRED_MESSAGE",
     "STABLE_ERROR_CODES",
     "STABLE_ERROR_CODE_SET",
+    "WORKSPACE_IDENTITY_AMBIGUOUS_MESSAGE",
+    "WORKSPACE_IDENTITY_DUPLICATE_MESSAGE",
     "ErrorCode",
+    "identity_block_failure",
     "is_database_busy",
     "is_stable_error_code",
 ]

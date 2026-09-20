@@ -4561,6 +4561,16 @@
       "status": "pending"
     },
     {
+      "acceptance": "python -m daem0nmcp.cli workspace-id parses and exercises its documented result contract.",
+      "entry_point": "daem0nmcp.cli:main",
+      "evidence": [],
+      "id": "cli.workspace-id",
+      "kind": "cli",
+      "owner": "cli",
+      "package": "daem0nmcp.cli",
+      "status": "pending"
+    },
+    {
       "acceptance": "Install profile agency-e2b and exercise its advertised capability.",
       "entry_point": "optional-dependency:agency-e2b",
       "evidence": [],
@@ -5754,8 +5764,8 @@
     "tests/test_legacy_vector_migration_guards.py"
   ],
   "observed_surface": {
-    "atomic_requirements": 572,
-    "cli_commands": 21,
+    "atomic_requirements": 573,
+    "cli_commands": 22,
     "dependency_profiles": 10,
     "hooks": 15,
     "registered_tools": 75,

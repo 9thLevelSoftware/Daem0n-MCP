@@ -71,6 +71,8 @@ class ErrorRegistryTests(unittest.TestCase):
             "CAPABILITY_DISABLED",
             "CAPABILITY_DEGRADED",
             "MIGRATION_REQUIRED",
+            "WORKSPACE_IDENTITY_AMBIGUOUS",
+            "WORKSPACE_IDENTITY_DUPLICATE",
             "LEXICAL_UNAVAILABLE",
             "COMMUNION_REQUIRED",
             "COUNSEL_REQUIRED",

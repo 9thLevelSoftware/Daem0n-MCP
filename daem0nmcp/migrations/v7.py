@@ -46,6 +46,7 @@ from ..storage_activation import (
 )
 from ..workspace import (
     WorkspaceRegistry,
+    ensure_workspace_identity,
     is_workspace_relative_path,
     normalize_resolved_path,
     relative_to_root,
@@ -1252,6 +1253,11 @@ class MigrationV7Service:
 
     def _storage(self, selector):
         workspace = self.registry.resolve(selector)
+        if workspace.identity_block is not None:
+            raise MigrationV7Error(
+                workspace.identity_block,
+                "the workspace identity must be settled first",
+            )
         storage = resolve_derived_path(workspace.root, ".daem0nmcp", "storage")
         return workspace, storage
 
@@ -1611,6 +1617,9 @@ class MigrationV7Service:
         ):
             raise ValueError("batch_size must be between 1 and 10000")
         workspace, storage = self._storage(selector)
+        # Activation is the one offline moment that settles which ID this
+        # project's rows belong to, so record it with the project.
+        ensure_workspace_identity([workspace.root])
         with DatabaseFileLock(storage, "exclusive"):
             resolved = resolve_active_database(storage)
             if resolved.format_version == TARGET_FORMAT_VERSION:

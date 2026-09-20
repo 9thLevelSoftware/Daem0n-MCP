@@ -4,6 +4,20 @@
 
 ### Added
 - Reproducible v7 core foundation with opt-in dependency profiles and lazy capability reporting.
+- **Memories follow a project that is moved or renamed.** Each workspace now
+  records its identity in `.daem0nmcp/workspace-id` (the opaque ID, a
+  device-and-inode key for the folder, and, after a fork, the ID it was forked
+  from). Move the folder with `.daem0nmcp/` inside it and the memories come
+  along; re-clone by copying `.daem0nmcp/` into the new clone. The file names no
+  path, and nothing in it is ever used to reach the filesystem. Bootstrap also
+  writes `.daem0nmcp/.gitignore`. Two registered folders may no longer claim one
+  identity: the mismatched ones answer every call with the non-retryable
+  `WORKSPACE_IDENTITY_DUPLICATE`, and a workspace whose stored events do not
+  match its recorded ID answers `WORKSPACE_IDENTITY_AMBIGUOUS`. The new
+  `python -m daem0nmcp.cli --project-path <root> workspace-id` command prints
+  the resolved ID or the block reason with per-ID event counts, and settles
+  either with `--new` (a recorded fork that hides the inherited events without
+  touching a row) or `--adopt <id>`. No row or event hash is ever rewritten.
 
 ### Changed
 - **Behaviour change — installed profiles now turn themselves on.** An unset (or

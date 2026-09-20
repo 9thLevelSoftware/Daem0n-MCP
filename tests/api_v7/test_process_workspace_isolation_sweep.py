@@ -8,8 +8,10 @@ arguments where A's would only be refused.  Two targets are swept:
 
 * B, an ordinary second workspace with its own database;
 * C, a registered root whose storage is a byte copy of A's (a re-cloned or
-  copied project).  C's database physically holds A's rows, so only the
-  ``workspace_id`` predicates keep them out of C's responses.
+  copied project), settled as an explicit ``workspace-id --new`` fork of that
+  copy.  C's database physically holds A's rows, so only the ``workspace_id``
+  predicates keep them out of C's responses.  The un-forked copy is refused
+  outright, which is asserted before the fork is recorded.
 
 No target response may carry A's text, A's canary token, A's IDs or A's
 workspace ID; A's database may not change; a rejected call may not change the
@@ -56,7 +58,11 @@ from daem0nmcp.api.v7.tools import TOOL_DATA_MODELS, DiagnosticSummary
 from daem0nmcp.config import Settings
 from daem0nmcp.covenant import CovenantLevel
 from daem0nmcp.storage_activation import resolve_active_database
-from daem0nmcp.workspace import WorkspaceRegistry
+from daem0nmcp.workspace import (
+    WorkspaceRegistry,
+    reset_workspace_identity_cache,
+    write_workspace_identity,
+)
 from tests.api_v7.process_client import (
     call,
     initialize_workspaces,
@@ -868,6 +874,15 @@ async def test_workspace_isolation_and_path_leak_sweep(tmp_path, capsys):
     (c_root / "src" / "neutral.py").write_text(
         "def neutral_function():\n    return 1  # TODO: neutral\n", encoding="utf-8"
     )
+    # The copy carries A's recorded identity, so registered beside A it is
+    # refused outright rather than answering with A's rows.
+    reset_workspace_identity_cache()
+    duplicate = WorkspaceRegistry([a_root, c_root], default_root=a_root)
+    assert duplicate.resolve(a_root).identity_block is None
+    assert duplicate.resolve(c_root).identity_block == "WORKSPACE_IDENTITY_DUPLICATE"
+    # Settling it as an explicit fork gives C its own ID over the same rows,
+    # which is exactly the state this sweep must prove is isolated.
+    write_workspace_identity(c_root, workspace_id=c, forked_from=a)
     async with Client(server((a_root, b_root, c_root))) as client:
         invoke = _invoker(client)
         await _mint_tokens(invoke, a, b, seed)

@@ -41,7 +41,12 @@ from ...transport_security import (
     build_fastmcp_auth,
     validate_transport_security,
 )
-from ...workspace import Workspace, WorkspaceRegistry
+from ...workspace import (
+    Workspace,
+    WorkspaceRegistry,
+    configured_roots,
+    ensure_workspace_identity,
+)
 from ...workspace_access import WorkspaceAccessPolicy
 from .code_entity_operations import (
     CodeEntityOperationDependencies,
@@ -760,11 +765,26 @@ def _assemble(
     native_runtimes = _OptionalNativeRuntimeLifecycle(capability_statuses)
     native_runtimes.start()
     normalizer = build_argument_normalizer()
+    # Record each configured root's identity before anything resolves one, so
+    # a moved or re-cloned project keeps the ID its rows were written under.
+    ensure_workspace_identity(
+        configured_roots(
+            loaded_settings.workspace_roots,
+            default_root=getattr(loaded_settings, "project_root", None),
+        )
+    )
     registry = WorkspaceRegistry.from_settings(loaded_settings)
     workspaces = {registry.default.workspace_id: registry.default}
     for root in loaded_settings.workspace_roots:
         workspace = registry.resolve(root)
         workspaces[workspace.workspace_id] = workspace
+    # A blocked root answers every call with its identity error; it must not
+    # be bootstrapped, dreamed over, or have projections drained behind it.
+    served = tuple(
+        workspace
+        for workspace in workspaces.values()
+        if workspace.identity_block is None
+    )
     access_policy = WorkspaceAccessPolicy(
         workspaces={
             str(workspace.root): workspace.workspace_id
@@ -861,7 +881,7 @@ def _assemble(
         projection_scheduler=schedule_capture_projection,
     )
     dreaming = V7DreamingCoordinator(
-        workspaces=tuple(workspaces.values()),
+        workspaces=served,
         settings=loaded_settings,
         candidate_store=capture_candidates,
         storage_resolver=storage_resolver,
@@ -1032,7 +1052,7 @@ def _assemble(
         capture_candidates=capture_candidates,
         edit_bridge_service=edit_bridge_service,
         services=(
-            WorkspaceBootstrapLifecycle(tuple(workspaces.values())),
+            WorkspaceBootstrapLifecycle(served),
             writer,
             recall,
             runtime_health,
@@ -1048,7 +1068,7 @@ def _assemble(
             federation_dependencies,
             consolidation_dependencies,
             _ProjectionLifecycle(
-                tuple(workspaces.values()),
+                served,
                 loaded_settings,
                 capability_statuses,
             ),
