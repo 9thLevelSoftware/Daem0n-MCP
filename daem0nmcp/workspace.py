@@ -309,15 +309,18 @@ def _claim_identity(root: Path) -> WorkspaceIdentity:
     current = _identity_root_key(root)
     path_hash = _workspace_id(root)
     recorded, malformed = _read_identity_file(root)
+    stored = _stored_workspace_ids(root)
     if malformed:
+        # ``workspace-id`` still reports the stored counts, and ``--new`` can
+        # still fork from them, so the operator is not left with nothing.
         return WorkspaceIdentity(
             workspace_id=path_hash,
             blocked=WORKSPACE_IDENTITY_AMBIGUOUS,
             current_root_key=current,
             malformed=True,
             has_file=True,
+            stored_ids=stored,
         )
-    stored = _stored_workspace_ids(root)
     if recorded is None:
         if not stored:
             claimed: str | None = path_hash
