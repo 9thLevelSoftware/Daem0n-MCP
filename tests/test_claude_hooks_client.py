@@ -9,9 +9,7 @@ import pytest
 from daem0nmcp.claude_hooks._client import (
     block,
     get_command_from_input,
-    get_file_path_from_input,
     get_project_path,
-    get_tool_input,
     read_hook_event,
     run_hook_safely,
     succeed,
@@ -108,33 +106,17 @@ class TestToolInputParsing:
         monkeypatch.setattr(sys, "stdin", TextIOWrapper(BytesIO(b"[]")))
         assert read_hook_event() == {}
 
-    def test_file_path_from_edit(self, monkeypatch):
-        monkeypatch.setenv("TOOL_INPUT", json.dumps({"file_path": "/foo/bar.py"}))
-        assert get_file_path_from_input() == "/foo/bar.py"
-
-    def test_notebook_path(self, monkeypatch):
-        monkeypatch.setenv("TOOL_INPUT", json.dumps({"notebook_path": "/foo.ipynb"}))
-        assert get_file_path_from_input() == "/foo.ipynb"
-
-    def test_file_path_takes_precedence(self, monkeypatch):
-        monkeypatch.setenv(
-            "TOOL_INPUT",
-            json.dumps({"file_path": "/a.py", "notebook_path": "/b.ipynb"}),
-        )
-        assert get_file_path_from_input() == "/a.py"
-
     def test_command_from_bash(self, monkeypatch):
         monkeypatch.setenv("TOOL_INPUT", json.dumps({"command": "ls -la"}))
         assert get_command_from_input() == "ls -la"
 
     def test_invalid_json(self, monkeypatch):
         monkeypatch.setenv("TOOL_INPUT", "not json")
-        assert get_tool_input() == {}
-        assert get_file_path_from_input() is None
+        assert get_command_from_input() is None
 
     def test_missing_env(self, monkeypatch):
         monkeypatch.delenv("TOOL_INPUT", raising=False)
-        assert get_tool_input() == {}
+        assert get_command_from_input() is None
 
 
 class TestRunHookSafely:

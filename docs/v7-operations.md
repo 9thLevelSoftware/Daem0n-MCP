@@ -257,6 +257,35 @@ Install Claude hooks for one project:
 python -m daem0nmcp.cli --project-path /srv/project-a install-claude-hooks
 ```
 
+The hooks go into the user-level `~/.claude/settings.json` and run in every
+project, staying silent unless the session directory, `CLAUDE_PROJECT_DIR`, or
+one of their parents (not your home directory) contains `.daem0nmcp/`. They
+remind only:
+
+| Event (matcher) | Hook | What it does | Input | Reminds only |
+|-----------------|------|--------------|-------|--------------|
+| `SessionStart` | `session_start` | Adds a line to the model's context asking it to call `session_brief` with this workspace's `workspace_id` | `CLAUDE_PROJECT_DIR` env | Yes |
+| `PreToolUse` (`Edit\|Write\|NotebookEdit`) | `pre_edit` | Inside a Daem0n project, adds a one-line `additionalContext` reminder to call `memory_recall_file` for the file and `memory_preflight` for the change; silent elsewhere | stdin event | Yes |
+| `PreToolUse` (`Bash`) | `pre_bash` | Checks the command against Daem0n rules. Currently inert: it reads a `TOOL_INPUT` env var that Claude Code does not set | `TOOL_INPUT` env | Yes (always exits 0) |
+| `PostToolUse` (`mcp__.*__edit_preflight`) | `post_edit_preflight` | Edit-bridge plumbing: stages an `edit_preflight` receipt for a bridge edit request. Nothing in Claude Code creates those requests any more, so it is a no-op | stdin event | Yes |
+| `PostToolUse` (`Edit\|Write\|NotebookEdit`) | `post_edit` | Edit-bridge plumbing: reports a bridge-approved edit as a capture candidate. Only loads the bridge when the project is paired; a no-op in Claude Code today | stdin event | Yes |
+| `Stop`, `SubagentStop` | `stop` | When the transcript shows a finished task with no recorded outcome, shows you suggested `memory_preflight`/`memory_store`/`memory_record_outcome` calls to ask Claude for, as a `systemMessage`. Never writes memory | stdin event (`transcript_path`) | Yes |
+
+No hook blocks a tool call or keeps the agent running: every hook exits 0 and none
+returns a `permissionDecision` or `decision`.
+
+Pairing writes an owner-only credential to
+`~/.daem0nmcp/edit-bridges/<authority>/credential.json`, uses
+`~/.daem0nmcp/edit-bridges/run/<authority[:16]>/` for the bridge socket, and
+adds `DAEM0NMCP_EDIT_BRIDGE_CREDENTIAL_FILE`, `DAEM0NMCP_EDIT_BRIDGE_RUNTIME_DIR`,
+`DAEM0NMCP_PROJECT_ROOT` and `DAEM0NMCP_STORAGE_PATH` to
+`<project>/.claude/settings.local.json`. Remove the hooks, those env keys and
+(with `--remove-credentials`) the credential and socket directories with:
+
+```bash
+python -m daem0nmcp.cli uninstall-claude-hooks --project-path /srv/project-a --remove-credentials
+```
+
 Install OpenCode V1 locally:
 
 ```bash
