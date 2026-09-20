@@ -59,6 +59,7 @@ from .federated_retrieval import (
     validate_directional_links,
 )
 from .models import (
+    MIGRATED_EMPTY_CONTENT,
     CapabilityState,
     CitationManifestEntry,
     RecordSummary,
@@ -465,8 +466,9 @@ def _record_summary(
 ) -> RecordSummary:
     tags = _parse_json(row["tags_json"], list, "MEMORY_RECORD_INTEGRITY_FAILED")
     content = row["content"]
-    if not isinstance(content, str) or not content:
+    if not isinstance(content, str):
         raise RuntimeServiceError("MEMORY_RECORD_INTEGRITY_FAILED")
+    content = content or MIGRATED_EMPTY_CONTENT
     try:
         return RecordSummary.model_validate(
             {

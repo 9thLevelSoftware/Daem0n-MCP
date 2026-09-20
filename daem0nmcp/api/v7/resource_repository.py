@@ -32,7 +32,11 @@ from ...schema_version import CURRENT_SCHEMA_VERSION
 from ...storage_activation import DatabaseFileLock, ResolvedActiveDatabase
 from ...workspace import Workspace, normalize_resolved_path
 from .errors import is_database_busy
-from .models import RecordSummary, stored_relative_path
+from .models import (
+    MIGRATED_EMPTY_CONTENT,
+    RecordSummary,
+    stored_relative_path,
+)
 from .public_ids import PublicObjectIdRepository
 from .resources import (
     RESOURCE_FETCH_LIMIT,
@@ -1133,8 +1137,11 @@ class SQLiteResourceRepository:
         if not isinstance(record_type, str) or record_type not in _PUBLIC_RECORD_TYPES:
             raise ValueError("record type is not public")
         content = row["content"]
-        if not isinstance(content, str) or not content:
+        if not isinstance(content, str):
             raise ValueError("record content is invalid")
+        # v6 accepted empty content; ``RecordSummary`` renders it as the
+        # migration's own marker rather than denying the whole read.
+        content = content or MIGRATED_EMPTY_CONTENT
         tags = _string_list(row["tags_json"])
         archived = _flag(row["archived"])
         deleted = row["deleted_at_us"] is not None

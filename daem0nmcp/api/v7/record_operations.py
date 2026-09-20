@@ -46,6 +46,7 @@ from ...workspace import Workspace, WorkspaceRegistry
 from .application import AdmittedRequest
 from .errors import STABLE_ERROR_CODE_SET
 from .models import (
+    MIGRATED_EMPTY_CONTENT,
     EvidenceRef,
     MutationReceipt,
     Page,
@@ -329,8 +330,9 @@ def _summary(
     include_metadata: bool = True,
 ) -> RecordSummary:
     content = row["content"]
-    if not isinstance(content, str) or not content:
+    if not isinstance(content, str):
         raise RecordOperationError("CAPABILITY_DEGRADED")
+    content = content or MIGRATED_EMPTY_CONTENT
     tags = _parse_json(row["tags_json"], list)
     # A future valid-time may be recorded now; ``RecordSummary`` exposes the
     # transaction-time creation while the event retains the exact valid time.
@@ -1071,7 +1073,9 @@ def _text_search_sync(
                         or bool(row["archived"])
                     ):
                         raise RecordOperationError("LEXICAL_UNAVAILABLE")
-                    excerpt = str(row["content"])[:8000]
+                    # v6 accepted empty content; the bounded excerpt shows
+                    # the migration marker rather than failing the search.
+                    excerpt = str(row["content"])[:8000] or MIGRATED_EMPTY_CONTENT
                     evidence = candidate.evidence
                     hits.append(
                         TextSearchHit(
