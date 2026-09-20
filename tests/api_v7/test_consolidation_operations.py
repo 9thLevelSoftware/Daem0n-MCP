@@ -339,6 +339,8 @@ class ConsolidationOperationTests(unittest.IsolatedAsyncioTestCase):
             )
             self.assertTrue(await asyncio.to_thread(entered.wait, 5))
             task.cancel()
+            # Let the task observe its cancellation before the worker resumes.
+            await asyncio.sleep(0)
             release.set()
             with self.assertRaises(asyncio.CancelledError):
                 await task
@@ -576,6 +578,8 @@ class ConsolidationOperationTests(unittest.IsolatedAsyncioTestCase):
             )
             self.assertTrue(await asyncio.to_thread(entered.wait, 5))
             task.cancel()
+            # Let the task observe its cancellation before the worker resumes.
+            await asyncio.sleep(0)
             release.set()
             with self.assertRaises(asyncio.CancelledError):
                 await task

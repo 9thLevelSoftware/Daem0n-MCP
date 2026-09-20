@@ -10,6 +10,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -35,7 +36,6 @@ CUTOVER_FILES = (
     ROOT / "hooks" / "daem0n_pre_edit_hook.py",
     ROOT / "hooks" / "daem0n_post_edit_hook.py",
     ROOT / "hooks" / "daem0n_stop_hook.py",
-    ROOT / "hooks" / "settings.json.example",
 )
 
 ROOT_HOOKS = tuple(path for path in CUTOVER_FILES if path.parent == ROOT / "hooks")
@@ -100,7 +100,7 @@ def _run_root_hook(
     name: str,
     *,
     workspace_root: Path,
-    extra_environment: dict[str, str] | None = None,
+    event: dict[str, object],
 ) -> subprocess.CompletedProcess[str]:
     environment = os.environ.copy()
     environment.update(
@@ -111,12 +111,11 @@ def _run_root_hook(
             "PYTHONDONTWRITEBYTECODE": "1",
         }
     )
-    if extra_environment:
-        environment.update(extra_environment)
     return subprocess.run(
         [sys.executable, str(ROOT / "hooks" / name)],
-        cwd=ROOT,
+        cwd=workspace_root,
         env=environment,
+        input=json.dumps(event),
         capture_output=True,
         text=True,
         timeout=5,
@@ -221,42 +220,15 @@ class ProtocolGoldenTests(unittest.TestCase):
         self.assertNotIn("memory.remember", hook_sources)
         self.assertNotIn("INSERT INTO session_state", hook_sources)
 
-    def test_root_hooks_are_read_only_v7_host_guidance(self) -> None:
-        hook_sources = "\n".join(_read(path) for path in ROOT_HOOKS)
-
-        for forbidden in (
-            "subprocess",
-            "daem0nmcp.cli",
-            "os.system",
-            "os.popen",
-            "urllib.request",
-            "sqlite3",
-            ".write_text(",
-            ".write_bytes(",
-            ".mkdir(",
-            ".touch(",
-            ".unlink(",
-            "open(",
-        ):
-            with self.subTest(forbidden=forbidden):
-                self.assertNotIn(forbidden, hook_sources)
-
-        expected_calls = {
-            "daem0n_prompt_hook.py": ("session_brief", "memory_recall"),
-            "daem0n_pre_edit_hook.py": ("memory_recall", "memory_preflight"),
-            "daem0n_post_edit_hook.py": ("memory_preflight", "memory_store"),
-            "daem0n_stop_hook.py": (
-                "memory_preflight",
-                "memory_store",
-                "memory_record_outcome",
-            ),
-            "settings.json.example": ("session_brief",),
-        }
+    def test_root_hooks_are_stdlib_only_deprecation_stubs(self) -> None:
         for path in ROOT_HOOKS:
             text = _read(path)
-            for tool_name in expected_calls[path.name]:
-                with self.subTest(path=path.name, tool_name=tool_name):
-                    self.assertIn(tool_name, text)
+            with self.subTest(path=path.name):
+                imports = re.findall(r"^\s*(?:import|from)\s+(\S+)", text, re.M)
+                self.assertEqual(["sys"], imports)
+                self.assertIn("install-claude-hooks", text)
+                self.assertIn("sys.exit(0)", text)
+                self.assertNotIn("exit(2)", text)
 
 
 class HookNameTests(unittest.TestCase):
@@ -321,103 +293,62 @@ class HookFailClosedTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("preflight_token", result.message)
             self.assertFalse((project / ".daem0nmcp" / "storage").exists())
 
-    async def test_pre_edit_fails_closed_without_native_bridge(self) -> None:
-        from daem0nmcp.claude_hooks.pre_edit import async_main
+    def test_pre_edit_reminds_without_blocking(self) -> None:
+        from daem0nmcp.claude_hooks.pre_edit import reminder
 
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            project = Path(tmp_dir)
+        with (
+            tempfile.TemporaryDirectory() as tmp_dir,
+            # Bound the upward project search to the temp dir.
+            mock.patch.object(Path, "home", return_value=Path(tmp_dir)),
+            mock.patch.dict(os.environ, {"CLAUDE_PROJECT_DIR": ""}),
+        ):
+            project = Path(tmp_dir) / "project"
+            project.mkdir()
+            event = {
+                "cwd": str(project),
+                "tool_name": "Edit",
+                "tool_input": {"file_path": str(project / "server.py")},
+            }
+            self.assertIsNone(reminder(event))
             (project / ".daem0nmcp").mkdir()
-            result = await async_main(str(project), str(project / "server.py"))
+            output = json.loads(reminder(event) or "{}")["hookSpecificOutput"]
 
-            self.assertFalse(result.allowed)
-            self.assertEqual("EDIT_BRIDGE_UNAVAILABLE", result.message)
+            self.assertNotIn("permissionDecision", output)
+            self.assertIn("memory_preflight", output["additionalContext"])
+            self.assertIn(
+                'memory_recall_file(relative_file_path="server.py")',
+                output["additionalContext"],
+            )
             self.assertFalse((project / ".daem0nmcp" / "storage").exists())
 
 
 class RootHookProcessTests(unittest.TestCase):
-    def test_pre_edit_process_denies_without_mutating_workspace(self) -> None:
+    def test_legacy_stubs_exit_zero_on_a_pre_tool_use_payload(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             workspace_root = Path(tmp_dir)
             (workspace_root / ".daem0nmcp").mkdir()
             before = _tree_snapshot(workspace_root)
-
-            result = _run_root_hook(
-                "daem0n_pre_edit_hook.py",
-                workspace_root=workspace_root,
-                extra_environment={
-                    "TOOL_INPUT": json.dumps(
-                        {"file_path": str(workspace_root / "service.py")}
-                    )
-                },
-            )
-
-            self.assertEqual(2, result.returncode)
-            self.assertEqual("", result.stdout)
-            self.assertIn("fails closed", result.stderr)
-            self.assertIn("memory_recall", result.stderr)
-            self.assertIn("memory_preflight", result.stderr)
-            self.assertRegex(result.stderr, r"workspace_id=[\"']ws_[a-f0-9]{24}")
-            self.assertIn("target_tool", result.stderr)
-            self.assertIn("target_arguments", result.stderr)
-            self.assertEqual(before, _tree_snapshot(workspace_root))
-
-    def test_advisory_processes_emit_exact_v7_calls_without_writing(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            workspace_root = Path(tmp_dir)
-            (workspace_root / ".daem0nmcp").mkdir()
-            transcript = workspace_root / "transcript.jsonl"
-            transcript.write_text(
-                json.dumps(
-                    {
-                        "role": "assistant",
-                        "content": (
-                            "I will use signed cookies because they avoid shared "
-                            "server state. Implementation is complete."
-                        ),
-                    }
-                )
-                + "\n",
-                encoding="utf-8",
-            )
-            before = _tree_snapshot(workspace_root)
-            tool_input = json.dumps(
-                {
+            event = {
+                "session_id": "s-1",
+                "cwd": str(workspace_root),
+                "hook_event_name": "PreToolUse",
+                "tool_name": "Edit",
+                "tool_input": {
                     "file_path": str(workspace_root / "service.py"),
-                    "new_string": "async def authenticate(token): pass",
-                }
-            )
-
-            prompt = _run_root_hook(
-                "daem0n_prompt_hook.py",
-                workspace_root=workspace_root,
-            )
-            post_edit = _run_root_hook(
-                "daem0n_post_edit_hook.py",
-                workspace_root=workspace_root,
-                extra_environment={"TOOL_INPUT": tool_input},
-            )
-            stop = _run_root_hook(
-                "daem0n_stop_hook.py",
-                workspace_root=workspace_root,
-                extra_environment={
-                    "CLAUDE_TRANSCRIPT_PATH": str(transcript),
+                    "old_string": "a",
+                    "new_string": "b",
                 },
-            )
+            }
 
-            self.assertEqual(0, prompt.returncode)
-            self.assertIn("session_brief", prompt.stdout)
-            self.assertIn("memory_recall", prompt.stdout)
-            self.assertEqual(0, post_edit.returncode)
-            self.assertIn("memory_preflight", post_edit.stdout)
-            self.assertIn("memory_store", post_edit.stdout)
-            self.assertIn("idempotency_key", post_edit.stdout)
-            self.assertEqual(0, stop.returncode)
-            stop_payload = json.loads(stop.stdout)
-            self.assertEqual("block", stop_payload["decision"])
-            self.assertIn("memory_preflight", stop_payload["reason"])
-            self.assertIn("memory_store", stop_payload["reason"])
-            self.assertIn("memory_record_outcome", stop_payload["reason"])
-            self.assertIn("idempotency_key", stop_payload["reason"])
+            for path in ROOT_HOOKS:
+                with self.subTest(path=path.name):
+                    result = _run_root_hook(
+                        path.name, workspace_root=workspace_root, event=event
+                    )
+                    self.assertEqual(0, result.returncode)
+                    self.assertEqual("", result.stdout)
+                    self.assertIn("deprecated", result.stderr)
+                    self.assertIn("install-claude-hooks", result.stderr)
             self.assertEqual(before, _tree_snapshot(workspace_root))
 
 

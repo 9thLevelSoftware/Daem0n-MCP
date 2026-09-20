@@ -7,12 +7,13 @@ import ssl
 import subprocess
 import sys
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import pytest
 
-from daem0nmcp.claude_hooks.pre_edit import handle_pre_edit
 from daem0nmcp.edit_bridge_transport import (
     RemoteBridgeHTTPSClient,
+    local_bridge_address,
     provision_bridge_credential,
 )
 from daem0nmcp.edit_host import (
@@ -27,6 +28,7 @@ from daem0nmcp.edit_host import (
 )
 from daem0nmcp.protected_files import verify_owner_only_file
 from daem0nmcp.workspace import WorkspaceRegistry
+from tests.native_edit_host import drive_native_edit
 
 
 def _configuration(tmp_path):
@@ -59,6 +61,14 @@ def test_local_installation_reuses_host_only_authority_credential(tmp_path):
     config = EditHostConfig.from_environment(first.environment())
     assert config.identity.principal_id == first.principal_id
     assert config.runtime_directory == first.runtime_directory
+    # The default root is ~/.daem0nmcp/edit-bridges; with this suffix the
+    # socket fits macOS's 104-byte AF_UNIX limit for usernames up to 17 chars.
+    address = local_bridge_address(
+        first.runtime_directory, config.identity.credential_id
+    )
+    if sys.platform != "win32":
+        suffix = Path(address).relative_to(host_root.resolve())
+        assert len(str(suffix)) <= 52, suffix
     assert (
         config.workspace_id(project)
         == WorkspaceRegistry(default_root=project).default.workspace_id
@@ -226,21 +236,20 @@ def test_remote_binding_rejects_same_path_checkout_replacement_without_network(
     with monkeypatch.context() as context:
         for name, value in installation.environment().items():
             context.setenv(name, value)
-        result = handle_pre_edit(
-            {
-                "session_id": "replacement-session",
-                "tool_use_id": "replacement-request",
-                "tool_name": "Edit",
-                "tool_input": {
-                    "file_path": str(target),
-                    "old_string": "replacement",
-                    "new_string": "changed",
+        with pytest.raises(ValueError):
+            drive_native_edit(
+                {
+                    "session_id": "replacement-session",
+                    "tool_use_id": "replacement-request",
+                    "tool_name": "Edit",
+                    "tool_input": {
+                        "file_path": str(target),
+                        "old_string": "replacement",
+                        "new_string": "changed",
+                    },
                 },
-            },
-            str(project),
-        )
-    assert not result.allowed
-    assert result.message == "EDIT_BRIDGE_UNAVAILABLE"
+                str(project),
+            )
     assert calls == 0
     project.rename(tmp_path / "replacement-checkout")
     (tmp_path / "original-checkout").rename(project)
@@ -307,21 +316,20 @@ def test_remote_recipient_substitution_fails_before_network(
     with monkeypatch.context() as context:
         for name, value in environment.items():
             context.setenv(name, value)
-        result = handle_pre_edit(
-            {
-                "session_id": "substitution-session",
-                "tool_use_id": "substitution-request",
-                "tool_name": "Edit",
-                "tool_input": {
-                    "file_path": str(target),
-                    "old_string": "before",
-                    "new_string": "after",
+        with pytest.raises(ValueError):
+            drive_native_edit(
+                {
+                    "session_id": "substitution-session",
+                    "tool_use_id": "substitution-request",
+                    "tool_name": "Edit",
+                    "tool_input": {
+                        "file_path": str(target),
+                        "old_string": "before",
+                        "new_string": "after",
+                    },
                 },
-            },
-            str(project),
-        )
-    assert not result.allowed
-    assert result.message == "EDIT_BRIDGE_UNAVAILABLE"
+                str(project),
+            )
     assert calls == 0
 
     with pytest.raises(ValueError, match="conflicts"):

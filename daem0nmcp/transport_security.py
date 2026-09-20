@@ -330,7 +330,7 @@ def _strict_json_value(raw: str | bytes | bytearray, *, max_bytes: int) -> Any:
 def strict_stdio_json_boundary(message_model: Any) -> Iterator[None]:
     """Make the pinned SDK's stdio model parser duplicate-key strict.
 
-    MCP SDK 1.26 invokes ``JSONRPCMessage.model_validate_json`` directly for
+    The pinned MCP SDK invokes ``JSONRPCMessage.model_validate_json`` directly for
     every line.  The Pydantic parser otherwise accepts the last duplicate key,
     so the reviewed stdio launcher temporarily replaces that one parse seam
     for the lifetime of the single stdio server.

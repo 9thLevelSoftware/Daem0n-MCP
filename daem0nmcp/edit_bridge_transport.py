@@ -576,7 +576,7 @@ def local_bridge_address(runtime_directory: Path, credential_id: str) -> str:
     if sys.platform == "win32":
         return rf"\\.\pipe\daem0nmcp-{digest}"
     directory = ensure_owner_only_directory(runtime_directory)
-    return str(directory / f"bridge-{digest}.sock")
+    return str(directory / f"b-{digest}.sock")
 
 
 class LocalBridgeServer:

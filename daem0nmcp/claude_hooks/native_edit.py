@@ -151,7 +151,9 @@ def _relative_path(root: Path, value: object) -> str:
         raise NativeEditNormalizationError(
             "native edit path is outside workspace"
         ) from exc
-    if not relative or relative == "." or len(relative) > 1024:
+    # A backslash is a separator only on Windows (as_posix() converts it
+    # there); on POSIX it is a filename character the bridge cannot represent.
+    if not relative or relative == "." or len(relative) > 1024 or "\\" in relative:
         raise NativeEditNormalizationError("native edit path is invalid")
     return relative
 

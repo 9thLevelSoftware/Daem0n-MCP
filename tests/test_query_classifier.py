@@ -8,8 +8,11 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
-import numpy as np
 import pytest
+
+pytest.importorskip("numpy")
+
+import numpy as np
 
 from daem0nmcp.query_classifier import ExemplarQueryClassifier, QueryComplexity
 

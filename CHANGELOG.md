@@ -4,6 +4,13 @@
 
 ### Added
 - Reproducible v7 core foundation with opt-in dependency profiles and lazy capability reporting.
+- `uninstall-claude-hooks` strips the pairing env keys from the project's `.claude/settings.local.json` (the project is `--project-path` or the current directory, and only a project the installer paired is touched); `--remove-credentials` also deletes its local edit-bridge credential and socket directories.
+
+### Changed
+- Claude Code hooks remind instead of block. `pre_edit` adds a one-line `memory_recall_file`/`memory_preflight` reminder to the model's context and never denies an edit; `stop` reads its stdin event, shows suggestions as a `systemMessage` and never keeps the agent running.
+- OpenCode edits are no longer gated either: the OpenCode plugin runs the same `pre_edit` hook, which now always allows the edit. The plugin does not yet show the reminder; that rework comes with the edit-bridge removal.
+- `install-claude-hooks` and `uninstall-claude-hooks` refuse to touch a `~/.claude/settings.json` that is not valid JSON, instead of replacing it.
+- The manual `hooks/daem0n_*.py` scripts are deprecated stubs that print a notice and exit 0, and `hooks/settings.json.example` is removed. If you installed them by hand, re-run `python -m daem0nmcp.cli install-claude-hooks`; it also removes the old entries.
 
 ## [6.0.0] - 2026-01-29
 

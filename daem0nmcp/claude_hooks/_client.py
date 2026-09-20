@@ -5,7 +5,6 @@ Provides direct Python imports (no HTTP/subprocess) for accessing
 Daem0n-MCP's database, memory, and rules from hook scripts.
 """
 
-import asyncio
 import json
 import os
 import sys
@@ -32,6 +31,59 @@ def read_hook_event() -> dict[str, Any]:
     except (AttributeError, OSError, TypeError, UnicodeError, json.JSONDecodeError):
         return {}
     return value if isinstance(value, dict) else {}
+
+
+def find_project_root(event: dict[str, Any]) -> Path | None:
+    """Return the nearest Daem0n project containing the event cwd.
+
+    Tries ``cwd`` (which follows ``cd`` in Bash), then ``CLAUDE_PROJECT_DIR``,
+    walking up to the first ancestor with ``.daem0nmcp/``.  The home directory
+    never counts: Daem0n keeps its own global state in ``~/.daem0nmcp/``.
+    """
+    home = Path.home()
+    for raw in (event.get("cwd"), os.environ.get("CLAUDE_PROJECT_DIR")):
+        if not isinstance(raw, str) or not raw:
+            continue
+        start = Path(os.path.abspath(raw))
+        for candidate in (start, *start.parents):
+            if candidate == home:
+                break
+            if (candidate / ".daem0nmcp").is_dir():
+                return candidate
+    return None
+
+
+def _is_unc(path: str) -> bool:
+    return path.startswith(("\\\\", "//"))
+
+
+def relative_project_path(
+    project: Path, raw: object, base: object = None
+) -> str | None:
+    """Return *raw* (relative to *base*, default *project*) relative to *project*.
+
+    The result is in POSIX form, or None when *raw* is not inside *project*.
+
+    Purely lexical: the path comes from the model, and resolving it on
+    Windows could open a ``\\\\host\\share`` path (SMB authentication) before
+    the user has approved anything.
+    """
+    if not isinstance(raw, str) or not raw or "\0" in raw or _is_unc(raw):
+        return None
+    root = os.path.normpath(str(project))
+    start = base if isinstance(base, str) and base else root
+    full = os.path.normpath(os.path.join(root, start, raw))
+    if _is_unc(full):
+        return None
+    try:
+        inside = os.path.commonpath(
+            [os.path.normcase(root), os.path.normcase(full)]
+        ) == os.path.normcase(root)
+    except ValueError:  # different drives, or mixed absolute/relative
+        return None
+    if not inside or os.path.normcase(full) == os.path.normcase(root):
+        return None
+    return Path(os.path.relpath(full, root)).as_posix()
 
 
 def get_project_path() -> str | None:
@@ -75,28 +127,18 @@ def get_managers(project_path: str):
 
 def run_async(coro) -> Any:
     """Run an async coroutine synchronously."""
+    import asyncio  # lazy: keeps the stdlib-only pre_edit hook fast
+
     return asyncio.run(coro)
 
 
-def get_tool_input() -> dict:
-    """Parse TOOL_INPUT env var as JSON, returning {} on failure."""
-    raw = os.environ.get("TOOL_INPUT", "{}")
-    try:
-        return json.loads(raw)
-    except (json.JSONDecodeError, TypeError):
-        return {}
-
-
-def get_file_path_from_input() -> str | None:
-    """Extract file_path or notebook_path from tool input."""
-    data = get_tool_input()
-    return data.get("file_path") or data.get("notebook_path")
-
-
 def get_command_from_input() -> str | None:
-    """Extract command from tool input (for Bash hooks)."""
-    data = get_tool_input()
-    return data.get("command")
+    """Extract command from the legacy TOOL_INPUT env var (for Bash hooks)."""
+    try:
+        data = json.loads(os.environ.get("TOOL_INPUT", "{}"))
+    except (json.JSONDecodeError, TypeError):
+        return None
+    return data.get("command") if isinstance(data, dict) else None
 
 
 def block(message: str) -> NoReturn:

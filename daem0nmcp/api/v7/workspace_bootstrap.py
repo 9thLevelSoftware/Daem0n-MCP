@@ -8,6 +8,7 @@ import os
 import secrets
 import sqlite3
 import stat
+import sys
 import tempfile
 from contextlib import suppress
 from pathlib import Path
@@ -95,7 +96,7 @@ def _open_bootstrap_marker(storage: Path) -> int:
             raise ProtectedPathError("bootstrap marker is not a regular file")
         if not os.path.samestat(opened, named):
             raise ProtectedPathError("bootstrap marker identity changed")
-        if os.name == "nt":
+        if sys.platform == "win32":
             import msvcrt
 
             try:
@@ -497,7 +498,13 @@ async def _bootstrap_posix_staged(
 ) -> None:
     """Build privately, then publish only through the retained directory FD."""
 
-    with tempfile.TemporaryDirectory(prefix="daem0nmcp-v7-bootstrap-") as raw:
+    # The system temp root is resolved first: on macOS it lives below the
+    # /var -> /private/var (or /tmp -> /private/tmp) symlink, which the
+    # linked-ancestry guard on the staging lock would otherwise reject.
+    with tempfile.TemporaryDirectory(
+        prefix="daem0nmcp-v7-bootstrap-",
+        dir=Path(tempfile.gettempdir()).resolve(strict=True),
+    ) as raw:
         staging = Path(raw) / "storage"
         manager = await _construct_staging_manager(staging, workspace.root)
         try:

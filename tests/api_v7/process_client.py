@@ -8,15 +8,105 @@ import os
 import socket
 import subprocess
 import sys
-from collections.abc import Awaitable, Callable
-from contextlib import asynccontextmanager
+import threading
+import time
+from collections.abc import Awaitable, Callable, Iterator
+from contextlib import asynccontextmanager, contextmanager
 from datetime import timedelta
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import httpx
+from joserfc import jwt
+from joserfc.jwk import RSAKey
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 from mcp.client.streamable_http import streamable_http_client
+
+from daem0nmcp.database import DatabaseManager
+from daem0nmcp.protected_files import write_new_owner_only_file
+from daem0nmcp.workspace import Workspace, WorkspaceRegistry
+
+JWT_AUDIENCE = "daem0n-access-test"
+JWT_SUBJECT = "alice"
+
+
+async def initialize_workspaces(roots: tuple[Path, ...]) -> list[Workspace]:
+    """Create an initialized store below each root and return its workspace."""
+    workspaces = []
+    for root in roots:
+        storage = root / ".daem0nmcp" / "storage"
+        storage.mkdir(parents=True)
+        manager = DatabaseManager(str(storage))
+        try:
+            await manager.init_db()
+        finally:
+            await manager.close()
+        workspaces.append(WorkspaceRegistry([root], default_root=root).default)
+    return workspaces
+
+
+@contextmanager
+def jwt_issuer() -> Iterator[tuple[str, Callable[..., str]]]:
+    """Serve a JWKS on loopback and yield its issuer URL and a token factory."""
+    key = RSAKey.generate_key(2048, parameters={"kid": "workspace-access-test"})
+    body = json.dumps({"keys": [key.as_dict(private=False)]}).encode()
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *_args):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    issuer_url = f"http://127.0.0.1:{server.server_port}"
+
+    def token(**overrides) -> str:
+        claims = {
+            "iss": issuer_url,
+            "aud": JWT_AUDIENCE,
+            "sub": JWT_SUBJECT,
+            "exp": int(time.time()) + 300,
+            **overrides,
+        }
+        return jwt.encode({"alg": "RS256", "kid": "workspace-access-test"}, claims, key)
+
+    try:
+        yield issuer_url, token
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+        assert not thread.is_alive()
+
+
+def write_workspace_grants(policy_path: Path, workspace_ids: list[str]) -> None:
+    """Grant the test JWT subject exactly these workspaces."""
+    body = json.dumps(
+        {"schema_version": 1, "grants": {f"oauth-sub:{JWT_SUBJECT}": workspace_ids}}
+    ).encode()
+    if policy_path.exists():
+        policy_path.write_bytes(body)
+    else:
+        write_new_owner_only_file(policy_path, body)
+
+
+def jwt_environment(issuer_url: str, policy_path: Path) -> dict[str, str]:
+    """Server environment that verifies the test issuer's JWTs."""
+    return {
+        "FASTMCP_SERVER_AUTH": "fastmcp.server.auth.providers.jwt.JWTVerifier",
+        "FASTMCP_SERVER_AUTH_JWT_JWKS_URI": issuer_url + "/jwks.json",
+        "FASTMCP_SERVER_AUTH_JWT_ISSUER": issuer_url,
+        "FASTMCP_SERVER_AUTH_JWT_AUDIENCE": JWT_AUDIENCE,
+        "DAEM0NMCP_WORKSPACE_ACCESS_FILE": str(policy_path),
+    }
 
 
 def server_environment(

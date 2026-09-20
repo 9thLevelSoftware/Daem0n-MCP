@@ -194,11 +194,19 @@ async def test_production_dreaming_builds_real_graph_generation(
         environment_overrides=environment,
     ) as session:
         await succeed(session, "session_brief", scope)
-        await asyncio.sleep(2.0)
-        health = await succeed(session, "system_health", scope)
-        strategies = {
-            item["strategy"]: item for item in health["dreaming"]["strategies"]
-        }
+        # Poll until the refresh has finished instead of sleeping a fixed time;
+        # slow runners can still be mid-run after two seconds.
+        deadline = asyncio.get_running_loop().time() + 30
+        while True:
+            await asyncio.sleep(0.25)
+            health = await succeed(session, "system_health", scope)
+            strategies = {
+                item["strategy"]: item for item in health["dreaming"]["strategies"]
+            }
+            refresh = strategies["community_refresh"]
+            done = refresh["status"] != "running" and refresh["last_success_at"]
+            if done or asyncio.get_running_loop().time() >= deadline:
+                break
         assert strategies["community_refresh"]["status"] == "idle"
         assert strategies["community_refresh"]["last_success_at"] is not None
     with sqlite3.connect(database) as connection:

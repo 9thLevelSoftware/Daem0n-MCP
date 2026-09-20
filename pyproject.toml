@@ -76,7 +76,8 @@ observability = [
 dev = [
     "pytest>=7.0.0",
     "pytest-asyncio>=0.23.0",
-    "ruff>=0.9.0",
+    "ruff==0.16.8",  # keep in sync with ci.yml and .pre-commit-config.yaml
+    "mypy==2.3.1",  # keep in sync with ci.yml and .pre-commit-config.yaml
     "pre-commit>=3.0.0",
 ]
 
@@ -122,9 +123,3 @@ quote-style = "double"
 indent-style = "space"
 skip-magic-trailing-comma = false
 
-[tool.pytest.ini_options]
-asyncio_mode = "auto"
-asyncio_default_fixture_loop_scope = "function"
-testpaths = ["tests"]
-python_files = ["test_*.py"]
-python_functions = ["test_*"]

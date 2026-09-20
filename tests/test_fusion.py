@@ -3,6 +3,8 @@
 
 import pytest
 
+pytest.importorskip("rank_bm25")
+
 from daem0nmcp.fusion import RRFHybridSearch, reciprocal_rank_fusion
 
 

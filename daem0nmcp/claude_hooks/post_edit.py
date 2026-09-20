@@ -7,9 +7,11 @@ import sys
 from collections.abc import Mapping
 from typing import Any
 
-from ..edit_host import EditHostConfig, EditHostStateStore, native_edit_capture_body
 from ._client import read_hook_event
-from .native_edit import configured_native_edit_tools, native_edit_relative_paths
+
+# Pairing writes this into the project's Claude settings; without it there is
+# no edit bridge, so the heavy bridge modules are never imported.
+_CREDENTIAL_ENV = "DAEM0NMCP_EDIT_BRIDGE_CREDENTIAL_FILE"
 
 
 def _ok(response: object) -> bool:
@@ -20,6 +22,16 @@ def _ok(response: object) -> bool:
 def handle_post_edit(event: Mapping[str, Any], project_path: str) -> bool:
     """Stage only a bounded host-generated candidate for a consumed request."""
     try:
+        from ..edit_host import (
+            EditHostConfig,
+            EditHostStateStore,
+            native_edit_capture_body,
+        )
+        from .native_edit import (
+            configured_native_edit_tools,
+            native_edit_relative_paths,
+        )
+
         native_session_id = event["session_id"]
         native_request_id = event["tool_use_id"]
         tool_name = event["tool_name"]
@@ -69,7 +81,7 @@ def handle_post_edit(event: Mapping[str, Any], project_path: str) -> bool:
 def main() -> None:
     event = read_hook_event()
     path = event.get("cwd")
-    if isinstance(path, str) and path:
+    if isinstance(path, str) and path and os.environ.get(_CREDENTIAL_ENV):
         handle_post_edit(event, path)
     sys.exit(0)
 

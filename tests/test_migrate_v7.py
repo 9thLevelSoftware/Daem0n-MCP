@@ -6,6 +6,7 @@ import asyncio
 import json
 import shutil
 import sqlite3
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -179,6 +180,32 @@ class V7DryRunTests(unittest.TestCase):
                 self.assertFalse((storage / "active-db.json").exists())
             finally:
                 writer.close()
+
+    @unittest.skipIf(sys.platform == "win32", "Windows always uses win32-none")
+    def test_sidecar_files_keep_the_source_off_the_immutable_path(self):
+        from daem0nmcp.migrations import v7
+
+        with tempfile.TemporaryDirectory() as raw:
+            database = Path(raw) / "daem0nmcp.db"
+            _create_legacy_database(database).close()
+            uris = []
+            connect = sqlite3.connect
+
+            def recording_connect(database, **kwargs):
+                uris.append(database)
+                return connect(database, **kwargs)
+
+            with mock.patch.object(v7.sqlite3, "connect", recording_connect):
+                v7._readonly_connection(database).close()
+                for suffix in ("-wal", "-shm", "-journal"):
+                    sidecar = Path(f"{database}{suffix}")
+                    sidecar.write_bytes(b"")
+                    try:
+                        v7._readonly_connection(database).close()
+                    finally:
+                        sidecar.unlink(missing_ok=True)
+            self.assertIn("immutable=1", uris[0])
+            self.assertTrue(all("immutable" not in uri for uri in uris[1:]))
 
     def test_dry_run_resolves_only_registered_workspace(self):
         from daem0nmcp.migrations.v7 import MigrationV7Service

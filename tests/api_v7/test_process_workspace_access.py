@@ -2,92 +2,37 @@
 
 from __future__ import annotations
 
-import json
-import threading
 import time
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import httpx
 import pytest
-from joserfc import jwt
-from joserfc.jwk import RSAKey
 from mcp.shared.exceptions import McpError
 
-from daem0nmcp.database import DatabaseManager
-from daem0nmcp.protected_files import write_new_owner_only_file
-from daem0nmcp.workspace import WorkspaceRegistry
-from tests.api_v7.process_client import call, process_client, succeed
+from tests.api_v7.process_client import (
+    call,
+    initialize_workspaces,
+    jwt_environment,
+    jwt_issuer,
+    process_client,
+    succeed,
+    write_workspace_grants,
+)
 
 
 @pytest.fixture
 def issuer():
-    key = RSAKey.generate_key(2048, parameters={"kid": "workspace-access-test"})
-    body = json.dumps({"keys": [key.as_dict(private=False)]}).encode()
-
-    class Handler(BaseHTTPRequestHandler):
-        def do_GET(self):
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
-
-        def log_message(self, *_args):
-            pass
-
-    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    issuer_url = f"http://127.0.0.1:{server.server_port}"
-
-    def token(**overrides):
-        claims = {
-            "iss": issuer_url,
-            "aud": "daem0n-access-test",
-            "sub": "alice",
-            "exp": int(time.time()) + 300,
-            **overrides,
-        }
-        return jwt.encode({"alg": "RS256", "kid": "workspace-access-test"}, claims, key)
-
-    try:
-        yield issuer_url, token
-    finally:
-        server.shutdown()
-        server.server_close()
-        thread.join(timeout=5)
-        assert not thread.is_alive()
+    with jwt_issuer() as value:
+        yield value
 
 
 async def test_real_jwt_workspace_access_and_revocation(tmp_path, issuer):
     roots = (tmp_path / "alpha", tmp_path / "beta")
-    workspaces = []
-    for root in roots:
-        storage = root / ".daem0nmcp" / "storage"
-        storage.mkdir(parents=True)
-        manager = DatabaseManager(str(storage))
-        try:
-            await manager.init_db()
-        finally:
-            await manager.close()
-        workspaces.append(WorkspaceRegistry([root], default_root=root).default)
+    workspaces = await initialize_workspaces(roots)
     alpha, beta = workspaces
     policy_path = tmp_path / "protected" / "access.json"
-
-    def grants(identifiers):
-        return json.dumps(
-            {"schema_version": 1, "grants": {"oauth-sub:alice": identifiers}}
-        ).encode()
-
-    write_new_owner_only_file(policy_path, grants([alpha.workspace_id]))
+    write_workspace_grants(policy_path, [alpha.workspace_id])
     issuer_url, token = issuer
-    overrides = {
-        "FASTMCP_SERVER_AUTH": "fastmcp.server.auth.providers.jwt.JWTVerifier",
-        "FASTMCP_SERVER_AUTH_JWT_JWKS_URI": issuer_url + "/jwks.json",
-        "FASTMCP_SERVER_AUTH_JWT_ISSUER": issuer_url,
-        "FASTMCP_SERVER_AUTH_JWT_AUDIENCE": "daem0n-access-test",
-        "DAEM0NMCP_WORKSPACE_ACCESS_FILE": str(policy_path),
-    }
+    overrides = jwt_environment(issuer_url, policy_path)
 
     async def probe(url):
         async with httpx.AsyncClient(timeout=5) as client:
@@ -156,10 +101,10 @@ async def test_real_jwt_workspace_access_and_revocation(tmp_path, issuer):
 
         denied = await link()
         assert denied["error"]["code"] == "UNAUTHORIZED_WORKSPACE"
-        policy_path.write_bytes(grants([alpha.workspace_id, beta.workspace_id]))
+        write_workspace_grants(policy_path, [alpha.workspace_id, beta.workspace_id])
         await succeed(session, "session_brief", {"workspace_id": beta.workspace_id})
         assert (await link())["ok"]
-        policy_path.write_bytes(grants([alpha.workspace_id]))
+        write_workspace_grants(policy_path, [alpha.workspace_id])
         denied = await call(
             session,
             "memory_recall",
@@ -170,7 +115,7 @@ async def test_real_jwt_workspace_access_and_revocation(tmp_path, issuer):
             },
         )
         assert denied["error"]["code"] == "UNAUTHORIZED_WORKSPACE"
-        policy_path.write_bytes(grants([]))
+        write_workspace_grants(policy_path, [])
         denied = await call(
             session,
             "memory_recall",
@@ -181,7 +126,7 @@ async def test_real_jwt_workspace_access_and_revocation(tmp_path, issuer):
             await session.read_resource(
                 f"memory://workspaces/{alpha.workspace_id}/warnings"
             )
-        policy_path.write_bytes(grants([beta.workspace_id]))
+        write_workspace_grants(policy_path, [beta.workspace_id])
         await succeed(session, "session_brief", {"workspace_id": beta.workspace_id})
         await succeed(
             session,

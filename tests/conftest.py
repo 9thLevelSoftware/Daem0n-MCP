@@ -6,6 +6,7 @@ Pytest configuration for Daem0nMCP tests.
 import getpass
 import os
 import shutil
+import sys
 import tempfile
 import uuid
 from pathlib import Path
@@ -67,6 +68,22 @@ def tmp_path(tmp_path_factory):
     path = Path(_safe_mkdtemp(prefix="pytest_"))
     yield path
     # Cleanup after test
+    shutil.rmtree(path, ignore_errors=True)
+
+
+@pytest.fixture
+def socket_tmp_path(tmp_path):
+    """A directory short enough to hold AF_UNIX sockets (104-108 byte paths).
+
+    The repository-local tmp_path is too deep on CI runners; Windows uses named
+    pipes, so it keeps the ordinary tmp_path.
+    """
+    if sys.platform == "win32":
+        yield tmp_path
+        return
+    path = Path("/tmp").resolve() / f"d7-{uuid.uuid4().hex[:12]}"
+    path.mkdir(mode=0o700)
+    yield path
     shutil.rmtree(path, ignore_errors=True)
 
 

@@ -7,6 +7,7 @@ import tempfile
 import unittest
 from contextlib import closing
 from datetime import datetime, timezone
+from importlib.util import find_spec
 from pathlib import Path
 from types import MappingProxyType
 from unittest.mock import ANY, AsyncMock, patch
@@ -293,6 +294,10 @@ class ExternalDocumentOperationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(event_ids, original.event_ids)
 
 
+@unittest.skipIf(
+    find_spec("e2b_code_interpreter") is None,
+    "e2b_code_interpreter ([agency-e2b] extra) is not installed",
+)
 class ModernE2BProviderTests(unittest.IsolatedAsyncioTestCase):
     async def test_real_sdk_result_shape_is_bounded_and_sandbox_is_isolated(
         self,

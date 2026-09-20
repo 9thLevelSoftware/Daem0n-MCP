@@ -740,7 +740,7 @@ class UpgradeVectorPhaseGuardTests(unittest.TestCase):
             except (OSError, NotImplementedError):
                 self.skipTest("symlinks unavailable in this environment")
 
-            with self.assertRaisesRegex(ValueError, "active-db"):
+            with self.assertRaisesRegex(ValueError, "UNSAFE_ACTIVE_POINTER"):
                 upgrade.resolve_db_path(str(root))
             self.assertEqual(_OLD_VECTOR, _read_embedding(database))
 

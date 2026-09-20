@@ -7,6 +7,7 @@ Tests verification of claims against stored knowledge:
 - Summary aggregation
 """
 
+from importlib.util import find_spec
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -18,6 +19,11 @@ from daem0nmcp.reflexion.verification import (
     summarize_verification,
     verify_claim,
     verify_claims,
+)
+
+requires_models_local = pytest.mark.skipif(
+    find_spec("sentence_transformers") is None,
+    reason="models-local profile is not installed",
 )
 
 
@@ -121,6 +127,7 @@ class TestVerifyClaim:
         assert len(result.evidence) >= 1
         assert result.evidence[0].source == "memory"
 
+    @requires_models_local
     @pytest.mark.asyncio
     async def test_verify_no_evidence_unverified(
         self, mock_memory_manager, memory_reference_claim
@@ -178,6 +185,7 @@ class TestVerifyClaim:
         assert result.conflict_reason is not None
         assert "negation" in result.conflict_reason.lower()
 
+    @requires_models_local
     @pytest.mark.asyncio
     async def test_verify_with_knowledge_graph(
         self, mock_memory_manager, mock_knowledge_graph, memory_reference_claim
@@ -216,6 +224,7 @@ class TestVerifyClaim:
         # Memory manager should not have been called for skip-level
         mock_memory_manager.recall.assert_not_called()
 
+    @requires_models_local
     @pytest.mark.asyncio
     async def test_verify_with_as_of_time(
         self, mock_memory_manager, memory_reference_claim
@@ -277,6 +286,7 @@ class TestVerifyClaim:
 class TestVerifyClaims:
     """Tests for verify_claims function."""
 
+    @requires_models_local
     @pytest.mark.asyncio
     async def test_verify_multiple_claims(self, mock_memory_manager):
         """Multiple claims should all be verified."""
@@ -317,6 +327,7 @@ class TestVerifyClaims:
 
         assert len(results) == 0
 
+    @requires_models_local
     @pytest.mark.asyncio
     async def test_verify_claims_preserves_order(self, mock_memory_manager):
         """Results should be in same order as input claims."""

@@ -590,14 +590,11 @@ def provision_client_bridge_installation(
     )
 
 
-def provision_local_bridge_installation(
-    project_root: str | Path,
-    *,
-    config_root: Path | None = None,
-) -> LocalBridgeInstallation:
-    """Provision or validate the local host credential outside the workspace."""
+def local_bridge_layout(
+    root: Path, config_root: Path | None
+) -> tuple[Path, str, Path, Path]:
+    """Return storage path, principal, credential dir and socket dir for *root*."""
 
-    root = Path(project_root).resolve(strict=True)
     settings = Settings(project_root=str(root))
     storage_path = Path(settings.get_storage_path()).resolve(strict=False)
     principal_id = local_authority_principal(storage_path)
@@ -608,9 +605,30 @@ def provision_local_bridge_installation(
         else Path.home() / ".daem0nmcp" / "edit-bridges"
     )
     reject_linked_ancestry(base)
-    authority_directory = ensure_owner_only_directory(base.absolute() / authority_id)
+    # AF_UNIX socket paths are limited to 104-108 bytes, and the authority
+    # directory name alone is 64 characters, so sockets live in a short
+    # sibling directory instead.
+    return (
+        storage_path,
+        principal_id,
+        base.absolute() / authority_id,
+        base.absolute() / "run" / authority_id[:16],
+    )
+
+
+def provision_local_bridge_installation(
+    project_root: str | Path,
+    *,
+    config_root: Path | None = None,
+) -> LocalBridgeInstallation:
+    """Provision or validate the local host credential outside the workspace."""
+
+    root = Path(project_root).resolve(strict=True)
+    storage_path, principal_id, authority, runtime_directory = local_bridge_layout(
+        root, config_root
+    )
+    authority_directory = ensure_owner_only_directory(authority)
     credential_path = authority_directory / "credential.json"
-    runtime_directory = authority_directory / "run"
     created = False
     if credential_path.exists():
         _, identity = load_bridge_credential(credential_path)
