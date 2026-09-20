@@ -29,10 +29,15 @@ def main():
     )
     args = parser.parse_args()
 
-    if args.project:
-        os.environ["DAEM0NMCP_PROJECT_ROOT"] = str(Path(args.project).resolve())
-    elif not os.environ.get("DAEM0NMCP_PROJECT_ROOT"):
-        os.environ["DAEM0NMCP_PROJECT_ROOT"] = str(Path.cwd().resolve())
+    project_root = Path(
+        args.project or os.environ.get("DAEM0NMCP_PROJECT_ROOT") or Path.cwd()
+    )
+    if not project_root.is_dir():
+        # Otherwise the server silently creates and serves an empty workspace
+        # wherever a typo points.
+        parser.error(f"project directory does not exist: {project_root}")
+    os.environ["DAEM0NMCP_PROJECT_ROOT"] = str(project_root.resolve())
+    print(f"Serving project: {project_root.resolve()}", file=sys.stderr)
 
     # Import only after the workspace environment is fixed.  Both public
     # launchers use the same v7 composition and transport-security boundary.

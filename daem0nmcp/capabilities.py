@@ -252,7 +252,10 @@ class CapabilityRegistry:
             "remediation": {
                 "action": "fix_configuration",
                 "environment": profile.environment_key,
-                "message": "Use a boolean value: true or false.",
+                "message": (
+                    "Use true or false, or leave it unset to enable the "
+                    "profile automatically when its extra is installed."
+                ),
             },
         }
 

@@ -10,7 +10,7 @@ import logging
 import os
 import re
 import secrets
-from collections.abc import Mapping
+from collections.abc import Mapping, MutableMapping
 from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -225,34 +225,46 @@ class _ProjectionLifecycle:
         await await_projection_job_drains(tuple(self._paths))
 
 
+# Only entry points the profile's own extra installs; a module from another
+# profile would fail here and degrade a working one.
+_NATIVE_PROFILE_MODULES = {
+    "local": ("qdrant_client",),
+    "models-local": ("sentence_transformers", "onnx", "onnxruntime"),
+    "graph": ("networkx", "igraph", "leidenalg"),
+}
+
+
 class _OptionalNativeRuntimeLifecycle:
     """Initialize enabled native provider entry points before worker threads."""
 
-    def __init__(self, capability_statuses: Mapping[str, str]) -> None:
-        self._local_enabled = capability_statuses.get("local") == "ready"
-        self._models_enabled = capability_statuses.get("models-local") == "ready"
-        self._graph_enabled = capability_statuses.get("graph") == "ready"
+    def __init__(self, capability_statuses: MutableMapping[str, str]) -> None:
+        self._statuses = capability_statuses
+        self.failures: dict[str, str] = {}
 
     def start(self) -> None:
-        modules = []
-        if self._local_enabled:
-            modules.append("qdrant_client")
-        if self._models_enabled:
-            modules.extend(("sentence_transformers", "onnx", "onnxruntime"))
-        if self._graph_enabled:
-            modules.extend(("numpy", "networkx", "igraph", "leidenalg"))
-        for module in modules:
-            # Import the public model/runtime entry points on the main thread.
-            # This initializes NumPy/SciPy/native DLL dependencies before a
-            # dense query can race another provider's first worker creation.
-            try:
-                importlib.import_module(module)
-            except Exception:
-                # Independent providers still get initialized if one is broken.
-                # Their operation boundary reports stable degraded diagnostics.
-                logging.getLogger(__name__).warning(
-                    "Optional native provider runtime preload is unavailable"
-                )
+        for profile, modules in _NATIVE_PROFILE_MODULES.items():
+            if self._statuses.get(profile) != "ready":
+                continue
+            for module in modules:
+                # Import the public model/runtime entry points on the main
+                # thread. This initializes NumPy/SciPy/native DLL dependencies
+                # before a dense query can race another provider's first worker.
+                try:
+                    importlib.import_module(module)
+                except Exception as error:
+                    # Installed metadata said ready, but the package cannot run
+                    # here. Report that once instead of per tool call.
+                    self._statuses[profile] = "degraded"
+                    self.failures[profile] = (
+                        f"importing {module} raised {type(error).__name__}"
+                    )
+                    logging.getLogger(__name__).warning(
+                        "Optional %s runtime is unavailable: importing %s raised %s",
+                        profile,
+                        module,
+                        type(error).__name__,
+                    )
+                    break
 
 
 def _loopback_host(host: str) -> bool:
@@ -304,29 +316,56 @@ def _task_configuration(
     )
 
 
+def _remediation_text(name: str, remediation: Mapping[str, Any]) -> str:
+    """Render the registry's structured remediation as one actionable line."""
+
+    parts = [
+        str(remediation[key])
+        for key in ("message", "command", "environment")
+        if remediation.get(key)
+    ]
+    missing = remediation.get("missing")
+    if isinstance(missing, list) and missing:
+        parts.append("Missing: " + ", ".join(str(item) for item in missing[:8]) + ".")
+    return " ".join(parts) or f"Review the {name} capability profile."
+
+
 def _capability_states(
     environ: Mapping[str, str],
+    native_failures: Mapping[str, str] = MappingProxyType({}),
 ) -> tuple[CapabilityState, ...]:
     values: list[CapabilityState] = []
     for name, capability in CapabilityRegistry(environ=environ).all().items():
         status = str(capability["status"])
-        if status == "ready":
+        failure = native_failures.get(name)
+        if status == "ready" and failure is None:
             values.append(
                 CapabilityState.model_validate({"name": name, "status": "ready"})
             )
             continue
+        if failure is not None:
+            status = "degraded"
         reason = {
             "disabled": "CAPABILITY_DISABLED",
             "degraded": "CAPABILITY_DEGRADED",
             "failed": "CAPABILITY_CONFIGURATION_INVALID",
         }[status]
+        remediation = capability.get("remediation")
+        text = (
+            f"The {name} profile is installed but cannot run here: {failure}. "
+            "Reinstall or repair it."
+            if failure is not None
+            else _remediation_text(
+                name, remediation if isinstance(remediation, Mapping) else {}
+            )
+        )
         values.append(
             CapabilityState.model_validate(
                 {
                     "name": name,
                     "status": status,
                     "reason_code": reason,
-                    "remediation": f"Review the {name} capability profile.",
+                    "remediation": text,
                 }
             )
         )
@@ -709,6 +748,10 @@ def _assemble(
         name: str(capability["status"])
         for name, capability in CapabilityRegistry(environ=env).all().items()
     }
+    # Preload before anything snapshots the statuses, so an installed but
+    # broken extra degrades everywhere instead of only failing per call.
+    native_runtimes = _OptionalNativeRuntimeLifecycle(capability_statuses)
+    native_runtimes.start()
     normalizer = build_argument_normalizer()
     registry = WorkspaceRegistry.from_settings(loaded_settings)
     workspaces = {registry.default.workspace_id: registry.default}
@@ -837,7 +880,7 @@ def _assemble(
             else "jwt"
         ),
         task_support=task_state,
-        capability_states=_capability_states(env),
+        capability_states=_capability_states(env, native_runtimes.failures),
         storage_resolver=storage_resolver,
         dreaming_provider=dreaming.health,
         runtime_diagnostics_provider=runtime_health.inspect,
@@ -983,7 +1026,6 @@ def _assemble(
         edit_bridge_service=edit_bridge_service,
         services=(
             WorkspaceBootstrapLifecycle(tuple(workspaces.values())),
-            _OptionalNativeRuntimeLifecycle(capability_statuses),
             writer,
             recall,
             runtime_health,
