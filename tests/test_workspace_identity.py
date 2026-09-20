@@ -27,6 +27,7 @@ from daem0nmcp.storage_activation import DEFAULT_DATABASE_NAME
 from daem0nmcp.workspace import (
     WORKSPACE_IDENTITY_AMBIGUOUS,
     WORKSPACE_IDENTITY_DUPLICATE,
+    WorkspaceIdentityError,
     WorkspaceRegistry,
     ensure_workspace_identity,
     path_hash_workspace_id,
@@ -581,3 +582,42 @@ def test_new_forks_from_the_id_that_blocked_the_folder(tmp_path):
     registry = WorkspaceRegistry([original, copy])
     assert registry.resolve(copy).identity_block is None
     assert registry.resolve(original).workspace_id == identifier
+
+
+def test_concurrent_starts_survive_a_lost_rename(tmp_path, monkeypatch):
+    """Two starts publish the same value; the loser must not take the server down."""
+
+    import threading
+
+    from daem0nmcp import workspace as workspace_module
+
+    root = _project(tmp_path, "racing")
+    barrier = threading.Barrier(4)
+    failures: list[BaseException] = []
+
+    def start() -> None:
+        try:
+            barrier.wait(timeout=30)
+            ensure_workspace_identity([root])
+        except BaseException as error:  # noqa: BLE001 - reported, not raised
+            failures.append(error)
+
+    threads = [threading.Thread(target=start) for _ in range(4)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=30)
+    assert failures == []
+    assert _recorded(root)["id"] == path_hash_workspace_id(root)
+
+    # A rename that never lands is only a failure when the file still does not
+    # carry the intended ID; an explicit command says so, a start does not.
+    def refuse(*_args, **_kwargs):
+        raise PermissionError(5, "Access is denied")
+
+    monkeypatch.setattr(workspace_module.os, "replace", refuse)
+    ensure_workspace_identity([root])
+    with pytest.raises(WorkspaceIdentityError):
+        write_workspace_identity(root, workspace_id=OTHER)
+    assert _recorded(root)["id"] == path_hash_workspace_id(root)
+    assert not list(_identity_file(root).parent.glob(".workspace-id-*.tmp"))

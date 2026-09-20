@@ -490,9 +490,16 @@ def _write_identity_file(
     root: Path,
     workspace_id: str,
     forked_from: str | None,
-) -> None:
-    directory = _identity_directory(root)
-    directory.mkdir(parents=True, exist_ok=True)
+) -> bool:
+    """Publish one identity by temp file and rename; say whether it stuck.
+
+    Two processes starting at once write the same deterministic value, and on
+    Windows the loser's rename fails outright rather than overwriting.  So a
+    failure only counts when the file does not already carry the intended ID;
+    a start must never die because another start won the race, or because the
+    project directory is read-only.
+    """
+
     payload: dict[str, str] = {
         "id": workspace_id,
         "root_key": _identity_root_key(root),
@@ -500,14 +507,22 @@ def _write_identity_file(
     if forked_from is not None:
         payload["forked_from"] = forked_from
     raw = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    directory = _identity_directory(root)
     temporary = directory / f".{IDENTITY_FILE_NAME}-{secrets.token_hex(8)}.tmp"
+    written = False
     try:
+        directory.mkdir(parents=True, exist_ok=True)
         temporary.write_bytes(raw + b"\n")
         os.replace(temporary, _identity_path(root))
+        written = True
+    except OSError:
+        recorded, _malformed = _read_identity_file(root)
+        written = recorded is not None and recorded.workspace_id == workspace_id
     finally:
         with suppress(OSError):
             temporary.unlink()
     reset_workspace_identity_cache()
+    return written
 
 
 def _ensure_storage_gitignore(root: Path) -> None:
@@ -536,7 +551,8 @@ def write_workspace_identity(
     if _WORKSPACE_ID_VALUE.match(workspace_id) is None:
         raise WorkspaceIdentityError("INVALID_WORKSPACE_ID")
     canonical = _canonical_root(root)
-    _write_identity_file(canonical, workspace_id, forked_from)
+    if not _write_identity_file(canonical, workspace_id, forked_from):
+        raise WorkspaceIdentityError("WORKSPACE_IDENTITY_NOT_WRITABLE")
     _ensure_storage_gitignore(canonical)
 
 
