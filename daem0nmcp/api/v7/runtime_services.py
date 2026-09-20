@@ -48,6 +48,7 @@ from ...workspace import (
     normalize_resolved_path,
     resolve_derived_path,
 )
+from .errors import is_database_busy
 from .federated_retrieval import (
     FederatedCandidate,
     FederatedRetrievalError,
@@ -125,8 +126,8 @@ def _validated_workspace(workspace: Workspace) -> Workspace:
     try:
         canonical = normalize_resolved_path(workspace.root.resolve(strict=True))
         registered = WorkspaceRegistry([canonical], default_root=canonical).default
-    except (OSError, RuntimeError, TypeError, ValueError):
-        raise RuntimeServiceError("INVALID_WORKSPACE") from None
+    except (OSError, RuntimeError, TypeError, ValueError) as exc:
+        raise RuntimeServiceError("INVALID_WORKSPACE") from exc
     if (
         registered.workspace_id != workspace.workspace_id
         or os.path.normcase(str(registered.root)) != os.path.normcase(str(canonical))
@@ -147,8 +148,8 @@ def resolve_workspace_storage(workspace: Workspace) -> Path:
             ".daem0nmcp",
             "storage",
         )
-    except Exception:
-        raise RuntimeServiceError("ACTIVE_V7_UNAVAILABLE") from None
+    except Exception as exc:
+        raise RuntimeServiceError("ACTIVE_V7_UNAVAILABLE") from exc
     if not storage.is_dir() or storage.is_symlink():
         raise RuntimeServiceError("ACTIVE_V7_UNAVAILABLE")
     return storage
@@ -174,9 +175,13 @@ class WorkspaceStorageResolver:
         except RuntimeServiceError:
             lock.release()
             raise
-        except Exception:
+        except Exception as exc:
             lock.release()
-            raise RuntimeServiceError("ACTIVE_V7_UNAVAILABLE") from None
+            # DatabaseInUseError: another process holds the storage lock
+            # exclusively (fresh bootstrap, migration) - transient, retryable.
+            if is_database_busy(exc):
+                raise RuntimeServiceError("DATABASE_IN_USE") from exc
+            raise RuntimeServiceError("ACTIVE_V7_UNAVAILABLE") from exc
         try:
             yield active
         finally:
@@ -247,10 +252,12 @@ def _open_database(path: Path, *, writable: bool) -> sqlite3.Connection:
         with suppress(NameError, sqlite3.Error):
             connection.close()
         raise
-    except Exception:
+    except Exception as exc:
         with suppress(NameError, sqlite3.Error):
             connection.close()
-        raise RuntimeServiceError("ACTIVE_V7_UNAVAILABLE") from None
+        if is_database_busy(exc):
+            raise RuntimeServiceError("DATABASE_IN_USE") from exc
+        raise RuntimeServiceError("ACTIVE_V7_UNAVAILABLE") from exc
 
 
 def _inspect_database_health(
@@ -302,8 +309,8 @@ def _inspect_database_health(
         # structurally incomplete storage.  Full-page corruption certification
         # remains the explicit offline verify-v7 operation.
         return schema_version, tables
-    except Exception:
-        raise RuntimeServiceError("ACTIVE_V7_UNAVAILABLE") from None
+    except Exception as exc:
+        raise RuntimeServiceError("ACTIVE_V7_UNAVAILABLE") from exc
     finally:
         if connection is not None:
             with suppress(sqlite3.Error):
@@ -318,8 +325,8 @@ def _datetime_us(value: datetime) -> int:
         epoch = datetime(1970, 1, 1, tzinfo=timezone.utc)
         delta = utc - epoch
         result = (delta.days * 86_400 + delta.seconds) * 1_000_000 + delta.microseconds
-    except (OverflowError, ValueError):
-        raise RuntimeServiceError("INVALID_TIMESTAMP") from None
+    except (OverflowError, ValueError) as exc:
+        raise RuntimeServiceError("INVALID_TIMESTAMP") from exc
     if not -(2**63) <= result <= 2**63 - 1:
         raise RuntimeServiceError("INVALID_TIMESTAMP")
     return result
@@ -330,8 +337,8 @@ def _datetime_from_us(value: object) -> datetime:
         raise RuntimeServiceError("MEMORY_RECORD_INTEGRITY_FAILED")
     try:
         return datetime.fromtimestamp(value / 1_000_000, timezone.utc)
-    except (OverflowError, OSError, ValueError):
-        raise RuntimeServiceError("MEMORY_RECORD_INTEGRITY_FAILED") from None
+    except (OverflowError, OSError, ValueError) as exc:
+        raise RuntimeServiceError("MEMORY_RECORD_INTEGRITY_FAILED") from exc
 
 
 def _record_status(row: sqlite3.Row, evidence_status: str = "current") -> str:
@@ -347,8 +354,8 @@ def _record_status(row: sqlite3.Row, evidence_status: str = "current") -> str:
 def _parse_json(value: object, expected_type: type, code: str) -> Any:
     try:
         parsed = json.loads(str(value))
-    except (TypeError, ValueError, RecursionError):
-        raise RuntimeServiceError(code) from None
+    except (TypeError, ValueError, RecursionError) as exc:
+        raise RuntimeServiceError(code) from exc
     if not isinstance(parsed, expected_type):
         raise RuntimeServiceError(code)
     return parsed
@@ -367,8 +374,8 @@ def _event_receipt(row: sqlite3.Row) -> AppendedEvent:
                 else str(row["previous_event_hash"])
             ),
         )
-    except (KeyError, TypeError, ValueError):
-        raise RuntimeServiceError("MEMORY_EVENT_INTEGRITY_FAILED") from None
+    except (KeyError, TypeError, ValueError) as exc:
+        raise RuntimeServiceError("MEMORY_EVENT_INTEGRITY_FAILED") from exc
 
 
 def _idempotency_correlation(
@@ -410,8 +417,8 @@ def _existing_idempotent_event(
     payload = _parse_json(row["payload_json"], dict, "MEMORY_EVENT_INTEGRITY_FAILED")
     try:
         canonical = canonical_json_bytes(payload).decode("utf-8")
-    except Exception:
-        raise RuntimeServiceError("MEMORY_EVENT_INTEGRITY_FAILED") from None
+    except Exception as exc:
+        raise RuntimeServiceError("MEMORY_EVENT_INTEGRITY_FAILED") from exc
     if canonical != str(row["payload_json"]) or sha256_json(payload) != str(
         row["payload_hash"]
     ):
@@ -476,8 +483,8 @@ def _record_summary(
         )
     except RuntimeServiceError:
         raise
-    except Exception:
-        raise RuntimeServiceError("MEMORY_RECORD_INTEGRITY_FAILED") from None
+    except Exception as exc:
+        raise RuntimeServiceError("MEMORY_RECORD_INTEGRITY_FAILED") from exc
 
 
 def _record_state(row: sqlite3.Row) -> dict[str, Any]:
@@ -567,6 +574,8 @@ class SQLiteMemoryEventWriter:
         worker = asyncio.create_task(self._workers.run(lambda: operation(cancelled)))
         try:
             return await asyncio.shield(worker)
+        except BoundedWorkerBusyError as exc:
+            raise RuntimeServiceError("DATABASE_IN_USE") from exc
         except asyncio.CancelledError as cancellation:
             cancelled.set()
             try:
@@ -580,8 +589,8 @@ class SQLiteMemoryEventWriter:
     def _now_us(self) -> int:
         try:
             value = self._clock()
-        except Exception:
-            raise RuntimeServiceError("CLOCK_UNAVAILABLE") from None
+        except Exception as exc:
+            raise RuntimeServiceError("CLOCK_UNAVAILABLE") from exc
         return _datetime_us(value)
 
     def _schedule_after_commit(self, path: Path, changed: bool) -> None:
@@ -742,10 +751,12 @@ class SQLiteMemoryEventWriter:
                 if connection.in_transaction:
                     connection.rollback()
                 raise
-            except Exception:
+            except Exception as exc:
                 if connection.in_transaction:
                     connection.rollback()
-                raise RuntimeServiceError("MEMORY_STORE_FAILED") from None
+                if is_database_busy(exc):
+                    raise RuntimeServiceError("DATABASE_IN_USE") from exc
+                raise RuntimeServiceError("MEMORY_STORE_FAILED") from exc
             finally:
                 if connection.in_transaction:
                     connection.rollback()
@@ -862,10 +873,12 @@ class SQLiteMemoryEventWriter:
                 if connection.in_transaction:
                     connection.rollback()
                 raise
-            except Exception:
+            except Exception as exc:
                 if connection.in_transaction:
                     connection.rollback()
-                raise RuntimeServiceError("MEMORY_OUTCOME_FAILED") from None
+                if is_database_busy(exc):
+                    raise RuntimeServiceError("DATABASE_IN_USE") from exc
+                raise RuntimeServiceError("MEMORY_OUTCOME_FAILED") from exc
             finally:
                 if connection.in_transaction:
                     connection.rollback()
@@ -931,8 +944,8 @@ def _retrieval_config_fingerprint(
                 "capabilities": dict(sorted(capability_statuses.items())),
             }
         )
-    except (TypeError, ValueError):
-        raise RuntimeServiceError("RETRIEVAL_CONFIG_INVALID") from None
+    except (TypeError, ValueError) as exc:
+        raise RuntimeServiceError("RETRIEVAL_CONFIG_INVALID") from exc
 
 
 @dataclass(slots=True)
@@ -1066,8 +1079,8 @@ class Task8RecallService:
         worker = asyncio.create_task(self._workers.run(operation))
         try:
             return await asyncio.shield(worker)
-        except BoundedWorkerBusyError:
-            raise RuntimeServiceError("RETRIEVAL_UNAVAILABLE") from None
+        except BoundedWorkerBusyError as exc:
+            raise RuntimeServiceError("RETRIEVAL_UNAVAILABLE") from exc
         except asyncio.CancelledError:
             with suppress(asyncio.CancelledError, Exception):
                 await await_task_terminal(worker)
@@ -1114,8 +1127,8 @@ class Task8RecallService:
             raise
         except RuntimeServiceError:
             raise
-        except Exception:
-            raise RuntimeServiceError("RETRIEVAL_FAILED") from None
+        except Exception as exc:
+            raise RuntimeServiceError("RETRIEVAL_FAILED") from exc
         return hydrated
 
     async def _retrieve_source(
@@ -1147,8 +1160,8 @@ class Task8RecallService:
         try:
             workspace = resolve(workspace_id)
             validated = _validated_workspace(workspace)
-        except Exception:
-            raise RuntimeServiceError("INVALID_WORKSPACE") from None
+        except Exception as exc:
+            raise RuntimeServiceError("INVALID_WORKSPACE") from exc
         if validated.workspace_id != workspace_id:
             raise RuntimeServiceError("INVALID_WORKSPACE")
         return validated
@@ -1236,10 +1249,10 @@ class Task8RecallService:
                     hydrated = compose_federated_results(dict(pairs), query)
                 finally:
                     guard.release()
-        except asyncio.TimeoutError:
-            raise RuntimeServiceError("DEADLINE_EXCEEDED") from None
+        except asyncio.TimeoutError as exc:
+            raise RuntimeServiceError("DEADLINE_EXCEEDED") from exc
         except FederatedRetrievalError as exc:
-            raise RuntimeServiceError(exc.code) from None
+            raise RuntimeServiceError(exc.code) from exc
         except asyncio.CancelledError:
             raise
         except RuntimeServiceError:
@@ -1250,8 +1263,8 @@ class Task8RecallService:
                 "COMMUNION_REQUIRED",
                 "UNAUTHORIZED_WORKSPACE",
             }:
-                raise RuntimeServiceError(authorization_code) from None
-            raise RuntimeServiceError("RETRIEVAL_FAILED") from None
+                raise RuntimeServiceError(authorization_code) from exc
+            raise RuntimeServiceError("RETRIEVAL_FAILED") from exc
         # `hydrated` is immutable and there is no await between releasing the
         # read guard above and committing this response to the caller.
         return hydrated
@@ -1351,10 +1364,10 @@ class Task8RecallService:
             if connection.in_transaction:
                 connection.rollback()
             raise
-        except Exception:
+        except Exception as exc:
             if connection.in_transaction:
                 connection.rollback()
-            raise RuntimeServiceError("EVIDENCE_AUTHENTICATION_FAILED") from None
+            raise RuntimeServiceError("EVIDENCE_AUTHENTICATION_FAILED") from exc
         finally:
             if connection.in_transaction:
                 connection.rollback()
@@ -1406,8 +1419,8 @@ class Task8RecallService:
                         dropped=0,
                     ),
                 )
-            except Exception:
-                raise RuntimeServiceError("RETRIEVAL_FAILED") from None
+            except Exception as exc:
+                raise RuntimeServiceError("RETRIEVAL_FAILED") from exc
 
         if result.context is None:
             raise RuntimeServiceError("EVIDENCE_AUTHENTICATION_FAILED")
@@ -1519,10 +1532,10 @@ class Task8RecallService:
             if connection.in_transaction:
                 connection.rollback()
             raise
-        except Exception:
+        except Exception as exc:
             if connection.in_transaction:
                 connection.rollback()
-            raise RuntimeServiceError("EVIDENCE_AUTHENTICATION_FAILED") from None
+            raise RuntimeServiceError("EVIDENCE_AUTHENTICATION_FAILED") from exc
         finally:
             if connection.in_transaction:
                 connection.rollback()
@@ -1543,8 +1556,8 @@ class Task8RecallService:
                 relation_path=list(ref.relation_path),
                 provider=provider,
             )
-        except Exception:
-            raise RuntimeServiceError("EVIDENCE_AUTHENTICATION_FAILED") from None
+        except Exception as exc:
+            raise RuntimeServiceError("EVIDENCE_AUTHENTICATION_FAILED") from exc
 
 
 class BriefingReader(Protocol):
@@ -1596,8 +1609,10 @@ class BasicBriefingService:
             raise
         except RuntimeServiceError:
             raise
-        except Exception:
-            raise RuntimeServiceError("BRIEFING_FAILED") from None
+        except Exception as exc:
+            if is_database_busy(exc):
+                raise RuntimeServiceError("DATABASE_IN_USE") from exc
+            raise RuntimeServiceError("BRIEFING_FAILED") from exc
         if data.workspace_id != workspace.workspace_id:
             raise RuntimeServiceError("BRIEFING_FAILED")
         return data
@@ -1652,8 +1667,10 @@ class BasicPreflightService:
             raise
         except RuntimeServiceError:
             raise
-        except Exception:
-            raise RuntimeServiceError("PREFLIGHT_FAILED") from None
+        except Exception as exc:
+            if is_database_busy(exc):
+                raise RuntimeServiceError("DATABASE_IN_USE") from exc
+            raise RuntimeServiceError("PREFLIGHT_FAILED") from exc
         return data
 
 

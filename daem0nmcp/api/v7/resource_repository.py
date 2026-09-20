@@ -31,6 +31,7 @@ from ...retrieval.lexical_config import RETRIEVAL_PROJECTION_NAMES
 from ...schema_version import CURRENT_SCHEMA_VERSION
 from ...storage_activation import DatabaseFileLock, ResolvedActiveDatabase
 from ...workspace import Workspace, normalize_resolved_path
+from .errors import is_database_busy
 from .models import RecordSummary, stored_relative_path
 from .public_ids import PublicObjectIdRepository
 from .resources import (
@@ -210,8 +211,9 @@ class ResourceRepositoryError(RuntimeError):
 
     code = "RESOURCE_REPOSITORY_UNAVAILABLE"
 
-    def __init__(self) -> None:
-        super().__init__(self.code)
+    def __init__(self, code: str = "RESOURCE_REPOSITORY_UNAVAILABLE") -> None:
+        self.code = code
+        super().__init__(code)
 
 
 ActiveDatabaseResolver = Callable[[Workspace], ResolvedActiveDatabase]
@@ -494,8 +496,13 @@ class SQLiteResourceRepository:
         failure_limit: int,
         rule_limit: int = 50,
         active_context_limit: int = 50,
+        include_git_changes: bool = True,
     ) -> ResourceRepositorySnapshot:
-        """Read all briefing resources without a pointer-generation gap."""
+        """Read all briefing resources without a pointer-generation gap.
+
+        Git changes cost two ``git`` subprocesses per read (plus a system-wide
+        thread walk on Windows); callers that never show them skip them.
+        """
 
         if not isinstance(workspace, Workspace):
             raise ValueError("workspace must be a registered Workspace")
@@ -536,6 +543,7 @@ class SQLiteResourceRepository:
                 failure_request=failure_request,
                 rule_request=rule_request,
                 active_request=active_request,
+                include_git_changes=include_git_changes is True,
             )
         )
 
@@ -547,6 +555,7 @@ class SQLiteResourceRepository:
         failure_request: ResourceReadRequest | None,
         rule_request: ResourceReadRequest,
         active_request: ResourceReadRequest,
+        include_git_changes: bool = True,
     ) -> ResourceRepositorySnapshot:
         connection, storage_lock = self._open_connection(workspace)
         try:
@@ -618,7 +627,9 @@ class SQLiteResourceRepository:
             rules=rules,
             active_context=active_context,
             decisions=decisions,
-            git_changes=self._read_git_changes_sync(workspace),
+            git_changes=(
+                self._read_git_changes_sync(workspace) if include_git_changes else []
+            ),
             projection_freshness=projection_freshness,
             workspace_statistics=workspace_statistics,
             stale_projection_count=stale_projection_count,
@@ -927,6 +938,7 @@ class SQLiteResourceRepository:
     async def _run(self, operation: Callable[[], T]) -> T:
         worker = asyncio.create_task(self._worker_pool.run(operation))
         cancellation: asyncio.CancelledError | None = None
+        timed_out = False
         try:
             return cast(
                 T,
@@ -936,7 +948,7 @@ class SQLiteResourceRepository:
                 ),
             )
         except asyncio.TimeoutError:
-            pass
+            timed_out = True
         except asyncio.CancelledError as exc:
             cancellation = exc
         except Exception:
@@ -956,12 +968,16 @@ class SQLiteResourceRepository:
                 continue
             except Exception:
                 break
-        if worker.done():
-            with suppress(Exception):
-                worker.result()
+        failure: BaseException | None = None
+        if worker.done() and not worker.cancelled():
+            failure = worker.exception()
         if cancellation is not None:
             raise cancellation
-        raise ResourceRepositoryError()
+        # A read that overran its deadline but did not itself fail was slowed
+        # by contention (lock waits, a saturated host), so it is retryable.
+        if is_database_busy(failure) or (timed_out and failure is None):
+            raise ResourceRepositoryError("DATABASE_IN_USE") from failure
+        raise ResourceRepositoryError() from failure
 
     def _open_connection(
         self,

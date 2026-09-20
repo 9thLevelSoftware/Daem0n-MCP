@@ -98,13 +98,53 @@ class ProductionCompositionTests(unittest.TestCase):
                 "sentence_transformers",
                 "onnx",
                 "onnxruntime",
-                "numpy",
+                # numpy belongs to models-local; the graph extra never installs it.
                 "networkx",
                 "igraph",
                 "leidenalg",
             ],
             imported,
         )
+
+    def test_a_broken_installed_runtime_degrades_its_own_profile_only(self) -> None:
+        """Metadata can say ready while the package cannot import here."""
+        from daem0nmcp.api.v7 import production
+
+        def import_module(name: str) -> object:
+            if name == "igraph":
+                raise OSError("[WinError 126] The specified module could not be found")
+            return object()
+
+        statuses = {"graph": "ready", "local": "ready"}
+        with patch.object(production.importlib, "import_module", import_module):
+            lifecycle = production._OptionalNativeRuntimeLifecycle(statuses)
+            lifecycle.start()
+
+        self.assertEqual({"graph": "degraded", "local": "ready"}, statuses)
+        self.assertIn("igraph", lifecycle.failures["graph"])
+        self.assertIn("OSError", lifecycle.failures["graph"])
+
+        states = {
+            state.name: state
+            for state in production._capability_states(
+                {"DAEM0NMCP_GRAPH_ENABLED": "true"}, lifecycle.failures
+            )
+        }
+        self.assertEqual("degraded", states["graph"].status)
+        self.assertIn("igraph", str(states["graph"].remediation))
+
+    def test_capability_states_carry_the_registry_remediation(self) -> None:
+        """Health must say how to enable a profile, not 'review' it."""
+        from daem0nmcp.api.v7 import production
+
+        states = {
+            state.name: state
+            for state in production._capability_states(
+                {"DAEM0NMCP_GRAPH_ENABLED": "false"}
+            )
+        }
+        self.assertEqual("disabled", states["graph"].status)
+        self.assertIn("DAEM0NMCP_GRAPH_ENABLED", str(states["graph"].remediation))
 
     def test_full_manifest_rejects_missing_or_unexpected_resources(self) -> None:
         from daem0nmcp.api.v7.production import build_production_surface
@@ -409,6 +449,8 @@ class ProductionCompositionTests(unittest.TestCase):
         )
 
         self.assertEqual(len(calls), 1)
+        # Guidance never shows git changes, so it must not spawn git for them.
+        self.assertIs(calls[0]["include_git_changes"], False)
         self.assertEqual(result["records"], [relevant_failure])
         self.assertEqual(result["rules"], [relevant_rule])
         self.assertIn(
@@ -598,6 +640,55 @@ class ProductionCompositionTests(unittest.TestCase):
                 environ={},
             )
         self.assertEqual([False], observed)
+
+
+async def test_memory_preflight_spawns_no_subprocess(tmp_path):
+    """Preflight guidance must not pay for git (F-040); session_brief still does."""
+    import subprocess
+
+    from fastmcp import Client
+
+    from daem0nmcp.api.v7.production import create_v7_server
+    from tests.api_v7.process_client import initialize_workspaces
+
+    [workspace] = await initialize_workspaces((tmp_path,))
+    spawned: list[list[str]] = []
+
+    def record_spawn(argv, *args, **kwargs):
+        spawned.append(list(argv))
+        raise FileNotFoundError(argv[0])
+
+    server = create_v7_server(
+        "stdio",
+        settings=Settings(
+            project_root=str(tmp_path),
+            workspace_roots=[str(tmp_path)],
+            dream_enabled=False,
+        ),
+        environ={},
+    )
+    scope = {"workspace_id": workspace.workspace_id}
+    async with Client(server) as client:
+        with patch.object(subprocess, "Popen", side_effect=record_spawn):
+            brief = await client.call_tool("session_brief", scope, raise_on_error=False)
+            assert brief.structured_content["ok"], brief.structured_content
+            assert any(argv[0] == "git" for argv in spawned), spawned
+            spawned.clear()
+            preflight = await client.call_tool(
+                "memory_preflight",
+                {
+                    **scope,
+                    "target_tool": "memory_store",
+                    "target_arguments": {
+                        "record_type": "decision",
+                        "content": "Preflight must not spawn processes.",
+                        "idempotency_key": "preflight-no-subprocess-0001",
+                    },
+                },
+                raise_on_error=False,
+            )
+    assert preflight.structured_content["ok"], preflight.structured_content
+    assert spawned == []
 
 
 if __name__ == "__main__":

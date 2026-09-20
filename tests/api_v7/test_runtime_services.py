@@ -332,6 +332,7 @@ class WriterServiceTests(
 
     async def test_cancelled_worker_retains_capacity_and_leaves_no_write(self) -> None:
         """Cancelling an asyncio waiter must not over-admit or commit later."""
+        from daem0nmcp.api.v7.runtime_services import RuntimeServiceError
         from daem0nmcp.bounded_workers import BoundedWorkerBusyError
 
         clock_entered = threading.Event()
@@ -347,11 +348,13 @@ class WriterServiceTests(
         await asyncio.to_thread(clock_entered.wait, 1.0)
         first.cancel()
         await asyncio.sleep(0)
-        with self.assertRaises(BoundedWorkerBusyError):
+        with self.assertRaises(RuntimeServiceError) as busy:
             await writer.store(
                 self.workspace,
                 self._store_command(idempotency_key="runtime-store-overflow"),
             )
+        self.assertEqual("DATABASE_IN_USE", busy.exception.code)
+        self.assertIsInstance(busy.exception.__cause__, BoundedWorkerBusyError)
         release_clock.set()
         with self.assertRaises(asyncio.CancelledError):
             await first

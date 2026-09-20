@@ -150,6 +150,29 @@ def server_environment(
     return environment
 
 
+_LOG_TAIL_BYTES = 8000
+
+
+def dump_server_log(path: Path) -> None:
+    """Print the server's own log when a process test fails.
+
+    CI shows only the assertion, so an INTERNAL_ERROR or a crash inside the
+    server is otherwise invisible; the tmp directory is gone by then.
+    """
+
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError as error:
+        print(f"\n----- {path.name} unavailable: {error} -----", flush=True)
+        return
+    tail = text[-_LOG_TAIL_BYTES:]
+    print(
+        f"\n----- {path.name} (last {len(tail)} of {len(text)} chars) -----\n{tail}"
+        f"\n----- end {path.name} -----",
+        flush=True,
+    )
+
+
 @asynccontextmanager
 async def process_client(
     workspace: Path,
@@ -160,6 +183,7 @@ async def process_client(
     environment_overrides: dict[str, str] | None = None,
     http_probe: Callable[[str], Awaitable[None]] | None = None,
     http_headers: dict[str, str] | None = None,
+    log_name: str = "stdio-server.log",
 ):
     """Launch the installed module in a workspace and clean up on every exit."""
     environment = server_environment(
@@ -176,7 +200,7 @@ async def process_client(
         )
         body_error: BaseException | None = None
         try:
-            with (workspace / "stdio-server.log").open("w", encoding="utf-8") as log:
+            with (workspace / log_name).open("w", encoding="utf-8") as log:
                 async with (
                     stdio_client(parameters, errlog=log) as (read, write),
                     ClientSession(
@@ -191,10 +215,12 @@ async def process_client(
                         # SDK stdout-reader BrokenResourceError during shutdown.
                         body_error = error
         except BaseException as cleanup_error:
+            dump_server_log(workspace / log_name)
             if body_error is not None:
                 raise body_error from cleanup_error
             raise
         if body_error is not None:
+            dump_server_log(workspace / log_name)
             raise body_error
         return
     if transport != "streamable-http":
@@ -202,68 +228,79 @@ async def process_client(
     with socket.socket() as reservation:
         reservation.bind(("127.0.0.1", 0))
         port = reservation.getsockname()[1]
-    with (workspace / "http-server.log").open("w", encoding="utf-8") as log:
-        process = subprocess.Popen(
-            [
-                python,
-                "-m",
-                "daem0nmcp.server",
-                "--transport",
-                transport,
-                "--host",
-                "127.0.0.1",
-                "--port",
-                str(port),
-            ],
-            cwd=workspace,
-            env=environment,
-            stdout=log,
-            stderr=log,
-            creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0,
-        )
-        try:
-            deadline = asyncio.get_running_loop().time() + 30
-            while True:
-                if process.poll() is not None:
-                    raise RuntimeError(
-                        f"MCP server exited with code {process.returncode}; inspect http-server.log"
-                    )
-                try:
-                    _, writer = await asyncio.open_connection("127.0.0.1", port)
-                    writer.close()
-                    await writer.wait_closed()
-                    break
-                except OSError:
-                    if asyncio.get_running_loop().time() >= deadline:
-                        raise TimeoutError(
-                            "MCP HTTP server did not become ready"
-                        ) from None
-                    await asyncio.sleep(0.05)
-            if http_probe is not None:
-                await http_probe(f"http://127.0.0.1:{port}/mcp")
-            async with (
-                httpx.AsyncClient(headers=http_headers, timeout=30) as http_client,
-                streamable_http_client(
-                    f"http://127.0.0.1:{port}/mcp", http_client=http_client
-                ) as (
-                    read,
-                    write,
-                    _,
-                ),
-                ClientSession(
-                    read, write, read_timeout_seconds=timedelta(seconds=30)
-                ) as session,
-            ):
-                await session.initialize()
-                yield session
-        finally:
-            if process.poll() is None:
-                process.terminate()
+    failed = False
+    try:
+        with (workspace / "http-server.log").open("w", encoding="utf-8") as log:
+            process = subprocess.Popen(
+                [
+                    python,
+                    "-m",
+                    "daem0nmcp.server",
+                    "--transport",
+                    transport,
+                    "--host",
+                    "127.0.0.1",
+                    "--port",
+                    str(port),
+                ],
+                cwd=workspace,
+                env=environment,
+                stdout=log,
+                stderr=log,
+                creationflags=subprocess.CREATE_NO_WINDOW
+                if sys.platform == "win32"
+                else 0,
+            )
             try:
-                await asyncio.to_thread(process.wait, timeout=10)
-            except subprocess.TimeoutExpired:
-                process.kill()
-                await asyncio.to_thread(process.wait, timeout=10)
+                deadline = asyncio.get_running_loop().time() + 30
+                while True:
+                    if process.poll() is not None:
+                        raise RuntimeError(
+                            f"MCP server exited with code {process.returncode}; inspect http-server.log"
+                        )
+                    try:
+                        _, writer = await asyncio.open_connection("127.0.0.1", port)
+                        writer.close()
+                        await writer.wait_closed()
+                        break
+                    except OSError:
+                        if asyncio.get_running_loop().time() >= deadline:
+                            raise TimeoutError(
+                                "MCP HTTP server did not become ready"
+                            ) from None
+                        await asyncio.sleep(0.05)
+                if http_probe is not None:
+                    await http_probe(f"http://127.0.0.1:{port}/mcp")
+                async with (
+                    httpx.AsyncClient(headers=http_headers, timeout=30) as http_client,
+                    streamable_http_client(
+                        f"http://127.0.0.1:{port}/mcp", http_client=http_client
+                    ) as (
+                        read,
+                        write,
+                        _,
+                    ),
+                    ClientSession(
+                        read, write, read_timeout_seconds=timedelta(seconds=30)
+                    ) as session,
+                ):
+                    await session.initialize()
+                    yield session
+            except BaseException:
+                failed = True
+                raise
+            finally:
+                if process.poll() is None:
+                    process.terminate()
+                try:
+                    await asyncio.to_thread(process.wait, timeout=10)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    await asyncio.to_thread(process.wait, timeout=10)
+    finally:
+        if failed:
+            # Outside the log context, so the tail is flushed and complete.
+            dump_server_log(workspace / "http-server.log")
 
 
 async def call(session: ClientSession, tool: str, arguments: dict) -> dict:

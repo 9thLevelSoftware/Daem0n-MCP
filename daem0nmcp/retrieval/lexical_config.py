@@ -25,6 +25,14 @@ LEXICAL_BUILD_CONFIG = {
     "tokenizer": LEXICAL_TOKENIZER,
 }
 
+# Per-generation row tables of the rebuildable local projections. Temporal
+# keeps no rows of its own; graph generations are owned by discovery tables.
+GENERATION_TABLES = {
+    "lexical": "retrieval_documents",
+    "procedure": "record_procedures",
+    "outcome": "record_outcome_view",
+}
+
 _WORKSPACE_ID = re.compile(r"^ws_[0-9a-f]{24}$")
 _FTS_PARTITION = re.compile(r"^retrieval_fts_[0-9a-f]{24}_g[1-9][0-9]*$")
 
@@ -55,6 +63,7 @@ def lexical_fts_table_name(workspace_id: str, generation: int) -> str:
 
 
 __all__ = [
+    "GENERATION_TABLES",
     "RETRIEVAL_PROJECTION_NAMES",
     "LEXICAL_BM25_WEIGHTS",
     "LEXICAL_BUILD_CONFIG",

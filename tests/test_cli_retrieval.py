@@ -9,6 +9,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from tests.test_migrate_v7 import _create_legacy_database
 
@@ -156,6 +157,66 @@ class RetrievalProjectionCliTests(unittest.TestCase):
             ]
             self.assertEqual(1, len(lexical))
             self.assertEqual(second_id, payload["workspace_id"])
+
+    def test_compact_projections_drains_superseded_generations_offline(self):
+        """Databases bloated before the GC existed need a one-shot drain."""
+
+        import sqlite3
+
+        from daem0nmcp.retrieval.projections import LexicalProjectionBuilder
+        from daem0nmcp.storage_activation import resolve_active_database
+
+        with tempfile.TemporaryDirectory() as raw:
+            root, workspace_id = self._migrated_fixture(raw)
+            database = resolve_active_database(root / ".daem0nmcp" / "storage").path
+            connection = sqlite3.connect(database)
+            try:
+                connection.execute("PRAGMA foreign_keys=ON")
+                with patch(
+                    "daem0nmcp.retrieval.projections.collect_superseded_generations",
+                    return_value=0,
+                ):
+                    for _ in range(9):
+                        LexicalProjectionBuilder(connection).rebuild(workspace_id)
+                superseded = connection.execute(
+                    "SELECT COUNT(*) FROM projection_manifests "
+                    "WHERE projection_name='lexical' AND status<>'active'"
+                ).fetchone()[0]
+            finally:
+                connection.close()
+            self.assertEqual(9, superseded)
+
+            result = self._run(
+                root,
+                "compact-projections",
+                "--workspace-id",
+                workspace_id,
+            )
+
+            self.assertEqual(0, result.returncode, result.stderr)
+            payload = json.loads(result.stdout)
+            self.assertEqual(8, payload["collected"]["lexical"])
+            self.assertLess(
+                payload["superseded_manifests_after"],
+                payload["superseded_manifests_before"],
+            )
+            self.assertTrue(payload["vacuumed"])
+            self.assertNotIn(str(root), result.stdout)
+            connection = sqlite3.connect(database)
+            try:
+                remaining = connection.execute(
+                    "SELECT COUNT(*) FROM projection_manifests "
+                    "WHERE projection_name='lexical'"
+                ).fetchone()[0]
+                tables = connection.execute(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type='table' "
+                    "AND name GLOB 'retrieval_fts_*_g*' "
+                    "AND sql GLOB 'CREATE VIRTUAL TABLE*'"
+                ).fetchone()[0]
+            finally:
+                connection.close()
+            self.assertEqual(2, remaining)
+            self.assertEqual(2, tables)
 
 
 if __name__ == "__main__":

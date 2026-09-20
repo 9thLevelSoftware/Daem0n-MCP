@@ -462,3 +462,22 @@ async def test_consolidation_preview_copy_and_canonical_archive_over_real_mcp(
         )
         assert archived["archived"] == 2
         assert all(source.root.is_dir() for source in sources)
+
+
+async def test_an_installed_extra_is_enabled_without_any_variable(
+    initialized_workspace,
+):
+    """UD-7: installing the extra is the whole opt-in."""
+    from daem0nmcp.capabilities import CapabilityRegistry
+
+    if CapabilityRegistry(environ={}).get("graph")["status"] != "ready":
+        pytest.skip("the graph extra is not installed")
+
+    workspace = initialized_workspace
+    scope = {"workspace_id": workspace.workspace_id}
+    async with process_client(workspace.root, "stdio") as session:
+        await succeed(session, "session_brief", scope)
+        health = await succeed(session, "system_health", scope)
+
+    states = {state["name"]: state["status"] for state in health["capability_states"]}
+    assert states["graph"] == "ready", states
