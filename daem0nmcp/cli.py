@@ -302,7 +302,17 @@ def format_check_result(result: dict) -> str:
     return "\n".join(lines)
 
 
-def _identity_payload(root, identity, counts: dict) -> dict:
+def _settled(workspace):
+    """Refuse an offline command on a root whose identity is blocked."""
+
+    from .workspace import WorkspaceIdentityError
+
+    if workspace.identity_block is not None:
+        raise WorkspaceIdentityError(workspace.identity_block)
+    return workspace
+
+
+def _identity_payload(identity, counts: dict) -> dict:
     """Describe one workspace identity without naming any host path."""
 
     hidden = {
@@ -364,7 +374,9 @@ def _workspace_id_command(args, active_settings) -> int:
             write_workspace_identity(root, workspace_id=args.adopt)
         elif args.new:
             fresh = path_hash_workspace_id(root)
-            previous = identity.workspace_id if identity.has_file else None
+            # Whatever is hidden is what the folder claimed before the fork,
+            # even when that claim is what blocked it.
+            previous = identity.recorded_id
             if previous is None and len(identity.stored_ids) == 1:
                 previous = next(iter(identity.stored_ids))
             write_workspace_identity(
@@ -381,7 +393,7 @@ def _workspace_id_command(args, active_settings) -> int:
         else:
             print(f"Error: {exc.code}")
         return 2
-    payload = _identity_payload(root, identity, stored_event_counts(root))
+    payload = _identity_payload(identity, stored_event_counts(root))
     if args.json:
         print(json.dumps(payload, sort_keys=True, separators=(",", ":")))
     else:
@@ -693,13 +705,14 @@ def main():
         from .verification_v7 import VerificationV7Error, verify_v7
         from .workspace import (
             WorkspaceAccessError,
+            WorkspaceIdentityError,
             WorkspacePathError,
             WorkspaceRegistry,
         )
 
         try:
             registry = WorkspaceRegistry.from_settings(active_settings)
-            workspace = registry.resolve(args.workspace_id)
+            workspace = _settled(registry.resolve(args.workspace_id))
             workspace_settings = active_settings
             if workspace.workspace_id != registry.default.workspace_id:
                 if getattr(active_settings, "storage_path", None):
@@ -718,6 +731,7 @@ def main():
             PointerValidationError,
             VerificationV7Error,
             WorkspaceAccessError,
+            WorkspaceIdentityError,
             WorkspacePathError,
         ) as exc:
             code = getattr(exc, "code", type(exc).__name__)
@@ -756,6 +770,7 @@ def main():
         from .storage_activation import DatabaseInUseError, PointerValidationError
         from .workspace import (
             WorkspaceAccessError,
+            WorkspaceIdentityError,
             WorkspacePathError,
             WorkspaceRegistry,
         )
@@ -779,6 +794,7 @@ def main():
             DatabaseInUseError,
             PointerValidationError,
             WorkspaceAccessError,
+            WorkspaceIdentityError,
             WorkspacePathError,
         ) as exc:
             code = getattr(exc, "code", type(exc).__name__)
@@ -865,6 +881,7 @@ def main():
         )
         from .workspace import (
             WorkspaceAccessError,
+            WorkspaceIdentityError,
             WorkspacePathError,
             WorkspaceRegistry,
         )
@@ -874,7 +891,7 @@ def main():
                 update={"project_root": args.consolidation_project_path}
             )
             registry = WorkspaceRegistry.from_settings(recovery_settings)
-            target = registry.default
+            target = _settled(registry.default)
             runs = recover_consolidation(registry, target, run_id=args.run_id)
             payload = {
                 "status": "recovered",
@@ -885,6 +902,7 @@ def main():
         except (
             ConsolidationOperationError,
             WorkspaceAccessError,
+            WorkspaceIdentityError,
             WorkspacePathError,
         ) as exc:
             code = getattr(exc, "code", type(exc).__name__)
@@ -933,13 +951,14 @@ def main():
         )
         from .workspace import (
             WorkspaceAccessError,
+            WorkspaceIdentityError,
             WorkspacePathError,
             WorkspaceRegistry,
         )
 
         try:
             registry = WorkspaceRegistry.from_settings(active_settings)
-            workspace = registry.resolve(args.workspace_id)
+            workspace = _settled(registry.resolve(args.workspace_id))
             workspace_settings = active_settings
             if workspace.workspace_id != registry.default.workspace_id:
                 if getattr(active_settings, "storage_path", None):
@@ -995,6 +1014,7 @@ def main():
             PointerValidationError,
             ProjectionOperationError,
             WorkspaceAccessError,
+            WorkspaceIdentityError,
             WorkspacePathError,
         ) as exc:
             code = getattr(exc, "code", type(exc).__name__)

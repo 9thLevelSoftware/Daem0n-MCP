@@ -154,6 +154,7 @@ class WorkspaceIdentity:
 
     workspace_id: str
     blocked: str | None = None
+    recorded_id: str | None = None
     recorded_root_key: str | None = None
     current_root_key: str = ""
     forked_from: str | None = None
@@ -341,6 +342,7 @@ def _claim_identity(root: Path) -> WorkspaceIdentity:
     return WorkspaceIdentity(
         workspace_id=path_hash if blocked else recorded.workspace_id,
         blocked=blocked,
+        recorded_id=recorded.workspace_id,
         recorded_root_key=recorded.root_key,
         current_root_key=current,
         forked_from=recorded.forked_from,
@@ -353,6 +355,7 @@ def _block(identity: WorkspaceIdentity, root: Path, code: str) -> WorkspaceIdent
     return WorkspaceIdentity(
         workspace_id=_workspace_id(root),
         blocked=code,
+        recorded_id=identity.recorded_id,
         recorded_root_key=identity.recorded_root_key,
         current_root_key=identity.current_root_key,
         forked_from=identity.forked_from,
@@ -407,6 +410,7 @@ def _resolve_identities(canonical: Sequence[Path]) -> dict[str, WorkspaceIdentit
         if identity.blocked is None and len(holders[identity.workspace_id]) > 1:
             identities[key] = WorkspaceIdentity(
                 workspace_id=identity.workspace_id,
+                recorded_id=identity.recorded_id,
                 recorded_root_key=identity.recorded_root_key,
                 current_root_key=identity.current_root_key,
                 forked_from=identity.forked_from,
@@ -449,8 +453,9 @@ def resolve_workspace_identities(
     identity file's stat, so a fork or adoption written anywhere is seen.
     """
 
-    key = tuple(sorted(_root_key(root) for root in canonical))
-    stamps = tuple(_identity_stamp(root) for root in canonical)
+    ordered = sorted(canonical, key=_root_key)
+    key = tuple(_root_key(root) for root in ordered)
+    stamps = tuple(_identity_stamp(root) for root in ordered)
     cached = _IDENTITY_CACHE.get(key)
     if cached is not None and cached[0] == stamps:
         return cached[1]

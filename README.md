@@ -758,6 +758,13 @@ Each project gets isolated storage at:
 <project_root>/.daem0nmcp/storage/daem0nmcp.db
 ```
 
+`<project_root>/.daem0nmcp/workspace-id` records which workspace those rows
+belong to, so the memories follow the folder when it is moved or renamed. Move
+the whole folder, `.daem0nmcp/` included; re-clone by copying `.daem0nmcp/` into
+the new clone. Two registered folders may not claim one identity — settle a
+copy with `python -m daem0nmcp.cli --project-path <root> workspace-id --new`.
+See `docs/v7-operations.md` for the full rules.
+
 ## Configuration
 
 All settings are configurable via environment variables with `DAEM0NMCP_` prefix.

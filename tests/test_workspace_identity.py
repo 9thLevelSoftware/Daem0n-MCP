@@ -504,3 +504,80 @@ def test_an_existing_store_keeps_its_rows_when_the_file_is_written(tmp_path):
     ensure_workspace_identity([root])
     assert _recorded(root)["id"] == identifier
     assert _database_digest(root) == before
+
+
+def test_a_differently_spelled_project_root_env_var_is_one_workspace(tmp_path):
+    root = _project(tmp_path, "environment")
+    (root / "sub").mkdir()
+    ensure_workspace_identity([root])
+    _seed_events(root, _recorded(root)["id"])
+    registry = WorkspaceRegistry.from_environment(
+        {
+            "DAEM0NMCP_PROJECT_ROOT": str(root / "sub" / ".."),
+            "DAEM0NMCP_WORKSPACE_ROOTS": json.dumps([str(root)]),
+        }
+    )
+    assert registry.default.identity_block is None
+    assert registry.resolve(root).workspace_id == registry.default.workspace_id
+
+
+# --- The offline command ---------------------------------------------------
+
+
+def _run_cli(root: Path, *arguments: str) -> int:
+    from daem0nmcp import cli
+
+    previous = os.environ.get("DAEM0NMCP_PROJECT_ROOT")
+    argv = sys.argv
+    sys.argv = ["daem0nmcp", "--project-path", str(root), "--json", *arguments]
+    try:
+        with pytest.raises(SystemExit) as raised:
+            cli.main()
+        return int(raised.value.code)
+    finally:
+        sys.argv = argv
+        if previous is None:
+            os.environ.pop("DAEM0NMCP_PROJECT_ROOT", None)
+        else:
+            os.environ["DAEM0NMCP_PROJECT_ROOT"] = previous
+        reset_workspace_identity_cache()
+
+
+def test_adopt_reports_the_events_it_hides(tmp_path, capsys):
+    root = _project(tmp_path, "cli-adopt")
+    _seed_events(root, FOREIGN, OTHER, OTHER)
+    assert _run_cli(root, "workspace-id") == 1
+    blocked = json.loads(capsys.readouterr().out.strip())
+    assert blocked["blocked"] == WORKSPACE_IDENTITY_AMBIGUOUS
+    assert blocked["events_by_workspace_id"] == {FOREIGN: 1, OTHER: 2}
+
+    assert _run_cli(root, "workspace-id", "--adopt", OTHER) == 0
+    adopted = json.loads(capsys.readouterr().out.strip())
+    assert adopted["workspace_id"] == OTHER
+    assert adopted["hidden_event_count"] == 1
+
+
+def test_new_forks_from_the_id_that_blocked_the_folder(tmp_path):
+    import shutil
+
+    original = _project(tmp_path, "fork-origin")
+    ensure_workspace_identity([original])
+    identifier = _recorded(original)["id"]
+    _seed_events(original, identifier)
+    copy = _project(tmp_path, "fork-copy")
+    shutil.copytree(original / ".daem0nmcp", copy / ".daem0nmcp")
+    # Blocked as a duplicate while both are registered, the copy still knows
+    # which ID it recorded, so the fork hides exactly those events.
+    assert (
+        WorkspaceRegistry([original, copy]).resolve(copy).identity_block
+        == WORKSPACE_IDENTITY_DUPLICATE
+    )
+    assert _run_cli(copy, "workspace-id", "--new") == 0
+    assert _recorded(copy) == {
+        "forked_from": identifier,
+        "id": path_hash_workspace_id(copy),
+        "root_key": _recorded(copy)["root_key"],
+    }
+    registry = WorkspaceRegistry([original, copy])
+    assert registry.resolve(copy).identity_block is None
+    assert registry.resolve(original).workspace_id == identifier
