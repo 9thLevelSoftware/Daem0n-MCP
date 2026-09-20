@@ -2046,6 +2046,56 @@ def _entity_selection_sync(
         raise _translate_error(error) from None
 
 
+def _lexical_catchup_pending_sync(
+    dependencies: DiscoveryOperationDependencies,
+    workspace: Workspace,
+    record_ids: tuple[str, ...],
+) -> bool:
+    """Return whether the lexical projection still owes these records.
+
+    True only when the records are absent from the active lexical generation
+    *and* a rebuild job is queued or running, i.e. a retry can actually make
+    progress. A dead-lettered rebuild, a permanently unavailable index, or a
+    record that simply does not match the entity name is not retryable.
+    """
+
+    if not record_ids:
+        return False
+
+    def reader(connection: sqlite3.Connection) -> bool:
+        active = connection.execute(
+            "SELECT generation FROM projection_manifests WHERE workspace_id=? "
+            "AND projection_name='lexical' AND status='active'",
+            (workspace.workspace_id,),
+        ).fetchone()
+        indexed = 0
+        if active is not None:
+            placeholders = ",".join("?" for _ in record_ids)
+            indexed = int(
+                connection.execute(
+                    "SELECT COUNT(*) FROM retrieval_documents WHERE workspace_id=? "
+                    f"AND projection_generation=? AND record_id IN ({placeholders})",
+                    (workspace.workspace_id, int(active[0]), *record_ids),
+                ).fetchone()[0]
+            )
+        if indexed >= len(record_ids):
+            return False
+        return (
+            connection.execute(
+                "SELECT 1 FROM background_jobs WHERE workspace_id=? "
+                "AND job_type='retrieval.projection_rebuild' "
+                "AND status IN ('queued','running') LIMIT 1",
+                (workspace.workspace_id,),
+            ).fetchone()
+            is not None
+        )
+
+    try:
+        return bool(_read_snapshot(dependencies, workspace, reader))
+    except Exception:
+        return False
+
+
 def _generation_is_current_sync(
     dependencies: DiscoveryOperationDependencies,
     workspace: Workspace,
@@ -2093,14 +2143,21 @@ async def _memory_recall_entity(
                 raise DiscoveryOperationError("CAPABILITY_DEGRADED")
             indexed[record_id] = item.record
         if set(indexed) != set(selection.record_ids):
-            # A lexical index that is stale, contended, or mid-swap has not
-            # caught up with the entity's records yet; the caller may retry.
-            if not any(
-                diagnostic.provider == "lexical" and diagnostic.status == "ready"
-                for diagnostic in result.provider_diagnostics
-            ):
-                raise DiscoveryOperationError("DATABASE_IN_USE")
-            raise DiscoveryOperationError("CAPABILITY_DEGRADED")
+            missing = tuple(
+                record_id
+                for record_id in selection.record_ids
+                if record_id not in indexed
+            )
+            # Only a projection that has genuinely not caught up yet is worth
+            # retrying. A permanently unavailable or dead-lettered lexical
+            # index stays a terminal CAPABILITY_DEGRADED.
+            pending = await _run_blocking(
+                dependencies,
+                lambda: _lexical_catchup_pending_sync(dependencies, workspace, missing),
+            )
+            raise DiscoveryOperationError(
+                "DATABASE_IN_USE" if pending else "CAPABILITY_DEGRADED"
+            )
         await _run_blocking(
             dependencies,
             lambda: _generation_is_current_sync(

@@ -12,7 +12,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 
 from ..event_store import canonical_json_bytes, deterministic_id, sha256_json
-from .jobs import ProjectionJobRunner
+from .jobs import is_lock_contention
 from .lexical_config import (
     GENERATION_TABLES,
     LEXICAL_TOKENIZER,
@@ -25,7 +25,8 @@ logger = logging.getLogger(__name__)
 
 _WORKSPACE_ID = re.compile(r"^ws_[0-9a-f]{24}$")
 _LEXICAL_BUILDER_VERSION = "retrieval-lexical-1"
-_COLLECTABLE_PROJECTIONS = frozenset({"lexical", "procedure", "outcome", "temporal"})
+# Graph is excluded: the discovery tables reference its generations.
+COLLECTABLE_PROJECTIONS = frozenset({"lexical", "procedure", "outcome", "temporal"})
 _GC_BUSY_TIMEOUT_MS = 250
 
 
@@ -292,9 +293,7 @@ class LexicalProjectionBuilder:
                 self.connection.execute(f"RELEASE SAVEPOINT {savepoint}")
             if isinstance(exc, ProjectionBuildError):
                 raise
-            if isinstance(
-                exc, sqlite3.OperationalError
-            ) and ProjectionJobRunner._is_lock_contention(exc):
+            if is_lock_contention(exc):
                 raise ProjectionBuildError(
                     "DATABASE_IN_USE", "lexical projection build was contended"
                 ) from exc
@@ -764,6 +763,61 @@ class LexicalProjectionBuilder:
         return value
 
 
+_VICTIM_QUERY = """
+SELECT manifest_id, generation FROM projection_manifests
+WHERE workspace_id=? AND projection_name=? AND typeof(generation)='integer'
+  AND (
+    (
+      status IN ('ready','failed')
+      AND manifest_id IS NOT (
+        SELECT manifest_id FROM projection_manifests
+        WHERE workspace_id=? AND projection_name=? AND status='ready'
+          AND activated_at_us IS NOT NULL
+        ORDER BY generation DESC LIMIT 1
+      )
+    )
+    OR (
+      status='rebuild_required'
+      AND generation < COALESCE((
+        SELECT generation FROM projection_manifests
+        WHERE workspace_id=? AND projection_name=? AND status='active'
+          AND typeof(generation)='integer'
+      ), -1)
+    )
+  )
+ORDER BY generation LIMIT ?
+"""
+
+
+def _drop_generation(
+    connection: sqlite3.Connection,
+    workspace_id: str,
+    projection: str,
+    manifest_id: str,
+    generation: int,
+) -> None:
+    fts_table = (
+        lexical_fts_table_name(workspace_id, generation)
+        if projection == "lexical"
+        else procedure_fts_table_name(workspace_id, generation)
+        if projection == "procedure"
+        else None
+    )
+    if fts_table is not None:
+        connection.execute(f'DROP TABLE IF EXISTS "{fts_table}"')
+    generation_table = GENERATION_TABLES.get(projection)
+    if generation_table is not None:
+        connection.execute(
+            f'DELETE FROM "{generation_table}" '
+            "WHERE workspace_id=? AND projection_generation=?",
+            (workspace_id, generation),
+        )
+    connection.execute(
+        "DELETE FROM projection_manifests WHERE manifest_id=?",
+        (manifest_id,),
+    )
+
+
 def collect_superseded_generations(
     connection: sqlite3.Connection,
     workspace_id: str,
@@ -773,81 +827,86 @@ def collect_superseded_generations(
     """Drop up to *limit* superseded generations of one local projection.
 
     Runs after an activation commits, in its own short transaction. Victims
-    are chosen by manifest status: ``ready`` or ``failed`` rows only, never
-    the active generation, a ``building`` or ``rebuild_required`` one, or the
-    most recently deactivated generation (a reader that looked up the old
-    manifest just before the switch may still be querying it). Best effort:
-    on contention or any SQLite error it gives up and the next activation
+    are chosen by manifest status: ``ready`` and ``failed`` rows, plus
+    ``rebuild_required`` rows below the active generation (readers consult
+    those only while no active manifest exists). It never touches the active
+    or a ``building`` generation, nor the most recently deactivated one (the
+    highest activated ``ready`` generation), because a reader that resolved
+    the old manifest just before the switch may still be querying it.
+
+    Best effort: one damaged generation is skipped rather than wedging the
+    rest, contention ends the pass, and nothing raises — the next activation
     retries. Returns the number of generations removed.
     """
 
     if (
-        projection not in _COLLECTABLE_PROJECTIONS
+        projection not in COLLECTABLE_PROJECTIONS
         or _WORKSPACE_ID.fullmatch(workspace_id) is None
         or connection.in_transaction
     ):
         return 0
-    generation_table = GENERATION_TABLES.get(projection)
+    collected = 0
     try:
         previous_timeout = int(connection.execute("PRAGMA busy_timeout").fetchone()[0])
         connection.execute(f"PRAGMA busy_timeout={_GC_BUSY_TIMEOUT_MS}")
         try:
             connection.execute("BEGIN IMMEDIATE")
             try:
-                victims = [
-                    int(row[0])
-                    for row in connection.execute(
-                        "SELECT generation FROM projection_manifests "
-                        "WHERE workspace_id=? AND projection_name=? "
-                        "AND status IN ('ready','failed') "
-                        "AND manifest_id IS NOT ("
-                        "SELECT manifest_id FROM projection_manifests "
-                        "WHERE workspace_id=? AND projection_name=? "
-                        "AND status='ready' AND activated_at_us IS NOT NULL "
-                        "ORDER BY activated_at_us DESC, generation DESC LIMIT 1) "
-                        "ORDER BY generation LIMIT ?",
-                        (workspace_id, projection, workspace_id, projection, limit),
-                    ).fetchall()
-                ]
-                for generation in victims:
-                    fts_table = (
-                        lexical_fts_table_name(workspace_id, generation)
-                        if projection == "lexical"
-                        else procedure_fts_table_name(workspace_id, generation)
-                        if projection == "procedure"
-                        else None
-                    )
-                    if fts_table is not None:
-                        connection.execute(f'DROP TABLE IF EXISTS "{fts_table}"')
-                    if generation_table is not None:
-                        connection.execute(
-                            f'DELETE FROM "{generation_table}" '
-                            "WHERE workspace_id=? AND projection_generation=?",
-                            (workspace_id, generation),
+                victims = connection.execute(
+                    _VICTIM_QUERY,
+                    (
+                        workspace_id,
+                        projection,
+                        workspace_id,
+                        projection,
+                        workspace_id,
+                        projection,
+                        limit,
+                    ),
+                ).fetchall()
+                for manifest_id, generation in victims:
+                    connection.execute("SAVEPOINT retrieval_generation_gc")
+                    try:
+                        _drop_generation(
+                            connection,
+                            workspace_id,
+                            projection,
+                            str(manifest_id),
+                            int(generation),
                         )
-                    connection.execute(
-                        "DELETE FROM projection_manifests WHERE workspace_id=? "
-                        "AND projection_name=? AND generation=?",
-                        (workspace_id, projection, generation),
-                    )
+                    except Exception as exc:
+                        connection.execute(
+                            "ROLLBACK TO SAVEPOINT retrieval_generation_gc"
+                        )
+                        connection.execute("RELEASE SAVEPOINT retrieval_generation_gc")
+                        if is_lock_contention(exc):
+                            raise
+                        # A damaged generation must not wedge every later
+                        # one; skip past it and keep collecting.
+                        logger.warning(
+                            "projection generation could not be collected",
+                            exc_info=True,
+                        )
+                        continue
+                    connection.execute("RELEASE SAVEPOINT retrieval_generation_gc")
+                    collected += 1
                 connection.commit()
             except BaseException:
                 connection.rollback()
                 raise
         finally:
             connection.execute(f"PRAGMA busy_timeout={previous_timeout}")
-    except sqlite3.Error as exc:
-        if isinstance(
-            exc, sqlite3.OperationalError
-        ) and ProjectionJobRunner._is_lock_contention(exc):
+    except Exception as exc:
+        if is_lock_contention(exc):
             logger.debug("projection generation GC skipped: database busy")
         else:
             logger.warning("projection generation GC failed", exc_info=True)
         return 0
-    return len(victims)
+    return collected
 
 
 __all__ = [
+    "COLLECTABLE_PROJECTIONS",
     "LexicalProjectionBuilder",
     "ProjectionBuildError",
     "ProjectionBuildResult",

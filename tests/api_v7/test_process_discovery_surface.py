@@ -146,7 +146,9 @@ async def test_production_graph_discovery_surface(initialized_workspace, transpo
                 item["record_id"] for item in recalled["data"]["items"]
             } & {first["record_id"], second["record_id"]}:
                 break
-            assert recalled["ok"] or recalled["error"]["retryable"], recalled
+            if not recalled["ok"]:
+                assert recalled["error"]["code"] == "DATABASE_IN_USE", recalled
+                assert recalled["error"]["retryable"], recalled
             assert asyncio.get_running_loop().time() < recall_deadline, recalled
             await asyncio.sleep(0.25)
         graph = await succeed(

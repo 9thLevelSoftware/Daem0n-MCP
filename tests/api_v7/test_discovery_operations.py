@@ -1162,35 +1162,32 @@ class DiscoveryOperationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(1, len(second.items))
         self.assertNotEqual(first.items[0].record_id, second.items[0].record_id)
 
-    async def test_memory_recall_entity_missing_members_retry_only_while_stale(
+    async def test_memory_recall_entity_retries_only_a_pending_catch_up(
         self,
     ) -> None:
-        """A lexical index still catching up is transient; a current one is not."""
+        """Only a projection that still owes the records is worth retrying."""
         from daem0nmcp.api.v7.discovery_operations import DiscoveryOperationError
         from daem0nmcp.api.v7.models import (
             ProviderDiagnostic,
             RetrievalData,
             TokenUsage,
         )
+        from daem0nmcp.retrieval.projections import LexicalProjectionBuilder
 
         self._activate_discovery()
 
         class RecallService:
-            status = "degraded"
+            """Returns nothing, as a lexical miss on the entity name does."""
 
             async def retrieve(self, workspace, query, linked_workspace_ids):
                 return RetrievalData(
                     provider_diagnostics=[
                         ProviderDiagnostic(
                             provider="lexical",
-                            status=self.status,
-                            manifest_generation=1,
+                            status="unavailable",
+                            manifest_generation=None,
                             elapsed_ms=0.0,
-                            reason=(
-                                None
-                                if self.status == "ready"
-                                else "LEXICAL_REBUILD_REQUIRED"
-                            ),
+                            reason="LEXICAL_UNAVAILABLE",
                             returned_count=0,
                         )
                     ],
@@ -1205,21 +1202,44 @@ class DiscoveryOperationTests(unittest.IsolatedAsyncioTestCase):
                     ),
                 )
 
-        recall = RecallService()
-        operation = self._operations(recall_service=recall)["memory_recall_entity"]
+        operation = self._operations(recall_service=RecallService())[
+            "memory_recall_entity"
+        ]
         request = _request(
             "memory_recall_entity",
             workspace_id=self.workspace.workspace_id,
             entity_name="Authentication",
         )
-        for status, code in (
-            ("degraded", "DATABASE_IN_USE"),
-            ("ready", "CAPABILITY_DEGRADED"),
-        ):
-            recall.status = status
+
+        async def code() -> str:
             with self.assertRaises(DiscoveryOperationError) as raised:
                 await operation(workspace=self.workspace, request=request)
-            self.assertEqual(code, raised.exception.code)
+            return raised.exception.code
+
+        # The records are not in the lexical projection yet and its rebuild
+        # job is queued: a retry can make progress.
+        self.assertEqual("DATABASE_IN_USE", await code())
+
+        # The rebuild dead-lettered, so nothing will catch up on its own.
+        with closing(sqlite3.connect(self.database)) as connection:
+            connection.execute(
+                "UPDATE background_jobs SET status='dead_letter',"
+                "finished_at_us=1 WHERE job_type='retrieval.projection_rebuild'"
+            )
+            connection.commit()
+        self.assertEqual("CAPABILITY_DEGRADED", await code())
+
+        # The projection holds every member, so the miss is genuine even
+        # though lexical reports itself unavailable and a job is queued.
+        with closing(sqlite3.connect(self.database)) as connection:
+            connection.execute("PRAGMA foreign_keys=ON")
+            LexicalProjectionBuilder(connection).rebuild(self.workspace.workspace_id)
+            connection.execute(
+                "UPDATE background_jobs SET status='queued',finished_at_us=NULL "
+                "WHERE job_type='retrieval.projection_rebuild'"
+            )
+            connection.commit()
+        self.assertEqual("CAPABILITY_DEGRADED", await code())
 
     async def test_stats_read_the_active_canonical_graph_snapshot(self) -> None:
         """Counting retained-v6 graph rows would misreport the v7 projection."""

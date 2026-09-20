@@ -22,6 +22,13 @@ _NO_OPTIONAL_PROFILES = {
     "graph": "disabled",
 }
 _LOCAL = ("lexical", "procedure", "outcome", "temporal")
+# Spelled out here on purpose: importing the production mapping would make a
+# shrunken GENERATION_TABLES pass this file.
+_GENERATION_TABLES = {
+    "lexical": "retrieval_documents",
+    "outcome": "record_outcome_view",
+    "procedure": "record_procedures",
+}
 
 
 def _record(content: str, *, procedure: bool = False) -> dict[str, object]:
@@ -74,14 +81,39 @@ class ProjectionGenerationGrowthTests(unittest.IsolatedAsyncioTestCase):
         self.connection.close()
         self._directory.cleanup()
 
-    def _append(self, *, procedure: bool = False) -> None:
+    def _record_outcome(self, record_id: str) -> None:
         from daem0nmcp.event_store import EventCommand, EventStore
 
         self._sequence += 1
         EventStore(self.connection).append_and_project(
             EventCommand(
                 workspace_id=WORKSPACE_ID,
-                stream_id=f"mem_{self._sequence:064x}",
+                stream_id=record_id,
+                stream_kind="memory",
+                event_type="memory.outcome_recorded",
+                occurred_at_us=100 + self._sequence,
+                recorded_at_us=100 + self._sequence,
+                actor_type="system",
+                payload={
+                    "record": {
+                        **_record("growth memory number 1", procedure=True),
+                        "outcome": "the generation was collected",
+                        "worked": True,
+                    }
+                },
+            )
+        )
+        self.connection.commit()
+
+    def _append(self, *, procedure: bool = False) -> str:
+        from daem0nmcp.event_store import EventCommand, EventStore
+
+        self._sequence += 1
+        record_id = f"mem_{self._sequence:064x}"
+        EventStore(self.connection).append_and_project(
+            EventCommand(
+                workspace_id=WORKSPACE_ID,
+                stream_id=record_id,
                 stream_kind="memory",
                 event_type="memory.created",
                 occurred_at_us=100 + self._sequence,
@@ -95,6 +127,7 @@ class ProjectionGenerationGrowthTests(unittest.IsolatedAsyncioTestCase):
             )
         )
         self.connection.commit()
+        return record_id
 
     def _rebuild(self, projection: str) -> None:
         from daem0nmcp.retrieval.projections import LexicalProjectionBuilder
@@ -145,10 +178,11 @@ class ProjectionGenerationGrowthTests(unittest.IsolatedAsyncioTestCase):
     async def test_spaced_writes_keep_generations_bounded(self) -> None:
         from daem0nmcp.retrieval.runtime import drain_projection_jobs
 
-        self._append()
+        first = self._append(procedure=True)
+        self._record_outcome(first)
         for projection in _LOCAL:
             self._rebuild(projection)
-        writes = 50
+        writes = 20
         for index in range(writes):
             self._append(procedure=index % 5 == 0)
             # Every job is due immediately: this is the interactive case of
@@ -159,12 +193,19 @@ class ProjectionGenerationGrowthTests(unittest.IsolatedAsyncioTestCase):
                 self.path,
                 config=SimpleNamespace(),
                 max_jobs=8,
+                # The real drain: every local projection rebuilds, so the
+                # specialized GC call site runs on the production path.
+                include_optional=True,
                 capability_statuses=_NO_OPTIONAL_PROFILES,
             )
             self.assertEqual(
                 {"succeeded"},
                 {run.status for run in runs},
                 [run.reason for run in runs],
+            )
+            self.assertEqual(
+                set(_LOCAL),
+                {name for run in runs for name in run.projections},
             )
 
         for projection in _LOCAL:
@@ -184,6 +225,34 @@ class ProjectionGenerationGrowthTests(unittest.IsolatedAsyncioTestCase):
             "SELECT COUNT(*) FROM retrieval_documents"
         ).fetchone()[0]
         self.assertLessEqual(documents, 2 * live)
+        self._assert_generation_rows_collected()
+        # The stale marker every write sets clears once the rebuild runs, and
+        # GC never leaves it stuck on an active manifest.
+        self.assertEqual(
+            [],
+            self.connection.execute(
+                "SELECT projection_name FROM projection_manifests "
+                "WHERE workspace_id=? AND status='active' AND ("
+                "json_extract(details_json,'$.rebuild_required_event_id') IS NOT NULL "
+                "OR json_extract(details_json,'$.rebuild_required_at_us') IS NOT NULL)",
+                (WORKSPACE_ID,),
+            ).fetchall(),
+        )
+
+    def _assert_generation_rows_collected(self) -> None:
+        """Every generation table keeps rows only for surviving manifests."""
+
+        for projection, table in _GENERATION_TABLES.items():
+            rows = {
+                int(row[0])
+                for row in self.connection.execute(
+                    f'SELECT DISTINCT projection_generation FROM "{table}" '
+                    "WHERE workspace_id=?",
+                    (WORKSPACE_ID,),
+                )
+            }
+            self.assertTrue(rows, f"{table} has no rows to prove collection")
+            self.assertLessEqual(rows, set(self._manifests(projection)), table)
 
     def test_stale_backlog_shrinks_five_generations_per_activation(self) -> None:
         self._append(procedure=True)
@@ -307,6 +376,146 @@ class ProjectionGenerationGrowthTests(unittest.IsolatedAsyncioTestCase):
         self._rebuild("lexical")
         self.assertNotIn(oldest, self._manifests("lexical"))
         self.assertLessEqual(len(self._manifests("lexical")), 2)
+
+    def test_gc_in_wal_mode_collects_under_an_open_reader(self) -> None:
+        from daem0nmcp.retrieval import projections
+        from daem0nmcp.retrieval.lexical_config import lexical_fts_table_name
+
+        self.connection.execute("PRAGMA journal_mode=WAL")
+        self._append()
+        for _ in range(3):
+            self._rebuild("lexical")
+        oldest = min(self._manifests("lexical"))
+        table = lexical_fts_table_name(WORKSPACE_ID, oldest)
+        reader = sqlite3.connect(self.path)
+        collect = projections.collect_superseded_generations
+        collected: list[int] = []
+
+        def collect_while_reading(*args, **kwargs):
+            reader.execute("BEGIN")
+            reader.execute(f'SELECT COUNT(*) FROM "{table}"').fetchone()
+            collected.append(collect(*args, **kwargs))
+            return collected[-1]
+
+        try:
+            with patch.object(
+                projections,
+                "collect_superseded_generations",
+                collect_while_reading,
+            ):
+                result = projections.LexicalProjectionBuilder(self.connection).rebuild(
+                    WORKSPACE_ID
+                )
+            self.assertEqual("active", result.status)
+            # WAL readers do not block the drop, and the reader's snapshot
+            # still answers from the generation being collected.
+            self.assertEqual([1], collected)
+            self.assertEqual(
+                1, len(reader.execute(f'SELECT * FROM "{table}" LIMIT 1').fetchall())
+            )
+            self.assertNotIn(oldest, self._manifests("lexical"))
+            self.assertNotIn(oldest, self._fts_generations("lexical"))
+        finally:
+            reader.close()
+
+    def test_repair_left_rebuild_required_generations_are_collected(self) -> None:
+        self._append()
+        self._rebuild("lexical")
+        repaired = self._active("lexical")
+        # verify-v7 --repair-projections demotes the active generation and
+        # rebuilds in one transaction, so its GC is a no-op.
+        self.connection.execute(
+            "UPDATE projection_manifests SET status='rebuild_required' "
+            "WHERE workspace_id=? AND projection_name='lexical' AND generation=?",
+            (WORKSPACE_ID, repaired),
+        )
+        self.connection.commit()
+
+        self._rebuild("lexical")
+
+        manifests = self._manifests("lexical")
+        self.assertNotIn(repaired, manifests)
+        self.assertEqual(set(manifests), self._fts_generations("lexical"))
+        self.assertEqual(
+            0,
+            self.connection.execute(
+                "SELECT COUNT(*) FROM retrieval_documents WHERE workspace_id=? "
+                "AND projection_generation=?",
+                (WORKSPACE_ID, repaired),
+            ).fetchone()[0],
+        )
+
+    def test_an_undroppable_generation_does_not_wedge_the_rest(self) -> None:
+        from daem0nmcp.retrieval import projections
+        from daem0nmcp.retrieval.lexical_config import lexical_fts_table_name
+
+        self._append()
+        with patch.object(
+            projections, "collect_superseded_generations", return_value=0
+        ):
+            for _ in range(4):
+                self._rebuild("lexical")
+        generations = sorted(self._manifests("lexical"))
+        damaged = generations[0]
+        original = projections._drop_generation
+
+        def refuse_oldest(
+            connection, workspace_id, projection, manifest_id, generation
+        ):
+            if generation == damaged:
+                raise sqlite3.OperationalError("malformed database schema")
+            return original(
+                connection, workspace_id, projection, manifest_id, generation
+            )
+
+        with patch.object(projections, "_drop_generation", refuse_oldest):
+            collected = projections.collect_superseded_generations(
+                self.connection, WORKSPACE_ID, "lexical"
+            )
+
+        manifests = self._manifests("lexical")
+        # The damaged generation is skipped, not retried forever, and every
+        # later victim is still collected.
+        self.assertGreaterEqual(collected, 1)
+        self.assertIn(damaged, manifests)
+        self.assertIn(damaged, self._fts_generations("lexical"))
+        self.assertNotIn(generations[1], manifests)
+        self.assertNotIn(generations[1], self._fts_generations("lexical"))
+        self.assertIsNotNone(lexical_fts_table_name(WORKSPACE_ID, damaged))
+
+    def test_offline_compaction_drains_a_backlog_and_reclaims_the_file(self) -> None:
+        from daem0nmcp.retrieval.operations import compact_projections
+
+        self._append(procedure=True)
+        with (
+            patch(
+                "daem0nmcp.retrieval.projections.collect_superseded_generations",
+                return_value=0,
+            ),
+            patch(
+                "daem0nmcp.retrieval.specialized_projection."
+                "collect_superseded_generations",
+                return_value=0,
+            ),
+        ):
+            for _ in range(30):
+                for projection in ("lexical", "procedure"):
+                    self._rebuild(projection)
+        self.assertEqual(30, len(self._manifests("lexical")))
+        before = self.path.stat().st_size
+
+        payload = compact_projections(self.connection, WORKSPACE_ID)
+
+        self.assertEqual(28, payload["collected"]["lexical"])
+        self.assertEqual(28, payload["collected"]["procedure"])
+        self.assertTrue(payload["vacuumed"])
+        self.assertEqual(58, payload["superseded_manifests_before"])
+        self.assertEqual(2, payload["superseded_manifests_after"])
+        for projection in ("lexical", "procedure"):
+            manifests = self._manifests(projection)
+            self.assertEqual(2, len(manifests), projection)
+            self.assertEqual(set(manifests), self._fts_generations(projection))
+        self.assertLess(self.path.stat().st_size, before)
 
     def test_lock_contention_is_retried_not_dead_lettered(self) -> None:
         from daem0nmcp.retrieval.jobs import ProjectionJobRunner

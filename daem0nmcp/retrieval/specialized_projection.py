@@ -11,7 +11,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 
 from ..event_store import canonical_json_bytes, deterministic_id, sha256_json
-from .jobs import ProjectionJobRunner
+from .jobs import is_lock_contention
 from .projections import collect_superseded_generations
 from .specialized_contract import (
     SPECIALIZED_BUILDER_VERSION,
@@ -363,9 +363,7 @@ class SpecializedProjectionBuilder:
             self._rollback(owns_transaction, savepoint)
             if isinstance(exc, SpecializedProjectionBuildError):
                 raise
-            if isinstance(
-                exc, sqlite3.OperationalError
-            ) and ProjectionJobRunner._is_lock_contention(exc):
+            if is_lock_contention(exc):
                 raise SpecializedProjectionBuildError(
                     "DATABASE_IN_USE",
                     "specialized projection build was contended",
@@ -376,8 +374,9 @@ class SpecializedProjectionBuilder:
                     "specialized projection build is unavailable",
                 ) from exc
             raise
-        if owns_transaction and projection_name != "graph":
-            # Graph generations are referenced by the discovery tables.
+        if owns_transaction:
+            # Graph is not collectable: the discovery tables reference its
+            # generations. collect_superseded_generations enforces that.
             collect_superseded_generations(
                 self.connection, workspace_id, projection_name
             )
