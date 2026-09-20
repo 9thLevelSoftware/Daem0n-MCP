@@ -58,9 +58,30 @@ def _server(*roots: Path):
 
 
 async def _call(client: Client, tool: str, arguments: dict[str, Any]) -> dict:
-    result = await client.call_tool(tool, arguments, raise_on_error=False)
-    assert isinstance(result.structured_content, dict), tool
-    return result.structured_content
+    """Call one tool, retrying only what the server itself calls retryable.
+
+    Under a loaded suite another writer can hold the store's write lock past
+    the busy timeout, which the server reports as retryable DATABASE_IN_USE.
+    Retrying that to a bounded deadline keeps these cases about identity.  A
+    non-retryable answer, which is what every assertion here is about, is
+    returned as it is.
+    """
+
+    deadline = time.monotonic() + 60.0
+    while True:
+        result = await client.call_tool(tool, arguments, raise_on_error=False)
+        assert isinstance(result.structured_content, dict), tool
+        payload = result.structured_content
+        if payload["ok"] or not payload["error"].get("retryable"):
+            return payload
+        if time.monotonic() >= deadline:
+            return payload
+        await asyncio.sleep(0.1)
+
+
+def _ok(payload: dict, label: str) -> dict:
+    assert payload["ok"], (label, payload["error"])
+    return payload["data"]
 
 
 async def _protected(client: Client, workspace_id: str, tool: str, arguments: dict):
@@ -92,9 +113,10 @@ async def _seed(root: Path) -> tuple[str, str]:
 
     async with Client(_server(root)) as client:
         workspace_id = WorkspaceRegistry([root], default_root=root).default.workspace_id
-        assert (await _call(client, "session_brief", {"workspace_id": workspace_id}))[
-            "ok"
-        ]
+        _ok(
+            await _call(client, "session_brief", {"workspace_id": workspace_id}),
+            "seed session_brief",
+        )
         stored = await _protected(
             client,
             workspace_id,
@@ -254,9 +276,10 @@ async def test_a_copy_registered_beside_the_original_is_blocked(
     copy_id = path_hash_workspace_id(copy)
     roots = (copy, original) if reversed_order else (original, copy)
     async with Client(_server(*roots)) as client:
-        assert (await _call(client, "session_brief", {"workspace_id": workspace_id}))[
-            "ok"
-        ]
+        _ok(
+            await _call(client, "session_brief", {"workspace_id": workspace_id}),
+            "original session_brief",
+        )
         blocked = await _call(client, "session_brief", {"workspace_id": copy_id})
         assert blocked["error"]["code"] == "WORKSPACE_IDENTITY_DUPLICATE", blocked
         assert blocked["error"]["retryable"] is False
@@ -285,9 +308,10 @@ async def test_a_copy_registered_beside_the_original_is_blocked(
         assert empty["ok"], empty
         assert not empty["data"]["items"]
         # The original is untouched throughout.
-        assert (await _call(client, "session_brief", {"workspace_id": workspace_id}))[
-            "ok"
-        ]
+        _ok(
+            await _call(client, "session_brief", {"workspace_id": workspace_id}),
+            "original session_brief after the fork",
+        )
         assert await _recalls_the_record(client, workspace_id, record_id)
 
     # Adopting the original's ID again restores the duplicate block.
