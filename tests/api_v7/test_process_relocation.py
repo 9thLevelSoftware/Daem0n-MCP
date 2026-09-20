@@ -9,10 +9,12 @@ and the SessionStart hook agree with them end to end.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import os
 import shutil
+import time
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
@@ -157,17 +159,36 @@ def _workspace_id_json(root: Path, *arguments: str, capsys) -> tuple[int, dict]:
     return code, json.loads(capsys.readouterr().out.strip().splitlines()[-1])
 
 
-async def _reads_the_record(root: Path, workspace_id: str, record_id: str) -> bool:
-    async with Client(_server(root)) as client:
-        brief = await _call(client, "session_brief", {"workspace_id": workspace_id})
-        assert brief["ok"], brief
+async def _recalls_the_record(
+    client: Client, workspace_id: str, record_id: str
+) -> bool:
+    """Poll recall until the record shows up, or a bounded deadline passes.
+
+    The lexical projection drains in the background after a write, so a server
+    that has only just started can answer from one that is still catching up.
+    The deadline is bounded and there is never a fixed sleep.
+    """
+
+    deadline = time.monotonic() + 60.0
+    while True:
         recall = await _call(
             client, "memory_recall", {"workspace_id": workspace_id, "query": CONTENT}
         )
         assert recall["ok"], recall
-        found = any(
+        if any(
             item["record"]["record_id"] == record_id for item in recall["data"]["items"]
-        )
+        ):
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        await asyncio.sleep(0.25)
+
+
+async def _reads_the_record(root: Path, workspace_id: str, record_id: str) -> bool:
+    async with Client(_server(root)) as client:
+        brief = await _call(client, "session_brief", {"workspace_id": workspace_id})
+        assert brief["ok"], brief
+        found = await _recalls_the_record(client, workspace_id, record_id)
         outcome = await _protected(
             client,
             workspace_id,
@@ -267,14 +288,7 @@ async def test_a_copy_registered_beside_the_original_is_blocked(
         assert (await _call(client, "session_brief", {"workspace_id": workspace_id}))[
             "ok"
         ]
-        kept = await _call(
-            client,
-            "memory_recall",
-            {"workspace_id": workspace_id, "query": CONTENT},
-        )
-        assert any(
-            item["record"]["record_id"] == record_id for item in kept["data"]["items"]
-        )
+        assert await _recalls_the_record(client, workspace_id, record_id)
 
     # Adopting the original's ID again restores the duplicate block.
     code, payload = _workspace_id_json(copy, "--adopt", workspace_id, capsys=capsys)
