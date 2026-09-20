@@ -197,9 +197,24 @@ the dry-run inventory. `FUTURE_V7_SCHEMA`, `UNSUPPORTED_V7_SCHEMA`, and
 Daem0nMCP build; they are not repaired automatically. After an interrupted run,
 repeat the same `migrate-v7 --apply` command. Use `migrate-v7 --rollback latest`
 to return to the retained predecessor and `--apply` to reactivate its verified
-candidate. The generic `migrate` command remains an in-place additive migration
-entry point; use `migrate-v7 --apply` when retention, verification, atomic
-activation, and rollback are required.
+candidate. Rollback refuses with `ROLLBACK_WOULD_HIDE_WRITES`, naming the count
+and the candidate that retains them, when events were recorded after
+activation; `--discard-v7-writes` proceeds and reports what stayed behind. The
+generic `migrate` command remains an in-place additive migration entry point,
+capped at the last v6 schema version while a store is still format 6 so it
+cannot rewrite what `migrate-v7` snapshots; use `migrate-v7 --apply` when
+retention, verification, atomic activation, and rollback are required.
+
+Stop the server before applying or rolling back: both commands take the
+storage lock, and a running server on the old pointer sees the generation
+change. Until a v6 workspace is migrated, every tool answers
+`MIGRATION_REQUIRED` (non-retryable) with the command to run.
+
+`migrate-v7 --apply` reports what it could not copy faithfully in `warnings`
+and counts it in `validation`: memory file links that pointed outside the
+workspace (kept only in the event's legacy payload), context triggers
+belonging to another project path, and rules or triggers reconciled because
+the v6 tables changed after an earlier in-place upgrade.
 
 `verify-v7` checks authority and projections; `--repair-projections` performs
 offline replay and atomic activation. Rollback retains the v7 write history

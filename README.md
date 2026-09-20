@@ -1038,9 +1038,23 @@ python -m daem0nmcp.cli install-opencode --force
 
 This regenerates `opencode.json` and the plugin to match the latest version.
 
-### 5. Migrations Run Automatically
+### 5. Migrations
 
-Database schema migrations are applied automatically when any MCP tool runs. No manual migration step required.
+Within a storage format, schema migrations are applied automatically when any
+MCP tool runs, and no manual step is required.
+
+Moving an existing v6 workspace to the v7 storage format is **not** automatic.
+It is an offline, reversible command, and a v6 workspace answers
+`MIGRATION_REQUIRED` until it has run:
+
+```bash
+# Stop the server first, then:
+python -m daem0nmcp.cli --project-path /path/to/project migrate-v7 --apply
+
+# Undo it; refuses if events were recorded since activation unless
+# --discard-v7-writes is passed.
+python -m daem0nmcp.cli --project-path /path/to/project migrate-v7 --rollback
+```
 
 ### 6. Index Your Codebase
 
