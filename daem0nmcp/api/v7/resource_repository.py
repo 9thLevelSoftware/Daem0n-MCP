@@ -27,10 +27,11 @@ from pathlib import Path
 from typing import TypeVar, cast
 
 from ...bounded_workers import BoundedWorkerPool
+from ...retrieval.lexical_config import RETRIEVAL_PROJECTION_NAMES
 from ...schema_version import CURRENT_SCHEMA_VERSION
 from ...storage_activation import DatabaseFileLock, ResolvedActiveDatabase
 from ...workspace import Workspace, normalize_resolved_path
-from .models import RecordSummary
+from .models import RecordSummary, stored_relative_path
 from .public_ids import PublicObjectIdRepository
 from .resources import (
     RESOURCE_FETCH_LIMIT,
@@ -182,9 +183,9 @@ _MAX_DATABASE_JSON_BYTES = 65_536
 _MAX_GIT_OUTPUT_BYTES = 1_048_576
 _MAX_GIT_CHANGES = 200
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
-_PROJECTION_NAMES = frozenset(
-    {"lexical", "dense", "graph", "temporal", "procedure", "outcome", "code"}
-)
+_PROJECTION_NAMES = RETRIEVAL_PROJECTION_NAMES
+_PROJECTION_NAME_PLACEHOLDERS = ",".join("?" * len(_PROJECTION_NAMES))
+_PROJECTION_NAME_PARAMETERS = tuple(sorted(_PROJECTION_NAMES))
 _REQUIRED_TABLES = frozenset(
     {
         "active_context",
@@ -767,12 +768,17 @@ class SQLiteResourceRepository:
         workspace: Workspace,
         connection: sqlite3.Connection,
     ) -> tuple[list[object], int]:
+        # ``projection_manifests`` also holds the migration's table snapshots
+        # (``memory_records`` and friends), which no retrieval provider serves.
+        # Select the retrieval names instead of refusing the rest: a migrated
+        # workspace must brief without a data change.
         rows = connection.execute(
             "SELECT projection_name,generation,source_event_root_hash,"
             "COALESCE(activated_at_us,completed_at_us,started_at_us) AS built_at_us "
             "FROM projection_manifests WHERE workspace_id=? AND status='active' "
+            f"AND projection_name IN ({_PROJECTION_NAME_PLACEHOLDERS}) "
             "ORDER BY projection_name",
-            (workspace.workspace_id,),
+            (workspace.workspace_id, *_PROJECTION_NAME_PARAMETERS),
         ).fetchall()
         values: list[object] = []
         for row in rows:
@@ -780,7 +786,6 @@ class SQLiteResourceRepository:
             root_hash = row["source_event_root_hash"]
             if (
                 not isinstance(projection, str)
-                or projection not in _PROJECTION_NAMES
                 or not isinstance(root_hash, str)
                 or _SHA256_RE.fullmatch(root_hash) is None
             ):
@@ -802,13 +807,12 @@ class SQLiteResourceRepository:
             "json_extract(details_json,'$.rebuild_required_event_id') IS NOT NULL "
             "THEN 1 ELSE 0 END) AS marked_stale "
             "FROM projection_manifests WHERE workspace_id=? "
+            f"AND projection_name IN ({_PROJECTION_NAME_PLACEHOLDERS}) "
             "GROUP BY projection_name",
-            (workspace.workspace_id,),
+            (workspace.workspace_id, *_PROJECTION_NAME_PARAMETERS),
         ).fetchall()
         stale = 0
         for row in state_rows:
-            if row["projection_name"] not in _PROJECTION_NAMES:
-                raise ValueError("projection name is invalid")
             if (
                 _plain_int(row["has_active"]) == 0
                 or _plain_int(row["marked_stale"]) == 1
@@ -1104,9 +1108,7 @@ class SQLiteResourceRepository:
         deleted = row["deleted_at_us"] is not None
         if deleted:
             _datetime_from_us(row["deleted_at_us"])
-        relative_path = row["file_path_relative"]
-        if relative_path is not None and not isinstance(relative_path, str):
-            raise ValueError("relative file path is invalid")
+        relative_path = stored_relative_path(row["file_path_relative"])
         status = "archived" if archived else "invalidated" if deleted else "current"
         public_value = {
             "record_id": row["record_id"],

@@ -35,6 +35,7 @@ from .event_store import (
 )
 from .migrations import MIGRATIONS
 from .migrations.v7 import _source_row_hash, inventory_database
+from .retrieval.lexical_config import RETRIEVAL_PROJECTION_NAMES
 from .schema_version import CURRENT_SCHEMA_VERSION, REQUIRED_V7_SCHEMA_VERSIONS
 from .storage_activation import (
     ActiveDatabasePointer,
@@ -74,6 +75,17 @@ _REQUIRED_TABLES = frozenset(
         "workspace_link_events",
     }
 )
+# The snapshots `migrate-v7` records for the tables it fills directly; no
+# retrieval provider serves them.
+_TABLE_SNAPSHOT_PROJECTIONS = frozenset(
+    {
+        "memory_records",
+        "memory_fact_versions",
+        "memory_relationship_versions",
+        "entities",
+        "communities",
+    }
+)
 _LOCAL_PROJECTIONS = frozenset(
     {
         "memory_records",
@@ -86,12 +98,7 @@ _LOCAL_PROJECTIONS = frozenset(
         "outcome",
     }
 )
-_SUPPORTED_PROJECTIONS = _LOCAL_PROJECTIONS | {
-    "dense",
-    "code",
-    "entities",
-    "communities",
-}
+_SUPPORTED_PROJECTIONS = _TABLE_SNAPSHOT_PROJECTIONS | RETRIEVAL_PROJECTION_NAMES
 _GENERATION_TABLES = {
     "lexical": "retrieval_documents",
     "procedure": "record_procedures",
@@ -709,6 +716,12 @@ def _verify_manifests(connection: sqlite3.Connection) -> tuple[int, int, int]:
             previous = latest_local.get(key)
             if previous is None or int(row[6]) > previous[0]:
                 latest_local[key] = (int(row[6]), not current or declared_stale)
+        if projection_name in _TABLE_SNAPSHOT_PROJECTIONS:
+            # A migration snapshot records what `migrate-v7` built for a table
+            # the event store owns, not a rebuildable retrieval generation, so
+            # later writes move the event cursor and the row count past it by
+            # design.  Only the retrieval projections carry those invariants.
+            continue
         if row[2] == "active" and not declared_stale:
             if projection_name == "code":
                 if (row[8], row[9]) != (None, None):
