@@ -1162,6 +1162,85 @@ class DiscoveryOperationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(1, len(second.items))
         self.assertNotEqual(first.items[0].record_id, second.items[0].record_id)
 
+    async def test_memory_recall_entity_retries_only_a_pending_catch_up(
+        self,
+    ) -> None:
+        """Only a projection that still owes the records is worth retrying."""
+        from daem0nmcp.api.v7.discovery_operations import DiscoveryOperationError
+        from daem0nmcp.api.v7.models import (
+            ProviderDiagnostic,
+            RetrievalData,
+            TokenUsage,
+        )
+        from daem0nmcp.retrieval.projections import LexicalProjectionBuilder
+
+        self._activate_discovery()
+
+        class RecallService:
+            """Returns nothing, as a lexical miss on the entity name does."""
+
+            async def retrieve(self, workspace, query, linked_workspace_ids):
+                return RetrievalData(
+                    provider_diagnostics=[
+                        ProviderDiagnostic(
+                            provider="lexical",
+                            status="unavailable",
+                            manifest_generation=None,
+                            elapsed_ms=0.0,
+                            reason="LEXICAL_UNAVAILABLE",
+                            returned_count=0,
+                        )
+                    ],
+                    abstained=True,
+                    abstention_reason="NO_EVIDENCE",
+                    token_usage=TokenUsage(
+                        budget=query.token_budget,
+                        requested=0,
+                        selected=0,
+                        rendered=0,
+                        dropped=0,
+                    ),
+                )
+
+        operation = self._operations(recall_service=RecallService())[
+            "memory_recall_entity"
+        ]
+        request = _request(
+            "memory_recall_entity",
+            workspace_id=self.workspace.workspace_id,
+            entity_name="Authentication",
+        )
+
+        async def code() -> str:
+            with self.assertRaises(DiscoveryOperationError) as raised:
+                await operation(workspace=self.workspace, request=request)
+            return raised.exception.code
+
+        # The records are not in the lexical projection yet and its rebuild
+        # job is queued: a retry can make progress.
+        self.assertEqual("DATABASE_IN_USE", await code())
+
+        # The rebuild dead-lettered, so nothing will catch up on its own.
+        with closing(sqlite3.connect(self.database)) as connection:
+            connection.execute(
+                "UPDATE background_jobs SET status='dead_letter',"
+                "finished_at_us=1 WHERE job_type='retrieval.projection_rebuild'"
+            )
+            connection.commit()
+        self.assertEqual("CAPABILITY_DEGRADED", await code())
+
+        # The projection holds every member, so the miss is genuine even
+        # though lexical reports itself unavailable and a job is queued.
+        with closing(sqlite3.connect(self.database)) as connection:
+            connection.execute("PRAGMA foreign_keys=ON")
+            LexicalProjectionBuilder(connection).rebuild(self.workspace.workspace_id)
+            connection.execute(
+                "UPDATE background_jobs SET status='queued',finished_at_us=NULL "
+                "WHERE job_type='retrieval.projection_rebuild'"
+            )
+            connection.commit()
+        self.assertEqual("CAPABILITY_DEGRADED", await code())
+
     async def test_stats_read_the_active_canonical_graph_snapshot(self) -> None:
         """Counting retained-v6 graph rows would misreport the v7 projection."""
         from daem0nmcp.api.v7.tools import KnowledgeGraphStatsData

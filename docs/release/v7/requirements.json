@@ -4371,6 +4371,16 @@
       "status": "pending"
     },
     {
+      "acceptance": "python -m daem0nmcp.cli compact-projections parses and exercises its documented result contract.",
+      "entry_point": "daem0nmcp.cli:main",
+      "evidence": [],
+      "id": "cli.compact-projections",
+      "kind": "cli",
+      "owner": "cli",
+      "package": "daem0nmcp.cli",
+      "status": "pending"
+    },
+    {
       "acceptance": "python -m daem0nmcp.cli index parses and exercises its documented result contract.",
       "entry_point": "daem0nmcp.cli:main",
       "evidence": [],
@@ -5744,8 +5754,8 @@
     "tests/test_legacy_vector_migration_guards.py"
   ],
   "observed_surface": {
-    "atomic_requirements": 571,
-    "cli_commands": 20,
+    "atomic_requirements": 572,
+    "cli_commands": 21,
     "dependency_profiles": 10,
     "hooks": 15,
     "registered_tools": 75,

@@ -940,6 +940,8 @@ def _projection_sync(
                 raise CoreOperationError("CAPABILITY_DISABLED") from exc
             if exc.code in {"LEXICAL_UNAVAILABLE", "FTS5_UNAVAILABLE"}:
                 raise CoreOperationError("LEXICAL_UNAVAILABLE") from exc
+            if exc.code == "DATABASE_IN_USE":
+                raise CoreOperationError("DATABASE_IN_USE") from exc
             raise CoreOperationError("CAPABILITY_DEGRADED") from exc
         except CoreOperationError:
             raise

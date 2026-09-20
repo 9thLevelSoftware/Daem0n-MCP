@@ -11,6 +11,8 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 
 from ..event_store import canonical_json_bytes, deterministic_id, sha256_json
+from .jobs import is_lock_contention
+from .projections import collect_superseded_generations
 from .specialized_contract import (
     SPECIALIZED_BUILDER_VERSION,
     specialized_projection_contract,
@@ -357,17 +359,28 @@ class SpecializedProjectionBuilder:
                 self.connection.commit()
             else:
                 self.connection.execute(f"RELEASE SAVEPOINT {savepoint}")
-            return result
         except Exception as exc:
             self._rollback(owns_transaction, savepoint)
             if isinstance(exc, SpecializedProjectionBuildError):
                 raise
+            if is_lock_contention(exc):
+                raise SpecializedProjectionBuildError(
+                    "DATABASE_IN_USE",
+                    "specialized projection build was contended",
+                ) from exc
             if isinstance(exc, sqlite3.Error):
                 raise SpecializedProjectionBuildError(
                     "PROJECTION_UNAVAILABLE",
                     "specialized projection build is unavailable",
                 ) from exc
             raise
+        if owns_transaction:
+            # Graph is not collectable: the discovery tables reference its
+            # generations. collect_superseded_generations enforces that.
+            collect_superseded_generations(
+                self.connection, workspace_id, projection_name
+            )
+        return result
 
     def active_is_current(self, workspace_id: str, projection_name: str) -> bool:
         """Return whether the active specialized generation is exact."""
