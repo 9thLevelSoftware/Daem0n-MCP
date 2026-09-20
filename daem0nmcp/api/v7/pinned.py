@@ -583,7 +583,7 @@ class PinnedHandlers:
                         target_tool=request.target_tool,
                         expires_at=None,
                     ),
-                    warnings=[draft_warning] if draft_warning is not None else None,
+                    warnings=[draft_warning] if draft_warning is not None else (),
                 )
             token = self._dependencies.covenant_gate.issue_preflight(
                 scope,
