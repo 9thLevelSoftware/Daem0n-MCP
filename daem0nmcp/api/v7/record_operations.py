@@ -329,10 +329,11 @@ def _summary(
     *,
     include_metadata: bool = True,
 ) -> RecordSummary:
+    # v6 accepted empty content; the bounded summary renders it as the
+    # migration's marker rather than denying the whole read.
     content = row["content"]
     if not isinstance(content, str):
         raise RecordOperationError("CAPABILITY_DEGRADED")
-    content = content or MIGRATED_EMPTY_CONTENT
     tags = _parse_json(row["tags_json"], list)
     # A future valid-time may be recorded now; ``RecordSummary`` exposes the
     # transaction-time creation while the event retains the exact valid time.

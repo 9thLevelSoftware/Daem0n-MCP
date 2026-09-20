@@ -209,9 +209,12 @@ Stop the server before applying or rolling back: both commands take the
 storage lock, and a running server on the old pointer sees the generation
 change. Until a v6 workspace is migrated, `session_brief` answers
 `MIGRATION_REQUIRED` (non-retryable) with the command to run, and every other
-tool is blocked behind it with `COMMUNION_REQUIRED`; the resource surface and
-the export/import path answer `MIGRATION_REQUIRED` too, the latter without the
-command because the generic router returns the code alone.
+tool is blocked behind it with `COMMUNION_REQUIRED`. The export/import path
+answers `MIGRATION_REQUIRED` too, without the command, because the generic
+router returns the code alone. The four data resources answer the single
+invariant `RESOURCE_UNAVAILABLE` for every failure by design, so that a caller
+cannot enumerate workspaces by reading their errors; `session_brief` is where
+the reason is named.
 
 The migration keeps the v6 row exactly as it was inside the migrated
 database — in the event log's `legacy` payload and in the retained v6 tables —

@@ -59,7 +59,6 @@ from .federated_retrieval import (
     validate_directional_links,
 )
 from .models import (
-    MIGRATED_EMPTY_CONTENT,
     CapabilityState,
     CitationManifestEntry,
     RecordSummary,
@@ -465,10 +464,11 @@ def _record_summary(
     evidence_status: str = "current",
 ) -> RecordSummary:
     tags = _parse_json(row["tags_json"], list, "MEMORY_RECORD_INTEGRITY_FAILED")
+    # v6 accepted empty content; the bounded summary renders it as the
+    # migration's marker rather than denying the whole read.
     content = row["content"]
     if not isinstance(content, str):
         raise RuntimeServiceError("MEMORY_RECORD_INTEGRITY_FAILED")
-    content = content or MIGRATED_EMPTY_CONTENT
     try:
         return RecordSummary.model_validate(
             {

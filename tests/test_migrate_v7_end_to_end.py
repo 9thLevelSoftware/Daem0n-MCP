@@ -446,6 +446,11 @@ async def test_migrated_v6_workspace_is_usable_end_to_end(tmp_path):
             relative = row["record"]["file_path_relative"]
             assert relative is None or is_workspace_relative_path(relative), relative
             assert "file_path" not in row["record"]
+        # And the event pages, where the migrated v6 row rides as `[name,
+        # value]` pairs -- the place the host path used to reach the wire.
+        assert any(page["page_kind"] == "events" for page in pages)
+        for page in pages:
+            assert str(root) not in json.dumps(page)
 
 
 async def test_every_migrated_row_reads_back_through_the_server(tmp_path):
@@ -497,59 +502,52 @@ async def test_a_database_migrated_by_the_pre_fix_code_still_reads(
     workspace_id = _workspace_id(root)
 
     absolute, _relative = _v6_file_paths(tmp_path / "other" / "helper.py", root)
-    marker = "spandrel"
     overlong = "y" * 120
     tags = json.dumps([overlong, "same", "same", *[f"u{n}" for n in range(40)]])
     connection = sqlite3.connect(resolve_active_database(storage).path)
     try:
+        # One warning row carrying every shape at once, so it is read back
+        # through `session_brief` and the warnings resource -- the reader
+        # whose failure PR 5 escalated, and one that selects by record type
+        # rather than through the lexical index, so no re-indexing is
+        # involved and the assertion cannot race a background rebuild.
         connection.execute(
             "UPDATE memory_records SET file_path=?,file_path_relative=?,tags_json=?,"
-            "content=? WHERE record_type='pattern'",
-            (absolute, stored_relative, tags, f"The {marker} helper lives outside"),
-        )
-        # An empty v6 content reaches the reader the same way.
-        connection.execute(
-            "UPDATE memory_records SET content='' WHERE record_type='decision'"
+            "content='' WHERE record_type='warning'",
+            (absolute, stored_relative, tags),
         )
         connection.commit()
+        record_id = str(
+            connection.execute(
+                "SELECT record_id FROM memory_records WHERE record_type='warning'"
+            ).fetchone()[0]
+        )
     finally:
         connection.close()
 
     async with Client(_server(root)) as client:
         brief = await _succeed(client, workspace_id, "session_brief")
-        assert isinstance(brief["warnings"], list)
-        for kind in ("warnings", "failures", "rules", "active-context"):
-            await client.read_resource(f"memory://workspaces/{workspace_id}/{kind}")
-
-        hits = await _succeed(
-            client,
-            workspace_id,
-            "memory_search_text",
-            query=marker,
-            include_metadata=True,
-        )
-        assert hits["items"], hits
-        record = hits["items"][0]["record"]
+        summaries = {item["record_id"]: item for item in brief["warnings"]}
+        assert record_id in summaries, brief["warnings"]
+        record = summaries[record_id]
         # The stored value is not workspace-relative, so no link is emitted --
         # and above all the host path never reaches the wire.
         assert record["relative_file_path"] is None
-        assert absolute not in json.dumps(hits)
-        assert stored_relative not in json.dumps(hits)
+        assert absolute not in json.dumps(brief)
+        assert stored_relative not in json.dumps(brief)
+        # v6 accepted empty content; the wire needs at least one character.
+        assert record["excerpt"] == "<empty>"
         # v6 had no tag length, uniqueness or count limit; the wire has all three.
         assert len(record["tags"]) == 32
         assert len(set(record["tags"])) == 32
         assert all(len(tag) <= 80 for tag in record["tags"])
         assert overlong[:80] in record["tags"]
 
-        empty = await _succeed(
-            client,
-            workspace_id,
-            "memory_search_text",
-            query="postgres",
-            include_metadata=True,
-        )
-        assert empty["items"], empty
-        assert empty["items"][0]["record"]["excerpt"] == "<empty>"
+        for kind in ("warnings", "failures", "rules", "active-context"):
+            document = await client.read_resource(
+                f"memory://workspaces/{workspace_id}/{kind}"
+            )
+            assert absolute not in document[0].text
 
 
 async def test_a_pre_fix_migrated_record_still_accepts_an_outcome(tmp_path):
@@ -717,6 +715,10 @@ async def test_reactivating_keeps_governance_authored_through_v7(tmp_path):
 
     # Drop the retained v6 rows the compatibility write made, leaving two
     # streams that exist only in v7 -- the shape reconcile must not touch.
+    # That shape is not reachable through the tools today, because
+    # `rule_create`/`context_trigger_create` write the retained row and
+    # `rule_update` writes it back; it becomes reachable once PR 10 removes
+    # that compatibility write, which is what this guards.
     connection = sqlite3.connect(resolve_active_database(storage).path)
     try:
         connection.execute("DELETE FROM rules WHERE id>1")
@@ -962,10 +964,14 @@ async def test_an_un_migrated_v6_workspace_says_migration_is_required(tmp_path):
         assert brief["error"]["code"] == "MIGRATION_REQUIRED"
         assert brief["error"]["retryable"] is False
         assert "migrate-v7 --apply" in brief["error"]["message"]
-        # The resource surface must name the same reason, not a path escape.
-        with pytest.raises(Exception) as resource_error:
+        # The resource surface deliberately answers one invariant
+        # (`RESOURCE_UNAVAILABLE`) for every failure, so a caller cannot
+        # enumerate workspaces by reading its errors; `session_brief` is
+        # where the reason is named.
+        from mcp.shared.exceptions import McpError
+
+        with pytest.raises(McpError):
             await client.read_resource(f"memory://workspaces/{workspace_id}/rules")
-        assert "outside its workspace" not in str(resource_error.value)
 
     # The transfer boundary raises it too.  It sits behind the covenant, so
     # reach it the way an operator would: brief a migrated store, roll it back

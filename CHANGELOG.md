@@ -25,6 +25,27 @@
 - `start_daem0nmcp_server.bat` serves the directory you run it from (or its first
   argument, or an exported `DAEM0NMCP_PROJECT_ROOT`) instead of the Daem0n-MCP
   checkout, and `install-opencode` installs the four `.opencode/commands/` files.
+- **Migration payload change — re-migrate a store migrated by an earlier
+  v7 development build.** `migrate-v7` no longer copies a v6 host path into the
+  event it writes: the columns that hold one (`file_path`, `project_path`,
+  `database_path`, and a `file_path_relative` that is not workspace-relative)
+  are recorded as a `{"$host_path": {...}}` digest, so an export bundle from a
+  migrated workspace no longer discloses the origin host's directory layout.
+  The raw value stays in the retained v6 tables and in
+  `.daem0nmcp/storage/migrations/v7/<id>/source.snapshot.db`. Because the
+  digest changes the lossless payload, a store migrated before this build fails
+  `verify-v7` with "retained legacy source provenance differs" and must be
+  migrated again from its intact v6 source (`migrate-v7 --rollback`, then
+  `migrate-v7 --apply`). v7 is unreleased, so this affects development stores
+  only.
+- **Migrated v6 workspaces are usable end to end.** `session_brief`, recall,
+  outcomes, the four resources and `workspace_export` all work on a migrated
+  store; `migrate-v7` reports in `warnings` whatever it could not copy
+  faithfully; an un-migrated v6 workspace answers the new non-retryable
+  `MIGRATION_REQUIRED` naming the command instead of a retryable error with no
+  remedy; and `migrate-v7 --rollback` refuses with `ROLLBACK_WOULD_HIDE_WRITES`
+  rather than silently stranding writes made since activation (pass
+  `--discard-v7-writes` to accept that).
 
 ## [6.0.0] - 2026-01-29
 

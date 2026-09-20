@@ -670,11 +670,16 @@ class RecordSummary(WireModel):
     """The bounded public view of a stored record.
 
     It is only ever built from storage, never parsed from a caller, so it
-    clips rows that predate v7's bounds -- v6 tags had no length,
-    uniqueness or count limit, v6 content could be empty, and v6 kept
-    valid time and transaction time independently -- rather than denying
-    every read of a migrated workspace.  A v7-written record already
-    satisfies the bounds, so clipping is a no-op for it.
+    clips rows that predate v7's bounds -- v6 tags had no length, uniqueness
+    or count limit, and v6 content could be empty -- rather than denying every
+    read of a migrated workspace.  A v7-written record satisfies those three,
+    because every stored tag input is ``UniqueTags`` and content has its own
+    minimum.
+
+    The fourth clip is not a v6-only repair: a record's creation carries its
+    valid time, which a backdated or future ``happened_at`` legitimately puts
+    on either side of the transaction time it was written at, so the summary
+    shows the earlier of the two rather than refusing the record.
 
     ``relative_file_path`` is a containment rule rather than a bound, so
     it stays refused here; a stored value is normalized by
