@@ -5,6 +5,27 @@
 ### Added
 - Reproducible v7 core foundation with opt-in dependency profiles and lazy capability reporting.
 
+### Changed
+- **Behaviour change — installed profiles now turn themselves on.** An unset (or
+  empty) `DAEM0NMCP_<PROFILE>_ENABLED` means "auto": the profile is ready when
+  its extra is installed and disabled otherwise. `false` still turns it off, and
+  `true` with packages missing is still degraded. An empty value used to mean
+  `false`. What this costs if you installed an extra and never set the flag:
+  `[graph]` imports networkx, igraph and leidenalg at startup, adds a graph
+  provider to recall (so rankings change) and lets dreaming refresh communities;
+  `[local]`/`[models-local]` import sentence-transformers and onnxruntime at
+  startup, download the embedding model on first use, and rebuild the dense
+  projection, which re-embeds the whole workspace once. Opt out per profile with
+  `DAEM0NMCP_<PROFILE>_ENABLED=false`.
+- `sandbox_execute_python` now honours `DAEM0NMCP_AGENCY_E2B_ENABLED=false`; it
+  previously required only `E2B_API_KEY`.
+- `system_health` and `meta.capability_states` report the profile's real
+  remediation (install command or environment variable) instead of "Review the
+  &lt;name&gt; capability profile."
+- `start_daem0nmcp_server.bat` serves the directory you run it from (or its first
+  argument, or an exported `DAEM0NMCP_PROJECT_ROOT`) instead of the Daem0n-MCP
+  checkout, and `install-opencode` installs the four `.opencode/commands/` files.
+
 ## [6.0.0] - 2026-01-29
 
 ### Breaking Changes

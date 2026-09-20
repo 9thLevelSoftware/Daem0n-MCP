@@ -98,18 +98,43 @@ def _ensure_dir(path: Path, dry_run: bool) -> str:
     return "[create]"
 
 
-def _ensure_file(path: Path, content: str, dry_run: bool, force: bool) -> str:
+def _reject_links(path: Path, root: Path) -> None:
+    """Refuse a target that a link could move outside the project."""
+    current = path
+    while True:
+        if current.is_symlink():
+            raise OSError(f"refusing to write through the link {current}")
+        if current == root:
+            return
+        parent = current.parent
+        if parent == current:
+            raise OSError(f"{path} is outside {root}")
+        current = parent
+
+
+def _ensure_file(
+    path: Path, content: str, dry_run: bool, force: bool, root: Path
+) -> str:
     """Ensure a file exists with given content. Returns status string."""
+    _reject_links(path, root)
     if path.exists():
         if force:
             if not dry_run:
-                path.write_text(content, encoding="utf-8")
+                # Replace rather than write in place, so the new file is ours.
+                path.unlink()
+                _write_new(path, content)
             return "[overwrite]"
         return "[exists]"
     if not dry_run:
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(content, encoding="utf-8")
+        _reject_links(path.parent, root)
+        _write_new(path, content)
     return "[create]"
+
+
+def _write_new(path: Path, content: str) -> None:
+    with path.open("x", encoding="utf-8") as handle:
+        handle.write(content)
 
 
 def _configured_template(
@@ -268,7 +293,7 @@ def install_opencode(
         lines.append("Configuration:")
         json_content = json.dumps(_configured_template(installation), indent=2) + "\n"
         json_path = root / "opencode.json"
-        status = _ensure_file(json_path, json_content, dry_run, force)
+        status = _ensure_file(json_path, json_content, dry_run, force, root)
         lines.append(f"  {status} opencode.json")
         if (
             installation is not None
@@ -296,13 +321,13 @@ def install_opencode(
 
         # -- Ensure plugin file ------------------------------------------
         plugin_path = opencode_root / "plugins" / "daem0n.ts"
-        status = _ensure_file(plugin_path, PLUGIN_TEMPLATE, dry_run, force)
+        status = _ensure_file(plugin_path, PLUGIN_TEMPLATE, dry_run, force, root)
         lines.append(f"  {status} .opencode/plugins/daem0n.ts")
 
         # -- Ensure slash-command files ----------------------------------
         for name, content in sorted(COMMAND_TEMPLATES.items()):
             status = _ensure_file(
-                opencode_root / "commands" / name, content, dry_run, force
+                opencode_root / "commands" / name, content, dry_run, force, root
             )
             lines.append(f"  {status} .opencode/commands/{name}")
 

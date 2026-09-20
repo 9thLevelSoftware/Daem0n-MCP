@@ -11,6 +11,7 @@ import pytest
 
 from daem0nmcp.edit_bridge_transport import provision_bridge_credential
 from daem0nmcp.opencode_install import (
+    COMMAND_TEMPLATES,
     PLUGIN_TEMPLATE,
     install_opencode,
     select_opencode_interface,
@@ -232,11 +233,7 @@ def test_install_preserves_existing_opencode_json(tmp_path):
 
 def test_install_creates_repo_command_files_without_overwriting(tmp_path):
     """The installer ships the repo's slash commands and keeps user edits."""
-    repo_commands = Path(__file__).resolve().parents[1] / ".opencode" / "commands"
-    expected = {
-        path.name: path.read_text(encoding="utf-8")
-        for path in repo_commands.glob("*.md")
-    }
+    expected = _repo_commands()
     assert set(expected) == {"commune.md", "counsel.md", "inscribe.md", "recall.md"}
     commands = tmp_path / ".opencode" / "commands"
     commands.mkdir(parents=True)
@@ -252,3 +249,60 @@ def test_install_creates_repo_command_files_without_overwriting(tmp_path):
     assert (commands / "recall.md").read_text(encoding="utf-8") == "my recall"
     for name in ("commune.md", "counsel.md", "inscribe.md"):
         assert (commands / name).read_text(encoding="utf-8") == expected[name]
+
+
+def _repo_commands() -> dict[str, str]:
+    repo_commands = Path(__file__).resolve().parents[1] / ".opencode" / "commands"
+    return {
+        path.name: path.read_text(encoding="utf-8")
+        for path in repo_commands.glob("*.md")
+    }
+
+
+def test_packaged_commands_match_the_repo_commands():
+    """The shipped copies must not drift from the ones the repo uses."""
+    assert _repo_commands() == COMMAND_TEMPLATES
+
+
+def test_force_overwrites_commands_and_dry_run_writes_nothing(tmp_path):
+    ok, msg = install_opencode(
+        str(tmp_path), dry_run=True, bridge_config_root=tmp_path / "host-config"
+    )
+    assert ok, msg
+    assert "[create] .opencode/commands/recall.md" in msg
+    assert not (tmp_path / ".opencode" / "commands" / "recall.md").exists()
+
+    assert install_opencode(str(tmp_path), bridge_config_root=tmp_path / "host-config")[
+        0
+    ]
+    recall = tmp_path / ".opencode" / "commands" / "recall.md"
+    recall.write_text("edited", encoding="utf-8")
+
+    ok, msg = install_opencode(
+        str(tmp_path), force=True, bridge_config_root=tmp_path / "host-config"
+    )
+
+    assert ok, msg
+    assert "[overwrite] .opencode/commands/recall.md" in msg
+    assert recall.read_text(encoding="utf-8") == COMMAND_TEMPLATES["recall.md"]
+
+
+def test_installer_refuses_to_write_through_a_symlink(tmp_path):
+    """A cloned repo must not steer the installer outside the project."""
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    project = tmp_path / "project"
+    (project / ".opencode" / "commands").mkdir(parents=True)
+    link = project / ".opencode" / "commands" / "recall.md"
+    try:
+        link.symlink_to(outside / "stolen.md")
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks are unavailable")
+
+    ok, msg = install_opencode(
+        str(project), bridge_config_root=tmp_path / "host-config"
+    )
+
+    assert not ok
+    assert "link" in msg
+    assert not (outside / "stolen.md").exists()

@@ -246,13 +246,33 @@ class TestCapabilityRegistry(unittest.TestCase):
             },
         )
 
-    def test_explicit_false_disables_an_installed_profile(self):
-        """The variable still turns an installed profile off."""
+    def test_an_empty_value_is_treated_as_unset(self):
+        """An empty variable means auto, as an unset one does."""
         from daem0nmcp.capabilities import CapabilityRegistry
+
+        installed = CapabilityRegistry(
+            environ={"DAEM0NMCP_GRAPH_ENABLED": "  "},
+            module_available=lambda _: True,
+        ).get("graph")
+        missing = CapabilityRegistry(
+            environ={"DAEM0NMCP_GRAPH_ENABLED": ""},
+            module_available=lambda _: False,
+        ).get("graph")
+
+        self.assertEqual(installed["status"], "ready")
+        self.assertEqual(missing["status"], "disabled")
+        self.assertEqual(missing["remediation"]["action"], "install_extra")
+
+    def test_explicit_false_disables_an_installed_profile(self):
+        """The variable still turns an installed profile off, without probing."""
+        from daem0nmcp.capabilities import CapabilityRegistry
+
+        def probe(distribution):
+            raise AssertionError(f"probed {distribution} for a disabled profile")
 
         capability = CapabilityRegistry(
             environ={"DAEM0NMCP_GRAPH_ENABLED": "false"},
-            module_available=lambda _: True,
+            module_available=probe,
         ).get("graph")
 
         self.assertEqual(capability["status"], "disabled")
@@ -303,6 +323,7 @@ class TestCapabilityRegistry(unittest.TestCase):
         self.assertEqual(
             capability["remediation"]["environment"], "DAEM0NMCP_MODELS_LOCAL_ENABLED"
         )
+        self.assertIn("unset", capability["remediation"]["message"])
 
     def test_ready_profile_checks_only_the_requested_profile(self):
         """Capability inspection must not import or probe every optional subsystem."""

@@ -1586,6 +1586,30 @@ class DiscoveryOperationTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(loaded)
         self.assertEqual("CAPABILITY_DISABLED", raised.exception.code)
         self.assertEqual("apps", raised.exception.capability_states[0].name)
+        self.assertIn(
+            "daem0nmcp[apps]", raised.exception.capability_states[0].remediation
+        )
+
+    async def test_each_apps_status_names_its_own_remedy(self) -> None:
+        """An invalid setting is a configuration fix, not a missing package."""
+        from daem0nmcp.api.v7.discovery_operations import _code_capability_error
+
+        remedies = {}
+        for status in ("disabled", "degraded", "failed"):
+            error = _code_capability_error(
+                SimpleNamespace(capability_statuses={"apps": status})
+            )
+            assert error is not None
+            remedies[status] = error.capability_states[0].remediation
+
+        self.assertIn("unless DAEM0NMCP_APPS_ENABLED=false", remedies["disabled"])
+        self.assertEqual(remedies["degraded"], remedies["disabled"])
+        self.assertIn("true, false, or leave it unset", remedies["failed"])
+        self.assertIsNone(
+            _code_capability_error(
+                SimpleNamespace(capability_statuses={"apps": "ready"})
+            )
+        )
 
     async def test_code_index_source_change_rolls_back_before_publish(self) -> None:
         from daem0nmcp.api.v7.discovery_operations import (
