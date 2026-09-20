@@ -162,7 +162,7 @@ def _quoted_identifier(name: str) -> str:
 
 
 def _readonly_connection(path: Path) -> sqlite3.Connection:
-    # Migration dry-run must not write any byte.  On Windows the no-lock VFS
+    # A dry run never changes the source database.  On Windows the no-lock VFS
     # keeps read-only connections off the ``-shm`` read marks.  POSIX has no
     # equivalent: ``unix-none`` lacks shared memory, so it cannot open a WAL
     # database at all.  There, with no ``-wal``, ``-shm`` or ``-journal`` the
