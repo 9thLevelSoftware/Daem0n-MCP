@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import itertools
 import json
 import sqlite3
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
@@ -391,13 +393,53 @@ class RetrievalProjectionJobTests(unittest.TestCase):
         from daem0nmcp.retrieval.jobs import ProjectionJobRunner
 
         self._queue_job()
+        lease_duration_us = 1_000_000
+        contended = threading.Event()
+        contentions = itertools.count(1)
+
+        class _CountingConnection(sqlite3.Connection):
+            """Report when the heartbeat has really hit its busy timeout."""
+
+            def execute(self, sql, parameters=()):  # type: ignore[override]
+                try:
+                    return super().execute(sql, parameters)
+                except sqlite3.OperationalError:
+                    if sql.startswith("BEGIN EXCLUSIVE") and next(contentions) >= 2:
+                        contended.set()
+                    raise
+
+        def heartbeat_connection():
+            return sqlite3.connect(
+                self.database_path, timeout=1.0, factory=_CountingConnection
+            )
 
         def write_locked_build(_workspace_id):
             self.connection.execute("BEGIN IMMEDIATE")
             self.connection.execute(
                 "UPDATE background_jobs SET result_json=result_json"
             )
-            time.sleep(1.25)
+            claimed_lease_us = int(
+                self.connection.execute(
+                    "SELECT lease_expires_at_us FROM background_jobs"
+                ).fetchone()[0]
+            )
+            # Hold SQLite's writer lock until the heartbeat has provably been
+            # through its busy timeout more than once AND the lease it was
+            # claimed under has expired.  Waiting on those two facts, rather
+            # than sleeping a duration chosen to outlast them, is what makes
+            # the contention this test is about deterministic under load.
+            deadline = time.monotonic() + 60
+            while True:
+                expired = time.time_ns() // 1_000 > claimed_lease_us
+                if contended.is_set() and expired:
+                    break
+                self.assertLess(
+                    time.monotonic(),
+                    deadline,
+                    f"heartbeat never contended (contended={contended.is_set()}, "
+                    f"lease expired={expired})",
+                )
+                time.sleep(0.02)
             self.connection.commit()
 
         runner = ProjectionJobRunner(
@@ -406,12 +448,15 @@ class RetrievalProjectionJobTests(unittest.TestCase):
             clock_us=lambda: time.time_ns() // 1_000,
             lease_owner="test-worker",
             token_factory=lambda: "lease-token",
-            lease_duration_us=100_000,
-            heartbeat_interval_us=20_000,
+            lease_duration_us=lease_duration_us,
+            heartbeat_interval_us=50_000,
+            heartbeat_connection_factory=heartbeat_connection,
             retry_delay_us=1,
         )
 
         result = runner.run_once()
+
+        self.assertTrue(contended.is_set())
 
         self.assertEqual("succeeded", result.status)
         self.assertEqual(
