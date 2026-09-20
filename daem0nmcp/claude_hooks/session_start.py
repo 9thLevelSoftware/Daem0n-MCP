@@ -26,11 +26,6 @@ _MOVED_NOTE = (
 )
 
 
-def _workspace_id(project_path: str) -> str:
-    """Return the resolved opaque ID for the hook's configured project root."""
-    return workspace_identity(project_path).workspace_id
-
-
 def _hook_message(identity: WorkspaceIdentity) -> str:
     """Name the workspace to brief, or say why the folder is blocked."""
     if identity.blocked is not None:
