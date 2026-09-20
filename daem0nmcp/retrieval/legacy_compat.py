@@ -12,7 +12,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from ..api.v7.models import contains_absolute_filesystem_path
 from ..event_store import (
     event_hash_for,
     event_id_for_hash,
@@ -57,9 +56,8 @@ def _safe_legacy_context(value: object) -> dict[str, Any] | None:
         ).encode("utf-8")
     except (TypeError, ValueError, RecursionError):
         return None
-    if len(encoded) > _MAX_LEGACY_CONTEXT_BYTES or contains_absolute_filesystem_path(
-        value
-    ):
+    # Context is user text and may mention paths (UD-3).
+    if len(encoded) > _MAX_LEGACY_CONTEXT_BYTES:
         return None
     # Detach the value from the parsed event payload before it reaches a cache.
     copied = json.loads(encoded.decode("utf-8"))

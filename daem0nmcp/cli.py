@@ -16,7 +16,7 @@ Usage:
     python -m daem0nmcp.cli install-hooks [--force]
     python -m daem0nmcp.cli uninstall-hooks
     python -m daem0nmcp.cli install-claude-hooks [--dry-run]
-    python -m daem0nmcp.cli uninstall-claude-hooks [--dry-run]
+    python -m daem0nmcp.cli [--project-path P] uninstall-claude-hooks [--dry-run] [--remove-credentials]
     python -m daem0nmcp.cli install-opencode [--dry-run] [--force]
     python -m daem0nmcp.cli watch [--debounce SECONDS] [--no-system] [--no-log] [--no-poll]
     python -m daem0nmcp.cli index [--path PATH] [--patterns *.py *.ts ...]
@@ -483,6 +483,16 @@ def main():
     uninstall_claude_parser.add_argument(
         "--dry-run", action="store_true", help="Show what would change"
     )
+    uninstall_claude_parser.add_argument(
+        "--remove-credentials",
+        action="store_true",
+        help="Also delete the project's local edit-bridge credential",
+    )
+    for claude_parser in (install_claude_parser, uninstall_claude_parser):
+        # Also accept --project-path after the subcommand (default: cwd).
+        claude_parser.add_argument(
+            "--project-path", default=argparse.SUPPRESS, help="Project root path"
+        )
 
     # install-opencode command
     install_oc_parser = subparsers.add_parser(
@@ -958,7 +968,9 @@ def main():
         from .claude_hooks.install import uninstall_claude_hooks
 
         success, message = uninstall_claude_hooks(
-            dry_run=getattr(args, "dry_run", False)
+            dry_run=getattr(args, "dry_run", False),
+            project_path=args.project_path or os.getcwd(),
+            remove_credentials=args.remove_credentials,
         )
         if args.json:
             print(json.dumps({"success": success, "message": message}))

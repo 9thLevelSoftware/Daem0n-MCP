@@ -1242,7 +1242,7 @@ class BasicServiceTests(
 
         with self.assertRaisesRegex(
             RuntimeServiceError,
-            "UNSAFE_SERVICE_OUTPUT",
+            "BRIEFING_FAILED",
         ) as leak:
             await BasicBriefingService(reader=leaky_reader).assemble(
                 self.workspace,

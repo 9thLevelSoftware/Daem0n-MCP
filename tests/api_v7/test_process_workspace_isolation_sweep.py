@@ -13,8 +13,11 @@ arguments where A's would only be refused.  Two targets are swept:
 
 No target response may carry A's text, A's canary token, A's IDs or A's
 workspace ID; A's database may not change; a rejected call may not change the
-target; and no string or key anywhere may carry a registered root or the home
-directory.  Every call's outcome is pinned.
+target; and no string or key outside a ``UserText`` field may carry a
+registered root or the home directory.  Each target stores a note naming its
+own root, which user text may do (UD-3), so the fields that echo it are found
+from the same response models the server validates against, never by field
+name.  Every call's outcome is pinned.
 
 Pass 2 relaunches A and B over HTTP with a JWT principal granted only A.
 Every call that targets B, directly or as a consolidation or federation
@@ -38,9 +41,18 @@ from typing import Any
 import pytest
 from fastmcp import Client
 from mcp.shared.exceptions import McpError
+from pydantic import BaseModel, ValidationError
 
+from daem0nmcp.api.v7.models import ApiResponse, RecordSummary, guarded_strings
 from daem0nmcp.api.v7.policy import V7_TOOL_LEVELS
 from daem0nmcp.api.v7.production import create_v7_server
+from daem0nmcp.api.v7.resources import (
+    ActiveContextResourceDocument,
+    FailureResourceDocument,
+    RuleResourceDocument,
+    WarningResourceDocument,
+)
+from daem0nmcp.api.v7.tools import TOOL_DATA_MODELS, DiagnosticSummary
 from daem0nmcp.config import Settings
 from daem0nmcp.covenant import CovenantLevel
 from daem0nmcp.storage_activation import resolve_active_database
@@ -93,6 +105,43 @@ _DERIVED_TABLE_PREFIXES = (
 )
 
 Invoke = Callable[[str, dict[str, Any]], Awaitable[dict[str, Any]]]
+
+RESOURCE_MODELS: dict[str, type[BaseModel]] = {
+    "warnings": WarningResourceDocument,
+    "failures": FailureResourceDocument,
+    "rules": RuleResourceDocument,
+    "active-context": ActiveContextResourceDocument,
+}
+
+
+def _response_model(tool: str) -> type[BaseModel]:
+    return ApiResponse[TOOL_DATA_MODELS[tool]]  # type: ignore[name-defined]
+
+
+# Marks the one piece of user text allowed to name a host path: the note each
+# target stores about its own root.
+NOTE_MARKER = "sweepnote4b1d"
+
+
+def _host_path_leaks(
+    model: type[BaseModel], document: Any, needles: set[str]
+) -> list[str]:
+    """Strings that contain a host path needle, other than the stored note.
+
+    Every string is scanned, UserText fields included, so server-assembled
+    user-text fields (excerpts, rendered context, TODO text, mermaid) stay
+    watched.  A hit is allowed only in a UserText field whose text carries the
+    note's marker.  Validating against the response model also refuses any
+    absolute path in a server-generated field, whatever its spelling.
+    """
+    validated = model.model_validate(document, strict=False)
+    guarded = set(guarded_strings(validated))
+    return [
+        value
+        for value in _strings(document)
+        if any(needle in value.lower() for needle in needles)
+        and (value in guarded or NOTE_MARKER not in value)
+    ]
 
 
 def _placeholder(prefix: str) -> str:
@@ -641,6 +690,36 @@ def _is_protected(tool: str) -> bool:
     return V7_TOOL_LEVELS[tool] in {CovenantLevel.COUNSEL, CovenantLevel.DESTRUCTIVE}
 
 
+def test_leak_check_exempts_user_text_by_annotation_only(tmp_path):
+    needles = {str(tmp_path).lower(), "alpha-private-root"}
+    summary = {
+        "record_id": "mem_" + "1" * 64,
+        "record_type": "warning",
+        "excerpt": f"Target note {NOTE_MARKER}: see {tmp_path}",
+        "tags": ["/health"],
+        "current_status": "current",
+        "content_hash": "a" * 64,
+        "created_at": "2026-08-08T12:00:00Z",
+        "updated_at": "2026-08-08T12:00:00Z",
+    }
+    assert _host_path_leaks(RecordSummary, summary, needles) == []
+    # A root in user text the server assembled on its own is still caught.
+    unmarked = {**summary, "excerpt": f"Rendered from {tmp_path}"}
+    assert _host_path_leaks(RecordSummary, unmarked, needles) == [
+        f"Rendered from {tmp_path}"
+    ]
+    # The same root in a server-generated field is refused by the model...
+    with pytest.raises(ValidationError):
+        _host_path_leaks(
+            DiagnosticSummary, {"code": "X_Y", "message": f"at {tmp_path}"}, needles
+        )
+    # ...and a spelling the path rule does not see is found by the scan.
+    leaked = {"code": "X_Y", "message": "at alpha-private-root"}
+    assert _host_path_leaks(DiagnosticSummary, leaked, needles) == [
+        "at alpha-private-root"
+    ]
+
+
 def test_every_manifest_tool_is_swept_or_declared_cross_workspace():
     swept = set(_sweep_arguments(Seed()))
     cross = set(CROSS_WORKSPACE_TOOLS)
@@ -666,7 +745,9 @@ class Sweep:
         self.needles = needles | {Path(n).as_posix().lower() for n in needles}
         self.observed: dict[str, dict[str, list[str]]] = {}
 
-    def check(self, label: str, response: Any, request: Any) -> None:
+    def check(
+        self, label: str, response: Any, request: Any, model: type[BaseModel]
+    ) -> None:
         echoed = set(_strings(request))
         for value in _strings(response):
             for secret in self.forbidden:
@@ -674,19 +755,31 @@ class Sweep:
             # A bare canary may appear only as an exact echo of the request
             # (memory_verify returns its claim).
             assert CANARY not in value or value in echoed, f"{label}: {value!r}"
-            lowered = value.lower()
-            for needle in self.needles:
-                assert needle not in lowered, f"{label}: host path in {value!r}"
+        leaks = _host_path_leaks(model, response, self.needles)
+        assert not leaks, f"{label}: host path in {leaks!r}"
         assert _ledger_counts(self.a_root) == self.a_ledger, f"{label} changed A"
 
     async def run(self, client, name: str, target: str, root: Path) -> None:
         invoke = _invoker(client)
         observed = self.observed.setdefault(name, {})
         assert (await invoke("session_brief", {"workspace_id": target}))["ok"]
+        # The target's own note names its root.  Reads echo it only in
+        # UserText fields; the leak check must pass without a name exemption.
+        # The marker is in the file name too, so a file entity the graph
+        # extracts from the note (POSIX paths only) carries it as well.
+        marked = root / "src" / f"{NOTE_MARKER}.py"
+        note = {
+            "record_type": "warning",
+            "content": f"Target note {NOTE_MARKER}: see {marked}",
+            "idempotency_key": f"sweep-{name}-host-note-0001",
+        }
+        assert (await _protected(invoke, target, "memory_store", note))["ok"]
         own: dict[str, str] = {}
         for tool, arguments in OWN_VARIANTS:
             response = await _target_call(invoke, target, tool, arguments)
-            self.check(f"{name}:{tool} (own)", response, arguments)
+            self.check(
+                f"{name}:{tool} (own)", response, arguments, _response_model(tool)
+            )
             own[tool] = _code(response)
             if tool == "code_search" and APPS_AVAILABLE:
                 # The scan must cover real results, not an empty page.
@@ -705,19 +798,16 @@ class Sweep:
             for variant in variants:
                 before = _ledger_counts(root)
                 response = await _target_call(invoke, target, tool, variant)
-                self.check(f"{name}:{tool}", response, variant)
+                self.check(f"{name}:{tool}", response, variant, _response_model(tool))
                 if not response["ok"]:
                     assert _ledger_counts(root) == before, f"{name}:{tool} wrote"
                 observed.setdefault(tool, []).append(_code(response))
         for tool, code in own.items():
             observed[tool].append(code)
-        templates = [
-            f"memory://workspaces/{target}/{kind}"
-            for kind in ("warnings", "failures", "rules", "active-context")
-        ]
-        for uri in templates:
-            contents = await client.read_resource(uri)
-            self.check(uri, [json.loads(item.text) for item in contents], uri)
+        for kind, model in RESOURCE_MODELS.items():
+            uri = f"memory://workspaces/{target}/{kind}"
+            for item in await client.read_resource(uri):
+                self.check(uri, json.loads(item.text), uri, model)
 
     def assert_pinned(self, name: str) -> None:
         for tool, codes in sorted(self.observed[name].items()):
@@ -802,7 +892,7 @@ async def _cross_workspace_checks(invoke, sweep, a, b, b_root, seed) -> list[str
     async def refused(tool, arguments, code):
         before = _ledger_counts(b_root)
         response = await _target_call(invoke, b, tool, arguments)
-        sweep.check(f"B:{tool}", response, arguments)
+        sweep.check(f"B:{tool}", response, arguments, _response_model(tool))
         assert _code(response) == code, (tool, response)
         assert _ledger_counts(b_root) == before, tool
 

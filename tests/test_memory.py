@@ -306,8 +306,15 @@ class TestMemoryManager:
         assert selected["record_id"].startswith("mem_")
         assert selected["evidence_refs"][0]["record_id"] == selected["record_id"]
         assert selected["origin_workspace_id"].startswith("ws_")
-        # Public absolute paths are never re-exposed through legacy context.
-        assert selected["context"] is None
+        # Context is user text and may mention paths (UD-3); it comes back as
+        # stored, while the provenance fields stay opaque and path-free.
+        assert selected["context"] == {"reason": r"stored beside C:\private\source.py"}
+        provenance = [
+            selected["record_id"],
+            selected["origin_workspace_id"],
+            *map(str, selected["evidence_refs"]),
+        ]
+        assert not any("private" in value for value in provenance), provenance
 
     @pytest.mark.asyncio
     async def test_failed_decisions_boosted(self, memory_manager):

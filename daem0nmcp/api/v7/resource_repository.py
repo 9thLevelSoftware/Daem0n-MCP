@@ -338,32 +338,6 @@ def _string_list(value: object) -> list[str]:
     return decoded
 
 
-def _workspace_root_tokens(workspace: Workspace) -> tuple[str, ...]:
-    root = str(workspace.root)
-    variants = {root.casefold(), root.replace("\\", "/").casefold()}
-    return tuple(value for value in variants if value)
-
-
-def _reject_canonical_root(value: object, workspace: Workspace) -> None:
-    tokens = _workspace_root_tokens(workspace)
-
-    def walk(item: object) -> None:
-        if isinstance(item, str):
-            normalized = item.casefold()
-            portable = item.replace("\\", "/").casefold()
-            if any(token in normalized or token in portable for token in tokens):
-                raise ValueError("public value contains a canonical workspace root")
-        elif isinstance(item, Mapping):
-            for key, child in item.items():
-                walk(key)
-                walk(child)
-        elif isinstance(item, (list, tuple)):
-            for child in item:
-                walk(child)
-
-    walk(value)
-
-
 def _validated_now(clock: Callable[[], datetime]) -> datetime:
     value = clock()
     if (
@@ -1161,7 +1135,6 @@ class SQLiteResourceRepository:
             "created_at": _datetime_from_us(row["created_at_us"]),
             "updated_at": _datetime_from_us(row["updated_at_us"]),
         }
-        _reject_canonical_root(public_value, workspace)
         return RecordSummary.model_validate(public_value), deleted
 
     def _read_rules_sync(
@@ -1207,7 +1180,6 @@ class SQLiteResourceRepository:
                     "enabled": _flag(row["enabled"]),
                     "created_at": _datetime_from_us(row["created_at_us"]),
                 }
-                _reject_canonical_root(public_value, workspace)
                 values.append(RuleView.model_validate(public_value))
             return values
         finally:
@@ -1433,7 +1405,6 @@ class SQLiteResourceRepository:
                         "added_at": added_at,
                         "expires_at": expires_at,
                     }
-                    _reject_canonical_root(public_value, workspace)
                     item = ActiveContextItem.model_validate(public_value)
                     ordered_values.append(
                         (

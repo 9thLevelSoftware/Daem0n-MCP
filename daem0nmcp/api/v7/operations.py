@@ -24,6 +24,8 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Any
 
+from pydantic import TypeAdapter, ValidationError
+
 from ...bounded_workers import BoundedWorkerBusyError, BoundedWorkerPool
 from ...covenant import CovenantGate, InvocationScope
 from ...event_store import (
@@ -51,7 +53,7 @@ from ...storage_activation import (
 from ...workspace import Workspace
 from .application import AdmittedRequest
 from .errors import STABLE_ERROR_CODE_SET
-from .models import EvidenceRef, Page, RecordSummary
+from .models import EvidenceRef, Page, RecordSummary, RelativePath
 from .portable_projections import (
     ImportFinalizationLease,
     PortableTransferError,
@@ -89,8 +91,10 @@ _FORMAT_VERSION = 7
 _MAX_EXPORT_EVENTS = 10_000
 _IMPORT_LEASE_RENEW_MARGIN_US = 5 * 60 * 1_000_000
 _CURSOR_RE = re.compile(r"^cur_([0-9a-f]{64})$")
-_WINDOWS_ABSOLUTE_PATH = re.compile(r"(?<![A-Za-z0-9])(?:[A-Za-z]:[\\/]|\\\\)")
-_POSIX_ABSOLUTE_PATH = re.compile(r"(?:^|[\s\"'=(])/(?!/)[A-Za-z0-9_.-]")
+# Host-path columns that are always empty in v7 payloads.
+_RAW_PATH_KEYS = frozenset({"file_path", "project_path", "database_path"})
+_RELATIVE_PATH_KEYS = frozenset({"relative_file_path", "file_path_relative"})
+_RELATIVE_PATH_ADAPTER: TypeAdapter[str] = TypeAdapter(RelativePath)
 _EVENT_COLUMNS = (
     "event_id,workspace_id,stream_id,stream_kind,stream_version,event_type,"
     "event_schema_version,occurred_at_us,recorded_at_us,actor_type,actor_id,"
@@ -447,21 +451,22 @@ def _validate_bundle(bundle: Mapping[str, Any], workspace_id: str) -> None:
 
 
 def _reject_raw_paths(value: object) -> None:
-    if isinstance(value, str):
-        if (
-            _WINDOWS_ABSOLUTE_PATH.search(value) is not None
-            or _POSIX_ABSOLUTE_PATH.search(value) is not None
-        ):
-            raise CoreOperationError("WORKSPACE_PATH_ESCAPE")
-    elif isinstance(value, Mapping):
+    """Refuse host paths in the structured path fields of an event payload.
+
+    Free text (content, rationale, rule text, context) is user text and may
+    mention paths, as on the wire.
+    """
+    if isinstance(value, Mapping):
         for key, item in value.items():
-            if (
-                key in {"file_path", "project_path", "database_path"}
-                and item is not None
-                and item != ""
-            ):
+            if key in _RAW_PATH_KEYS and item is not None and item != "":
                 raise CoreOperationError("WORKSPACE_PATH_ESCAPE")
-            _reject_raw_paths(item)
+            if key in _RELATIVE_PATH_KEYS and item is not None:
+                try:
+                    _RELATIVE_PATH_ADAPTER.validate_python(item)
+                except ValidationError:
+                    raise CoreOperationError("WORKSPACE_PATH_ESCAPE") from None
+            if key != "context":
+                _reject_raw_paths(item)
     elif isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
         for item in value:
             _reject_raw_paths(item)
@@ -995,6 +1000,8 @@ def _export_sync(
             content = page["content"]
             manifest = page["manifest"]
             items = content["items"]
+            if page["page_kind"] == "legacy":
+                _reject_raw_paths(items)
             descriptor = page.get(
                 "page_descriptor",
                 {
@@ -1053,6 +1060,7 @@ def _portable_page(bundle: ExportBundle) -> dict[str, Any]:
         items = [event.model_dump(mode="json") for event in bundle.events]
     elif bundle.page_kind == "legacy":
         items = list(bundle.legacy_rows)
+        _reject_raw_paths(items)
     else:
         items = [point.model_dump(mode="json") for point in bundle.vector_points]
     return {

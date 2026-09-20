@@ -469,22 +469,21 @@ class SQLiteResourceRepositoryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(by_id[deleted].item.current_status, "invalidated")
         self.assertTrue(by_id[deleted].deleted)
 
-    async def test_canonical_root_embedded_in_public_text_fails_closed(self) -> None:
-        # Catches free-text fields bypassing the path-safe structured field policy.
-        self.fixture.add_record(
-            12,
-            content=f"do not expose {self.fixture.workspace_root / 'secret.py'}",
-        )
+    async def test_user_text_naming_the_workspace_root_reads_back(self) -> None:
+        # User text may mention paths, the root included (UD-3); one such
+        # warning must not make the resource unreadable.
+        content = f"see {self.fixture.workspace_root / 'app.py'}"
+        record_id = self.fixture.add_record(12, content=content)
         repository = self._repository()
-        from daem0nmcp.api.v7.resource_repository import ResourceRepositoryError
 
-        with self.assertRaises(ResourceRepositoryError):
-            await repository.read_warnings(
-                self.fixture.workspace,
-                ResourceReadRequest(
-                    kind="warnings", limit=1, order_by="updated_at_desc"
-                ),
-            )
+        rows = await repository.read_warnings(
+            self.fixture.workspace,
+            ResourceReadRequest(kind="warnings", limit=1, order_by="updated_at_desc"),
+        )
+
+        self.assertEqual(
+            [(record_id, content)], [(r.item.record_id, r.item.excerpt) for r in rows]
+        )
 
     async def test_rules_use_canonical_ids_and_highest_priority_enabled_order(
         self,

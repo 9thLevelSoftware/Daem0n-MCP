@@ -27,7 +27,6 @@ from daem0nmcp.claude_hooks.post_edit import handle_post_edit
 from daem0nmcp.claude_hooks.post_edit_preflight import (
     handle_edit_preflight_response,
 )
-from daem0nmcp.claude_hooks.pre_edit import handle_pre_edit
 from daem0nmcp.covenant import InvocationScope
 from daem0nmcp.database import DatabaseManager
 from daem0nmcp.edit_bridge import (
@@ -51,6 +50,7 @@ from daem0nmcp.edit_host import (
     provision_remote_bridge_installation,
 )
 from daem0nmcp.workspace import WorkspaceRegistry
+from tests.native_edit_host import drive_native_edit
 
 SECRET = "bridge-secret-" + "x" * 48
 AUTHKEY = b"local-auth-key-" + b"y" * 32
@@ -510,8 +510,8 @@ async def test_remote_hooks_bind_different_desktop_root_to_server_workspace(
     }
     try:
         with patch.dict(os.environ, environment, clear=False):
-            denied = handle_pre_edit(first_event, str(client_root))
-        assert not denied.allowed
+            denied = drive_native_edit(first_event, str(client_root))
+        assert not denied
         assert (
             workspace.workspace_id
             != WorkspaceRegistry(default_root=client_root).default.workspace_id
@@ -567,8 +567,8 @@ async def test_remote_hooks_bind_different_desktop_root_to_server_workspace(
         )
         retry_event = {**first_event, "tool_use_id": "remote-allowed-2"}
         with patch.dict(os.environ, environment, clear=False):
-            allowed = handle_pre_edit(retry_event, str(client_root))
-        assert allowed.allowed
+            allowed = drive_native_edit(retry_event, str(client_root))
+        assert allowed
         target.write_text("after", encoding="utf-8")
         with patch.dict(os.environ, environment, clear=False):
             assert handle_post_edit(retry_event, str(client_root))

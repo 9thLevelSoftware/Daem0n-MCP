@@ -23,6 +23,7 @@ from .models import (
     AwareDateTime,
     RecordSummary,
     RuleId,
+    UserText,
     UtcDateTime,
     WireModel,
     WorkspaceId,
@@ -49,8 +50,9 @@ _WORKSPACE_ID_ADAPTER = TypeAdapter(WorkspaceId)
 _UTC_DATETIME_ADAPTER = TypeAdapter(UtcDateTime)
 _ACCESS_FAILURE = object()
 
+# Rule text is user-authored and may mention paths.
 BoundedText = Annotated[
-    str,
+    UserText,
     StringConstraints(strict=True, min_length=1, max_length=2000),
 ]
 
@@ -91,7 +93,7 @@ class ActiveContextItem(WireModel):
     priority: Annotated[int, Field(strict=True, ge=-100, le=100)]
     reason: (
         Annotated[
-            str,
+            UserText,
             StringConstraints(strict=True, min_length=1, max_length=2000),
         ]
         | None
