@@ -13,7 +13,7 @@ from daem0nmcp.api.v7.runtime_services import WorkspaceStorageResolver
 from daem0nmcp.database import DatabaseManager
 from daem0nmcp.event_store import EventCommand, EventStore
 from daem0nmcp.workspace import WorkspaceRegistry
-from tests.api_v7.process_client import process_client, succeed
+from tests.api_v7.process_client import call, process_client, succeed
 from tests.api_v7.test_process_surface import _preflight, _store
 
 
@@ -39,6 +39,34 @@ async def _export_pages(session, scope, legacy):
         )
         pages.append(page)
     return pages
+
+
+async def _import_retrying_while_busy(session, scope, arguments):
+    """Import one page, waiting out a concurrent writer's SQLite write lock.
+
+    A projection drain or dreaming job can hold the write lock past the server's
+    busy timeout, which the transfer reports as the retryable DATABASE_IN_USE.
+    A real client retries it; so does this test, within a bounded deadline.
+    """
+
+    deadline = asyncio.get_running_loop().time() + 30
+    while True:
+        result = await call(
+            session,
+            "workspace_import",
+            {
+                **scope,
+                **arguments,
+                "preflight_token": await _preflight(
+                    session, scope, "workspace_import", arguments
+                ),
+            },
+        )
+        if result["ok"]:
+            return result["data"]
+        assert result["error"]["code"] == "DATABASE_IN_USE", result["error"]
+        assert asyncio.get_running_loop().time() < deadline, result["error"]
+        await asyncio.sleep(0.5)
 
 
 @pytest.mark.parametrize("transport", ["stdio", "streamable-http"])
@@ -79,8 +107,10 @@ async def test_production_export_restores_retained_workspace(
     retained = tmp_path / ".daem0nmcp" / "retained-before-restore"
     assert storage.resolve().is_relative_to(tmp_path.resolve())
     assert retained.resolve().is_relative_to(tmp_path.resolve())
-    # Windows may briefly keep a handle open inside storage after the server
-    # exits (seen with the graph profile on), so retry within a bounded deadline.
+    # Windows can briefly refuse the rename after the server exits. The cause is
+    # unconfirmed (the venv launcher's real interpreter is a grandchild the
+    # harness does not wait for, or a virus scanner reading the fresh files);
+    # no product code renames storage. Retry within a bounded deadline.
     rename_deadline = asyncio.get_running_loop().time() + 15
     while True:
         try:
@@ -101,17 +131,7 @@ async def test_production_export_restores_retained_workspace(
             }
             if import_id is not None:
                 arguments["import_session_id"] = import_id
-            staged = await succeed(
-                session,
-                "workspace_import",
-                {
-                    **scope,
-                    **arguments,
-                    "preflight_token": await _preflight(
-                        session, scope, "workspace_import", arguments
-                    ),
-                },
-            )
+            staged = await _import_retrying_while_busy(session, scope, arguments)
             import_id = staged["import_session_id"]
             assert staged["staged_pages"] == index + 1
             assert staged["imported"] == 0
@@ -120,17 +140,7 @@ async def test_production_export_restores_retained_workspace(
             "finalize": True,
             "idempotency_key": "portable-process-import-0001",
         }
-        restored = await succeed(
-            session,
-            "workspace_import",
-            {
-                **scope,
-                **finish,
-                "preflight_token": await _preflight(
-                    session, scope, "workspace_import", finish
-                ),
-            },
-        )
+        restored = await _import_retrying_while_busy(session, scope, finish)
         assert restored["status"] == "succeeded"
         assert restored["imported"] == 2
         assert restored["root_hash"] == expected_root

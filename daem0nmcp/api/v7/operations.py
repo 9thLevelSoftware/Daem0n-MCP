@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import hmac
+import logging
 import os
 import re
 import secrets
@@ -138,6 +139,8 @@ _UNIX_EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
 # This is intentionally not the event loop's default executor.  The semaphore
 # remains owned by the concurrent future after an asyncio waiter is cancelled,
 # so cancellation cannot release capacity while SQLite still holds a lock.
+_LOGGER = logging.getLogger(__name__)
+
 _CORE_OPERATION_WORKERS = BoundedWorkerPool(
     max_workers=4,
     thread_name_prefix="daem0nmcp-v7-core",
@@ -216,6 +219,42 @@ def _validated_storage_path(
     except (OSError, RuntimeError, TypeError, ValueError) as exc:
         raise CoreOperationError("WORKSPACE_PATH_ESCAPE") from exc
     return resolved
+
+
+# SQLITE_BUSY and SQLITE_LOCKED, with their extended result codes.
+_SQLITE_BUSY_CODES = frozenset({5, 6, 261, 262, 513, 517})
+
+
+def _is_database_busy(error: BaseException) -> bool:
+    if not isinstance(error, sqlite3.OperationalError):
+        return False
+    code = getattr(error, "sqlite_errorcode", None)  # Python 3.11+
+    if isinstance(code, int):
+        return code in _SQLITE_BUSY_CODES
+    return "is locked" in str(error)
+
+
+def _portable_failure_code(error: BaseException, operation: str) -> str:
+    """Name a transfer failure the caller can act on, and log its cause.
+
+    A concurrent writer (a projection drain or a dreaming job) can hold the
+    SQLite write lock past the busy timeout while a transfer does its session
+    bookkeeping. That is a transient, retryable condition, not an invalid
+    bundle, and reporting it as one leaves the caller with no next step.
+    """
+
+    seen: set[int] = set()
+    cause: BaseException | None = error
+    while cause is not None and id(cause) not in seen:
+        seen.add(id(cause))
+        if _is_database_busy(cause):
+            _LOGGER.warning("%s deferred: %s", operation, cause)
+            return "DATABASE_IN_USE"
+        cause = cause.__cause__ or cause.__context__
+    _LOGGER.warning(
+        "%s rejected the bundle: %s", operation, type(error).__name__, exc_info=error
+    )
+    return "IMPORT_INVALID"
 
 
 def _verify_schema(connection: sqlite3.Connection) -> None:
@@ -1028,9 +1067,14 @@ def _export_sync(
         except CoreOperationError:
             raise
         except PortableTransferError as exc:
-            raise CoreOperationError(exc.code) from exc
+            code = exc.code
+            if code == "IMPORT_INVALID":
+                code = _portable_failure_code(exc, "workspace_export")
+            raise CoreOperationError(code) from exc
         except Exception as exc:
-            raise CoreOperationError("IMPORT_INVALID") from exc
+            raise CoreOperationError(
+                _portable_failure_code(exc, "workspace_export")
+            ) from exc
 
 
 def _journal_payload(bundle: ExportBundle, merge: bool) -> dict[str, Any]:
@@ -1446,7 +1490,10 @@ def _import_v2_sync(
             if vector_candidate is not None:
                 vector_candidate.discard(connection, workspace.workspace_id)
                 vector_candidate = None
-            raise CoreOperationError(exc.code) from exc
+            code = exc.code
+            if code == "IMPORT_INVALID":
+                code = _portable_failure_code(exc, "workspace_import")
+            raise CoreOperationError(code) from exc
         except CoreOperationError:
             if connection.in_transaction:
                 connection.rollback()
@@ -1474,7 +1521,9 @@ def _import_v2_sync(
             if vector_candidate is not None:
                 vector_candidate.discard(connection, workspace.workspace_id)
             vector_candidate = None
-            raise CoreOperationError("IMPORT_INVALID") from exc
+            raise CoreOperationError(
+                _portable_failure_code(exc, "workspace_import")
+            ) from exc
         finally:
             if lease is not None and not committed:
                 with suppress(Exception):

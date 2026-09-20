@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import secrets
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
@@ -19,6 +20,8 @@ from .models import (
     ResponseMeta,
     WorkspaceId,
 )
+
+_LOGGER = logging.getLogger(__name__)
 
 T = TypeVar("T")
 
@@ -120,6 +123,15 @@ class ResponseContext:
     def internal_error(self, error: BaseException | None = None) -> ApiResponse[Any]:
         """Return the one deliberately opaque internal failure envelope."""
 
+        if error is not None:
+            # The caller-visible envelope stays opaque; the operator needs the
+            # cause, which was previously discarded without a trace.
+            _LOGGER.error(
+                "internal error in request %s: %s",
+                self.request_id,
+                type(error).__name__,
+                exc_info=error,
+            )
         del error
         return self.failure(
             ErrorCode.INTERNAL_ERROR,
