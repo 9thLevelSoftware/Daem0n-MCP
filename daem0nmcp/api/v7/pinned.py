@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import inspect
+import logging
 import os
 import re
 from collections.abc import Awaitable, Callable, Mapping
@@ -10,6 +11,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from types import MappingProxyType
 from typing import Any, Protocol, TypeVar
+
+from pydantic import ValidationError
 
 from ...covenant import (
     ArgumentNormalizationError,
@@ -20,8 +23,14 @@ from ...covenant import (
 from ...event_store import AppendedEvent, EventStreamConflict
 from ...retrieval import RetrievalQuery
 from ...workspace import Workspace
-from .errors import ErrorCode
-from .models import ApiResponse, CapabilityState, RecordSummary, RetrievalData
+from .errors import DATABASE_IN_USE_RETRY_AFTER_MS, ErrorCode
+from .models import (
+    ApiResponse,
+    ApiWarning,
+    CapabilityState,
+    RecordSummary,
+    RetrievalData,
+)
 from .responses import ResponseContext, ResponseFactory
 from .tasks import (
     durable_task_execution_var,
@@ -104,10 +113,48 @@ def _contains_raw_path(value: object) -> bool:
 T = TypeVar("T")
 
 
-def _path_safe_success(response: ResponseContext, data: T) -> ApiResponse[T]:
+def _path_safe_success(
+    response: ResponseContext,
+    data: T,
+    *,
+    warnings: list[ApiWarning] | None = None,
+) -> ApiResponse[T]:
     if _contains_raw_path(data):
         return response.internal_error()
-    return response.success(data)
+    return response.success(data, warnings=warnings or ())
+
+
+_FIELD_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,63}$")
+
+
+def _token_not_issued_warning(error: ArgumentNormalizationError) -> ApiWarning:
+    """Say why a description-only preflight carries no token.
+
+    Supplied values are never echoed: only pydantic error types and the
+    locations of the failing arguments.  A location part is echoed only when
+    it is an int index or identifier-shaped (which may include a key the
+    caller sent); anything else, such as a path-like key, becomes ``?``.
+    """
+
+    problems: list[str] = []
+    cause = error.__cause__
+    if isinstance(cause, ValidationError):
+        for item in cause.errors():
+            location = ".".join(
+                str(part)
+                if isinstance(part, int) or _FIELD_NAME.match(str(part))
+                else "?"
+                for part in item["loc"]
+            )
+            problems.append(f"{location or 'target_arguments'} ({item['type']})")
+    detail = "; ".join(problems)[:360] or "they do not match the target tool schema"
+    return ApiWarning(
+        code="PREFLIGHT_TOKEN_NOT_ISSUED",
+        message=(
+            f"Target arguments did not validate: {detail}. "
+            "No preflight token issued; fix them and call memory_preflight again."
+        ),
+    )
 
 
 _EXPECTED_SERVICE_ERRORS = MappingProxyType(
@@ -192,7 +239,23 @@ def _expected_service_failure(
     if mapped is None:
         return None
     code, message, retryable = mapped
-    return response.failure(code, message, retryable=retryable)
+    if error_code == "ACTIVE_V7_UNAVAILABLE":
+        # Opaque on the wire like INTERNAL_ERROR, so keep the cause findable.
+        logging.getLogger(__name__).warning(
+            "v7 workspace unavailable correlation_id=%s",
+            response.request_id,
+            exc_info=error,
+        )
+    return response.failure(
+        code,
+        message,
+        retryable=retryable,
+        retry_after_ms=(
+            DATABASE_IN_USE_RETRY_AFTER_MS
+            if code is ErrorCode.DATABASE_IN_USE
+            else None
+        ),
+    )
 
 
 def _utc_now() -> datetime:
@@ -507,13 +570,14 @@ class PinnedHandlers:
             **request.target_arguments,
         }
         target_is_complete = True
+        draft_warning: ApiWarning | None = None
         try:
             normalized_arguments = self._dependencies.argument_normalizer(
                 request.target_tool,
                 target_call_arguments,
                 scope.canonical_workspace,
             )
-        except ArgumentNormalizationError:
+        except ArgumentNormalizationError as normalization_error:
             if request.description is None:
                 return response.failure(
                     ErrorCode.INVALID_ARGUMENT,
@@ -524,6 +588,7 @@ class PinnedHandlers:
             # can never become capability material until full normalization
             # succeeds.
             target_is_complete = False
+            draft_warning = _token_not_issued_warning(normalization_error)
             normalized_arguments = dict(request.target_arguments)
         try:
             guidance_value = self._dependencies.preflight_service.guidance(
@@ -549,6 +614,7 @@ class PinnedHandlers:
                         target_tool=request.target_tool,
                         expires_at=None,
                     ),
+                    warnings=[draft_warning] if draft_warning is not None else None,
                 )
             token = self._dependencies.covenant_gate.issue_preflight(
                 scope,
@@ -797,6 +863,14 @@ class PinnedHandlers:
         if failure is not None:
             return failure
         assert scope is not None
+        preflight_remedy = {
+            "workspace_id": request.workspace_id,
+            "target_tool": "memory_store",
+            "target_arguments": request.model_dump(
+                mode="json",
+                exclude={"workspace_id", "preflight_token"},
+            ),
+        }
         violation = self._dependencies.covenant_gate.authorize(
             "memory_store",
             request.model_dump(),
@@ -823,14 +897,7 @@ class PinnedHandlers:
                 ErrorCode.TOKEN_LEGACY_UNSUPPORTED,
             }:
                 remedy_tool = "memory_preflight"
-                remedy_arguments = {
-                    "workspace_id": request.workspace_id,
-                    "target_tool": "memory_store",
-                    "target_arguments": request.model_dump(
-                        mode="json",
-                        exclude={"workspace_id", "preflight_token"},
-                    ),
-                }
+                remedy_arguments = preflight_remedy
             return response.failure(
                 stable_code,
                 "The preflight capability was rejected.",
@@ -879,6 +946,18 @@ class PinnedHandlers:
                 retryable=True,
             )
         except Exception as exc:
+            if getattr(exc, "code", None) == ErrorCode.DATABASE_IN_USE.value:
+                # authorize() already spent the token, so a retry needs a new
+                # one; the idempotency key keeps the retry replay-safe.
+                return response.failure(
+                    ErrorCode.DATABASE_IN_USE,
+                    "The workspace database is currently in use. Request a new "
+                    "preflight token, then retry with the same idempotency_key.",
+                    retryable=True,
+                    retry_after_ms=DATABASE_IN_USE_RETRY_AFTER_MS,
+                    remedy_tool="memory_preflight",
+                    remedy_arguments=preflight_remedy,
+                )
             return _expected_service_failure(response, exc) or response.internal_error(
                 exc
             )

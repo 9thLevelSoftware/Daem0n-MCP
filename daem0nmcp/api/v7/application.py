@@ -15,7 +15,7 @@ from pydantic import ValidationError
 
 from ...covenant import CovenantGate, InvocationScope
 from ...workspace import Workspace
-from .errors import ErrorCode
+from .errors import DATABASE_IN_USE_RETRY_AFTER_MS, ErrorCode
 from .models import CapabilityState
 from .policy import V7_TOOL_LEVELS
 from .responses import ResponseFactory
@@ -119,17 +119,25 @@ class V7ToolRouter:
         if code in {"COUNSEL_REQUIRED", "TOKEN_MISSING"} and isinstance(
             workspace_id, str
         ):
-            target_arguments = {
-                key: value
-                for key, value in effective.items()
-                if key not in {"workspace_id", "preflight_token"}
-            }
-            return "memory_preflight", {
-                "workspace_id": workspace_id,
-                "target_tool": tool_name,
-                "target_arguments": target_arguments,
-            }
+            return self._preflight_remedy(workspace_id, tool_name, effective)
         return None, {}
+
+    @staticmethod
+    def _preflight_remedy(
+        workspace_id: str,
+        tool_name: str,
+        effective: Mapping[str, Any],
+    ) -> tuple[str, dict[str, Any]]:
+        target_arguments = {
+            key: value
+            for key, value in effective.items()
+            if key not in {"workspace_id", "preflight_token"}
+        }
+        return "memory_preflight", {
+            "workspace_id": workspace_id,
+            "target_tool": tool_name,
+            "target_arguments": target_arguments,
+        }
 
     def handler(self, tool_name: str) -> Callable[..., Any]:
         try:
@@ -294,6 +302,24 @@ class V7ToolRouter:
                         states = ()
                     if any(not isinstance(state, CapabilityState) for state in states):
                         states = ()
+                    if error_code == ErrorCode.DATABASE_IN_USE.value:
+                        # The gate already spent any preflight token, so a
+                        # retry needs a fresh one.
+                        workspace_id = effective.get("workspace_id")
+                        remedy_tool, remedy_arguments = (
+                            self._preflight_remedy(workspace_id, tool_name, effective)
+                            if isinstance(token, str) and isinstance(workspace_id, str)
+                            else (None, {})
+                        )
+                        return response.failure(
+                            ErrorCode.DATABASE_IN_USE,
+                            "The workspace database is currently in use.",
+                            retryable=True,
+                            retry_after_ms=DATABASE_IN_USE_RETRY_AFTER_MS,
+                            remedy_tool=remedy_tool,
+                            remedy_arguments=remedy_arguments,
+                            capability_states=tuple(states),
+                        )
                     return response.failure(
                         ErrorCode(error_code),
                         "The operation could not be completed.",

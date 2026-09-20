@@ -51,7 +51,7 @@ from ...storage_activation import (
 )
 from ...workspace import Workspace
 from .application import AdmittedRequest
-from .errors import STABLE_ERROR_CODE_SET
+from .errors import STABLE_ERROR_CODE_SET, is_database_busy
 from .models import EvidenceRef, Page, RecordSummary
 from .portable_projections import (
     ImportFinalizationLease,
@@ -221,19 +221,6 @@ def _validated_storage_path(
     return resolved
 
 
-# SQLITE_BUSY and SQLITE_LOCKED, with their extended result codes.
-_SQLITE_BUSY_CODES = frozenset({5, 6, 261, 262, 513, 517})
-
-
-def _is_database_busy(error: BaseException) -> bool:
-    if not isinstance(error, sqlite3.OperationalError):
-        return False
-    code = getattr(error, "sqlite_errorcode", None)  # Python 3.11+
-    if isinstance(code, int):
-        return code in _SQLITE_BUSY_CODES
-    return "is locked" in str(error)
-
-
 def _portable_failure_code(error: BaseException, operation: str) -> str:
     """Name a transfer failure the caller can act on, and log its cause.
 
@@ -241,16 +228,18 @@ def _portable_failure_code(error: BaseException, operation: str) -> str:
     SQLite write lock past the busy timeout while a transfer does its session
     bookkeeping. That is a transient, retryable condition, not an invalid
     bundle, and reporting it as one leaves the caller with no next step.
+    Only the explicit ``raise ... from`` chain counts: a bundle rejected while
+    an unrelated busy error is in flight is still an invalid bundle.
     """
 
     seen: set[int] = set()
     cause: BaseException | None = error
     while cause is not None and id(cause) not in seen:
         seen.add(id(cause))
-        if _is_database_busy(cause):
+        if is_database_busy(cause):
             _LOGGER.warning("%s deferred: %s", operation, cause)
             return "DATABASE_IN_USE"
-        cause = cause.__cause__ or cause.__context__
+        cause = cause.__cause__
     _LOGGER.warning(
         "%s rejected the bundle: %s", operation, type(error).__name__, exc_info=error
     )

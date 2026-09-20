@@ -1173,6 +1173,12 @@ class PinnedHandlerTests(unittest.TestCase):
         self.assertTrue(validated.ok)
         self.assertIsNone(validated.data.preflight_token)
         self.assertIsNone(validated.data.expires_at)
+        # An ok:true draft must say why no token was issued (F-070/F-082).
+        [warning] = validated.meta.warnings
+        self.assertEqual("PREFLIGHT_TOKEN_NOT_ISSUED", warning.code)
+        self.assertIn("record_type (missing)", warning.message)
+        self.assertIn("content (missing)", warning.message)
+        self.assertIn("No preflight token issued", warning.message)
         self.assertEqual(len(observed), 1)
         self.assertEqual(observed[0][0], "memory_store")
         self.assertEqual(gate.state_store.status(scope)["active_capabilities"], 0)
@@ -1760,6 +1766,56 @@ class PinnedHandlerTests(unittest.TestCase):
         self.assertEqual(validated.data.stream_version, 2)
         self.assertTrue(validated.data.worked)
         self.assertFalse(validated.data.idempotent_replay)
+
+    def test_transient_writer_contention_is_retryable_database_in_use(self) -> None:
+        # Pool saturation and SQLite lock timeouts clear on retry (F-020/F-027).
+        from daem0nmcp.api.v7 import pinned
+        from daem0nmcp.api.v7.errors import ErrorCode
+        from daem0nmcp.api.v7.runtime_services import RuntimeServiceError
+        from daem0nmcp.api.v7.tools import MemoryStoreInput, MemoryStoreOutput
+
+        workspace = Workspace(WORKSPACE_ID, Path.cwd())
+        scope = InvocationScope("principal", "session-busy", str(workspace.root))
+        gate = _gate()
+        gate.record_briefing(scope)
+        target = {
+            "workspace_id": WORKSPACE_ID,
+            "record_type": "decision",
+            "content": "Contention is transient.",
+            "idempotency_key": "decision-busy-1",
+        }
+        token = gate.issue_preflight(scope, "memory_store", target)
+        handlers = pinned.build_pinned_handlers(
+            _dependencies(
+                gate=gate,
+                scope=scope,
+                workspace=workspace,
+                briefing_service=_UnusedService(),
+                memory_event_writer=_FailingMemoryEventWriter(
+                    RuntimeServiceError("DATABASE_IN_USE")
+                ),
+            )
+        )
+
+        request = MemoryStoreInput(**target, preflight_token=token).model_dump()
+        response = asyncio.run(handlers["memory_store"](**request))
+
+        validated = MemoryStoreOutput.model_validate(response)
+        self.assertFalse(validated.ok)
+        self.assertEqual(ErrorCode.DATABASE_IN_USE, validated.error.code)
+        self.assertTrue(validated.error.retryable)
+        self.assertEqual(250, validated.error.retry_after_ms)
+        # authorize() spent the token before the write, so the documented
+        # retry is a fresh preflight with the same idempotency_key.
+        self.assertEqual("memory_preflight", validated.error.remedy.tool)
+        remedy_target = validated.error.remedy.arguments["target_arguments"]
+        self.assertEqual("decision-busy-1", remedy_target["idempotency_key"])
+        self.assertNotIn("preflight_token", remedy_target)
+        replayed = MemoryStoreOutput.model_validate(
+            asyncio.run(handlers["memory_store"](**request))
+        )
+        self.assertEqual(ErrorCode.TOKEN_REPLAYED, replayed.error.code)
+        self.assertEqual("memory_preflight", replayed.error.remedy.tool)
 
     def test_record_outcome_maps_runtime_not_found(self) -> None:
         from daem0nmcp.api.v7 import pinned

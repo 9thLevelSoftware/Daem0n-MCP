@@ -716,8 +716,10 @@ class SQLiteResourceRepositoryTests(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(read.done())
             self.assertEqual(pool.in_flight, 1)
             release.set()
-            with self.assertRaises(ResourceRepositoryError):
+            with self.assertRaises(ResourceRepositoryError) as caught:
                 await read
+            # An overrun read that did not itself fail is retryable contention.
+            self.assertEqual(caught.exception.code, "DATABASE_IN_USE")
             self.assertEqual(pool.in_flight, 0)
         finally:
             release.set()
@@ -835,6 +837,32 @@ class SQLiteResourceRepositoryTests(unittest.IsolatedAsyncioTestCase):
             [row.item.active_context_id for row in snapshot.active_context], [active]
         )
         self.assertEqual(snapshot.workspace_statistics["active_context"], 2)
+
+    async def test_snapshot_skips_git_subprocesses_when_changes_are_unused(
+        self,
+    ) -> None:
+        # Preflight guidance paid two git subprocesses per call for data it
+        # discarded; under load that pushed reads past their deadline.
+        from daem0nmcp.api.v7.resource_repository import SQLiteResourceRepository
+
+        repository = SQLiteResourceRepository(
+            lambda _workspace: self.fixture.resolved,
+            clock=lambda: NOW,
+        )
+        git_reads: list[object] = []
+
+        def read_git_changes(workspace):
+            git_reads.append(workspace)
+            return []
+
+        repository._read_git_changes_sync = read_git_changes
+        limits = {"warning_limit": 1, "failure_limit": 1, "active_context_limit": 1}
+        skipped = await repository.read_briefing_snapshot(
+            self.fixture.workspace, include_git_changes=False, **limits
+        )
+        self.assertEqual((skipped.git_changes, git_reads), ([], []))
+        await repository.read_briefing_snapshot(self.fixture.workspace, **limits)
+        self.assertEqual(len(git_reads), 1)
 
     async def test_briefing_sections_share_one_sqlite_read_snapshot(self) -> None:
         # A canonical writer may commit while holding the same shared generation

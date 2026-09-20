@@ -644,6 +644,7 @@ def _guidance_reader(readers: ResourceRepositoryReaders):
                 failure_limit=20,
                 rule_limit=50,
                 active_context_limit=1,
+                include_git_changes=False,
             )
             candidate_records = [
                 *_public_items(snapshot.failures, RecordSummary),
