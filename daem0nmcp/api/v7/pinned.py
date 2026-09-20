@@ -4,12 +4,11 @@ from __future__ import annotations
 
 import inspect
 import os
-import re
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from types import MappingProxyType
-from typing import Any, Protocol, TypeVar
+from typing import Any, Protocol
 
 from ...covenant import (
     ArgumentNormalizationError,
@@ -76,38 +75,6 @@ class FederationAuthorizationError(RuntimeError):
     def __init__(self, code: str) -> None:
         self.code = code
         super().__init__(code)
-
-
-_WINDOWS_ABSOLUTE_PATH = re.compile(r"(?<![A-Za-z0-9])(?:[A-Za-z]:[\\/]|\\\\)")
-_POSIX_ABSOLUTE_PATH = re.compile(r"(?:^|[\s\"'=(])/(?!/)[A-Za-z0-9_.-]")
-
-
-def _contains_raw_path(value: object) -> bool:
-    if isinstance(value, str):
-        return (
-            _WINDOWS_ABSOLUTE_PATH.search(value) is not None
-            or _POSIX_ABSOLUTE_PATH.search(value) is not None
-        )
-    if isinstance(value, Mapping):
-        return any(
-            _contains_raw_path(key) or _contains_raw_path(item)
-            for key, item in value.items()
-        )
-    if isinstance(value, (list, tuple, set, frozenset)):
-        return any(_contains_raw_path(item) for item in value)
-    model_dump = getattr(value, "model_dump", None)
-    if callable(model_dump):
-        return _contains_raw_path(model_dump(mode="python"))
-    return False
-
-
-T = TypeVar("T")
-
-
-def _path_safe_success(response: ResponseContext, data: T) -> ApiResponse[T]:
-    if _contains_raw_path(data):
-        return response.internal_error()
-    return response.success(data)
 
 
 _EXPECTED_SERVICE_ERRORS = MappingProxyType(
@@ -437,7 +404,7 @@ class PinnedHandlers:
             data = SessionBriefData.model_validate(assembled)
             if data.workspace_id != request.workspace_id:
                 raise ValueError("briefing service returned a mismatched workspace")
-            result = _path_safe_success(response, data)
+            result = response.success(data)
             if result.ok:
                 self._dependencies.covenant_gate.record_briefing(scope)
             return result
@@ -538,11 +505,8 @@ class PinnedHandlers:
                 else guidance_value
             )
             guidance = PreflightGuidance.model_validate(guidance_result)
-            if _contains_raw_path(guidance):
-                return response.internal_error()
             if not target_is_complete:
-                return _path_safe_success(
-                    response,
+                return response.success(
                     PreflightData(
                         guidance=guidance,
                         preflight_token=None,
@@ -563,7 +527,7 @@ class PinnedHandlers:
                 target_tool=request.target_tool,
                 expires_at=expires_at,
             )
-            return _path_safe_success(response, data)
+            return response.success(data)
         except Exception as exc:
             return _expected_service_failure(response, exc) or response.internal_error(
                 exc
@@ -744,8 +708,7 @@ class PinnedHandlers:
                 if inspect.isawaitable(result_value)
                 else result_value
             )
-            return _path_safe_success(
-                response,
+            return response.success(
                 RetrievalData.model_validate(result),
             )
         except Exception as exc:
@@ -866,7 +829,7 @@ class PinnedHandlers:
                 stream_version=stored.event.stream_version,
                 idempotent_replay=stored.idempotent_replay,
             )
-            return _path_safe_success(response, data)
+            return response.success(data)
         except IdempotencyConflict:
             return response.failure(
                 ErrorCode.IDEMPOTENCY_CONFLICT,
@@ -961,7 +924,7 @@ class PinnedHandlers:
                 worked=recorded.worked,
                 idempotent_replay=recorded.idempotent_replay,
             )
-            return _path_safe_success(response, data)
+            return response.success(data)
         except IdempotencyConflict:
             return response.failure(
                 ErrorCode.IDEMPOTENCY_CONFLICT,
@@ -1029,7 +992,7 @@ class PinnedHandlers:
                     return failure
             if not request.include_components and data.capability_states:
                 data = data.model_copy(update={"capability_states": []})
-            return _path_safe_success(response, data)
+            return response.success(data)
         except Exception as exc:
             return _expected_service_failure(response, exc) or response.internal_error(
                 exc

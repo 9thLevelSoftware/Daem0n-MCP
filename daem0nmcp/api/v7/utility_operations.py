@@ -22,7 +22,7 @@ from ...event_store import canonical_json_bytes, parse_canonical_json, sha256_js
 from ...workspace import Workspace, WorkspaceRegistry
 from .application import AdmittedRequest
 from .errors import STABLE_ERROR_CODE_SET
-from .models import Page, contains_absolute_filesystem_path
+from .models import Page
 from .runtime_protocols import WorkerPool
 from .tasks import await_task_terminal
 from .tools import ContextCompressData, RefactorProposalData, TodoFinding
@@ -278,7 +278,7 @@ def _findings(
             if todo_type not in selected_types:
                 continue
             rendered = line.strip()[:2000]
-            if not rendered or contains_absolute_filesystem_path(rendered):
+            if not rendered:
                 continue
             try:
                 findings.append(

@@ -16,7 +16,6 @@ import hmac
 import inspect
 import json
 import os
-import posixpath
 import re
 import secrets
 import sqlite3
@@ -753,24 +752,6 @@ def _partition_metadata(
     if row_count > _MAX_PARTITION_ROWS:
         raise DiscoveryOperationError("TASK_REQUIRED")
     return row_count, content_hash
-
-
-def _safe_code_path(value: object) -> bool:
-    if (
-        not isinstance(value, str)
-        or not 1 <= len(value) <= 1024
-        or "\\" in value
-        or "\x00" in value
-        or value.startswith(("/", "~"))
-        or re.match(r"^[A-Za-z]:", value) is not None
-        or value in {".", ".."}
-    ):
-        return False
-    components = value.split("/")
-    return (
-        all(component not in {"", ".", ".."} for component in components)
-        and posixpath.normpath(value) == value
-    )
 
 
 def _validate_entity_partition(
