@@ -1424,7 +1424,10 @@ def _code_capability_error(
         else "CAPABILITY_DEGRADED"
     )
     remediation = (
-        "Set DAEM0NMCP_APPS_ENABLED=true and install the apps dependency profile."
+        "Set DAEM0NMCP_APPS_ENABLED to true, false, or leave it unset."
+        if capability_status == "failed"
+        else "Install the apps profile with pip install 'daem0nmcp[apps]'; "
+        "it turns on automatically unless DAEM0NMCP_APPS_ENABLED=false."
     )
     return DiscoveryOperationError(
         code,

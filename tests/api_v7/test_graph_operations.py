@@ -842,7 +842,12 @@ async def test_actual_mcp_graph_profile_enabled_and_disabled(tmp_path, transport
         "force": False,
         "idempotency_key": "process-graph-disabled",
     }
-    async with process_client(workspace.root, transport) as session:
+    # The graph extra is installed in CI, so it is on unless explicitly disabled.
+    async with process_client(
+        workspace.root,
+        transport,
+        environment_overrides={"DAEM0NMCP_GRAPH_ENABLED": "false"},
+    ) as session:
         await succeed(session, "session_brief", scope)
         token = await _preflight(
             session, workspace.workspace_id, "entity_backfill", disabled_arguments

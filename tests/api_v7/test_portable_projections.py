@@ -1995,3 +1995,24 @@ async def test_concurrent_finalizer_is_lease_blocked_and_cannot_delete_winner(
     assert artifacts == 0
     attempts = directory / "attempts"
     assert not attempts.exists() or not any(attempts.iterdir())
+
+
+def test_a_concurrent_writer_is_reported_as_retryable_not_as_a_bad_bundle():
+    """A held SQLite write lock must not read as an invalid bundle."""
+    from daem0nmcp.api.v7.operations import _portable_failure_code
+    from daem0nmcp.api.v7.portable_projections import PortableTransferError
+
+    busy = sqlite3.OperationalError("database is locked")
+    wrapped = PortableTransferError("IMPORT_INVALID")
+    wrapped.__cause__ = busy
+    # A bad bundle raised while an unrelated busy error is in flight.
+    unrelated = PortableTransferError("IMPORT_INVALID")
+    unrelated.__context__ = busy
+
+    assert _portable_failure_code(busy, "workspace_import") == "DATABASE_IN_USE"
+    assert _portable_failure_code(wrapped, "workspace_import") == "DATABASE_IN_USE"
+    assert _portable_failure_code(unrelated, "workspace_import") == "IMPORT_INVALID"
+    assert (
+        _portable_failure_code(ValueError("bad page"), "workspace_import")
+        == "IMPORT_INVALID"
+    )

@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import io
 import os
+import shutil
 import sys
+import tempfile
 import types
 import unittest
 from contextlib import redirect_stdout
@@ -15,6 +17,9 @@ class HttpEntrypointTests(unittest.TestCase):
         import start_server
         from daem0nmcp.api.v7.launcher import ServerOptions
 
+        workspace = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, workspace, True)
+
         built: list[tuple[str, str | None]] = []
         launched: list[tuple[object, ServerOptions]] = []
         server = object()
@@ -26,7 +31,7 @@ class HttpEntrypointTests(unittest.TestCase):
         ) -> object:
             self.assertEqual(
                 os.environ.get("DAEM0NMCP_PROJECT_ROOT"),
-                str(Path("tests/http-workspace").resolve()),
+                str(workspace.resolve()),
             )
             built.append((transport, host))
             return server
@@ -40,7 +45,7 @@ class HttpEntrypointTests(unittest.TestCase):
             "--port",
             "9988",
             "--project",
-            str(Path("tests/http-workspace")),
+            str(workspace),
         ]
         output = io.StringIO()
         with (

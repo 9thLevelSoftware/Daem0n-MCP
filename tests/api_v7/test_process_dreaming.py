@@ -82,6 +82,8 @@ async def test_production_dreaming_runs_idempotently_and_reports_missing_graph(
         "DAEM0NMCP_DREAM_PENDING_MIN_AGE_HOURS": "0",
         "DAEM0NMCP_DREAM_PENDING_EVIDENCE_THRESHOLD": "1",
         "DAEM0NMCP_DREAM_REVIEW_COOLDOWN_HOURS": "72",
+        # CI installs the graph extra, which would otherwise turn graph on.
+        "DAEM0NMCP_GRAPH_ENABLED": "false",
     }
     scope = {"workspace_id": workspace.workspace_id}
     async with process_client(

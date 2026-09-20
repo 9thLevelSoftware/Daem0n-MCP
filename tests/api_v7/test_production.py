@@ -98,13 +98,53 @@ class ProductionCompositionTests(unittest.TestCase):
                 "sentence_transformers",
                 "onnx",
                 "onnxruntime",
-                "numpy",
+                # numpy belongs to models-local; the graph extra never installs it.
                 "networkx",
                 "igraph",
                 "leidenalg",
             ],
             imported,
         )
+
+    def test_a_broken_installed_runtime_degrades_its_own_profile_only(self) -> None:
+        """Metadata can say ready while the package cannot import here."""
+        from daem0nmcp.api.v7 import production
+
+        def import_module(name: str) -> object:
+            if name == "igraph":
+                raise OSError("[WinError 126] The specified module could not be found")
+            return object()
+
+        statuses = {"graph": "ready", "local": "ready"}
+        with patch.object(production.importlib, "import_module", import_module):
+            lifecycle = production._OptionalNativeRuntimeLifecycle(statuses)
+            lifecycle.start()
+
+        self.assertEqual({"graph": "degraded", "local": "ready"}, statuses)
+        self.assertIn("igraph", lifecycle.failures["graph"])
+        self.assertIn("OSError", lifecycle.failures["graph"])
+
+        states = {
+            state.name: state
+            for state in production._capability_states(
+                {"DAEM0NMCP_GRAPH_ENABLED": "true"}, lifecycle.failures
+            )
+        }
+        self.assertEqual("degraded", states["graph"].status)
+        self.assertIn("igraph", str(states["graph"].remediation))
+
+    def test_capability_states_carry_the_registry_remediation(self) -> None:
+        """Health must say how to enable a profile, not 'review' it."""
+        from daem0nmcp.api.v7 import production
+
+        states = {
+            state.name: state
+            for state in production._capability_states(
+                {"DAEM0NMCP_GRAPH_ENABLED": "false"}
+            )
+        }
+        self.assertEqual("disabled", states["graph"].status)
+        self.assertIn("DAEM0NMCP_GRAPH_ENABLED", str(states["graph"].remediation))
 
     def test_full_manifest_rejects_missing_or_unexpected_resources(self) -> None:
         from daem0nmcp.api.v7.production import build_production_surface

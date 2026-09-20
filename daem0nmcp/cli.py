@@ -1247,15 +1247,18 @@ def main():
             if args.json:
                 print(
                     json.dumps(
-                        {"error": "tree-sitter-languages not installed", "indexed": 0}
+                        {
+                            "error": "tree-sitter-language-pack not installed",
+                            "indexed": 0,
+                        }
                     )
                 )
             else:
                 print(
-                    "ERROR: Code indexing requires tree-sitter-languages",
+                    "ERROR: Code indexing requires tree-sitter-language-pack",
                     file=sys.stderr,
                 )
-                print("Install with: pip install tree-sitter-languages")
+                print("Install with: pip install 'daem0nmcp[apps]'")
             sys.exit(1)
 
         project_path = Path(args.project_path or os.getcwd()).resolve()
