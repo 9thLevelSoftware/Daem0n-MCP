@@ -374,11 +374,17 @@ def _workspace_id_command(args, active_settings) -> int:
             write_workspace_identity(root, workspace_id=args.adopt)
         elif args.new:
             fresh = path_hash_workspace_id(root)
-            # Whatever is hidden is what the folder claimed before the fork,
-            # even when that claim is what blocked it.
-            previous = identity.recorded_id
-            if previous is None and len(identity.stored_ids) == 1:
+            hidden = identity.stored_ids - {fresh}
+            if len(hidden) == 1:
+                previous = next(iter(hidden))
+            elif identity.forked_from is not None:
+                previous = identity.forked_from
+            elif identity.recorded_id is not None:
+                previous = identity.recorded_id
+            elif len(identity.stored_ids) == 1:
                 previous = next(iter(identity.stored_ids))
+            else:
+                previous = None
             write_workspace_identity(
                 root,
                 workspace_id=fresh,

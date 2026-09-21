@@ -62,18 +62,20 @@ def _write_raw(root: Path, payload: str) -> None:
     path.write_text(payload, encoding="utf-8")
 
 
-def _seed_events(root: Path, *workspace_ids: str) -> None:
+def _seed_events(root: Path, *workspace_ids: str, table: str = "memory_events") -> None:
     """Record events under each ID, the way a stored workspace carries them."""
 
+    if table not in {"memory_events", "governance_events"}:
+        raise ValueError(table)
     storage = root / ".daem0nmcp" / "storage"
     storage.mkdir(parents=True, exist_ok=True)
     with closing(sqlite3.connect(storage / DEFAULT_DATABASE_NAME)) as database:
         database.execute(
-            "CREATE TABLE IF NOT EXISTS memory_events ("
+            f"CREATE TABLE IF NOT EXISTS {table} ("  # noqa: S608
             "workspace_id TEXT NOT NULL, event_id TEXT NOT NULL)"
         )
         database.executemany(
-            "INSERT INTO memory_events VALUES (?, ?)",
+            f"INSERT INTO {table} VALUES (?, ?)",  # noqa: S608
             [
                 (workspace_id, f"evt_{index}_{workspace_id}")
                 for index, workspace_id in enumerate(workspace_ids)
@@ -111,6 +113,22 @@ def test_a_root_with_no_file_adopts_the_single_stored_id(tmp_path):
     assert identity.blocked is None
     ensure_workspace_identity([root])
     assert _recorded(root)["id"] == FOREIGN
+
+
+def test_governance_events_alone_are_adopted(tmp_path):
+    root = _project(tmp_path, "gov-only")
+    _seed_events(root, FOREIGN, FOREIGN, table="governance_events")
+    identity = workspace_identity(root)
+    assert identity.workspace_id == FOREIGN
+    assert identity.blocked is None
+    ensure_workspace_identity([root])
+    assert _recorded(root)["id"] == FOREIGN
+
+
+def test_several_governance_ids_with_no_file_are_blocked(tmp_path):
+    root = _project(tmp_path, "gov-mixed")
+    _seed_events(root, FOREIGN, OTHER, table="governance_events")
+    assert workspace_identity(root).blocked == WORKSPACE_IDENTITY_AMBIGUOUS
 
 
 def test_a_root_with_no_file_and_several_stored_ids_is_blocked(tmp_path):
@@ -569,6 +587,27 @@ def test_adopt_reports_the_events_it_hides(tmp_path, capsys):
     assert adopted["hidden_event_count"] == 1
 
 
+def test_new_on_a_nested_reclone_keeps_the_hidden_id(tmp_path):
+    import shutil
+
+    original = _project(tmp_path, "nested-origin")
+    ensure_workspace_identity([original])
+    identifier = _recorded(original)["id"]
+    _seed_events(original, identifier)
+    first = _project(tmp_path, "nested-first")
+    shutil.copytree(original / ".daem0nmcp", first / ".daem0nmcp")
+    assert _run_cli(first, "workspace-id", "--new") == 0
+    assert _recorded(first)["forked_from"] == identifier
+    second = _project(tmp_path, "nested-second")
+    shutil.copytree(first / ".daem0nmcp", second / ".daem0nmcp")
+    assert _run_cli(second, "workspace-id", "--new") == 0
+    assert _recorded(second)["forked_from"] == identifier
+    assert workspace_identity(second).blocked is None
+    assert _run_cli(second, "workspace-id", "--new") == 0
+    assert _recorded(second)["forked_from"] == identifier
+    assert workspace_identity(second).blocked is None
+
+
 def test_new_forks_from_the_id_that_blocked_the_folder(tmp_path):
     import shutil
 
@@ -593,6 +632,87 @@ def test_new_forks_from_the_id_that_blocked_the_folder(tmp_path):
     registry = WorkspaceRegistry([original, copy])
     assert registry.resolve(copy).identity_block is None
     assert registry.resolve(original).workspace_id == identifier
+
+
+def test_an_unreadable_store_is_not_seeded_as_a_new_root(tmp_path):
+    root = _project(tmp_path, "unread")
+    _seed_events(root, FOREIGN)
+    (root / ".daem0nmcp" / "storage" / DEFAULT_DATABASE_NAME).unlink()
+    identity = workspace_identity(root)
+    assert identity.blocked == WORKSPACE_IDENTITY_AMBIGUOUS
+    ensure_workspace_identity([root])
+    assert not _identity_file(root).exists()
+    assert workspace_identity(root).blocked == WORKSPACE_IDENTITY_AMBIGUOUS
+
+
+def test_a_linked_identity_file_is_malformed_and_never_followed(tmp_path):
+    root = _project(tmp_path, "linked-id")
+    _seed_events(root, FOREIGN)
+    target = tmp_path / "outside-identity"
+    target.write_text('{"id": "' + FOREIGN + '", "root_key": "' + "0" * 64 + '"}')
+    path = _identity_file(root)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        os.symlink(target, path)
+    except (OSError, NotImplementedError):
+        pytest.skip("this environment cannot create file symlinks")
+    identity = workspace_identity(root)
+    assert identity.malformed
+    assert identity.blocked == WORKSPACE_IDENTITY_AMBIGUOUS
+    ensure_workspace_identity([root])
+    assert path.is_symlink()
+    recorder = _PathRecorder(str(target))
+    patches = _forbidden_host_patches(recorder)
+    for patch in patches:
+        patch.start()
+    try:
+        reset_workspace_identity_cache()
+        workspace_identity(root)
+    finally:
+        for patch in reversed(patches):
+            patch.stop()
+    assert recorder.calls == []
+
+
+def test_an_oversized_identity_file_is_rejected_without_a_full_read(
+    tmp_path, monkeypatch
+):
+    root = _project(tmp_path, "huge")
+    _write_raw(root, '{"id": "' + FOREIGN + '"}' + ("x" * 5000))
+    reads: list[int] = []
+    real_read = os.read
+
+    def capped(fd, n):
+        reads.append(n)
+        return real_read(fd, n)
+
+    monkeypatch.setattr(os, "read", capped)
+    identity = workspace_identity(root)
+    assert identity.blocked == WORKSPACE_IDENTITY_AMBIGUOUS
+    assert identity.malformed
+    assert reads == []
+
+
+def test_a_seed_does_not_clobber_a_published_identity(tmp_path):
+    from daem0nmcp.workspace import _write_identity_file
+
+    root = _project(tmp_path, "seed-keep")
+    write_workspace_identity(root, workspace_id=OTHER)
+    assert (
+        _write_identity_file(root, path_hash_workspace_id(root), None, replace=False)
+        is False
+    )
+    assert _recorded(root)["id"] == OTHER
+
+
+def test_a_failed_seed_is_not_served(tmp_path, monkeypatch):
+    from daem0nmcp import workspace as workspace_module
+
+    root = _project(tmp_path, "seed-fail")
+    monkeypatch.setattr(workspace_module, "_write_identity_file", lambda *a, **k: False)
+    ensure_workspace_identity([root])
+    assert not _identity_file(root).exists()
+    assert workspace_identity(root).blocked == WORKSPACE_IDENTITY_AMBIGUOUS
 
 
 def test_concurrent_starts_survive_a_lost_rename(tmp_path, monkeypatch):

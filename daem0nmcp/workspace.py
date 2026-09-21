@@ -9,6 +9,7 @@ import posixpath
 import re
 import secrets
 import sqlite3
+import stat
 from collections.abc import Iterable, Mapping, Sequence
 from contextlib import closing, suppress
 from dataclasses import dataclass, field
@@ -198,17 +199,64 @@ def _identity_root_key(root: Path) -> str:
     return hashlib.sha256(raw).hexdigest()
 
 
-def _read_identity_file(root: Path) -> tuple[_RecordedIdentity | None, bool]:
-    """Return the recorded identity and whether the file is malformed."""
+def _is_link_or_reparse(status: os.stat_result) -> bool:
+    attributes = getattr(status, "st_file_attributes", 0)
+    reparse = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+    return stat.S_ISLNK(status.st_mode) or bool(attributes & reparse)
 
+
+def _lstat(path: Path) -> os.stat_result | None:
     try:
-        raw = _identity_path(root).read_bytes()
-    except (FileNotFoundError, NotADirectoryError, IsADirectoryError):
+        return os.lstat(path)
+    except FileNotFoundError:
+        return None
+
+
+def _read_identity_bytes(path: Path) -> tuple[bytes | None, bool]:
+    """Read the identity file without following a link. Cap at 4 KiB."""
+
+    named = _lstat(path)
+    if named is None:
+        return None, False
+    if _is_link_or_reparse(named) or not stat.S_ISREG(named.st_mode):
+        return None, True
+    if named.st_size > _MAX_IDENTITY_BYTES:
+        return None, True
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_CLOEXEC", 0)
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags)
+    except FileNotFoundError:
         return None, False
     except OSError:
         return None, True
+    try:
+        opened = os.fstat(descriptor)
+        named_again = os.lstat(path)
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or _is_link_or_reparse(named_again)
+            or not os.path.samestat(opened, named_again)
+        ):
+            return None, True
+        raw = os.read(descriptor, _MAX_IDENTITY_BYTES + 1)
+    except OSError:
+        return None, True
+    finally:
+        os.close(descriptor)
     if len(raw) > _MAX_IDENTITY_BYTES:
         return None, True
+    return raw, False
+
+
+def _read_identity_file(root: Path) -> tuple[_RecordedIdentity | None, bool]:
+    """Return the recorded identity and whether the file is malformed."""
+
+    raw, malformed = _read_identity_bytes(_identity_path(root))
+    if malformed:
+        return None, True
+    if raw is None:
+        return None, False
     try:
         parsed = json.loads(raw.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError):
@@ -239,26 +287,26 @@ def _open_identity_reader(root: Path) -> sqlite3.Connection | None:
         return None
     from .storage_activation import readonly_database_uri, resolve_active_database
 
+    database = resolve_active_database(storage).path
+    if not database.is_file():
+        raise sqlite3.DatabaseError("active database is missing")
+    # The shared read-only URI leaves no ``-shm`` behind, so resolving an
+    # identity stays a read even inside an offline dry run.
+    connection = sqlite3.connect(readonly_database_uri(database), uri=True)
+    connection.execute("PRAGMA query_only=ON")
+    return connection
+
+
+def _load_stored_workspace_ids(root: Path) -> frozenset[str] | None:
+    """IDs in the store, or ``None`` if a store exists but could not be read."""
+
+    storage = _identity_directory(root) / "storage"
+    if not storage.is_dir():
+        return frozenset()
     try:
-        database = resolve_active_database(storage).path
+        connection = _open_identity_reader(root)
     except Exception:
         return None
-    if not database.is_file():
-        return None
-    try:
-        # The shared read-only URI leaves no ``-shm`` behind, so resolving an
-        # identity stays a read even inside an offline dry run.
-        connection = sqlite3.connect(readonly_database_uri(database), uri=True)
-        connection.execute("PRAGMA query_only=ON")
-        return connection
-    except sqlite3.Error:
-        return None
-
-
-def _stored_workspace_ids(root: Path) -> frozenset[str]:
-    """Distinct workspace IDs the root's own event tables already carry."""
-
-    connection = _open_identity_reader(root)
     if connection is None:
         return frozenset()
     found: set[str] = set()
@@ -277,7 +325,10 @@ def _stored_workspace_ids(root: Path) -> frozenset[str]:
 def stored_event_counts(root: str | os.PathLike[str]) -> dict[str, int]:
     """Count the events stored under each workspace ID, for operator output."""
 
-    connection = _open_identity_reader(_canonical_root(root))
+    try:
+        connection = _open_identity_reader(_canonical_root(root))
+    except Exception:
+        return {}
     if connection is None:
         return {}
     counts: dict[str, int] = {}
@@ -309,7 +360,19 @@ def _claim_identity(root: Path) -> WorkspaceIdentity:
     current = _identity_root_key(root)
     path_hash = _workspace_id(root)
     recorded, malformed = _read_identity_file(root)
-    stored = _stored_workspace_ids(root)
+    stored = _load_stored_workspace_ids(root)
+    if stored is None:
+        # A store is present but unreadable: never treat that as empty.
+        return WorkspaceIdentity(
+            workspace_id=path_hash,
+            blocked=WORKSPACE_IDENTITY_AMBIGUOUS,
+            recorded_id=None if recorded is None else recorded.workspace_id,
+            recorded_root_key=None if recorded is None else recorded.root_key,
+            current_root_key=current,
+            forked_from=None if recorded is None else recorded.forked_from,
+            malformed=malformed,
+            has_file=recorded is not None or malformed,
+        )
     if malformed:
         # ``workspace-id`` still reports the stored counts, and ``--new`` can
         # still fork from them, so the operator is not left with nothing.
@@ -428,9 +491,8 @@ def _resolve_identities(canonical: Sequence[Path]) -> dict[str, WorkspaceIdentit
 
 
 def _identity_stamp(root: Path) -> tuple[int, int, int] | None:
-    try:
-        status = os.stat(_identity_path(root))
-    except OSError:
+    status = _lstat(_identity_path(root))
+    if status is None:
         return None
     return (status.st_mtime_ns, status.st_size, status.st_ino)
 
@@ -486,19 +548,38 @@ def workspace_identity(
     return resolve_workspace_identities(canonical)[_root_key(canonical[0])]
 
 
+def _publish_identity(temporary: Path, destination: Path, *, replace: bool) -> None:
+    """Move a regular temp file into place. Seed never clobbers; rewrite may."""
+
+    temp_status = _lstat(temporary)
+    dest_status = _lstat(destination)
+    if temp_status is None or _is_link_or_reparse(temp_status):
+        raise OSError("identity temp is missing or linked")
+    if dest_status is not None and _is_link_or_reparse(dest_status):
+        raise OSError("identity file is a link")
+    if replace:
+        os.replace(temporary, destination)
+        return
+    try:
+        os.link(temporary, destination, follow_symlinks=False)
+    except FileExistsError:
+        raise
+    except (NotImplementedError, OSError):
+        # Windows rename refuses an existing dest; POSIX link is the no-clobber
+        # path, so any other POSIX failure must not fall through to overwrite.
+        if os.name != "nt":
+            raise
+        os.rename(temporary, destination)
+
+
 def _write_identity_file(
     root: Path,
     workspace_id: str,
     forked_from: str | None,
+    *,
+    replace: bool,
 ) -> bool:
-    """Publish one identity by temp file and rename; say whether it stuck.
-
-    Two processes starting at once write the same deterministic value, and on
-    Windows the loser's rename fails outright rather than overwriting.  So a
-    failure only counts when the file does not already carry the intended ID;
-    a start must never die because another start won the race, or because the
-    project directory is read-only.
-    """
+    """Publish one identity by temp file. Seed is create-if-absent."""
 
     payload: dict[str, str] = {
         "id": workspace_id,
@@ -508,20 +589,41 @@ def _write_identity_file(
         payload["forked_from"] = forked_from
     raw = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
     directory = _identity_directory(root)
+    destination = _identity_path(root)
     temporary = directory / f".{IDENTITY_FILE_NAME}-{secrets.token_hex(8)}.tmp"
     written = False
     try:
         directory.mkdir(parents=True, exist_ok=True)
-        temporary.write_bytes(raw + b"\n")
-        os.replace(temporary, _identity_path(root))
+        dest_status = _lstat(destination)
+        if dest_status is not None and _is_link_or_reparse(dest_status):
+            return False
+        if not replace and dest_status is not None:
+            recorded, _malformed = _read_identity_file(root)
+            return recorded is not None and recorded.workspace_id == workspace_id
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+        flags |= getattr(os, "O_BINARY", 0) | getattr(os, "O_CLOEXEC", 0)
+        flags |= getattr(os, "O_NOFOLLOW", 0)
+        descriptor = os.open(temporary, flags, 0o600)
+        try:
+            opened = os.fstat(descriptor)
+            named = os.lstat(temporary)
+            if not stat.S_ISREG(opened.st_mode) or not os.path.samestat(opened, named):
+                raise OSError("identity temp is not a regular file")
+            os.write(descriptor, raw + b"\n")
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+        _publish_identity(temporary, destination, replace=replace)
         written = True
     except OSError:
         recorded, _malformed = _read_identity_file(root)
         written = recorded is not None and recorded.workspace_id == workspace_id
     finally:
         with suppress(OSError):
-            temporary.unlink()
-    reset_workspace_identity_cache()
+            leftover = _lstat(temporary)
+            if leftover is not None and not _is_link_or_reparse(leftover):
+                temporary.unlink()
+        reset_workspace_identity_cache()
     return written
 
 
@@ -551,7 +653,7 @@ def write_workspace_identity(
     if _WORKSPACE_ID_VALUE.match(workspace_id) is None:
         raise WorkspaceIdentityError("INVALID_WORKSPACE_ID")
     canonical = _canonical_root(root)
-    if not _write_identity_file(canonical, workspace_id, forked_from):
+    if not _write_identity_file(canonical, workspace_id, forked_from, replace=True):
         raise WorkspaceIdentityError("WORKSPACE_IDENTITY_NOT_WRITABLE")
     _ensure_storage_gitignore(canonical)
 
@@ -568,20 +670,35 @@ def ensure_workspace_identity(
 
     canonical = configured_roots(roots)
     identities = _resolve_identities(canonical)
+    persist_failed = False
     for root in canonical:
-        identity = identities[_root_key(root)]
+        key = _root_key(root)
+        identity = identities[key]
         if identity.blocked is not None:
             continue
         if not identity.has_file:
-            _write_identity_file(root, identity.workspace_id, identity.forked_from)
+            landed = _write_identity_file(
+                root, identity.workspace_id, identity.forked_from, replace=False
+            )
+            if not landed and _lstat(_identity_path(root)) is None:
+                identities[key] = _block(identity, root, WORKSPACE_IDENTITY_AMBIGUOUS)
+                persist_failed = True
+                continue
         elif identity.sole_holder and not identity.root_key_matches:
-            # The folder was moved, renamed, or ``.daem0nmcp/`` was copied into
-            # a new clone.  A different spelling of the same folder keeps the
-            # same device and inode, so it never reaches this branch (R-28).
-            _write_identity_file(root, identity.workspace_id, identity.forked_from)
+            # Same folder, different spelling keeps device+inode, so it never
+            # reaches this branch.  Only the ID's single holder rewrites.
+            _write_identity_file(
+                root, identity.workspace_id, identity.forked_from, replace=True
+            )
         _ensure_storage_gitignore(root)
-    # Resolve once more through the cache, so the registry built next reuses
-    # this answer instead of reading every store again.
+    if persist_failed:
+        ordered = sorted(canonical, key=_root_key)
+        cache_key = tuple(_root_key(item) for item in ordered)
+        stamps = tuple(_identity_stamp(item) for item in ordered)
+        if len(_IDENTITY_CACHE) >= _IDENTITY_CACHE_LIMIT:
+            _IDENTITY_CACHE.clear()
+        _IDENTITY_CACHE[cache_key] = (stamps, identities)
+        return identities
     return resolve_workspace_identities(canonical)
 
 

@@ -33,6 +33,7 @@ from daem0nmcp.workspace import (
     WorkspaceRegistry,
     path_hash_workspace_id,
     reset_workspace_identity_cache,
+    stored_event_counts,
 )
 
 CONTENT = "Relocation keeps the workspace's memories reachable."
@@ -283,18 +284,28 @@ async def test_a_copy_registered_beside_the_original_is_blocked(
         blocked = await _call(client, "session_brief", {"workspace_id": copy_id})
         assert blocked["error"]["code"] == "WORKSPACE_IDENTITY_DUPLICATE", blocked
         assert blocked["error"]["retryable"] is False
+        assert str(copy) not in blocked["error"]["message"]
         recall = await _call(
             client, "memory_recall", {"workspace_id": copy_id, "query": CONTENT}
         )
         assert recall["error"]["code"] == "WORKSPACE_IDENTITY_DUPLICATE", recall
+        routed = await _call(client, "rule_list", {"workspace_id": copy_id})
+        assert routed["error"]["code"] == "WORKSPACE_IDENTITY_DUPLICATE", routed
+        assert routed["error"]["retryable"] is False
+        from mcp.shared.exceptions import McpError
+
+        uri = f"memory://workspaces/{copy_id}/warnings"
+        with pytest.raises(McpError):
+            await client.read_resource(uri)
 
     # A recorded fork settles the copy without touching a single stored row.
+    hidden_before = stored_event_counts(copy)
     digest = _database_digest(copy)
     code, payload = _workspace_id_json(copy, "--new", capsys=capsys)
     assert code == 0, payload
     assert payload["workspace_id"] == copy_id
     assert payload["forked_from"] == workspace_id
-    assert payload["hidden_event_count"] > 0
+    assert payload["hidden_event_count"] == sum(hidden_before.values())
     assert _database_digest(copy) == digest
 
     async with Client(_server(*roots)) as client:
@@ -365,6 +376,35 @@ async def test_the_hook_reports_a_copied_folder_and_a_blocked_one(tmp_path, caps
     assert payload["events_by_workspace_id"][workspace_id] > 0
 
 
+async def test_a_mixed_database_briefs_as_ambiguous(tmp_path):
+    root = tmp_path / "mixed-brief"
+    root.mkdir()
+    await _seed(root)
+    foreign = "ws_" + "c" * 24
+    import sqlite3
+    from contextlib import closing
+
+    from daem0nmcp.storage_activation import resolve_active_database
+
+    active = resolve_active_database(root / ".daem0nmcp" / "storage").path
+    with closing(sqlite3.connect(active)) as database:
+        database.execute("DROP TRIGGER IF EXISTS memory_events_no_update")
+        database.execute(
+            "UPDATE memory_events SET workspace_id=? WHERE event_id=("
+            "SELECT event_id FROM memory_events LIMIT 1)",
+            (foreign,),
+        )
+        database.commit()
+    (root / ".daem0nmcp" / "workspace-id").unlink()
+    reset_workspace_identity_cache()
+    mixed_id = path_hash_workspace_id(root)
+    async with Client(_server(root)) as client:
+        blocked = await _call(client, "session_brief", {"workspace_id": mixed_id})
+        assert blocked["error"]["code"] == "WORKSPACE_IDENTITY_AMBIGUOUS", blocked
+        assert blocked["error"]["retryable"] is False
+        assert str(root) not in blocked["error"]["message"]
+
+
 def test_a_blocked_root_never_reaches_the_path_free_wire(tmp_path):
     """The identity remedy names no host path (the wire model enforces it)."""
 
@@ -373,5 +413,7 @@ def test_a_blocked_root_never_reaches_the_path_free_wire(tmp_path):
     code, message = identity_block_failure("WORKSPACE_IDENTITY_DUPLICATE")
     assert code is ErrorCode.WORKSPACE_IDENTITY_DUPLICATE
     assert "workspace-id --new" in message
-    assert str(tmp_path) not in message
+    assert identity_block_failure("WORKSPACE_IDENTITY_AMBIGUOUS")[0] is (
+        ErrorCode.WORKSPACE_IDENTITY_AMBIGUOUS
+    )
     assert identity_block_failure("NOT_FOUND") is None
