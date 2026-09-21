@@ -334,13 +334,13 @@ def _claim_identity(root: Path) -> WorkspaceIdentity:
             current_root_key=current,
             stored_ids=stored,
         )
-    # The recorded ID must be one the stored events already carry, unless the
-    # only events present are the ones an explicit ``workspace-id --new`` fork
-    # hid under ``forked_from`` (R-41).  Any other ID blocks.
+    # A fork only hides ``forked_from``; adopt (no fork) hides every other ID.
     allowed = {recorded.workspace_id}
     if recorded.forked_from is not None:
         allowed.add(recorded.forked_from)
-    settled = not stored or recorded.workspace_id in stored or stored <= allowed
+        settled = not stored or stored <= allowed
+    else:
+        settled = not stored or recorded.workspace_id in stored
     blocked = None if settled else WORKSPACE_IDENTITY_AMBIGUOUS
     return WorkspaceIdentity(
         workspace_id=path_hash if blocked else recorded.workspace_id,

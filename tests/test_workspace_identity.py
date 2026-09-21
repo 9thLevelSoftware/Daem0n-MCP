@@ -165,6 +165,14 @@ def test_a_third_id_besides_the_fork_source_still_blocks(tmp_path):
     assert workspace_identity(root).blocked == WORKSPACE_IDENTITY_AMBIGUOUS
 
 
+def test_a_fork_stays_blocked_when_its_own_id_and_a_third_id_are_stored(tmp_path):
+    root = _project(tmp_path, "fork-own-plus")
+    own = path_hash_workspace_id(root)
+    _seed_events(root, FOREIGN, OTHER, own)
+    write_workspace_identity(root, workspace_id=own, forked_from=FOREIGN)
+    assert workspace_identity(root).blocked == WORKSPACE_IDENTITY_AMBIGUOUS
+
+
 def test_a_malformed_file_is_rejected_and_never_overwritten(tmp_path):
     root = _project(tmp_path, "malformed")
     _write_raw(root, '{"id": "not-a-workspace-id"}')
@@ -356,6 +364,9 @@ def test_a_subst_drive_of_the_same_folder_is_not_a_copy(tmp_path):
         ensure_workspace_identity([root])
         _seed_events(root, _recorded(root)["id"])
         _assert_one_workspace(root, Path(letter + "\\"))
+        first = _identity_file(root).read_bytes()
+        ensure_workspace_identity([Path(letter + "\\")])
+        assert _identity_file(root).read_bytes() == first
     finally:
         subprocess.run(["subst", letter, "/d"], capture_output=True, shell=True)  # noqa: S603
 
