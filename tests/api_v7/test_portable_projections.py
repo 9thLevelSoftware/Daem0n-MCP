@@ -2016,3 +2016,94 @@ def test_a_concurrent_writer_is_reported_as_retryable_not_as_a_bad_bundle():
         _portable_failure_code(ValueError("bad page"), "workspace_import")
         == "IMPORT_INVALID"
     )
+
+
+async def test_retry_after_a_contended_finalize_releases_its_abandoned_lease(
+    tmp_path: Path,
+):
+    """A finalize retried after DATABASE_IN_USE must not meet its own dead lease.
+
+    The failed attempt claims a durable lease, then a concurrent writer holds the
+    SQLite write lock past the busy timeout, so both the attempt and its cleanup
+    release report "database is locked".  The retry that DATABASE_IN_USE invites
+    must finish the import, not answer the non-retryable TASK_REQUIRED until the
+    abandoned lease expires.
+    """
+    from daem0nmcp.api.v7 import operations as operations_module
+
+    source = _fixture(tmp_path / "source")
+    target = _fixture(tmp_path / "target")
+    source.append("contended finalize", occurred_at_us=100, recorded_at_us=200)
+    pages = await _all_pages(
+        build_core_operations(_dependencies(source))["workspace_export"],
+        source,
+        include_legacy_projection=False,
+    )
+    importer = build_core_operations(_dependencies(target))["workspace_import"]
+    session_id = None
+    for index, page in enumerate(pages):
+        staged = await importer(
+            workspace=target.workspace,
+            request=_request(
+                "workspace_import",
+                workspace_id=WORKSPACE_ID,
+                bundle=page.model_dump(mode="python"),
+                import_session_id=session_id,
+                finalize=False,
+                idempotency_key=f"contended-stage-{index:04d}",
+                preflight_token="token_value_for_test",
+            ),
+        )
+        session_id = staged.import_session_id
+    finalize_request = _request(
+        "workspace_import",
+        workspace_id=WORKSPACE_ID,
+        bundle=None,
+        import_session_id=session_id,
+        finalize=True,
+        idempotency_key="contended-finalize-0001",
+        preflight_token="token_value_for_test",
+    )
+    original_prepare = operations_module.prepare_vector_candidate
+    original_release = operations_module.release_import_finalization
+    calls = {"prepare": 0, "release": 0}
+
+    def contended_prepare(*args, **kwargs):
+        calls["prepare"] += 1
+        if calls["prepare"] == 1:
+            raise sqlite3.OperationalError("database is locked")
+        return original_prepare(*args, **kwargs)
+
+    def contended_release(*args, **kwargs):
+        calls["release"] += 1
+        if calls["release"] == 1:
+            raise sqlite3.OperationalError("database is locked")
+        return original_release(*args, **kwargs)
+
+    with (
+        patch.object(
+            operations_module,
+            "prepare_vector_candidate",
+            side_effect=contended_prepare,
+        ),
+        patch.object(
+            operations_module,
+            "release_import_finalization",
+            side_effect=contended_release,
+        ),
+    ):
+        with pytest.raises(CoreOperationError, match="DATABASE_IN_USE"):
+            await importer(workspace=target.workspace, request=finalize_request)
+        result = await importer(workspace=target.workspace, request=finalize_request)
+    assert result.status == "succeeded"
+    assert result.imported == 1
+    connection = sqlite3.connect(target.database)
+    try:
+        leases = connection.execute(
+            "SELECT COUNT(*) FROM portable_transfer_finalization_leases "
+            "WHERE session_id=?",
+            (session_id,),
+        ).fetchone()[0]
+    finally:
+        connection.close()
+    assert leases == 0

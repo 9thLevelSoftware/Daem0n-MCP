@@ -157,6 +157,16 @@ _CORE_OPERATION_WORKERS = BoundedWorkerPool(
     thread_name_prefix="daem0nmcp-v7-core",
 )
 
+# Finalization leases whose attempt has ended without deleting them, keyed by
+# storage and import session.  A concurrent writer that outlasts the busy
+# timeout fails the attempt as DATABASE_IN_USE and then its cleanup release
+# too; the lease would otherwise turn every retry that DATABASE_IN_USE invites
+# into TASK_REQUIRED until it expires.  The ended attempt no longer renews or
+# uses its lease, so the next finalize of the session completes the release
+# before it claims.
+_ABANDONED_FINALIZATION_LEASES: dict[tuple[str, str], ImportFinalizationLease] = {}
+_ABANDONED_FINALIZATION_LEASES_LOCK = threading.Lock()
+
 
 class CoreOperationError(RuntimeError):
     """Sanitized operation failure understood by the shared v7 router."""
@@ -1200,6 +1210,35 @@ def _event_command(event: Mapping[str, Any]) -> EventCommand:
     )
 
 
+def _abandon_finalization_lease(storage: Path, lease: ImportFinalizationLease) -> None:
+    with _ABANDONED_FINALIZATION_LEASES_LOCK:
+        _ABANDONED_FINALIZATION_LEASES[(str(storage), lease.session_id)] = lease
+
+
+def _release_abandoned_finalization(
+    connection: sqlite3.Connection,
+    storage: Path,
+    session_id: str,
+    *,
+    now: datetime,
+) -> None:
+    """Finish an ended attempt's lease release before claiming the session.
+
+    A still-held lock raises here and reaches the caller as DATABASE_IN_USE,
+    so the lease stays recorded for the next retry.
+    """
+
+    key = (str(storage), session_id)
+    with _ABANDONED_FINALIZATION_LEASES_LOCK:
+        abandoned = _ABANDONED_FINALIZATION_LEASES.get(key)
+    if abandoned is None:
+        return
+    release_import_finalization(connection, storage, abandoned, now=now)
+    with _ABANDONED_FINALIZATION_LEASES_LOCK:
+        if _ABANDONED_FINALIZATION_LEASES.get(key) is abandoned:
+            del _ABANDONED_FINALIZATION_LEASES[key]
+
+
 def _import_v2_sync(
     dependencies: CoreOperationDependencies,
     workspace: Workspace,
@@ -1294,6 +1333,12 @@ def _import_v2_sync(
                         "skipped": receipt.imported + receipt.skipped,
                     }
                 )
+            _release_abandoned_finalization(
+                connection,
+                storage,
+                session_id,
+                now=dependencies.clock(),
+            )
             lease = claim_import_finalization(
                 connection,
                 storage,
@@ -1554,13 +1599,15 @@ def _import_v2_sync(
             ) from exc
         finally:
             if lease is not None and not committed:
-                with suppress(Exception):
+                try:
                     release_import_finalization(
                         connection,
                         storage,
                         lease,
                         now=dependencies.clock(),
                     )
+                except Exception:
+                    _abandon_finalization_lease(storage, lease)
 
 
 def _import_sync(
