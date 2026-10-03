@@ -209,6 +209,23 @@ class DatabaseManager:
 
         self._migrated = True
 
+    def _v6_migration_ceiling(self, previous_schema_version: int) -> int | None:
+        """The migration ceiling for a retained format-6 store, else ``None``.
+
+        A brand-new database whose creation crashed part-way through its own
+        migration run is pointerless and therefore reads as format 6, but it
+        holds no user rows and is finished by the recovery branch in
+        ``init_db``; capping it would leave it permanently incomplete.
+        """
+
+        from .migrations.schema import _LAST_V6_SCHEMA_VERSION
+
+        if self.format_version != 6:
+            return None
+        if previous_schema_version >= 16 and not self._has_user_rows():
+            return None
+        return _LAST_V6_SCHEMA_VERSION
+
     async def init_db(self):
         """Initialize the database tables and run migrations."""
         # Skip if already initialized
@@ -224,7 +241,13 @@ class DatabaseManager:
         # Run migrations first for existing databases (sync operation)
         # This happens BEFORE we create the async engine to avoid lock conflicts
         if not is_new_db:
-            self._run_migrations()
+            # A format-6 store is what `migrate-v7` snapshots and can roll back
+            # to.  Applying the v7 ledger to it in place would rewrite the
+            # source without a backup, and its governance backfill then goes
+            # stale against later v6 edits, so cap it at the last v6 version.
+            self._run_migrations(
+                maximum_version=self._v6_migration_ceiling(previous_schema_version)
+            )
 
         # Then create any new tables
         async with self.engine.begin() as conn:
@@ -425,7 +448,14 @@ class DatabaseManager:
             foreign = list(connection.execute("PRAGMA foreign_key_check"))
             if integrity != ["ok"] or foreign:
                 raise RuntimeError("DATABASE_INTEGRITY_FAILED")
-            if self._schema_version() < CURRENT_SCHEMA_VERSION:
+            from .migrations.schema import _LAST_V6_SCHEMA_VERSION
+
+            # A retained format-6 store stops at the last v6 version on
+            # purpose: `migrate-v7` owns everything above it.
+            if format_version == 7:
+                if self._schema_version() < CURRENT_SCHEMA_VERSION:
+                    raise RuntimeError("SCHEMA_MIGRATION_INCOMPLETE")
+            elif self._schema_version() < _LAST_V6_SCHEMA_VERSION:
                 raise RuntimeError("SCHEMA_MIGRATION_INCOMPLETE")
             if format_version == 7:
                 required = {

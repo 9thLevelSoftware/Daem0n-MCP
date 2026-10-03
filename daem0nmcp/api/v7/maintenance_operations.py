@@ -35,7 +35,12 @@ from ...storage_activation import ResolvedActiveDatabase
 from ...workspace import Workspace, WorkspaceRegistry
 from .application import AdmittedRequest
 from .errors import STABLE_ERROR_CODE_SET
-from .models import DestructiveMutationReceipt, Preview, RecordSummary
+from .models import (
+    DestructiveMutationReceipt,
+    Preview,
+    RecordSummary,
+    stored_relative_path,
+)
 from .runtime_protocols import ActiveStorageResolver, WorkerPool
 from .runtime_services import WorkspaceStorageResolver
 from .tasks import await_task_terminal
@@ -300,9 +305,10 @@ def _verified_snapshot(row: sqlite3.Row) -> _RecordSnapshot:
     try:
         state = _record_state(row)
         payload = _parse_json(row["payload_json"], dict)
+        # A migrated v6 row keeps the host-absolute ``file_path`` v6 wrote;
+        # ``_record_state`` already drops it from the compared state.
         if (
-            row["file_path"] is not None
-            or row["workspace_id"] != row["event_workspace_id"]
+            row["workspace_id"] != row["event_workspace_id"]
             or row["record_id"] != row["event_stream_id"]
             or payload.get("record") != state
             or canonical_json_bytes(payload).decode("utf-8") != str(row["payload_json"])
@@ -672,7 +678,9 @@ def _record_summary(record: _RecordSnapshot) -> RecordSummary:
                 "record_type": record.state["record_type"],
                 "excerpt": content[:4000],
                 "tags": tags,
-                "relative_file_path": record.state["file_path_relative"],
+                "relative_file_path": stored_relative_path(
+                    record.state["file_path_relative"]
+                ),
                 "current_status": status,
                 "content_hash": record.content_hash,
                 "created_at": created_at,

@@ -6,8 +6,11 @@ must update the schema/conformance fixture in the same review.
 
 from __future__ import annotations
 
+import sqlite3
 from enum import Enum
 from types import MappingProxyType
+
+from ...bounded_workers import BoundedWorkerBusyError
 
 
 class ErrorCode(str, Enum):
@@ -22,6 +25,7 @@ class ErrorCode(str, Enum):
     STALE_PROJECTION_ID = "STALE_PROJECTION_ID"
     CAPABILITY_DISABLED = "CAPABILITY_DISABLED"
     CAPABILITY_DEGRADED = "CAPABILITY_DEGRADED"
+    MIGRATION_REQUIRED = "MIGRATION_REQUIRED"
     LEXICAL_UNAVAILABLE = "LEXICAL_UNAVAILABLE"
     COMMUNION_REQUIRED = "COMMUNION_REQUIRED"
     COUNSEL_REQUIRED = "COUNSEL_REQUIRED"
@@ -56,6 +60,15 @@ ERROR_CODE_REGISTRY = MappingProxyType({code.value: code for code in ErrorCode})
 # caller; server-side logs may contain the corresponding private details.
 INTERNAL_ERROR_MESSAGE = "Internal error."
 
+# A retained v6 store cannot be read by v7 and retrying never helps.  The
+# remedy is an offline command, not an MCP tool, so it is stated in the message
+# with a placeholder instead of a machine-readable ``remedy``.
+MIGRATION_REQUIRED_MESSAGE = (
+    "This workspace still uses the v6 storage format. Stop the server, then "
+    "run: python -m daem0nmcp.cli --project-path <project root> migrate-v7 "
+    "--apply"
+)
+
 
 def is_stable_error_code(value: object) -> bool:
     """Return whether *value* is an exact reviewed v7 error code."""
@@ -63,11 +76,45 @@ def is_stable_error_code(value: object) -> bool:
     return isinstance(value, str) and value in STABLE_ERROR_CODE_SET
 
 
+# Clients back off this long before retrying DATABASE_IN_USE.
+DATABASE_IN_USE_RETRY_AFTER_MS = 250
+
+
+def is_database_busy(error: BaseException | None) -> bool:
+    """Return whether *error* is transient contention a caller may retry.
+
+    A full worker pool and a SQLite lock or busy timeout both clear once the
+    competing writer finishes, so they map to retryable ``DATABASE_IN_USE``.
+    The ``code`` check keeps an already-classified repository error (which is
+    not a ``RuntimeServiceError``) busy through the briefing/preflight wrappers.
+    """
+
+    if isinstance(error, BoundedWorkerBusyError):
+        return True
+    if getattr(error, "code", None) == ErrorCode.DATABASE_IN_USE.value:
+        return True
+    if not isinstance(error, sqlite3.OperationalError):
+        return False
+    code = getattr(error, "sqlite_errorcode", None)
+    if isinstance(code, int):
+        return code & 0xFF in {5, 6}  # SQLITE_BUSY, SQLITE_LOCKED
+    # sqlite_errorcode is unavailable on Python 3.10; match SQLite's fixed
+    # lock diagnostics only, never arbitrary detail text.
+    return str(error).casefold() in {
+        "database is locked",
+        "database table is locked",
+        "database schema is locked",
+    }
+
+
 __all__ = [
+    "DATABASE_IN_USE_RETRY_AFTER_MS",
     "ERROR_CODE_REGISTRY",
     "INTERNAL_ERROR_MESSAGE",
+    "MIGRATION_REQUIRED_MESSAGE",
     "STABLE_ERROR_CODES",
     "STABLE_ERROR_CODE_SET",
     "ErrorCode",
+    "is_database_busy",
     "is_stable_error_code",
 ]

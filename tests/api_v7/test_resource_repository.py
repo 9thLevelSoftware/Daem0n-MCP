@@ -469,22 +469,21 @@ class SQLiteResourceRepositoryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(by_id[deleted].item.current_status, "invalidated")
         self.assertTrue(by_id[deleted].deleted)
 
-    async def test_canonical_root_embedded_in_public_text_fails_closed(self) -> None:
-        # Catches free-text fields bypassing the path-safe structured field policy.
-        self.fixture.add_record(
-            12,
-            content=f"do not expose {self.fixture.workspace_root / 'secret.py'}",
-        )
+    async def test_user_text_naming_the_workspace_root_reads_back(self) -> None:
+        # User text may mention paths, the root included (UD-3); one such
+        # warning must not make the resource unreadable.
+        content = f"see {self.fixture.workspace_root / 'app.py'}"
+        record_id = self.fixture.add_record(12, content=content)
         repository = self._repository()
-        from daem0nmcp.api.v7.resource_repository import ResourceRepositoryError
 
-        with self.assertRaises(ResourceRepositoryError):
-            await repository.read_warnings(
-                self.fixture.workspace,
-                ResourceReadRequest(
-                    kind="warnings", limit=1, order_by="updated_at_desc"
-                ),
-            )
+        rows = await repository.read_warnings(
+            self.fixture.workspace,
+            ResourceReadRequest(kind="warnings", limit=1, order_by="updated_at_desc"),
+        )
+
+        self.assertEqual(
+            [(record_id, content)], [(r.item.record_id, r.item.excerpt) for r in rows]
+        )
 
     async def test_rules_use_canonical_ids_and_highest_priority_enabled_order(
         self,
@@ -716,8 +715,10 @@ class SQLiteResourceRepositoryTests(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(read.done())
             self.assertEqual(pool.in_flight, 1)
             release.set()
-            with self.assertRaises(ResourceRepositoryError):
+            with self.assertRaises(ResourceRepositoryError) as caught:
                 await read
+            # An overrun read that did not itself fail is retryable contention.
+            self.assertEqual(caught.exception.code, "DATABASE_IN_USE")
             self.assertEqual(pool.in_flight, 0)
         finally:
             release.set()
@@ -835,6 +836,32 @@ class SQLiteResourceRepositoryTests(unittest.IsolatedAsyncioTestCase):
             [row.item.active_context_id for row in snapshot.active_context], [active]
         )
         self.assertEqual(snapshot.workspace_statistics["active_context"], 2)
+
+    async def test_snapshot_skips_git_subprocesses_when_changes_are_unused(
+        self,
+    ) -> None:
+        # Preflight guidance paid two git subprocesses per call for data it
+        # discarded; under load that pushed reads past their deadline.
+        from daem0nmcp.api.v7.resource_repository import SQLiteResourceRepository
+
+        repository = SQLiteResourceRepository(
+            lambda _workspace: self.fixture.resolved,
+            clock=lambda: NOW,
+        )
+        git_reads: list[object] = []
+
+        def read_git_changes(workspace):
+            git_reads.append(workspace)
+            return []
+
+        repository._read_git_changes_sync = read_git_changes
+        limits = {"warning_limit": 1, "failure_limit": 1, "active_context_limit": 1}
+        skipped = await repository.read_briefing_snapshot(
+            self.fixture.workspace, include_git_changes=False, **limits
+        )
+        self.assertEqual((skipped.git_changes, git_reads), ([], []))
+        await repository.read_briefing_snapshot(self.fixture.workspace, **limits)
+        self.assertEqual(len(git_reads), 1)
 
     async def test_briefing_sections_share_one_sqlite_read_snapshot(self) -> None:
         # A canonical writer may commit while holding the same shared generation

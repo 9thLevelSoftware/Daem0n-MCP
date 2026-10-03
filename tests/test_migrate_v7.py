@@ -1320,8 +1320,9 @@ class V7ApplyRollbackTests(unittest.TestCase):
             self.assertEqual("reactivate", reactivated.action)
             active = sqlite3.connect(resolve_active_database(storage).path)
             try:
+                # Generation 1 is superseded twice over and is collected.
                 self.assertEqual(
-                    [(1, "ready"), (2, "ready"), (3, "active")],
+                    [(2, "ready"), (3, "active")],
                     active.execute(
                         "SELECT generation,status FROM projection_manifests "
                         "WHERE projection_name='lexical' ORDER BY generation"
@@ -1430,7 +1431,9 @@ class V7ApplyRollbackTests(unittest.TestCase):
             candidate.commit()
             candidate.close()
 
-            service.rollback(root, migrated.migration_run_id)
+            # The v7 event written above is deliberate, so the operator
+            # acknowledges that rolling back hides it until reactivation.
+            service.rollback(root, migrated.migration_run_id, discard_v7_writes=True)
             reactivated = service.apply(root)
 
             self.assertEqual("reactivate", reactivated.action)
@@ -1500,7 +1503,9 @@ class V7ApplyRollbackTests(unittest.TestCase):
             )
             candidate.commit()
             candidate.close()
-            service.rollback(root, migrated.migration_run_id)
+            # The v7 event written above is deliberate, so the operator
+            # acknowledges that rolling back hides it until reactivation.
+            service.rollback(root, migrated.migration_run_id, discard_v7_writes=True)
 
             candidate = sqlite3.connect(candidate_path)
             candidate.execute(
@@ -1621,7 +1626,9 @@ class V7ApplyRollbackTests(unittest.TestCase):
             )
             candidate.commit()
             candidate.close()
-            service.rollback(root, migrated.migration_run_id)
+            # The v7 event written above is deliberate, so the operator
+            # acknowledges that rolling back hides it until reactivation.
+            service.rollback(root, migrated.migration_run_id, discard_v7_writes=True)
 
             with self.assertRaisesRegex(MigrationV7Error, "VALIDATION_FAILED"):
                 service.apply(root)

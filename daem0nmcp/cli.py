@@ -353,6 +353,14 @@ def main():
         help="Roll back the active migration run (default: latest)",
     )
     migrate_v7_parser.add_argument(
+        "--discard-v7-writes",
+        action="store_true",
+        help=(
+            "Roll back even though events recorded after activation would "
+            "become unreachable"
+        ),
+    )
+    migrate_v7_parser.add_argument(
         "--batch-size",
         type=_v7_batch_size,
         default=500,
@@ -376,6 +384,19 @@ def main():
     )
     projection_status_parser.add_argument(
         "--workspace-id", required=True, help="Registered opaque workspace ID"
+    )
+
+    compact_projections_parser = subparsers.add_parser(
+        "compact-projections",
+        help="Offline: drop every superseded projection generation and VACUUM",
+    )
+    compact_projections_parser.add_argument(
+        "--workspace-id", required=True, help="Registered opaque workspace ID"
+    )
+    compact_projections_parser.add_argument(
+        "--no-vacuum",
+        action="store_true",
+        help="Drop the superseded generations without reclaiming the file",
     )
 
     rebuild_projection_parser = subparsers.add_parser(
@@ -647,7 +668,11 @@ def main():
         service = MigrationV7Service(registry)
         try:
             if args.rollback is not None:
-                result = service.rollback(args.project_path, args.rollback)
+                result = service.rollback(
+                    args.project_path,
+                    args.rollback,
+                    discard_v7_writes=args.discard_v7_writes,
+                )
             elif args.apply:
                 result = service.apply(args.project_path, batch_size=args.batch_size)
             else:
@@ -689,7 +714,15 @@ def main():
                 "checkpoints": {},
                 "validation": {},
                 "warnings": [],
-                "error": {"code": exc.code, "message": exc.code},
+                # Migration details stay redacted to the code, except the
+                # rollback refusal, whose detail is the operator signal: a
+                # count and the storage-relative candidate, never a host path.
+                "error": {
+                    "code": exc.code,
+                    "message": str(exc)
+                    if exc.code == "ROLLBACK_WOULD_HIDE_WRITES"
+                    else exc.code,
+                },
             }
             exit_code = 2 if exc.code == "UNSAFE_MIGRATION_PATH" else 1
         except Exception:
@@ -723,8 +756,10 @@ def main():
                 )
             if payload.get("active_generation") is not None:
                 print(f"Generation: {payload['active_generation']}")
+            for warning in payload.get("warnings") or ():
+                print(f"Warning: {warning}")
             if payload.get("error"):
-                print(f"Error: {payload['error']['code']}")
+                print(f"Error: {payload['error']['message']}")
         sys.exit(exit_code)
 
     if args.command == "recover-consolidation":
@@ -780,11 +815,16 @@ def main():
             print(f"Runs: {len(payload['runs'])}")
         sys.exit(exit_code)
 
-    if args.command in {"projection-status", "rebuild-projection"}:
+    if args.command in {
+        "compact-projections",
+        "projection-status",
+        "rebuild-projection",
+    }:
         import sqlite3
 
         from .retrieval.operations import (
             ProjectionOperationError,
+            compact_projections,
             projection_status,
             rebuild_projection,
         )
@@ -812,7 +852,12 @@ def main():
                     update={"project_root": str(workspace.root)}
                 )
             storage_path = Path(workspace_settings.get_storage_path())
-            with DatabaseFileLock(storage_path, "shared"):
+            # Compaction drops generations a running server could be reading,
+            # so it takes the offline exclusive lock.
+            lock_mode = (
+                "exclusive" if args.command == "compact-projections" else "shared"
+            )
+            with DatabaseFileLock(storage_path, lock_mode):
                 active = resolve_active_database(storage_path)
                 if active.format_version != 7:
                     raise ProjectionOperationError("FORMAT_7_REQUIRED")
@@ -823,6 +868,12 @@ def main():
                     connection.execute("PRAGMA foreign_keys=ON")
                     if args.command == "projection-status":
                         payload = projection_status(connection, workspace.workspace_id)
+                    elif args.command == "compact-projections":
+                        payload = compact_projections(
+                            connection,
+                            workspace.workspace_id,
+                            vacuum=not args.no_vacuum,
+                        )
                     else:
                         builders = create_projection_builders(
                             connection,
@@ -1230,15 +1281,18 @@ def main():
             if args.json:
                 print(
                     json.dumps(
-                        {"error": "tree-sitter-languages not installed", "indexed": 0}
+                        {
+                            "error": "tree-sitter-language-pack not installed",
+                            "indexed": 0,
+                        }
                     )
                 )
             else:
                 print(
-                    "ERROR: Code indexing requires tree-sitter-languages",
+                    "ERROR: Code indexing requires tree-sitter-language-pack",
                     file=sys.stderr,
                 )
-                print("Install with: pip install tree-sitter-languages")
+                print("Install with: pip install 'daem0nmcp[apps]'")
             sys.exit(1)
 
         project_path = Path(args.project_path or os.getcwd()).resolve()

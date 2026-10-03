@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import hmac
+import logging
 import os
 import re
 import secrets
@@ -23,6 +24,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any
+
+from pydantic import TypeAdapter, ValidationError
 
 from ...bounded_workers import BoundedWorkerBusyError, BoundedWorkerPool
 from ...covenant import CovenantGate, InvocationScope
@@ -50,8 +53,14 @@ from ...storage_activation import (
 )
 from ...workspace import Workspace
 from .application import AdmittedRequest
-from .errors import STABLE_ERROR_CODE_SET
-from .models import EvidenceRef, Page, RecordSummary
+from .errors import STABLE_ERROR_CODE_SET, is_database_busy
+from .models import (
+    EvidenceRef,
+    Page,
+    RecordSummary,
+    RelativePath,
+    stored_relative_path,
+)
 from .portable_projections import (
     ImportFinalizationLease,
     PortableTransferError,
@@ -89,8 +98,11 @@ _FORMAT_VERSION = 7
 _MAX_EXPORT_EVENTS = 10_000
 _IMPORT_LEASE_RENEW_MARGIN_US = 5 * 60 * 1_000_000
 _CURSOR_RE = re.compile(r"^cur_([0-9a-f]{64})$")
-_WINDOWS_ABSOLUTE_PATH = re.compile(r"(?<![A-Za-z0-9])(?:[A-Za-z]:[\\/]|\\\\)")
-_POSIX_ABSOLUTE_PATH = re.compile(r"(?:^|[\s\"'=(])/(?!/)[A-Za-z0-9_.-]")
+# Host-path columns that are always empty in v7 payloads.
+_RAW_PATH_KEYS = frozenset({"file_path", "project_path", "database_path"})
+_RELATIVE_PATH_KEYS = frozenset({"relative_file_path", "file_path_relative"})
+_RELATIVE_PATH_ADAPTER: TypeAdapter[str] = TypeAdapter(RelativePath)
+_PATH_PAIR_NAMES = _RAW_PATH_KEYS | _RELATIVE_PATH_KEYS
 _EVENT_COLUMNS = (
     "event_id,workspace_id,stream_id,stream_kind,stream_version,event_type,"
     "event_schema_version,occurred_at_us,recorded_at_us,actor_type,actor_id,"
@@ -138,10 +150,22 @@ _UNIX_EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
 # This is intentionally not the event loop's default executor.  The semaphore
 # remains owned by the concurrent future after an asyncio waiter is cancelled,
 # so cancellation cannot release capacity while SQLite still holds a lock.
+_LOGGER = logging.getLogger(__name__)
+
 _CORE_OPERATION_WORKERS = BoundedWorkerPool(
     max_workers=4,
     thread_name_prefix="daem0nmcp-v7-core",
 )
+
+# Finalization leases whose attempt has ended without deleting them, keyed by
+# storage and import session.  A concurrent writer that outlasts the busy
+# timeout fails the attempt as DATABASE_IN_USE and then its cleanup release
+# too; the lease would otherwise turn every retry that DATABASE_IN_USE invites
+# into TASK_REQUIRED until it expires.  The ended attempt no longer renews or
+# uses its lease, so the next finalize of the session completes the release
+# before it claims.
+_ABANDONED_FINALIZATION_LEASES: dict[tuple[str, str], ImportFinalizationLease] = {}
+_ABANDONED_FINALIZATION_LEASES_LOCK = threading.Lock()
 
 
 class CoreOperationError(RuntimeError):
@@ -218,6 +242,31 @@ def _validated_storage_path(
     return resolved
 
 
+def _portable_failure_code(error: BaseException, operation: str) -> str:
+    """Name a transfer failure the caller can act on, and log its cause.
+
+    A concurrent writer (a projection drain or a dreaming job) can hold the
+    SQLite write lock past the busy timeout while a transfer does its session
+    bookkeeping. That is a transient, retryable condition, not an invalid
+    bundle, and reporting it as one leaves the caller with no next step.
+    Only the explicit ``raise ... from`` chain counts: a bundle rejected while
+    an unrelated busy error is in flight is still an invalid bundle.
+    """
+
+    seen: set[int] = set()
+    cause: BaseException | None = error
+    while cause is not None and id(cause) not in seen:
+        seen.add(id(cause))
+        if is_database_busy(cause):
+            _LOGGER.warning("%s deferred: %s", operation, cause)
+            return "DATABASE_IN_USE"
+        cause = cause.__cause__
+    _LOGGER.warning(
+        "%s rejected the bundle: %s", operation, type(error).__name__, exc_info=error
+    )
+    return "IMPORT_INVALID"
+
+
 def _verify_schema(connection: sqlite3.Connection) -> None:
     try:
         row = connection.execute(
@@ -240,6 +289,9 @@ def _active_connection(
     try:
         with DatabaseFileLock(storage, "shared"):
             active = resolve_active_database(storage)
+            if active.format_version == 6:
+                # An intact but un-migrated v6 store: retrying never helps.
+                raise CoreOperationError("MIGRATION_REQUIRED")
             if active.format_version != _FORMAT_VERSION:
                 raise CoreOperationError("CAPABILITY_DEGRADED")
             connection = sqlite3.connect(active.path, timeout=5.0)
@@ -447,22 +499,42 @@ def _validate_bundle(bundle: Mapping[str, Any], workspace_id: str) -> None:
 
 
 def _reject_raw_paths(value: object) -> None:
-    if isinstance(value, str):
-        if (
-            _WINDOWS_ABSOLUTE_PATH.search(value) is not None
-            or _POSIX_ABSOLUTE_PATH.search(value) is not None
-        ):
-            raise CoreOperationError("WORKSPACE_PATH_ESCAPE")
-    elif isinstance(value, Mapping):
+    """Refuse host paths in the structured path fields of an event payload.
+
+    Free text (content, rationale, rule text, context) is user text and may
+    mention paths, as on the wire.
+    """
+    if isinstance(value, Mapping):
         for key, item in value.items():
-            if (
-                key in {"file_path", "project_path", "database_path"}
-                and item is not None
-                and item != ""
-            ):
+            if key in _RAW_PATH_KEYS and item is not None and item != "":
                 raise CoreOperationError("WORKSPACE_PATH_ESCAPE")
-            _reject_raw_paths(item)
+            if key in _RELATIVE_PATH_KEYS and item is not None:
+                try:
+                    _RELATIVE_PATH_ADAPTER.validate_python(item)
+                except ValidationError:
+                    raise CoreOperationError("WORKSPACE_PATH_ESCAPE") from None
+            if key != "context":
+                _reject_raw_paths(item)
     elif isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        # A migrated event carries its v6 row as ``[name, value]`` pairs, so a
+        # path column is a list element rather than a mapping key.  Check that
+        # shape too: the migration replaces these with a digest, and a
+        # regression must fail here rather than reach the wire.
+        if (
+            len(value) == 2
+            # A column name is a string; anything else here is an ordinary
+            # two-element list, whose members may be unhashable.
+            and isinstance(value[0], str)
+            and value[0] in _PATH_PAIR_NAMES
+            and isinstance(value[1], str)
+            and value[1]
+        ):
+            if value[0] in _RAW_PATH_KEYS:
+                raise CoreOperationError("WORKSPACE_PATH_ESCAPE")
+            try:
+                _RELATIVE_PATH_ADAPTER.validate_python(value[1])
+            except ValidationError:
+                raise CoreOperationError("WORKSPACE_PATH_ESCAPE") from None
         for item in value:
             _reject_raw_paths(item)
     elif isinstance(value, (bytes, bytearray, memoryview)):
@@ -628,7 +700,7 @@ def _summary(
     record = _record_from_event(event)
     content = record.get("content")
     tags = record.get("tags", [])
-    relative = record.get("file_path_relative")
+    relative = stored_relative_path(record.get("file_path_relative"))
     if not isinstance(content, str) or not content or not isinstance(tags, list):
         raise CoreOperationError("IMPORT_INVALID")
     if record.get("deleted_at_us") is not None:
@@ -912,6 +984,8 @@ def _projection_sync(
                 raise CoreOperationError("CAPABILITY_DISABLED") from exc
             if exc.code in {"LEXICAL_UNAVAILABLE", "FTS5_UNAVAILABLE"}:
                 raise CoreOperationError("LEXICAL_UNAVAILABLE") from exc
+            if exc.code == "DATABASE_IN_USE":
+                raise CoreOperationError("DATABASE_IN_USE") from exc
             raise CoreOperationError("CAPABILITY_DEGRADED") from exc
         except CoreOperationError:
             raise
@@ -993,6 +1067,8 @@ def _export_sync(
             content = page["content"]
             manifest = page["manifest"]
             items = content["items"]
+            if page["page_kind"] == "legacy":
+                _reject_raw_paths(items)
             descriptor = page.get(
                 "page_descriptor",
                 {
@@ -1028,9 +1104,14 @@ def _export_sync(
         except CoreOperationError:
             raise
         except PortableTransferError as exc:
-            raise CoreOperationError(exc.code) from exc
+            code = exc.code
+            if code == "IMPORT_INVALID":
+                code = _portable_failure_code(exc, "workspace_export")
+            raise CoreOperationError(code) from exc
         except Exception as exc:
-            raise CoreOperationError("IMPORT_INVALID") from exc
+            raise CoreOperationError(
+                _portable_failure_code(exc, "workspace_export")
+            ) from exc
 
 
 def _journal_payload(bundle: ExportBundle, merge: bool) -> dict[str, Any]:
@@ -1051,6 +1132,7 @@ def _portable_page(bundle: ExportBundle) -> dict[str, Any]:
         items = [event.model_dump(mode="json") for event in bundle.events]
     elif bundle.page_kind == "legacy":
         items = list(bundle.legacy_rows)
+        _reject_raw_paths(items)
     else:
         items = [point.model_dump(mode="json") for point in bundle.vector_points]
     return {
@@ -1126,6 +1208,35 @@ def _event_command(event: Mapping[str, Any]) -> EventCommand:
         expected_stream_version=int(event["stream_version"]),
         payload=dict(event["payload"]),
     )
+
+
+def _abandon_finalization_lease(storage: Path, lease: ImportFinalizationLease) -> None:
+    with _ABANDONED_FINALIZATION_LEASES_LOCK:
+        _ABANDONED_FINALIZATION_LEASES[(str(storage), lease.session_id)] = lease
+
+
+def _release_abandoned_finalization(
+    connection: sqlite3.Connection,
+    storage: Path,
+    session_id: str,
+    *,
+    now: datetime,
+) -> None:
+    """Finish an ended attempt's lease release before claiming the session.
+
+    A still-held lock raises here and reaches the caller as DATABASE_IN_USE,
+    so the lease stays recorded for the next retry.
+    """
+
+    key = (str(storage), session_id)
+    with _ABANDONED_FINALIZATION_LEASES_LOCK:
+        abandoned = _ABANDONED_FINALIZATION_LEASES.get(key)
+    if abandoned is None:
+        return
+    release_import_finalization(connection, storage, abandoned, now=now)
+    with _ABANDONED_FINALIZATION_LEASES_LOCK:
+        if _ABANDONED_FINALIZATION_LEASES.get(key) is abandoned:
+            del _ABANDONED_FINALIZATION_LEASES[key]
 
 
 def _import_v2_sync(
@@ -1222,6 +1333,12 @@ def _import_v2_sync(
                         "skipped": receipt.imported + receipt.skipped,
                     }
                 )
+            _release_abandoned_finalization(
+                connection,
+                storage,
+                session_id,
+                now=dependencies.clock(),
+            )
             lease = claim_import_finalization(
                 connection,
                 storage,
@@ -1446,7 +1563,10 @@ def _import_v2_sync(
             if vector_candidate is not None:
                 vector_candidate.discard(connection, workspace.workspace_id)
                 vector_candidate = None
-            raise CoreOperationError(exc.code) from exc
+            code = exc.code
+            if code == "IMPORT_INVALID":
+                code = _portable_failure_code(exc, "workspace_import")
+            raise CoreOperationError(code) from exc
         except CoreOperationError:
             if connection.in_transaction:
                 connection.rollback()
@@ -1474,16 +1594,20 @@ def _import_v2_sync(
             if vector_candidate is not None:
                 vector_candidate.discard(connection, workspace.workspace_id)
             vector_candidate = None
-            raise CoreOperationError("IMPORT_INVALID") from exc
+            raise CoreOperationError(
+                _portable_failure_code(exc, "workspace_import")
+            ) from exc
         finally:
             if lease is not None and not committed:
-                with suppress(Exception):
+                try:
                     release_import_finalization(
                         connection,
                         storage,
                         lease,
                         now=dependencies.clock(),
                     )
+                except Exception:
+                    _abandon_finalization_lease(storage, lease)
 
 
 def _import_sync(

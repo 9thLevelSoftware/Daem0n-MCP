@@ -7,7 +7,7 @@ import sys
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from importlib import metadata
-from typing import Any
+from typing import Any, Literal
 
 CAPABILITY_STATUSES = frozenset({"ready", "disabled", "degraded", "failed"})
 CORE_DISTRIBUTIONS = (
@@ -117,10 +117,15 @@ class CapabilityRegistry:
         configured = self._configured(profile)
         if configured is None:
             return self._failed(profile)
-        if not configured:
+        if configured is False:
             return self._disabled(profile)
+        # An unset variable means "on when installed": a profile that cannot run
+        # is simply off, while an explicit request for it is degraded.
         if name == "models-local" and sys.version_info < (3, 11):
-            return self._python_version_unavailable(profile)
+            capability = self._python_version_unavailable(profile)
+            if configured == "auto":
+                capability["status"] = "disabled"
+            return capability
 
         missing = [
             distribution
@@ -128,6 +133,8 @@ class CapabilityRegistry:
             if not self._distribution_available(distribution)
         ]
         if missing:
+            if configured == "auto":
+                return self._not_installed(profile, missing)
             return self._degraded(profile, missing)
         return self._ready(profile)
 
@@ -167,11 +174,13 @@ class CapabilityRegistry:
             },
         }
 
-    def _configured(self, profile: CapabilityProfile) -> bool | None:
-        value = self._environ.get(profile.environment_key, "false").strip().lower()
+    def _configured(self, profile: CapabilityProfile) -> bool | Literal["auto"] | None:
+        value = self._environ.get(profile.environment_key, "").strip().lower()
+        if not value:
+            return "auto"
         if value in {"1", "true", "yes", "on"}:
             return True
-        if value in {"0", "false", "no", "off", ""}:
+        if value in {"0", "false", "no", "off"}:
             return False
         return None
 
@@ -191,6 +200,24 @@ class CapabilityRegistry:
             "remediation": {
                 "action": "enable_configuration",
                 "environment": f"{profile.environment_key}=true",
+                "message": (
+                    f"Unset {profile.environment_key} or set it to true; the "
+                    f"profile turns on when 'daem0nmcp[{profile.name}]' is installed."
+                ),
+            },
+        }
+
+    @staticmethod
+    def _not_installed(
+        profile: CapabilityProfile, missing: list[str]
+    ) -> dict[str, Any]:
+        return {
+            "name": profile.name,
+            "status": "disabled",
+            "remediation": {
+                "action": "install_extra",
+                "command": f"pip install 'daem0nmcp[{profile.name}]'",
+                "missing": missing,
             },
         }
 
@@ -225,7 +252,10 @@ class CapabilityRegistry:
             "remediation": {
                 "action": "fix_configuration",
                 "environment": profile.environment_key,
-                "message": "Use a boolean value: true or false.",
+                "message": (
+                    "Use true or false, or leave it unset to enable the "
+                    "profile automatically when its extra is installed."
+                ),
             },
         }
 

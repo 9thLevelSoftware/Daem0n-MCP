@@ -151,13 +151,7 @@ async def test_production_ritual_and_restart(initialized_workspace, transport):
                 "idempotency_key": "process-acceptance-outcome-0001",
             },
         )
-        visibility_deadline = asyncio.get_running_loop().time() + 5
-        while True:
-            recalled = await succeed(session, "memory_recall", recall_arguments)
-            if record_id in {item["record"]["record_id"] for item in recalled["items"]}:
-                break
-            assert asyncio.get_running_loop().time() < visibility_deadline, recalled
-            await asyncio.sleep(0.1)
+        await _recall_until_visible(session, recall_arguments, record_id)
         templates = await session.list_resource_templates()
         assert len(templates.resourceTemplates) >= 4
         resource = await session.read_resource(
@@ -172,8 +166,24 @@ async def test_production_ritual_and_restart(initialized_workspace, transport):
         denied = await call(restarted, "memory_recall", recall_arguments)
         assert denied["error"]["code"] == "COMMUNION_REQUIRED"
         await succeed(restarted, "session_brief", scope)
-        recalled = await succeed(restarted, "memory_recall", recall_arguments)
-        assert record_id in {item["record"]["record_id"] for item in recalled["items"]}
+        # A restarted server republishes the lexical generation in the
+        # background, so the first recall after it can still read the
+        # previous one.  Poll to a bounded deadline instead of racing it.
+        await _recall_until_visible(restarted, recall_arguments, record_id)
+
+
+async def _recall_until_visible(
+    session, recall_arguments: dict, record_id: str, *, timeout: float = 30
+) -> None:
+    """Recall until the record is visible, or fail at a bounded deadline."""
+
+    deadline = asyncio.get_running_loop().time() + timeout
+    while True:
+        recalled = await succeed(session, "memory_recall", recall_arguments)
+        if record_id in {item["record"]["record_id"] for item in recalled["items"]}:
+            return
+        assert asyncio.get_running_loop().time() < deadline, recalled
+        await asyncio.sleep(0.1)
 
 
 async def test_federated_recall_process_requires_each_briefing_and_keeps_origin(
@@ -452,3 +462,22 @@ async def test_consolidation_preview_copy_and_canonical_archive_over_real_mcp(
         )
         assert archived["archived"] == 2
         assert all(source.root.is_dir() for source in sources)
+
+
+async def test_an_installed_extra_is_enabled_without_any_variable(
+    initialized_workspace,
+):
+    """UD-7: installing the extra is the whole opt-in."""
+    from daem0nmcp.capabilities import CapabilityRegistry
+
+    if CapabilityRegistry(environ={}).get("graph")["status"] != "ready":
+        pytest.skip("the graph extra is not installed")
+
+    workspace = initialized_workspace
+    scope = {"workspace_id": workspace.workspace_id}
+    async with process_client(workspace.root, "stdio") as session:
+        await succeed(session, "session_brief", scope)
+        health = await succeed(session, "system_health", scope)
+
+    states = {state["name"]: state["status"] for state in health["capability_states"]}
+    assert states["graph"] == "ready", states

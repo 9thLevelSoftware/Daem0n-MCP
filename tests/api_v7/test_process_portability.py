@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import sqlite3
 from contextlib import closing
 from datetime import datetime, timedelta, timezone
@@ -12,7 +13,7 @@ from daem0nmcp.api.v7.runtime_services import WorkspaceStorageResolver
 from daem0nmcp.database import DatabaseManager
 from daem0nmcp.event_store import EventCommand, EventStore
 from daem0nmcp.workspace import WorkspaceRegistry
-from tests.api_v7.process_client import process_client, succeed
+from tests.api_v7.process_client import call, process_client, succeed
 from tests.api_v7.test_process_surface import _preflight, _store
 
 
@@ -38,6 +39,52 @@ async def _export_pages(session, scope, legacy):
         )
         pages.append(page)
     return pages
+
+
+async def _import_retrying_while_busy(session, scope, arguments):
+    """Import one page, waiting out a concurrent writer's SQLite write lock.
+
+    A projection drain or dreaming job can hold the write lock past the server's
+    busy timeout, which both the preflight and the transfer report as the
+    retryable DATABASE_IN_USE. A real client retries those; so does this test,
+    within a bounded deadline and a bounded number of attempts.
+    """
+
+    deadline = asyncio.get_running_loop().time() + 30
+    for attempt in range(8):
+        contended = None
+        preflight = await call(
+            session,
+            "memory_preflight",
+            {
+                **scope,
+                "target_tool": "workspace_import",
+                "target_arguments": arguments,
+                "description": "Exercise workspace_import through the transport",
+            },
+        )
+        if preflight["ok"]:
+            result = await call(
+                session,
+                "workspace_import",
+                {
+                    **scope,
+                    **arguments,
+                    "preflight_token": preflight["data"]["preflight_token"],
+                },
+            )
+            if result["ok"]:
+                # Contention is occasional; a transfer that always contends is
+                # a regression, not slowness.
+                assert attempt < 4, f"import needed {attempt + 1} attempts"
+                return result["data"]
+            contended = result["error"]
+        else:
+            contended = preflight["error"]
+        assert contended["code"] == "DATABASE_IN_USE", contended
+        assert asyncio.get_running_loop().time() < deadline, contended
+        await asyncio.sleep(0.5)
+    raise AssertionError("the import stayed contended for 8 attempts")
 
 
 @pytest.mark.parametrize("transport", ["stdio", "streamable-http"])
@@ -78,7 +125,19 @@ async def test_production_export_restores_retained_workspace(
     retained = tmp_path / ".daem0nmcp" / "retained-before-restore"
     assert storage.resolve().is_relative_to(tmp_path.resolve())
     assert retained.resolve().is_relative_to(tmp_path.resolve())
-    storage.rename(retained)
+    # Windows can briefly refuse the rename after the server exits. The cause is
+    # unconfirmed (the venv launcher's real interpreter is a grandchild the
+    # harness does not wait for, or a virus scanner reading the fresh files);
+    # no product code renames storage. Retry within a bounded deadline.
+    rename_deadline = asyncio.get_running_loop().time() + 15
+    while True:
+        try:
+            storage.rename(retained)
+            break
+        except PermissionError:
+            if asyncio.get_running_loop().time() >= rename_deadline:
+                raise
+            await asyncio.sleep(0.2)
     async with process_client(tmp_path, transport) as session:
         await succeed(session, "session_brief", scope)
         import_id = None
@@ -90,17 +149,7 @@ async def test_production_export_restores_retained_workspace(
             }
             if import_id is not None:
                 arguments["import_session_id"] = import_id
-            staged = await succeed(
-                session,
-                "workspace_import",
-                {
-                    **scope,
-                    **arguments,
-                    "preflight_token": await _preflight(
-                        session, scope, "workspace_import", arguments
-                    ),
-                },
-            )
+            staged = await _import_retrying_while_busy(session, scope, arguments)
             import_id = staged["import_session_id"]
             assert staged["staged_pages"] == index + 1
             assert staged["imported"] == 0
@@ -109,17 +158,7 @@ async def test_production_export_restores_retained_workspace(
             "finalize": True,
             "idempotency_key": "portable-process-import-0001",
         }
-        restored = await succeed(
-            session,
-            "workspace_import",
-            {
-                **scope,
-                **finish,
-                "preflight_token": await _preflight(
-                    session, scope, "workspace_import", finish
-                ),
-            },
-        )
+        restored = await _import_retrying_while_busy(session, scope, finish)
         assert restored["status"] == "succeeded"
         assert restored["imported"] == 2
         assert restored["root_hash"] == expected_root

@@ -16,7 +16,6 @@ import hmac
 import inspect
 import json
 import os
-import posixpath
 import re
 import secrets
 import sqlite3
@@ -51,7 +50,13 @@ from ...workspace import (
 )
 from .application import AdmittedRequest
 from .errors import STABLE_ERROR_CODE_SET
-from .models import CapabilityState, Page, RecordSummary, RetrievalData
+from .models import (
+    CapabilityState,
+    Page,
+    RecordSummary,
+    RetrievalData,
+    stored_relative_path,
+)
 from .public_ids import (
     PublicObjectIdNotFound,
     PublicObjectIdRepository,
@@ -755,24 +760,6 @@ def _partition_metadata(
     return row_count, content_hash
 
 
-def _safe_code_path(value: object) -> bool:
-    if (
-        not isinstance(value, str)
-        or not 1 <= len(value) <= 1024
-        or "\\" in value
-        or "\x00" in value
-        or value.startswith(("/", "~"))
-        or re.match(r"^[A-Za-z]:", value) is not None
-        or value in {".", ".."}
-    ):
-        return False
-    components = value.split("/")
-    return (
-        all(component not in {"", ".", ".."} for component in components)
-        and posixpath.normpath(value) == value
-    )
-
-
 def _validate_entity_partition(
     connection: sqlite3.Connection,
     workspace_id: str,
@@ -1061,24 +1048,24 @@ def _record_summary(row: sqlite3.Row) -> RecordSummary:
     try:
         content = row["content"]
         tags = json.loads(str(row["tags_json"]))
+        # A migrated v6 row keeps the host-absolute ``file_path`` v6 wrote and
+        # may carry a valid time ahead of its transaction time; neither is
+        # corruption, and ``RecordSummary`` bounds what is emitted.
         if (
             not isinstance(content, str)
             or not content
             or not isinstance(tags, list)
-            or row["file_path"] is not None
             or row["deleted_at_us"] is not None
         ):
             raise ValueError
         created = _datetime_from_us(row["created_at_us"])
         updated = _datetime_from_us(row["updated_at_us"])
-        if updated < created:
-            raise ValueError
         return RecordSummary(
             record_id=row["record_id"],
             record_type=row["record_type"],
             excerpt=content[:4000],
             tags=tags,
-            relative_file_path=row["file_path_relative"],
+            relative_file_path=stored_relative_path(row["file_path_relative"]),
             current_status="archived" if bool(row["archived"]) else "current",
             content_hash=row["content_hash"],
             created_at=created,
@@ -1424,7 +1411,10 @@ def _code_capability_error(
         else "CAPABILITY_DEGRADED"
     )
     remediation = (
-        "Set DAEM0NMCP_APPS_ENABLED=true and install the apps dependency profile."
+        "Set DAEM0NMCP_APPS_ENABLED to true, false, or leave it unset."
+        if capability_status == "failed"
+        else "Install the apps profile with pip install 'daem0nmcp[apps]'; "
+        "it turns on automatically unless DAEM0NMCP_APPS_ENABLED=false."
     )
     return DiscoveryOperationError(
         code,
@@ -2046,6 +2036,56 @@ def _entity_selection_sync(
         raise _translate_error(error) from None
 
 
+def _lexical_catchup_pending_sync(
+    dependencies: DiscoveryOperationDependencies,
+    workspace: Workspace,
+    record_ids: tuple[str, ...],
+) -> bool:
+    """Return whether the lexical projection still owes these records.
+
+    True only when the records are absent from the active lexical generation
+    *and* a rebuild job is queued or running, i.e. a retry can actually make
+    progress. A dead-lettered rebuild, a permanently unavailable index, or a
+    record that simply does not match the entity name is not retryable.
+    """
+
+    if not record_ids:
+        return False
+
+    def reader(connection: sqlite3.Connection) -> bool:
+        active = connection.execute(
+            "SELECT generation FROM projection_manifests WHERE workspace_id=? "
+            "AND projection_name='lexical' AND status='active'",
+            (workspace.workspace_id,),
+        ).fetchone()
+        indexed = 0
+        if active is not None:
+            placeholders = ",".join("?" for _ in record_ids)
+            indexed = int(
+                connection.execute(
+                    "SELECT COUNT(*) FROM retrieval_documents WHERE workspace_id=? "
+                    f"AND projection_generation=? AND record_id IN ({placeholders})",
+                    (workspace.workspace_id, int(active[0]), *record_ids),
+                ).fetchone()[0]
+            )
+        if indexed >= len(record_ids):
+            return False
+        return (
+            connection.execute(
+                "SELECT 1 FROM background_jobs WHERE workspace_id=? "
+                "AND job_type='retrieval.projection_rebuild' "
+                "AND status IN ('queued','running') LIMIT 1",
+                (workspace.workspace_id,),
+            ).fetchone()
+            is not None
+        )
+
+    try:
+        return bool(_read_snapshot(dependencies, workspace, reader))
+    except Exception:
+        return False
+
+
 def _generation_is_current_sync(
     dependencies: DiscoveryOperationDependencies,
     workspace: Workspace,
@@ -2093,7 +2133,21 @@ async def _memory_recall_entity(
                 raise DiscoveryOperationError("CAPABILITY_DEGRADED")
             indexed[record_id] = item.record
         if set(indexed) != set(selection.record_ids):
-            raise DiscoveryOperationError("CAPABILITY_DEGRADED")
+            missing = tuple(
+                record_id
+                for record_id in selection.record_ids
+                if record_id not in indexed
+            )
+            # Only a projection that has genuinely not caught up yet is worth
+            # retrying. A permanently unavailable or dead-lettered lexical
+            # index stays a terminal CAPABILITY_DEGRADED.
+            pending = await _run_blocking(
+                dependencies,
+                lambda: _lexical_catchup_pending_sync(dependencies, workspace, missing),
+            )
+            raise DiscoveryOperationError(
+                "DATABASE_IN_USE" if pending else "CAPABILITY_DEGRADED"
+            )
         await _run_blocking(
             dependencies,
             lambda: _generation_is_current_sync(

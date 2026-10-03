@@ -20,6 +20,7 @@ import time
 from collections.abc import Callable, Iterable
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
+from functools import partial
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote
@@ -43,10 +44,37 @@ from ..storage_activation import (
     resolve_active_database,
     write_active_pointer,
 )
-from ..workspace import WorkspaceRegistry, resolve_derived_path
+from ..workspace import (
+    WorkspaceRegistry,
+    is_workspace_relative_path,
+    normalize_resolved_path,
+    relative_to_root,
+    resolve_derived_path,
+)
+from .schema import (
+    _retained_trigger_states,
+    reconcile_retained_governance,
+)
 
 TARGET_FORMAT_VERSION = 7
 DEFAULT_BATCH_SIZE = 500
+# Every table a v7 client can add user data to after activation.  The
+# three event ledgers are append-only (schema triggers enforce it), so a
+# row count is an exact high-water mark; capture candidates are plain
+# inserts holding unapproved user content, so a rise is reported too.
+_POST_ACTIVATION_TABLES = (
+    "memory_events",
+    "governance_events",
+    "workspace_link_events",
+    "memory_capture_candidates",
+)
+# v6 accepted empty content; the v7 bounded summary needs at least one
+# character.  ``api/v7/models.MIGRATED_EMPTY_CONTENT`` uses the same marker for
+# rows migrated before this normalization existed.
+_EMPTY_CONTENT = "<empty>"
+# The v7 wire limits on a record's tags, which v6 did not have.
+_MAX_TAGS = 32
+_MAX_TAG_CHARS = 80
 _KNOWN_MEMORY_TYPES = {
     "decision",
     "pattern",
@@ -146,7 +174,7 @@ def _quoted_identifier(name: str) -> str:
 
 
 def _readonly_connection(path: Path) -> sqlite3.Connection:
-    # Migration dry-run must not write any byte.  On Windows the no-lock VFS
+    # A dry run never changes the source database.  On Windows the no-lock VFS
     # keeps read-only connections off the ``-shm`` read marks.  POSIX has no
     # equivalent: ``unix-none`` lacks shared memory, so it cannot open a WAL
     # database at all.  There, with no ``-wal``, ``-shm`` or ``-journal`` the
@@ -182,6 +210,13 @@ def _table_names(connection: sqlite3.Connection) -> list[str]:
             """
         )
     ]
+
+
+def _has_column(connection: sqlite3.Connection, table: str, column: str) -> bool:
+    return any(
+        str(row[1]) == column
+        for row in connection.execute(f"PRAGMA table_info({_quoted_identifier(table)})")
+    )
 
 
 def _table_exists(connection: sqlite3.Connection, name: str) -> bool:
@@ -610,12 +645,11 @@ def _partial_candidates(root: Path | None) -> list[Path]:
 
 
 def _sqlite_backup(source: Path, destination: Path) -> None:
-    source_uri = "file:" + quote(source.resolve().as_posix(), safe="/:") + "?mode=ro"
-    source_connection = sqlite3.connect(source_uri, uri=True)
+    # Opened through the same reader the dry run uses, so the two do not
+    # disagree about what "read-only" means beside the v6 file.
+    source_connection = _readonly_connection(source)
     target_connection = sqlite3.connect(destination)
     try:
-        source_connection.execute("PRAGMA foreign_keys=ON")
-        source_connection.execute("PRAGMA busy_timeout=0")
         source_connection.backup(target_connection)
         target_connection.commit()
     finally:
@@ -639,27 +673,51 @@ def _integrity(path: Path) -> dict[str, Any]:
     return {"integrity_check": "ok", "foreign_key_violations": foreign}
 
 
+# v6 columns that hold a path on the machine that wrote them.  The lossless
+# row rides inside every migrated event's payload, and an export bundle is a
+# shareable artifact, so the value is replaced by a digest rather than copied
+# to the wire.  The original stays in `source.snapshot.db` and in the retained
+# v6 tables, and the usable form is derived into `record.file_path_relative`.
+_HOST_PATH_COLUMNS = frozenset({"file_path", "project_path", "database_path"})
+_DERIVED_PATH_COLUMNS = frozenset({"file_path_relative", "relative_file_path"})
+
+
+def _host_path_marker(value: str) -> dict[str, Any]:
+    return {
+        "$host_path": {
+            "length": len(value),
+            "sha256": hashlib.sha256(value.encode("utf-8")).hexdigest(),
+            "snapshot": "source.snapshot.db",
+        }
+    }
+
+
+def _lossless_column(row: sqlite3.Row, table: str, name: str) -> Any:
+    value = row[name]
+    if table == "memories" and name == "vector_embedding" and isinstance(value, bytes):
+        return {
+            "$legacy_vector": {
+                "length": len(value),
+                "sha256": hashlib.sha256(value).hexdigest(),
+                "snapshot": "source.snapshot.db",
+            }
+        }
+    if isinstance(value, str) and value:
+        if name in _HOST_PATH_COLUMNS:
+            return _host_path_marker(value)
+        # v6 wrote `../outside/x.py` here for a file above the project, and
+        # the absolute path itself across Windows drives; neither may leave
+        # the host either.
+        if name in _DERIVED_PATH_COLUMNS and not is_workspace_relative_path(value):
+            return _host_path_marker(value)
+    return _encode_sqlite_value(value, table=table, column=name)
+
+
 def _lossless_row(row: sqlite3.Row, table: str) -> dict[str, Any]:
     return {
         "table": table,
         "columns": [
-            [
-                name,
-                (
-                    {
-                        "$legacy_vector": {
-                            "length": len(row[name]),
-                            "sha256": hashlib.sha256(row[name]).hexdigest(),
-                            "snapshot": "source.snapshot.db",
-                        }
-                    }
-                    if table == "memories"
-                    and name == "vector_embedding"
-                    and isinstance(row[name], bytes)
-                    else _encode_sqlite_value(row[name], table=table, column=name)
-                ),
-            ]
-            for name in tuple(row.keys())
+            [name, _lossless_column(row, table, name)] for name in tuple(row.keys())
         ],
     }
 
@@ -715,8 +773,109 @@ def _legacy_score(value: Any) -> float | None:
     return number if math.isfinite(number) and 0 <= number <= 1 else None
 
 
+def sole_recorded_project_root(connection: sqlite3.Connection) -> str | None:
+    """The one project root a v6 database records, or ``None``.
+
+    v6 wrote the project root onto rows in several tables.  When every one of
+    them names the same root, that root is this database's own project even
+    after the directory was moved; when they disagree, no single root can be
+    inferred.  Spellings are compared normalized, so a trailing separator or
+    Windows case does not split one root into two.  This is the single
+    definition: file links and context triggers both use it.
+    """
+
+    recorded: dict[str, str] = {}
+    for table in _table_names(connection):
+        if table in _V7_TABLE_NAMES:
+            continue
+        columns = {
+            str(row[1])
+            for row in connection.execute(
+                f"PRAGMA table_info({_quoted_identifier(table)})"
+            )
+        }
+        if "project_path" not in columns:
+            continue
+        for value in _distinct(connection, table, "project_path"):
+            if not isinstance(value, str) or not value:
+                continue
+            recorded.setdefault(_project_root_key(value), value)
+            if len(recorded) > 1:
+                return None
+    if len(recorded) != 1:
+        return None
+    return next(iter(recorded.values()))
+
+
+def _project_root_key(value: str) -> str:
+    try:
+        resolved = normalize_resolved_path(Path(value).expanduser().resolve())
+    except (OSError, RuntimeError, ValueError):
+        return os.path.normcase(value.rstrip("/\\"))
+    return os.path.normcase(str(resolved))
+
+
+def _legacy_project_roots(
+    connection: sqlite3.Connection, workspace_root: Path
+) -> tuple[str, ...]:
+    """The roots a v6 file link may be relative to, workspace root first.
+
+    When the database records exactly one project root and it is not this
+    workspace, the project was moved before the migration, so file links are
+    resolved against it as well.  Containment is decided by
+    ``relative_to_root``, which compares ``os.path.normcase`` forms; on a
+    case-insensitive volume whose real spelling differs from the recorded one
+    the link is dropped and counted rather than guessed.
+    """
+
+    roots = [str(workspace_root)]
+    recorded_root = sole_recorded_project_root(connection)
+    if recorded_root is not None and _project_root_key(
+        recorded_root
+    ) != _project_root_key(roots[0]):
+        roots.append(recorded_root)
+    return tuple(roots)
+
+
+def _legacy_relative_path(row: sqlite3.Row, roots: Iterable[str]) -> str | None:
+    """Resolve a v6 file link to a workspace-relative path, or drop it.
+
+    v6 stored a host-absolute ``file_path`` plus a relative form that is
+    ``../outside/x.py`` for a file above the project root (and the absolute
+    path itself across Windows drives).  Neither may be emitted, so the stored
+    relative form is kept when it already is workspace-relative and otherwise
+    re-derived from the absolute path.  Both raw values stay in the event's
+    lossless ``legacy`` payload either way.
+    """
+
+    stored = _column(row, "file_path_relative")
+    if is_workspace_relative_path(stored):
+        return str(stored)
+    absolute = _column(row, "file_path")
+    if not isinstance(absolute, str) or not absolute:
+        return None
+    for root in roots:
+        relative = relative_to_root(absolute, root)
+        if relative is not None:
+            return relative
+    return None
+
+
+def _legacy_tags(values: Iterable[Any]) -> list[str]:
+    """Clip v6 tags to the v7 wire limits; the raw list stays in ``legacy``."""
+
+    clipped: list[str] = []
+    for value in values:
+        if not isinstance(value, str) or not value:
+            continue
+        tag = value[:_MAX_TAG_CHARS]
+        if tag not in clipped:
+            clipped.append(tag)
+    return clipped[:_MAX_TAGS]
+
+
 def _memory_state(
-    row: sqlite3.Row, *, base: dict[str, Any] | None = None
+    row: sqlite3.Row, *, roots: Iterable[str] = (), base: dict[str, Any] | None = None
 ) -> dict[str, Any]:
     category = _column(row, "category") if base is None else base["record_type"]
     legacy_type = None
@@ -727,7 +886,7 @@ def _memory_state(
     else:
         legacy_type = base["legacy_type"]
     context, _ = _parse_legacy_json(_column(row, "context"), dict, {})
-    tags, _ = _parse_legacy_json(_column(row, "tags"), list, [])
+    raw_tags, _ = _parse_legacy_json(_column(row, "tags"), list, [])
     worked_value = _column(row, "worked")
     worked = None if worked_value is None else _legacy_bool(worked_value)
     content = _column(row, "content", "")
@@ -736,16 +895,16 @@ def _memory_state(
     return {
         "record_type": category,
         "legacy_type": legacy_type,
-        "content": content,
+        "content": content or _EMPTY_CONTENT,
         "rationale": _column(row, "rationale"),
         "context": context,
-        "tags": tags,
-        "file_path": base.get("file_path")
-        if base is not None
-        else _column(row, "file_path"),
+        "tags": _legacy_tags(raw_tags),
+        # The host-absolute v6 path never reaches the v7 record; it survives
+        # in the event's lossless ``legacy`` payload.
+        "file_path": None,
         "file_path_relative": base.get("file_path_relative")
         if base is not None
-        else _column(row, "file_path_relative"),
+        else _legacy_relative_path(row, roots),
         "keywords": base.get("keywords")
         if base is not None
         else _column(row, "keywords"),
@@ -838,6 +997,7 @@ def _projected_memory_state(row: sqlite3.Row) -> dict[str, Any]:
 def _validate_retained_compatibility(
     connection: sqlite3.Connection,
     workspace_id: str,
+    roots: tuple[str, ...] = (),
 ) -> None:
     """Compare current retained-v6 rows to their unique live typed claims."""
 
@@ -875,7 +1035,7 @@ def _validate_retained_compatibility(
             (workspace_id, stream_id),
         ).fetchone()
         if projected is None or canonical_json_bytes(
-            _memory_state(source)
+            _memory_state(source, roots=roots)
         ) != canonical_json_bytes(_projected_memory_state(projected)):
             raise MigrationV7Error(
                 "VALIDATION_FAILED", "current memory compatibility row diverges"
@@ -1011,6 +1171,49 @@ def _validate_retained_compatibility(
                 "VALIDATION_FAILED",
                 "current relationship compatibility row diverges",
             )
+
+
+def _migration_warnings(validation: dict[str, Any]) -> tuple[str, ...]:
+    """State every migrated fact that is not a faithful copy of the v6 row."""
+
+    warnings: list[str] = []
+    dropped = int(validation.get("dropped_file_link_count", 0))
+    if dropped:
+        warnings.append(
+            f"{dropped} memory file link(s) pointed outside the workspace and were "
+            "kept only in the legacy event payload"
+        )
+    foreign = int(validation.get("foreign_trigger_count", 0))
+    if foreign:
+        warnings.append(
+            f"{foreign} context trigger(s) belong to another project path and were "
+            "not migrated"
+        )
+    updated = int(validation.get("rules_updated", 0))
+    if updated:
+        warnings.append(
+            f"{updated} rule(s) changed in v6 after an earlier in-place upgrade and "
+            "were reconciled"
+        )
+    disabled = int(validation.get("rules_disabled", 0))
+    if disabled:
+        warnings.append(
+            f"{disabled} rule(s) removed in v6 after an earlier in-place upgrade "
+            "were disabled; no rule deletion event exists"
+        )
+    deleted = int(validation.get("triggers_deleted", 0))
+    if deleted:
+        warnings.append(
+            f"{deleted} context trigger(s) removed in v6 after an earlier in-place "
+            "upgrade were marked deleted"
+        )
+    unreconciled = int(validation.get("triggers_unreconciled", 0))
+    if unreconciled:
+        warnings.append(
+            f"{unreconciled} context trigger(s) were edited in v6 after an earlier "
+            "in-place upgrade and keep the earlier content; re-create them"
+        )
+    return tuple(warnings)
 
 
 def _run_migration_16(path: Path, workspace_id: str) -> None:
@@ -1220,6 +1423,22 @@ class MigrationV7Service:
                 raise MigrationV7Error(
                     "ACTIVATION_STATE_INVALID", "candidate run is not ready"
                 )
+            validation_row = active.execute(
+                "SELECT validation_json FROM v7_migration_runs "
+                "WHERE migration_run_id=?",
+                (run_id,),
+            ).fetchone()
+            try:
+                validation = json.loads(validation_row[0] or "{}")
+            except (TypeError, ValueError):
+                validation = {}
+            if isinstance(validation, dict):
+                validation["activation_counts"] = self._post_activation_counts(active)
+                active.execute(
+                    "UPDATE v7_migration_runs SET validation_json=? "
+                    "WHERE migration_run_id=?",
+                    (canonical_json_bytes(validation).decode("utf-8"), run_id),
+                )
             active.execute(
                 "UPDATE projection_manifests SET status='active', activated_at_us=? "
                 "WHERE workspace_id=? AND status='ready' AND generation=1 "
@@ -1290,7 +1509,7 @@ class MigrationV7Service:
             connection.close()
 
     def _recover_ready_pointer(
-        self, resolved, workspace_id: str
+        self, resolved, workspace_id: str, workspace_root: Path
     ) -> MigrationResult | None:
         """Finish activation when the pointer was durable before metadata commit."""
 
@@ -1313,6 +1532,7 @@ class MigrationV7Service:
             run_id,
             workspace_id,
             inventory,
+            workspace_root,
             retained_authority=prior_validation.get("authority") == "retained_v7",
         )
         self._bootstrap_lexical(resolved.path, workspace_id)
@@ -1414,7 +1634,7 @@ class MigrationV7Service:
                 if upgrade is not None:
                     return upgrade
                 recovered = self._recover_ready_pointer(
-                    resolved, workspace.workspace_id
+                    resolved, workspace.workspace_id, workspace.root
                 )
                 if recovered is not None:
                     return recovered
@@ -1451,12 +1671,14 @@ class MigrationV7Service:
                         run_id,
                         workspace.workspace_id,
                         batch_size,
+                        workspace.root,
                     )
                 validation = self._finalize_candidate(
                     candidate,
                     run_id,
                     workspace.workspace_id,
                     inventory,
+                    workspace.root,
                     retained_authority=action == "reactivate",
                 )
                 self._bootstrap_lexical(candidate, workspace.workspace_id)
@@ -1521,6 +1743,7 @@ class MigrationV7Service:
                     inventory=inventory,
                     checkpoints=checkpoints,
                     validation=validation,
+                    warnings=_migration_warnings(validation),
                 )
             except MigrationInterrupted:
                 raise
@@ -1633,7 +1856,8 @@ class MigrationV7Service:
                     snapshot_hash,
                     int(inventory["max_schema_version"]),
                     "source.snapshot.db",
-                    "candidate.db.partial",
+                    # The final published artifact, as verify-v7 expects.
+                    "candidate.db",
                     canonical_json_bytes(inventory).decode("utf-8"),
                     now,
                     now,
@@ -1890,14 +2114,16 @@ class MigrationV7Service:
         run_id: str,
         workspace_id: str,
         batch_size: int,
+        workspace_root: Path,
     ) -> dict[str, Any]:
         connection = sqlite3.connect(candidate)
         connection.row_factory = sqlite3.Row
         try:
             connection.execute("PRAGMA foreign_keys=ON")
             connection.execute("PRAGMA synchronous=FULL")
+            roots = _legacy_project_roots(connection, workspace_root)
             for table, importer in (
-                ("memories", self._import_memory_row),
+                ("memories", partial(self._import_memory_row, roots=roots)),
                 ("facts", self._import_fact_row),
                 ("memory_relationships", self._import_relationship_row),
             ):
@@ -1976,12 +2202,14 @@ class MigrationV7Service:
         row: sqlite3.Row,
         run_id: str,
         workspace_id: str,
+        *,
+        roots: tuple[str, ...],
     ) -> None:
         legacy_id = str(row["id"])
         record_id = deterministic_id(
             "mem", "memory", workspace_id, "legacy", "memories", legacy_id
         )
-        state = _memory_state(row)
+        state = _memory_state(row, roots=roots)
         stream_version = 0
         versions = connection.execute(
             "SELECT * FROM memory_versions WHERE memory_id=? ORDER BY version_number, id",
@@ -1996,7 +2224,7 @@ class MigrationV7Service:
         }
         for version in versions:
             stream_version += 1
-            version_state = _memory_state(version, base=state)
+            version_state = _memory_state(version, roots=roots, base=state)
             occurred, valid_quality, valid_original = _parse_legacy_time(
                 _column(version, "valid_from") or _column(version, "changed_at")
             )
@@ -2335,6 +2563,7 @@ class MigrationV7Service:
         run_id: str,
         workspace_id: str,
         source_inventory: dict[str, Any],
+        workspace_root: Path,
         *,
         retained_authority: bool = False,
     ) -> dict[str, Any]:
@@ -2342,11 +2571,24 @@ class MigrationV7Service:
         connection.row_factory = sqlite3.Row
         try:
             connection.execute("PRAGMA foreign_keys=ON")
+            roots = _legacy_project_roots(connection, workspace_root)
             connection.execute("BEGIN IMMEDIATE")
             now = self._clock_us()
             connection.execute(
                 "UPDATE v7_migration_runs SET status='validating', updated_at_us=? WHERE migration_run_id=?",
                 (now, run_id),
+            )
+            # A legacy command may already have backfilled governance into the
+            # v6 file; the v6 tables can have changed since.  Carry those edits
+            # over before the candidate is declared ready.
+            # `_run_migration_16` already ran the ledger's own
+            # backfill on this candidate, so every retained rule and trigger
+            # has a public id and a stream before the comparison below.
+            governance = reconcile_retained_governance(
+                connection, workspace_id, now_us=now
+            )
+            _foreign_trigger_states, foreign_triggers = _retained_trigger_states(
+                connection, workspace_id
             )
             quick = [
                 str(row[0]) for row in connection.execute("PRAGMA integrity_check")
@@ -2471,7 +2713,7 @@ class MigrationV7Service:
                     if table == "memories" and (
                         imported[2] != "legacy.memory_state_imported"
                         or canonical_json_bytes(imported_payload.get("record"))
-                        != canonical_json_bytes(_memory_state(source_row))
+                        != canonical_json_bytes(_memory_state(source_row, roots=roots))
                     ):
                         raise MigrationV7Error(
                             "VALIDATION_FAILED",
@@ -2864,7 +3106,7 @@ class MigrationV7Service:
                     )
 
             if retained_authority:
-                _validate_retained_compatibility(connection, workspace_id)
+                _validate_retained_compatibility(connection, workspace_id, roots)
 
             expected_maps = {
                 "memories": int(source_inventory["memory_count"]),
@@ -2949,6 +3191,21 @@ class MigrationV7Service:
                         now,
                     ),
                 )
+            # Count every head row that recorded a file link of any shape and
+            # kept none.  Versions inherit the head's link, so they cannot lose
+            # one independently.
+            dropped_file_links = 0
+            if _table_exists(connection, "memories"):
+                for source_row in connection.execute("SELECT * FROM memories"):
+                    recorded = any(
+                        isinstance(value, str) and value
+                        for value in (
+                            _column(source_row, "file_path"),
+                            _column(source_row, "file_path_relative"),
+                        )
+                    )
+                    if recorded and _legacy_relative_path(source_row, roots) is None:
+                        dropped_file_links += 1
             validation = {
                 "integrity_check": "ok",
                 "foreign_key_violations": [],
@@ -2959,6 +3216,14 @@ class MigrationV7Service:
                 "relationship_version_count": _count(
                     connection, "memory_relationship_versions"
                 ),
+                "rule_count": _count(connection, "governance_rules"),
+                "trigger_count": _count(connection, "governance_context_triggers"),
+                "rules_updated": governance["rules_updated"],
+                "rules_disabled": governance["rules_disabled"],
+                "triggers_deleted": governance["triggers_deleted"],
+                "triggers_unreconciled": governance["triggers_unreconciled"],
+                "foreign_trigger_count": foreign_triggers,
+                "dropped_file_link_count": dropped_file_links,
             }
             if retained_authority:
                 validation["authority"] = "retained_v7"
@@ -3005,10 +3270,78 @@ class MigrationV7Service:
             return
         write_active_pointer(storage, previous.pointer)
 
+    @staticmethod
+    def _post_activation_counts(connection: sqlite3.Connection) -> dict[str, int]:
+        """Row counts for every table a v7 client can add user data to."""
+
+        counts: dict[str, int] = {}
+        for table in _POST_ACTIVATION_TABLES:
+            if not _table_exists(connection, table):
+                continue
+            counts[table] = int(
+                connection.execute(
+                    f"SELECT count(*) FROM {_quoted_identifier(table)}"
+                ).fetchone()[0]
+            )
+        return counts
+
+    def _events_after_activation(self, candidate: Path, run_id: str) -> int:
+        """Count user writes made to the candidate since activation.
+
+        Rolling the pointer back to v6 makes them unreachable: the v6 file
+        never received them, and a later v6 write changes the run identity, so
+        the next `--apply` builds a different candidate.
+
+        The comparison is against the row counts recorded when the candidate
+        was activated, not against a timestamp: a backward clock step (NTP,
+        a resumed VM) would otherwise hide exactly the writes this refuses to
+        discard.  A store activated before this was recorded falls back to the
+        activation timestamp.
+        """
+
+        connection = sqlite3.connect(candidate)
+        try:
+            row = connection.execute(
+                "SELECT activated_at_us,validation_json FROM v7_migration_runs "
+                "WHERE migration_run_id=?",
+                (run_id,),
+            ).fetchone()
+            if row is None or row[0] is None:
+                return 0
+            activated = int(row[0])
+            try:
+                recorded = json.loads(row[1] or "{}").get("activation_counts")
+            except (TypeError, ValueError):
+                recorded = None
+            current = self._post_activation_counts(connection)
+            if isinstance(recorded, dict):
+                return sum(
+                    max(0, count - int(recorded.get(table, 0)))
+                    for table, count in current.items()
+                )
+            total = 0
+            for table in _POST_ACTIVATION_TABLES:
+                if table not in current or not _has_column(
+                    connection, table, "recorded_at_us"
+                ):
+                    continue
+                total += int(
+                    connection.execute(
+                        f"SELECT count(*) FROM {_quoted_identifier(table)} "
+                        "WHERE recorded_at_us>?",
+                        (activated,),
+                    ).fetchone()[0]
+                )
+            return total
+        finally:
+            connection.close()
+
     def rollback(
         self,
         selector: str | os.PathLike[str] | None = None,
         migration_run_id: str | None = "latest",
+        *,
+        discard_v7_writes: bool = False,
     ) -> MigrationResult:
         workspace, storage = self._storage(selector)
         with DatabaseFileLock(storage, "exclusive"):
@@ -3099,6 +3432,14 @@ class MigrationV7Service:
                 workspace.workspace_id,
                 error_code="ROLLBACK_STATE_INVALID",
             )
+            hidden = self._events_after_activation(resolved.path, run_id)
+            if hidden and not discard_v7_writes:
+                raise MigrationV7Error(
+                    "ROLLBACK_WOULD_HIDE_WRITES",
+                    f"{hidden} event(s) recorded since activation would become "
+                    f"unreachable; they stay in {current_relative}. Re-run with "
+                    "--discard-v7-writes to roll back anyway",
+                )
             pointer = ActiveDatabasePointer(
                 format_version=source_format,
                 generation=resolved.generation + 1,
@@ -3116,6 +3457,14 @@ class MigrationV7Service:
                 source_format=TARGET_FORMAT_VERSION,
                 migration_run_id=run_id,
                 active_generation=pointer.generation,
+                warnings=(
+                    (
+                        f"{hidden} event(s) recorded since activation stay only in "
+                        f"{current_relative}",
+                    )
+                    if hidden
+                    else ()
+                ),
             )
 
 

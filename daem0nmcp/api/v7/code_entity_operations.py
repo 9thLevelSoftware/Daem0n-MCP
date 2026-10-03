@@ -49,7 +49,7 @@ from .errors import STABLE_ERROR_CODE_SET
 from .models import (
     EvidenceRef,
     RecordSummary,
-    contains_absolute_filesystem_path,
+    stored_relative_path,
 )
 from .public_ids import (
     PublicObjectIdNotFound,
@@ -79,7 +79,6 @@ _MAX_ENTITY_RECORDS = 200
 _MAX_ENTITY_EVENTS = 200
 _MAX_IMPACT_ENTITIES = 500
 _MAX_IMPACT_EDGES = 5_000
-_CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 _EVENT_TYPE_RE = re.compile(r"^[a-z][a-z0-9_.-]{2,79}$")
 _EVENT_COLUMNS = (
     "event_id,workspace_id,stream_id,stream_kind,stream_version,event_type,"
@@ -366,7 +365,6 @@ def _validated_record_row(
         or row["stream_version"] != expected_version
         or row["state_hash"] != memory_state_hash(state)
         or row["content_hash"] != memory_content_hash(state)
-        or row["file_path"] is not None
     ):
         raise CodeEntityOperationError("CAPABILITY_DEGRADED")
     return row
@@ -382,17 +380,17 @@ def _event_record_summary(
     content = state["content"]
     if not isinstance(content, str) or not content:
         raise CodeEntityOperationError("CAPABILITY_DEGRADED")
+    # A record's valid time may precede or follow the transaction time it was
+    # written at; ``RecordSummary`` shows the earlier of the two.
     created = _datetime_from_us(occurred_at_us)
     updated = _datetime_from_us(recorded_at_us)
-    if created > updated:
-        raise CodeEntityOperationError("CAPABILITY_DEGRADED")
     try:
         return RecordSummary(
             record_id=record_id,
             record_type=state["record_type"],
             excerpt=content[:4000],
             tags=state["tags"],
-            relative_file_path=state["file_path_relative"],
+            relative_file_path=stored_relative_path(state["file_path_relative"]),
             current_status=(
                 "invalidated"
                 if state["deleted_at_us"] is not None
@@ -935,12 +933,8 @@ def _entity_row(
 
 def _safe_event_content(state: Mapping[str, Any]) -> str:
     content = state.get("content")
-    if (
-        not isinstance(content, str)
-        or not content
-        or _CONTROL_RE.search(content) is not None
-        or contains_absolute_filesystem_path(content)
-    ):
+    # Stored user text reads back as stored (UD-3).
+    if not isinstance(content, str) or not content:
         raise CodeEntityOperationError("CAPABILITY_DEGRADED")
     return content
 

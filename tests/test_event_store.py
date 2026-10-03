@@ -257,6 +257,103 @@ class SQLiteEventStoreTests(unittest.TestCase):
             self.connection.execute("SELECT count(*) FROM memory_events").fetchone()[0],
         )
 
+    def test_only_integrity_errors_on_insert_are_stream_conflicts(self):
+        """A lock or I/O failure must not be reported as a retryable conflict."""
+        command_type, store_type = self._api()
+        from daem0nmcp.event_store import EventStreamConflict
+
+        connection = self.connection
+
+        class FailingInsert:
+            error: Exception
+
+            def execute(self, sql, *arguments):
+                if "INSERT INTO memory_events" in sql:
+                    raise self.error
+                return connection.execute(sql, *arguments)
+
+            def __getattr__(self, name):
+                return getattr(connection, name)
+
+        command = command_type(
+            workspace_id=self.workspace_id,
+            stream_id="mem_" + "c" * 64,
+            stream_kind="memory",
+            event_type="memory.created",
+            occurred_at_us=1,
+            recorded_at_us=1,
+            actor_type="system",
+            payload={"record": self._state()},
+        )
+        failing = FailingInsert()
+        failing.error = sqlite3.OperationalError("disk I/O error")
+        with self.assertRaisesRegex(sqlite3.OperationalError, "disk I/O error"):
+            store_type(failing).append_and_project(command)
+        failing.error = sqlite3.IntegrityError("UNIQUE constraint failed")
+        with self.assertRaises(EventStreamConflict):
+            store_type(failing).append_and_project(command)
+        connection.rollback()
+
+    def test_only_integrity_errors_on_governance_insert_are_conflicts(self):
+        """The governance append follows the same conflict rule as memory."""
+        from daem0nmcp.event_store import (
+            EventStreamConflict,
+            GovernanceEventCommand,
+            GovernanceEventStore,
+        )
+        from daem0nmcp.migrations.schema import MIGRATIONS
+        from daem0nmcp.schema_version import CURRENT_SCHEMA_VERSION
+
+        connection = sqlite3.connect(":memory:")
+        self.addCleanup(connection.close)
+        connection.execute("PRAGMA foreign_keys=ON")
+        for version in range(16, CURRENT_SCHEMA_VERSION + 1):
+            for statement in next(m for m in MIGRATIONS if m[0] == version)[2]:
+                connection.execute(statement)
+        connection.commit()
+
+        class FailingInsert:
+            error: Exception
+
+            def execute(self, sql, *arguments):
+                if "INSERT INTO governance_events" in sql:
+                    raise self.error
+                return connection.execute(sql, *arguments)
+
+            def __getattr__(self, name):
+                return getattr(connection, name)
+
+        command = GovernanceEventCommand(
+            workspace_id=self.workspace_id,
+            stream_id="rule_" + "d" * 64,
+            stream_kind="rule",
+            event_type="rule.created",
+            occurred_at_us=1,
+            recorded_at_us=1,
+            actor_type="system",
+            expected_stream_version=1,
+            payload={
+                "rule_id": "rule_" + "d" * 64,
+                "trigger": "conflict mapping",
+                "must_do": [],
+                "must_not": [],
+                "ask_first": [],
+                "warnings": [],
+                "priority": 1,
+                "enabled": True,
+                "created_at_us": 1,
+                "updated_at_us": 1,
+            },
+        )
+        failing = FailingInsert()
+        failing.error = sqlite3.OperationalError("disk I/O error")
+        with self.assertRaisesRegex(sqlite3.OperationalError, "disk I/O error"):
+            GovernanceEventStore(failing).append_and_project(command)
+        failing.error = sqlite3.IntegrityError("UNIQUE constraint failed")
+        with self.assertRaises(EventStreamConflict):
+            GovernanceEventStore(failing).append_and_project(command)
+        connection.rollback()
+
     def test_projection_failure_rolls_back_event_with_savepoint(self):
         """No immutable event may survive a failed projection in caller transaction."""
         command_type, store_type = self._api()

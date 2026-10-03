@@ -22,12 +22,22 @@ def main():
     parser.add_argument("--host", default="127.0.0.1", help="Host to bind to")
     parser.add_argument(
         "--project",
-        help="Project directory for storage (default: current directory)",
+        help=(
+            "Project directory to serve (default: DAEM0NMCP_PROJECT_ROOT if set, "
+            "else the current directory)"
+        ),
     )
     args = parser.parse_args()
 
-    project_root = Path(args.project or os.getcwd()).resolve()
-    os.environ["DAEM0NMCP_PROJECT_ROOT"] = str(project_root)
+    project_root = Path(
+        args.project or os.environ.get("DAEM0NMCP_PROJECT_ROOT") or Path.cwd()
+    )
+    if not project_root.is_dir():
+        # Otherwise the server silently creates and serves an empty workspace
+        # wherever a typo points.
+        parser.error(f"project directory does not exist: {project_root}")
+    os.environ["DAEM0NMCP_PROJECT_ROOT"] = str(project_root.resolve())
+    print(f"Serving project: {project_root.resolve()}", file=sys.stderr)
 
     # Import only after the workspace environment is fixed.  Both public
     # launchers use the same v7 composition and transport-security boundary.

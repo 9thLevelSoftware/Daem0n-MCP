@@ -125,7 +125,7 @@ class WriterServiceTests(
         (other_storage / "daem0nmcp.db").touch()
         pointerless = WorkspaceRegistry([other], default_root=other).default
         with (
-            self.assertRaisesRegex(RuntimeServiceError, "ACTIVE_V7_UNAVAILABLE"),
+            self.assertRaisesRegex(RuntimeServiceError, "MIGRATION_REQUIRED"),
             resolver.locked_active(pointerless),
         ):
             self.fail("pointerless storage was admitted")
@@ -332,6 +332,7 @@ class WriterServiceTests(
 
     async def test_cancelled_worker_retains_capacity_and_leaves_no_write(self) -> None:
         """Cancelling an asyncio waiter must not over-admit or commit later."""
+        from daem0nmcp.api.v7.runtime_services import RuntimeServiceError
         from daem0nmcp.bounded_workers import BoundedWorkerBusyError
 
         clock_entered = threading.Event()
@@ -347,11 +348,13 @@ class WriterServiceTests(
         await asyncio.to_thread(clock_entered.wait, 1.0)
         first.cancel()
         await asyncio.sleep(0)
-        with self.assertRaises(BoundedWorkerBusyError):
+        with self.assertRaises(RuntimeServiceError) as busy:
             await writer.store(
                 self.workspace,
                 self._store_command(idempotency_key="runtime-store-overflow"),
             )
+        self.assertEqual("DATABASE_IN_USE", busy.exception.code)
+        self.assertIsInstance(busy.exception.__cause__, BoundedWorkerBusyError)
         release_clock.set()
         with self.assertRaises(asyncio.CancelledError):
             await first
@@ -830,16 +833,17 @@ class RecallAdapterTests(
         ):
             await run(self._retrieval_result(stored, provider=""))
 
+        # A row migrated from v6 keeps the host-absolute ``file_path`` v6
+        # wrote.  It is legacy provenance, so it must not deny the recall, and
+        # it must never leave the server.
         with closing(sqlite3.connect(self.database)) as connection:
             connection.execute(
                 "UPDATE memory_records SET file_path=? WHERE record_id=?",
                 (str(self.root / "private.txt"), stored.record.record_id),
             )
             connection.commit()
-        with self.assertRaisesRegex(
-            RuntimeServiceError, "EVIDENCE_AUTHENTICATION_FAILED"
-        ):
-            await run(self._retrieval_result(stored))
+        legacy = await run(self._retrieval_result(stored))
+        self.assertNotIn("private.txt", legacy.model_dump_json())
 
     async def test_recall_rejects_federation_and_preserves_abstention(
         self,
@@ -1239,7 +1243,7 @@ class BasicServiceTests(
 
         with self.assertRaisesRegex(
             RuntimeServiceError,
-            "UNSAFE_SERVICE_OUTPUT",
+            "BRIEFING_FAILED",
         ) as leak:
             await BasicBriefingService(reader=leaky_reader).assemble(
                 self.workspace,

@@ -129,6 +129,59 @@ class V7ApplicationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(second.error.code, "TOKEN_REPLAYED")
         self.assertEqual(len(calls), 1)
 
+    async def test_database_in_use_is_retryable_and_points_at_a_fresh_preflight(
+        self,
+    ) -> None:
+        from daem0nmcp.api.v7.models import MutationReceipt
+
+        class BusyError(RuntimeError):
+            code = "DATABASE_IN_USE"
+
+        attempts: list[object] = []
+
+        async def operation(*, workspace: Workspace, request: object) -> object:
+            del workspace
+            attempts.append(request)
+            if len(attempts) == 1:
+                raise BusyError("database is locked")
+            return MutationReceipt(
+                operation_id="op_archive_retry",
+                affected_ids=[request.record_id],
+                event_ids=[],
+                counts={"changed": 1},
+                idempotent_replay=False,
+            )
+
+        self.gate.record_briefing(self.scope)
+        target = {
+            "workspace_id": WORKSPACE_ID,
+            "record_id": RECORD_ID,
+            "archived": True,
+        }
+        handler = self._router({"memory_archive_set": operation}).handler(
+            "memory_archive_set"
+        )
+        token = self.gate.issue_preflight(self.scope, "memory_archive_set", target)
+
+        busy = await handler(**target, preflight_token=token)
+        self.assertFalse(busy.ok)
+        self.assertEqual(busy.error.code, "DATABASE_IN_USE")
+        self.assertTrue(busy.error.retryable)
+        self.assertEqual(busy.error.retry_after_ms, 250)
+        self.assertEqual(busy.error.remedy.tool, "memory_preflight")
+        self.assertEqual(
+            busy.error.remedy.arguments["target_arguments"],
+            {"record_id": RECORD_ID, "archived": True},
+        )
+        # The token was spent before the operation ran: a literal retry is
+        # refused, and the remedy (a fresh preflight) succeeds.
+        replayed = await handler(**target, preflight_token=token)
+        self.assertEqual(replayed.error.code, "TOKEN_REPLAYED")
+        fresh = self.gate.issue_preflight(self.scope, "memory_archive_set", target)
+        retried = await handler(**target, preflight_token=fresh)
+        self.assertTrue(retried.ok)
+        self.assertEqual(len(attempts), 2)
+
     async def test_protected_durable_execution_requires_exact_worker_context(
         self,
     ) -> None:

@@ -12,6 +12,7 @@ from html.parser import HTMLParser
 from types import MappingProxyType
 from typing import Any, Protocol
 
+from ...capabilities import CapabilityRegistry
 from ...workspace import Workspace, WorkspaceRegistry
 from .application import AdmittedRequest
 from .errors import STABLE_ERROR_CODE_SET
@@ -524,6 +525,29 @@ def build_external_operations(
                         reason_code="E2B_API_KEY_MISSING",
                         remediation=(
                             "Set E2B_API_KEY to enable isolated Python execution."
+                        ),
+                    ),
+                ),
+            )
+        capability = CapabilityRegistry(environ=dependencies.environment).get(
+            "agency-e2b"
+        )
+        if capability["status"] != "ready":
+            # The advertised opt-out must also switch off remote code execution.
+            raise ExternalOperationError(
+                "CAPABILITY_DISABLED"
+                if capability["status"] == "disabled"
+                else "CAPABILITY_DEGRADED",
+                capability_states=(
+                    CapabilityState(
+                        name="agency-e2b",
+                        status=capability["status"],
+                        reason_code="CAPABILITY_DISABLED"
+                        if capability["status"] == "disabled"
+                        else "CAPABILITY_DEGRADED",
+                        remediation=(
+                            "Install 'daem0nmcp[agency-e2b]' and leave "
+                            "DAEM0NMCP_AGENCY_E2B_ENABLED unset or true."
                         ),
                     ),
                 ),

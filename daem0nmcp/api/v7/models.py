@@ -8,9 +8,10 @@ retrieval/storage integrations.
 from __future__ import annotations
 
 import json
-import posixpath
 import re
+from collections.abc import Iterator, Mapping
 from datetime import datetime, timezone
+from functools import cache
 from typing import (
     TYPE_CHECKING,
     Annotated,
@@ -19,6 +20,7 @@ from typing import (
     Literal,
     TypeAlias,
     TypeVar,
+    get_args,
 )
 
 from pydantic import (
@@ -33,6 +35,7 @@ from pydantic import (
 )
 from typing_extensions import Self, TypeAliasType
 
+from ...workspace import is_workspace_relative_path
 from .errors import INTERNAL_ERROR_MESSAGE, ErrorCode
 
 MAX_JSON_COLLECTION_ITEMS = 4096
@@ -46,7 +49,6 @@ _RFC3339 = re.compile(
     r"[0-9]{2}:[0-9]{2}:[0-9]{2}"
     r"(?:\.[0-9]{1,9})?(?:Z|[+-][0-9]{2}:[0-9]{2})$"
 )
-_WINDOWS_DRIVE = re.compile(r"^[A-Za-z]:")
 _WINDOWS_ABSOLUTE_PATH = re.compile(
     r"(?<![A-Za-z0-9])(?:[A-Za-z]:[\\/]|\\\\[^\s\\/]+[\\/])"
 )
@@ -55,43 +57,98 @@ _FILE_URI = re.compile(r"(?i)\bfile:(?://)?/")
 _CONTROL_CHAR = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 
 
-def contains_absolute_filesystem_path(value: object) -> bool:
-    """Return whether a nested public value contains an absolute path."""
+def is_host_absolute_path(value: str) -> bool:
+    """Return whether text contains an absolute host path or file URI.
 
-    if isinstance(value, str):
-        return bool(
-            _WINDOWS_ABSOLUTE_PATH.search(value)
-            or _POSIX_ABSOLUTE_PATH.search(value)
-            or _FILE_URI.search(value)
-        )
-    if isinstance(value, dict):
-        return any(
-            contains_absolute_filesystem_path(key)
-            or contains_absolute_filesystem_path(item)
-            for key, item in value.items()
-        )
-    if isinstance(value, (list, tuple, set, frozenset)):
-        return any(contains_absolute_filesystem_path(item) for item in value)
+    This is the only absolute-path predicate on the v7 wire.  ``WireModel``
+    applies it to every string except ``UserText`` fields.
+    """
+
+    return bool(
+        _WINDOWS_ABSOLUTE_PATH.search(value)
+        or _POSIX_ABSOLUTE_PATH.search(value)
+        or _FILE_URI.search(value)
+    )
+
+
+class _Exempt:
+    """``Annotated`` marker for strings the substring path scan skips."""
+
+    __slots__ = ("name",)
+
+    def __init__(self, name: str) -> None:
+        self.name = name
+
+    def __repr__(self) -> str:
+        return self.name
+
+
+_USER_TEXT = _Exempt("UserText")
+# RelativePath's own validator refuses absolute and escaping paths exactly;
+# the prose scan would also refuse valid names such as ``src/__pycache__/x``.
+_RELATIVE_PATH = _Exempt("RelativePath")
+
+# Memory content, queries, rule text and server text quoting them may mention
+# routes and file paths ("/health", "C:\proj\app.py").  Fields typed with it,
+# alone or inside a list, set or dict, are exempt from the absolute-path rule in
+# both directions, so anything accepted on input can always be read back.
+UserText = Annotated[str, _USER_TEXT]
+
+
+def _carries(annotation: object, marker: _Exempt) -> bool:
+    return annotation is marker or any(
+        _carries(argument, marker) for argument in get_args(annotation)
+    )
+
+
+def _fields_marked(model: type[BaseModel], marker: _Exempt) -> frozenset[str]:
+    return frozenset(
+        name
+        for name, field in model.model_fields.items()
+        if marker in field.metadata or _carries(field.annotation, marker)
+    )
+
+
+@cache
+def _user_text_fields(model: type[BaseModel]) -> frozenset[str]:
+    return _fields_marked(model, _USER_TEXT)
+
+
+@cache
+def _exempt_fields(model: type[BaseModel]) -> frozenset[str]:
+    return _user_text_fields(model) | _fields_marked(model, _RELATIVE_PATH)
+
+
+def guarded_strings(value: object, user_text: bool = False) -> Iterator[str]:
+    """Yield every string, keys included, that the absolute-path rule covers.
+
+    Nested models are walked with their own field annotations, so a model
+    inside a ``UserText`` container is still checked.
+    """
+
     if isinstance(value, BaseModel):
-        return contains_absolute_filesystem_path(value.__dict__)
-    return False
+        exempt = _exempt_fields(type(value))
+        for name, item in value.__dict__.items():
+            yield from guarded_strings(item, name in exempt)
+    elif isinstance(value, Mapping):
+        for key, item in value.items():
+            yield from guarded_strings(key, user_text)
+            yield from guarded_strings(item, user_text)
+    elif isinstance(value, (list, tuple, set, frozenset)):
+        for item in value:
+            yield from guarded_strings(item, user_text)
+    elif isinstance(value, str) and not user_text:
+        yield value
+
+
+def contains_absolute_filesystem_path(value: object) -> bool:
+    """Return whether a nested value has a guarded string with a host path."""
+
+    return any(is_host_absolute_path(text) for text in guarded_strings(value))
 
 
 def _relative_path(value: str) -> str:
-    if value == ".":
-        return value
-    if (
-        not value
-        or "\\" in value
-        or "\x00" in value
-        or value.startswith(("/", "~"))
-        or _WINDOWS_DRIVE.match(value) is not None
-    ):
-        raise ValueError("path must be a normalized workspace-relative POSIX path")
-    components = value.split("/")
-    if any(component in {"", ".", ".."} for component in components):
-        raise ValueError("path must be a normalized workspace-relative POSIX path")
-    if posixpath.normpath(value) != value:
+    if not is_workspace_relative_path(value):
         raise ValueError("path must be a normalized workspace-relative POSIX path")
     return value
 
@@ -283,6 +340,7 @@ RelativePath = Annotated[
     str,
     StringConstraints(strict=True, min_length=1, max_length=1024),
     AfterValidator(_relative_path),
+    _RELATIVE_PATH,
 ]
 AwareDateTime = Annotated[datetime, BeforeValidator(parse_wire_datetime)]
 UtcDateTime = Annotated[AwareDateTime, AfterValidator(_utc)]
@@ -326,7 +384,8 @@ else:
             Field(max_length=MAX_JSON_COLLECTION_ITEMS),
         ],
     )
-ContextJsonObject = Annotated[JsonObject, AfterValidator(_context_size)]
+UserJsonObject = Annotated[JsonObject, _USER_TEXT]
+ContextJsonObject = Annotated[UserJsonObject, AfterValidator(_context_size)]
 
 ErrorCodeValue = Annotated[ErrorCode, BeforeValidator(_error_code)]
 UpperSnakeCode = Annotated[
@@ -348,10 +407,14 @@ ToolName = Annotated[
     ),
 ]
 Tag = Annotated[
-    str,
+    UserText,
     StringConstraints(strict=True, min_length=1, max_length=80),
-    AfterValidator(_sanitized),
 ]
+# Every stored tag list.  ``RecordSummary.tags`` requires uniqueness on the
+# way out, so the inputs that feed it require it on the way in; without it a
+# plain ``memory_store(tags=['a','a'])`` wrote a record no reader could
+# render.
+UniqueTags = Annotated[list[Tag], AfterValidator(_unique_strings)]
 ProviderName = Annotated[
     str,
     StringConstraints(
@@ -430,7 +493,7 @@ class WireModel(BaseModel):
 
     @model_validator(mode="after")
     def reject_absolute_filesystem_paths(self) -> WireModel:
-        if contains_absolute_filesystem_path(self.__dict__):
+        if contains_absolute_filesystem_path(self):
             raise ValueError("absolute filesystem paths are forbidden on the v7 wire")
         return self
 
@@ -471,7 +534,8 @@ ApiFieldError = FieldError
 
 class ErrorRemedy(WireModel):
     tool: ToolName
-    arguments: JsonObject = Field(default_factory=dict)
+    # The caller's own validated arguments, echoed back for the retry.
+    arguments: UserJsonObject = Field(default_factory=dict)
 
 
 Remedy = ErrorRemedy
@@ -582,13 +646,51 @@ class Page(WireModel, Generic[T]):
     truncated: bool
 
 
+MIGRATED_EMPTY_CONTENT = "<empty>"
+
+
+def stored_relative_path(value: object) -> str | None:
+    """Return a stored path only when it is a workspace-relative POSIX path.
+
+    v6 stored an absolute ``file_path`` plus a relative form that is
+    ``../outside/x.py`` for a file above the project (and the absolute path
+    itself across Windows drives).  Neither may leave the workspace, so a
+    migrated record reads back without its file link instead of failing.
+    """
+
+    if not isinstance(value, str):
+        return None
+    try:
+        return _relative_path(value)
+    except ValueError:
+        return None
+
+
 class RecordSummary(WireModel):
+    """The bounded public view of a stored record.
+
+    It is only ever built from storage, never parsed from a caller, so it
+    clips rows that predate v7's bounds -- v6 tags had no length, uniqueness
+    or count limit, and v6 content could be empty -- rather than denying every
+    read of a migrated workspace.  A v7-written record satisfies those three,
+    because every stored tag input is ``UniqueTags`` and content has its own
+    minimum.
+
+    The fourth clip is not a v6-only repair: a record's creation carries its
+    valid time, which a backdated or future ``happened_at`` legitimately puts
+    on either side of the transaction time it was written at, so the summary
+    shows the earlier of the two rather than refusing the record.
+
+    ``relative_file_path`` is a containment rule rather than a bound, so
+    it stays refused here; a stored value is normalized by
+    ``stored_relative_path`` where the row is read.
+    """
+
     record_id: RecordId
     record_type: RecordType
     excerpt: Annotated[
-        str,
+        UserText,
         StringConstraints(strict=True, min_length=1, max_length=4000),
-        AfterValidator(_sanitized),
     ]
     tags: Annotated[list[Tag], AfterValidator(_unique_strings)] = Field(
         default_factory=list,
@@ -600,11 +702,37 @@ class RecordSummary(WireModel):
     created_at: AwareDateTime
     updated_at: AwareDateTime
 
-    @model_validator(mode="after")
-    def validate_timeline(self) -> RecordSummary:
-        if self.updated_at < self.created_at:
-            raise ValueError("updated_at cannot precede created_at")
-        return self
+    @model_validator(mode="before")
+    @classmethod
+    def clip_stored_record(cls, data: object) -> object:
+        if not isinstance(data, Mapping):
+            return data
+        values = dict(data)
+        tags = values.get("tags")
+        if isinstance(tags, (list, tuple)):
+            clipped: list[str] = []
+            for tag in tags:
+                if not isinstance(tag, str) or not tag:
+                    continue
+                tag = tag[:80]
+                if tag not in clipped:
+                    clipped.append(tag)
+            values["tags"] = clipped[:32]
+        excerpt = values.get("excerpt")
+        if isinstance(excerpt, str):
+            values["excerpt"] = excerpt[:4000] or MIGRATED_EMPTY_CONTENT
+        # A record's creation carries its valid time, which may be backdated
+        # or in the future relative to the transaction time it was written at,
+        # and v6 kept the two independently.  The summary shows the earlier of
+        # the two as the creation rather than refusing the record.
+        try:
+            created = parse_wire_datetime(values["created_at"])
+            updated = parse_wire_datetime(values["updated_at"])
+        except (KeyError, TypeError, ValueError):
+            return values
+        if updated < created:
+            values["created_at"] = updated
+        return values
 
 
 class EvidenceRef(WireModel):
@@ -621,9 +749,8 @@ class EvidenceItem(WireModel):
     citation: Citation
     record: RecordSummary
     bounded_excerpt: Annotated[
-        str,
+        UserText,
         StringConstraints(strict=True, min_length=1, max_length=8000),
-        AfterValidator(_sanitized),
     ]
     channels: Annotated[list[ProviderName], AfterValidator(_unique_strings)] = Field(
         min_length=1,
@@ -694,7 +821,7 @@ class RetrievalData(WireModel):
     items: list[EvidenceItem] = Field(default_factory=list, max_length=50)
     rendered_context: (
         Annotated[
-            str,
+            UserText,
             StringConstraints(strict=True, min_length=1, max_length=500_000),
         ]
         | None
@@ -790,6 +917,10 @@ __all__ = [
     "EventId",
     "FactId",
     "FieldError",
+    "guarded_strings",
+    "is_host_absolute_path",
+    "MIGRATED_EMPTY_CONTENT",
+    "stored_relative_path",
     "JsonObject",
     "JsonValue",
     "MAX_CONTEXT_JSON_BYTES",
@@ -819,9 +950,12 @@ __all__ = [
     "RuleId",
     "SelectionToken",
     "Tag",
+    "UniqueTags",
     "TokenUsage",
     "ToolName",
     "TriggerId",
+    "UserJsonObject",
+    "UserText",
     "UtcDateTime",
     "VersionId",
     "WireModel",

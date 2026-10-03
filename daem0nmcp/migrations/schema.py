@@ -12,6 +12,7 @@ import sqlite3
 import time
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 from daem0nmcp.schema_version import CURRENT_SCHEMA_VERSION
 
@@ -2821,6 +2822,162 @@ def _retained_path_workspace_id(value: object) -> str | None:
     return f"ws_{hashlib.sha256(root_key.encode('utf-8')).hexdigest()[:24]}"
 
 
+def _retained_source_id(value: object) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise RuntimeError("GOVERNANCE_BACKFILL_INVALID")
+    return value
+
+
+def _retained_rule_states(
+    connection: sqlite3.Connection,
+    workspace_id: str,
+) -> dict[str, tuple[int, dict[str, Any]]]:
+    """The canonical rule state each retained v6 rule row stands for."""
+
+    if not _table_exists(connection, "rules"):
+        return {}
+    states: dict[str, tuple[int, dict[str, Any]]] = {}
+    for row in connection.execute(
+        "SELECT id,trigger,must_do,must_not,ask_first,warnings,priority,"
+        "enabled,created_at FROM rules ORDER BY id"
+    ).fetchall():
+        source_id = _retained_source_id(row[0])
+        if not isinstance(row[1], str) or not 1 <= len(row[1]) <= 2_000:
+            raise RuntimeError("GOVERNANCE_BACKFILL_INVALID")
+        if (
+            isinstance(row[6], bool)
+            or not isinstance(row[6], int)
+            or not -1_000 <= row[6] <= 1_000
+            or row[7] not in (0, 1)
+        ):
+            raise RuntimeError("GOVERNANCE_BACKFILL_INVALID")
+        public_id = _retained_public_mapping(
+            connection, workspace_id, "rule", source_id
+        )
+        created_at_us = _retained_timestamp_us(row[8])
+        states[public_id] = (
+            source_id,
+            {
+                "rule_id": public_id,
+                "trigger": row[1],
+                "must_do": _retained_text_list(row[2]),
+                "must_not": _retained_text_list(row[3]),
+                "ask_first": _retained_text_list(row[4]),
+                "warnings": _retained_text_list(row[5]),
+                "priority": row[6],
+                "enabled": bool(row[7]),
+                "created_at_us": created_at_us,
+                "updated_at_us": created_at_us,
+            },
+        )
+    return states
+
+
+def _retained_trigger_states(
+    connection: sqlite3.Connection,
+    workspace_id: str,
+) -> tuple[dict[str, tuple[int, dict[str, Any]]], int]:
+    """The canonical trigger states, plus the count left to another project.
+
+    v6 recorded the project root each trigger belongs to.  When the database
+    records exactly one, it is this workspace's own history even if the project
+    directory has since been moved, so its triggers migrate.  With several
+    roots, only the ones naming this workspace do.
+    """
+
+    if not _table_exists(connection, "context_triggers"):
+        return {}, 0
+    rows = connection.execute(
+        "SELECT id,project_path,trigger_type,pattern,recall_topic,recall_categories,"
+        "is_active,priority,created_at FROM context_triggers ORDER BY id"
+    ).fetchall()
+    from daem0nmcp.migrations.v7 import sole_recorded_project_root
+
+    sole_root = sole_recorded_project_root(connection)
+    public_types = {
+        "file_pattern": "file",
+        "tag_match": "tag",
+        "entity_match": "entity",
+    }
+    states: dict[str, tuple[int, dict[str, Any]]] = {}
+    foreign = 0
+    for row in rows:
+        source_id = _retained_source_id(row[0])
+        # A trigger that records no project root names no workspace, so it
+        # stays foreign exactly as it was before the sole-root rule existed.
+        local = (
+            isinstance(row[1], str)
+            and bool(row[1])
+            and (
+                row[1] == sole_root
+                or _retained_path_workspace_id(row[1]) == workspace_id
+            )
+        )
+        if not local:
+            foreign += 1
+            continue
+        trigger_type = public_types.get(row[2])
+        if trigger_type is None:
+            raise RuntimeError("GOVERNANCE_BACKFILL_INVALID")
+        if (
+            not isinstance(row[3], str)
+            or not 1 <= len(row[3]) <= 2_000
+            or not isinstance(row[4], str)
+            or not 1 <= len(row[4]) <= 2_000
+            or row[6] not in (0, 1)
+            or isinstance(row[7], bool)
+            or not isinstance(row[7], int)
+        ):
+            raise RuntimeError("GOVERNANCE_BACKFILL_INVALID")
+        public_id = _retained_public_mapping(
+            connection, workspace_id, "trigger", source_id
+        )
+        created_at_us = _retained_timestamp_us(row[8])
+        states[public_id] = (
+            source_id,
+            {
+                "trigger_id": public_id,
+                "trigger_type": trigger_type,
+                "pattern": row[3],
+                "recall_query": row[4],
+                "categories": _retained_text_list(row[5]),
+                "enabled": bool(row[6]),
+                "priority": row[7],
+                "created_at_us": created_at_us,
+                "updated_at_us": created_at_us,
+                "deleted_at_us": None,
+            },
+        )
+    return states, foreign
+
+
+def _migration_authored_streams(
+    connection: sqlite3.Connection, workspace_id: str
+) -> set[str]:
+    """The governance streams the retained backfill created, not v7 clients."""
+
+    return {
+        str(row[0])
+        for row in connection.execute(
+            "SELECT stream_id FROM governance_events WHERE workspace_id=? "
+            "AND stream_version=1 AND actor_type='migration'",
+            (workspace_id,),
+        )
+    }
+
+
+def _governance_stream_exists(
+    connection: sqlite3.Connection, workspace_id: str, stream_id: str
+) -> bool:
+    return (
+        connection.execute(
+            "SELECT 1 FROM governance_events WHERE workspace_id=? AND stream_id=?",
+            (workspace_id, stream_id),
+        ).fetchone()
+        is not None
+    )
+
+
 def backfill_retained_governance(
     connection: sqlite3.Connection,
     workspace_id: str,
@@ -2840,159 +2997,202 @@ def backfill_retained_governance(
         raise RuntimeError("GOVERNANCE_SCHEMA_INCOMPLETE")
     store = GovernanceEventStore(connection, assume_transaction=True)
     inserted = 0
-    if _table_exists(connection, "rules"):
-        rows = connection.execute(
-            "SELECT id,trigger,must_do,must_not,ask_first,warnings,priority,"
-            "enabled,created_at FROM rules ORDER BY id"
-        ).fetchall()
-        for row in rows:
-            source_id = row[0]
-            if (
-                isinstance(source_id, bool)
-                or not isinstance(source_id, int)
-                or source_id < 1
-            ):
-                raise RuntimeError("GOVERNANCE_BACKFILL_INVALID")
-            public_id = _retained_public_mapping(
-                connection, workspace_id, "rule", source_id
-            )
+    trigger_states, _foreign = _retained_trigger_states(connection, workspace_id)
+    for kind, projection, column, event_type, states in (
+        (
+            "rule",
+            "governance_rules",
+            "rule_id",
+            "rule.created",
+            _retained_rule_states(connection, workspace_id),
+        ),
+        (
+            "trigger",
+            "governance_context_triggers",
+            "trigger_id",
+            "context_trigger.created",
+            trigger_states,
+        ),
+    ):
+        for public_id, (source_id, state) in states.items():
             if (
                 connection.execute(
-                    "SELECT 1 FROM governance_rules WHERE workspace_id=? AND rule_id=?",
+                    f"SELECT 1 FROM {projection} WHERE workspace_id=? AND {column}=?",
                     (workspace_id, public_id),
                 ).fetchone()
                 is not None
             ):
                 continue
-            if (
-                connection.execute(
-                    "SELECT 1 FROM governance_events WHERE workspace_id=? "
-                    "AND stream_id=?",
-                    (workspace_id, public_id),
-                ).fetchone()
-                is not None
-            ):
+            if _governance_stream_exists(connection, workspace_id, public_id):
                 raise RuntimeError("GOVERNANCE_BACKFILL_INTEGRITY_ERROR")
-            created_at_us = _retained_timestamp_us(row[8])
-            if not isinstance(row[1], str) or not 1 <= len(row[1]) <= 2_000:
-                raise RuntimeError("GOVERNANCE_BACKFILL_INVALID")
-            if (
-                isinstance(row[6], bool)
-                or not isinstance(row[6], int)
-                or not -1_000 <= row[6] <= 1_000
-                or row[7] not in (0, 1)
-            ):
-                raise RuntimeError("GOVERNANCE_BACKFILL_INVALID")
-            state = {
-                "rule_id": public_id,
-                "trigger": row[1],
-                "must_do": _retained_text_list(row[2]),
-                "must_not": _retained_text_list(row[3]),
-                "ask_first": _retained_text_list(row[4]),
-                "warnings": _retained_text_list(row[5]),
-                "priority": row[6],
-                "enabled": bool(row[7]),
-                "created_at_us": created_at_us,
-                "updated_at_us": created_at_us,
-            }
             store.append_and_project(
                 GovernanceEventCommand(
                     workspace_id=workspace_id,
                     stream_id=public_id,
-                    stream_kind="rule",
-                    event_type="rule.created",
-                    occurred_at_us=created_at_us,
-                    recorded_at_us=created_at_us,
+                    stream_kind=kind,
+                    event_type=event_type,
+                    occurred_at_us=state["created_at_us"],
+                    recorded_at_us=state["created_at_us"],
                     actor_type="migration",
-                    correlation_id=f"migration21:rule:{source_id}",
-                    payload=state,
-                    expected_stream_version=1,
-                )
-            )
-            inserted += 1
-    if _table_exists(connection, "context_triggers"):
-        rows = connection.execute(
-            "SELECT id,project_path,trigger_type,pattern,recall_topic,recall_categories,"
-            "is_active,priority,created_at FROM context_triggers ORDER BY id"
-        ).fetchall()
-        public_types = {
-            "file_pattern": "file",
-            "tag_match": "tag",
-            "entity_match": "entity",
-        }
-        for row in rows:
-            source_id = row[0]
-            if (
-                isinstance(source_id, bool)
-                or not isinstance(source_id, int)
-                or source_id < 1
-            ):
-                raise RuntimeError("GOVERNANCE_BACKFILL_INVALID")
-            if _retained_path_workspace_id(row[1]) != workspace_id:
-                continue
-            public_id = _retained_public_mapping(
-                connection, workspace_id, "trigger", source_id
-            )
-            if (
-                connection.execute(
-                    "SELECT 1 FROM governance_context_triggers "
-                    "WHERE workspace_id=? AND trigger_id=?",
-                    (workspace_id, public_id),
-                ).fetchone()
-                is not None
-            ):
-                continue
-            if (
-                connection.execute(
-                    "SELECT 1 FROM governance_events WHERE workspace_id=? "
-                    "AND stream_id=?",
-                    (workspace_id, public_id),
-                ).fetchone()
-                is not None
-            ):
-                raise RuntimeError("GOVERNANCE_BACKFILL_INTEGRITY_ERROR")
-            trigger_type = public_types.get(row[2])
-            if trigger_type is None:
-                raise RuntimeError("GOVERNANCE_BACKFILL_INVALID")
-            if (
-                not isinstance(row[3], str)
-                or not 1 <= len(row[3]) <= 2_000
-                or not isinstance(row[4], str)
-                or not 1 <= len(row[4]) <= 2_000
-                or row[6] not in (0, 1)
-                or isinstance(row[7], bool)
-                or not isinstance(row[7], int)
-            ):
-                raise RuntimeError("GOVERNANCE_BACKFILL_INVALID")
-            created_at_us = _retained_timestamp_us(row[8])
-            state = {
-                "trigger_id": public_id,
-                "trigger_type": trigger_type,
-                "pattern": row[3],
-                "recall_query": row[4],
-                "categories": _retained_text_list(row[5]),
-                "enabled": bool(row[6]),
-                "priority": row[7],
-                "created_at_us": created_at_us,
-                "updated_at_us": created_at_us,
-                "deleted_at_us": None,
-            }
-            store.append_and_project(
-                GovernanceEventCommand(
-                    workspace_id=workspace_id,
-                    stream_id=public_id,
-                    stream_kind="trigger",
-                    event_type="context_trigger.created",
-                    occurred_at_us=created_at_us,
-                    recorded_at_us=created_at_us,
-                    actor_type="migration",
-                    correlation_id=f"migration21:trigger:{source_id}",
+                    correlation_id=f"migration21:{kind}:{source_id}",
                     payload=state,
                     expected_stream_version=1,
                 )
             )
             inserted += 1
     return inserted
+
+
+def reconcile_retained_governance(
+    connection: sqlite3.Connection,
+    workspace_id: str,
+    *,
+    now_us: int,
+) -> dict[str, int]:
+    """Carry v6 rule and trigger edits made after an earlier backfill into v7.
+
+    A legacy command can apply migration 21 to a v6 store, and the v6 tables
+    may then be edited again before `migrate-v7` runs.  The backfill skips a
+    stream that already exists, so without this pass the edit or the deletion
+    would never reach v7 and a `must_not` could silently disappear.
+
+    Only streams the backfill itself created are reconciled.  A reactivated
+    candidate is the database that *was* live, so it also holds rules and
+    triggers authored through v7, which have no retained v6 row; inferring
+    "deleted in v6" from their absence would disable or delete them.  The
+    creating event's `actor_type` separates the two: the backfill writes
+    `migration`, a v7 client writes `client`.
+
+    The governance event vocabulary has `rule.updated` and
+    `context_trigger.deleted` but no `context_trigger.updated`, so a rule that
+    no longer exists in v6 is recorded as disabled, and a trigger whose
+    content changed in v6 is counted and reported instead of rewritten.
+    """
+
+    from daem0nmcp.event_store import (
+        GovernanceEventCommand,
+        GovernanceEventStore,
+    )
+
+    if not _table_exists(connection, "governance_events"):
+        raise RuntimeError("GOVERNANCE_SCHEMA_INCOMPLETE")
+    store = GovernanceEventStore(connection, assume_transaction=True)
+    counts = {
+        "rules_updated": 0,
+        "rules_disabled": 0,
+        "triggers_deleted": 0,
+        "triggers_unreconciled": 0,
+    }
+    migrated = _migration_authored_streams(connection, workspace_id)
+
+    rule_states = _retained_rule_states(connection, workspace_id)
+    for row in connection.execute(
+        "SELECT rule_id,trigger,must_do_json,must_not_json,ask_first_json,"
+        "warnings_json,priority,enabled,stream_version,created_at_us "
+        "FROM governance_rules WHERE workspace_id=? ORDER BY rule_id",
+        (workspace_id,),
+    ).fetchall():
+        public_id = str(row[0])
+        if public_id not in migrated:
+            continue
+        entry = rule_states.get(public_id)
+        current = {
+            "rule_id": public_id,
+            "trigger": row[1],
+            "must_do": json.loads(row[2]),
+            "must_not": json.loads(row[3]),
+            "ask_first": json.loads(row[4]),
+            "warnings": json.loads(row[5]),
+            "priority": row[6],
+            "enabled": bool(row[7]),
+        }
+        removed = entry is None
+        if removed:
+            desired = dict(current, enabled=False)
+            correlation = f"migration21:rule-removed:{public_id}"
+        else:
+            desired = {
+                key: value
+                for key, value in entry[1].items()
+                if key not in {"created_at_us", "updated_at_us"}
+            }
+            correlation = f"migration21:rule-updated:{entry[0]}"
+        if desired == current:
+            continue
+        store.append_and_project(
+            GovernanceEventCommand(
+                workspace_id=workspace_id,
+                stream_id=public_id,
+                stream_kind="rule",
+                event_type="rule.updated",
+                occurred_at_us=now_us,
+                recorded_at_us=now_us,
+                actor_type="migration",
+                correlation_id=correlation,
+                payload={
+                    **desired,
+                    "created_at_us": int(row[9]),
+                    "updated_at_us": now_us,
+                },
+                expected_stream_version=int(row[8]) + 1,
+            )
+        )
+        counts["rules_disabled" if removed else "rules_updated"] += 1
+
+    trigger_states, _foreign = _retained_trigger_states(connection, workspace_id)
+    for row in connection.execute(
+        "SELECT trigger_id,trigger_type,pattern,recall_query,categories_json,"
+        "enabled,priority,stream_version,created_at_us FROM "
+        "governance_context_triggers WHERE workspace_id=? AND deleted_at_us IS NULL "
+        "ORDER BY trigger_id",
+        (workspace_id,),
+    ).fetchall():
+        public_id = str(row[0])
+        if public_id not in migrated:
+            continue
+        entry = trigger_states.get(public_id)
+        if entry is not None:
+            # No `context_trigger.updated` event type exists, so a v6 edit (or
+            # a rowid reused by a different trigger) cannot be replayed.  Count
+            # it so the operator is told rather than left with a stale pattern.
+            state = entry[1]
+            if (
+                state["trigger_type"] != row[1]
+                or state["pattern"] != row[2]
+                or state["recall_query"] != row[3]
+                or state["categories"] != json.loads(row[4])
+                or state["enabled"] != bool(row[5])
+                or state["priority"] != row[6]
+            ):
+                counts["triggers_unreconciled"] += 1
+            continue
+        store.append_and_project(
+            GovernanceEventCommand(
+                workspace_id=workspace_id,
+                stream_id=public_id,
+                stream_kind="trigger",
+                event_type="context_trigger.deleted",
+                occurred_at_us=now_us,
+                recorded_at_us=now_us,
+                actor_type="migration",
+                correlation_id=f"migration21:trigger-removed:{public_id}",
+                payload={
+                    "trigger_id": public_id,
+                    "trigger_type": row[1],
+                    "pattern": row[2],
+                    "recall_query": row[3],
+                    "categories": json.loads(row[4]),
+                    "enabled": bool(row[5]),
+                    "priority": row[6],
+                    "created_at_us": int(row[8]),
+                    "updated_at_us": now_us,
+                    "deleted_at_us": now_us,
+                },
+                expected_stream_version=int(row[7]) + 1,
+            )
+        )
+        counts["triggers_deleted"] += 1
+    return counts
 
 
 def _has_retained_public_rows(connection: sqlite3.Connection) -> bool:

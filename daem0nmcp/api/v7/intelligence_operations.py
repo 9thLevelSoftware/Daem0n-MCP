@@ -34,8 +34,8 @@ from .errors import STABLE_ERROR_CODE_SET
 from .models import (
     EvidenceRef,
     RecordSummary,
-    contains_absolute_filesystem_path,
     parse_wire_datetime,
+    stored_relative_path,
 )
 from .public_ids import PublicObjectIdNotFound, PublicObjectIdRepository
 from .resources import RuleView
@@ -63,7 +63,6 @@ _MAX_COMMUNITIES = 1_000
 _MAX_COMMUNITY_MEMBERS = 20_000
 _CLAIM_SPLIT_RE = re.compile(r"(?<=[.!?])\s+|[\r\n]+")
 _WORD_RE = re.compile(r"[A-Za-z0-9]+(?:[-_][A-Za-z0-9]+)*")
-_CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 _NEGATIONS = frozenset({"no", "not", "never", "none", "without"})
 _STOP_WORDS = frozenset(
     {
@@ -369,12 +368,8 @@ def _verified_event(row: sqlite3.Row) -> dict[str, Any]:
 
 
 def _safe_text(value: object) -> str:
-    if (
-        not isinstance(value, str)
-        or not value
-        or _CONTROL_RE.search(value) is not None
-        or contains_absolute_filesystem_path(value)
-    ):
+    # Stored user text reads back as stored (UD-3).
+    if not isinstance(value, str) or not value:
         raise IntelligenceOperationError("CAPABILITY_DEGRADED")
     return value
 
@@ -442,7 +437,7 @@ def _record_evidence_from_events(
         content = _safe_text(state.get("content"))
         try:
             tags = state.get("tags", [])
-            relative_path = state.get("file_path_relative")
+            relative_path = stored_relative_path(state.get("file_path_relative"))
             content_hash = memory_content_hash(state)
             recorded_at_us = int(row["recorded_at_us"])
             created = _datetime_from_us(created_at_us)

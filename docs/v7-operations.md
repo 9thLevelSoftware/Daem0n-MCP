@@ -197,9 +197,39 @@ the dry-run inventory. `FUTURE_V7_SCHEMA`, `UNSUPPORTED_V7_SCHEMA`, and
 Daem0nMCP build; they are not repaired automatically. After an interrupted run,
 repeat the same `migrate-v7 --apply` command. Use `migrate-v7 --rollback latest`
 to return to the retained predecessor and `--apply` to reactivate its verified
-candidate. The generic `migrate` command remains an in-place additive migration
-entry point; use `migrate-v7 --apply` when retention, verification, atomic
-activation, and rollback are required.
+candidate. Rollback refuses with `ROLLBACK_WOULD_HIDE_WRITES`, naming the count
+and the candidate that retains them, when events were recorded after
+activation; `--discard-v7-writes` proceeds and reports what stayed behind. The
+generic `migrate` command remains an in-place additive migration entry point,
+capped at the last v6 schema version while a store is still format 6 so it
+cannot rewrite what `migrate-v7` snapshots; use `migrate-v7 --apply` when
+retention, verification, atomic activation, and rollback are required.
+
+Stop the server before applying or rolling back: both commands take the
+storage lock, and a running server on the old pointer sees the generation
+change. Until a v6 workspace is migrated, `session_brief` answers
+`MIGRATION_REQUIRED` (non-retryable) with the command to run, and every other
+tool is blocked behind it with `COMMUNION_REQUIRED`. The export/import path
+answers `MIGRATION_REQUIRED` too, without the command, because the generic
+router returns the code alone. The four data resources answer the single
+invariant `RESOURCE_UNAVAILABLE` for every failure by design, so that a caller
+cannot enumerate workspaces by reading their errors; `session_brief` is where
+the reason is named.
+
+The migration keeps the v6 row exactly as it was inside the migrated
+database — in the event log's `legacy` payload and in the retained v6 tables —
+but that copy is not part of `workspace_export`, which carries the v7
+projection. Host paths are never exported: the columns that hold one are
+recorded as a digest, and the usable form is derived into
+`relative_file_path`. A workspace migrated before this release keeps the raw
+value inside its own hash-chained events, so its exports need a re-migration
+to be path-free; reads, recall, outcomes and resources do not.
+
+`migrate-v7 --apply` reports what it could not copy faithfully in `warnings`
+and counts it in `validation`: memory file links that pointed outside the
+workspace (kept only in the event's legacy payload), context triggers
+belonging to another project path, and rules or triggers reconciled because
+the v6 tables changed after an earlier in-place upgrade.
 
 `verify-v7` checks authority and projections; `--repair-projections` performs
 offline replay and atomic activation. Rollback retains the v7 write history
