@@ -8,6 +8,7 @@ server accepts must read back: nothing can be stored and then brick a read.
 
 from __future__ import annotations
 
+import asyncio
 import copy
 import hashlib
 import sqlite3
@@ -790,6 +791,25 @@ async def _export_pages(invoke, workspace_id: str) -> list[dict[str, Any]]:
     return pages
 
 
+async def _import_call(invoke, workspace_id: str, arguments: dict) -> dict[str, Any]:
+    """Preflight and run one import call, waiting out a held write lock.
+
+    The graph profile's projection drains can hold the SQLite write lock past
+    the server's busy timeout, which the preflight and the import report as the
+    retryable DATABASE_IN_USE.  A real client retries those; so does this test,
+    within a bounded deadline and a bounded number of attempts.
+    """
+
+    deadline = time.monotonic() + 30
+    for _attempt in range(8):
+        result = await _target_call(invoke, workspace_id, "workspace_import", arguments)
+        if result["ok"] or result["error"]["code"] != "DATABASE_IN_USE":
+            return result
+        assert time.monotonic() < deadline, result["error"]
+        await asyncio.sleep(0.5)
+    raise AssertionError("the import stayed contended for 8 attempts")
+
+
 async def _import_pages(invoke, workspace_id: str, pages) -> dict[str, Any]:
     import_id = None
     key = "mech-import-0001"
@@ -797,11 +817,11 @@ async def _import_pages(invoke, workspace_id: str, pages) -> dict[str, Any]:
         arguments = {"bundle": page, "finalize": False, "idempotency_key": key}
         if import_id is not None:
             arguments["import_session_id"] = import_id
-        staged = await _target_call(invoke, workspace_id, "workspace_import", arguments)
+        staged = await _import_call(invoke, workspace_id, arguments)
         assert staged["ok"], staged["error"]
         import_id = staged["data"]["import_session_id"]
     finish = {"import_session_id": import_id, "finalize": True, "idempotency_key": key}
-    done = await _target_call(invoke, workspace_id, "workspace_import", finish)
+    done = await _import_call(invoke, workspace_id, finish)
     assert done["ok"], done["error"]
     return done["data"]
 
