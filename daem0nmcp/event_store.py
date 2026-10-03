@@ -11,6 +11,7 @@ import hashlib
 import json
 import math
 import re
+import sqlite3
 import unicodedata
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
@@ -536,7 +537,10 @@ class EventStore:
                 """,
                 values,
             )
-        except Exception as exc:
+        except sqlite3.IntegrityError as exc:
+            # Only a uniqueness/constraint collision is a stream conflict; I/O
+            # and lock errors propagate so callers do not advise a retry of a
+            # conflict that never happened.
             raise EventStreamConflict(
                 "event identity or stream version is occupied"
             ) from exc
@@ -1933,7 +1937,8 @@ class GovernanceEventStore:
                 "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 values,
             )
-        except Exception as exc:
+        except sqlite3.IntegrityError as exc:
+            # As for memory events: only a constraint collision is a conflict.
             raise EventStreamConflict(
                 "governance event identity or stream version is occupied"
             ) from exc

@@ -160,6 +160,7 @@ async def process_client(
     environment_overrides: dict[str, str] | None = None,
     http_probe: Callable[[str], Awaitable[None]] | None = None,
     http_headers: dict[str, str] | None = None,
+    log_name: str = "stdio-server.log",
 ):
     """Launch the installed module in a workspace and clean up on every exit."""
     environment = server_environment(
@@ -176,7 +177,7 @@ async def process_client(
         )
         body_error: BaseException | None = None
         try:
-            with (workspace / "stdio-server.log").open("w", encoding="utf-8") as log:
+            with (workspace / log_name).open("w", encoding="utf-8") as log:
                 async with (
                     stdio_client(parameters, errlog=log) as (read, write),
                     ClientSession(

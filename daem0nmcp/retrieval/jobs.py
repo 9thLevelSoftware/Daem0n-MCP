@@ -26,6 +26,26 @@ _HEARTBEAT_BUSY_TIMEOUT_MS = 100
 _HEARTBEAT_SHUTDOWN_GRACE_SECONDS = 1.5
 
 
+def is_lock_contention(exc: BaseException) -> bool:
+    """Return whether *exc* is SQLite lock contention a caller may retry."""
+
+    if not isinstance(exc, sqlite3.OperationalError):
+        return False
+    code = getattr(exc, "sqlite_errorcode", None)
+    if isinstance(code, int):
+        return code & 0xFF in {
+            sqlite3.SQLITE_BUSY,
+            sqlite3.SQLITE_LOCKED,
+        }
+    # sqlite_errorcode is unavailable on supported Python 3.10 builds.
+    # Match only SQLite's fixed lock diagnostics, never arbitrary detail.
+    return str(exc).casefold() in {
+        "database is locked",
+        "database table is locked",
+        "database schema is locked",
+    }
+
+
 class ProjectionJobError(RuntimeError):
     """Owned, sanitized projection-job failure."""
 
@@ -250,7 +270,7 @@ class ProjectionJobRunner:
                         break
                     except sqlite3.OperationalError as exc:
                         connection.rollback()
-                        if not self._is_lock_contention(exc):
+                        if not is_lock_contention(exc):
                             raise
                         if stop.is_set():
                             if stop_seen_at is None:
@@ -554,22 +574,6 @@ class ProjectionJobRunner:
             raise ProjectionJobError("PROJECTION_JOB_CLOCK_INVALID")
         return value
 
-    @staticmethod
-    def _is_lock_contention(exc: sqlite3.OperationalError) -> bool:
-        code = getattr(exc, "sqlite_errorcode", None)
-        if isinstance(code, int):
-            return code & 0xFF in {
-                sqlite3.SQLITE_BUSY,
-                sqlite3.SQLITE_LOCKED,
-            }
-        # sqlite_errorcode is unavailable on supported Python 3.10 builds.
-        # Match only SQLite's fixed lock diagnostics, never arbitrary detail.
-        return str(exc).casefold() in {
-            "database is locked",
-            "database table is locked",
-            "database schema is locked",
-        }
-
 
 def create_projection_job_runner(
     connection: sqlite3.Connection,
@@ -593,4 +597,5 @@ __all__ = [
     "ProjectionJobRun",
     "ProjectionJobRunner",
     "create_projection_job_runner",
+    "is_lock_contention",
 ]

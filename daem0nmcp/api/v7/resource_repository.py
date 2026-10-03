@@ -30,6 +30,7 @@ from ...bounded_workers import BoundedWorkerPool
 from ...schema_version import CURRENT_SCHEMA_VERSION
 from ...storage_activation import DatabaseFileLock, ResolvedActiveDatabase
 from ...workspace import Workspace, normalize_resolved_path
+from .errors import is_database_busy
 from .models import RecordSummary
 from .public_ids import PublicObjectIdRepository
 from .resources import (
@@ -209,8 +210,9 @@ class ResourceRepositoryError(RuntimeError):
 
     code = "RESOURCE_REPOSITORY_UNAVAILABLE"
 
-    def __init__(self) -> None:
-        super().__init__(self.code)
+    def __init__(self, code: str = "RESOURCE_REPOSITORY_UNAVAILABLE") -> None:
+        self.code = code
+        super().__init__(code)
 
 
 ActiveDatabaseResolver = Callable[[Workspace], ResolvedActiveDatabase]
@@ -334,32 +336,6 @@ def _string_list(value: object) -> list[str]:
     if not isinstance(decoded, list) or not all(type(item) is str for item in decoded):
         raise ValueError("database JSON string list is invalid")
     return decoded
-
-
-def _workspace_root_tokens(workspace: Workspace) -> tuple[str, ...]:
-    root = str(workspace.root)
-    variants = {root.casefold(), root.replace("\\", "/").casefold()}
-    return tuple(value for value in variants if value)
-
-
-def _reject_canonical_root(value: object, workspace: Workspace) -> None:
-    tokens = _workspace_root_tokens(workspace)
-
-    def walk(item: object) -> None:
-        if isinstance(item, str):
-            normalized = item.casefold()
-            portable = item.replace("\\", "/").casefold()
-            if any(token in normalized or token in portable for token in tokens):
-                raise ValueError("public value contains a canonical workspace root")
-        elif isinstance(item, Mapping):
-            for key, child in item.items():
-                walk(key)
-                walk(child)
-        elif isinstance(item, (list, tuple)):
-            for child in item:
-                walk(child)
-
-    walk(value)
 
 
 def _validated_now(clock: Callable[[], datetime]) -> datetime:
@@ -519,8 +495,13 @@ class SQLiteResourceRepository:
         failure_limit: int,
         rule_limit: int = 50,
         active_context_limit: int = 50,
+        include_git_changes: bool = True,
     ) -> ResourceRepositorySnapshot:
-        """Read all briefing resources without a pointer-generation gap."""
+        """Read all briefing resources without a pointer-generation gap.
+
+        Git changes cost two ``git`` subprocesses per read (plus a system-wide
+        thread walk on Windows); callers that never show them skip them.
+        """
 
         if not isinstance(workspace, Workspace):
             raise ValueError("workspace must be a registered Workspace")
@@ -561,6 +542,7 @@ class SQLiteResourceRepository:
                 failure_request=failure_request,
                 rule_request=rule_request,
                 active_request=active_request,
+                include_git_changes=include_git_changes is True,
             )
         )
 
@@ -572,6 +554,7 @@ class SQLiteResourceRepository:
         failure_request: ResourceReadRequest | None,
         rule_request: ResourceReadRequest,
         active_request: ResourceReadRequest,
+        include_git_changes: bool = True,
     ) -> ResourceRepositorySnapshot:
         connection, storage_lock = self._open_connection(workspace)
         try:
@@ -643,7 +626,9 @@ class SQLiteResourceRepository:
             rules=rules,
             active_context=active_context,
             decisions=decisions,
-            git_changes=self._read_git_changes_sync(workspace),
+            git_changes=(
+                self._read_git_changes_sync(workspace) if include_git_changes else []
+            ),
             projection_freshness=projection_freshness,
             workspace_statistics=workspace_statistics,
             stale_projection_count=stale_projection_count,
@@ -949,6 +934,7 @@ class SQLiteResourceRepository:
     async def _run(self, operation: Callable[[], T]) -> T:
         worker = asyncio.create_task(self._worker_pool.run(operation))
         cancellation: asyncio.CancelledError | None = None
+        timed_out = False
         try:
             return cast(
                 T,
@@ -958,7 +944,7 @@ class SQLiteResourceRepository:
                 ),
             )
         except asyncio.TimeoutError:
-            pass
+            timed_out = True
         except asyncio.CancelledError as exc:
             cancellation = exc
         except Exception:
@@ -978,12 +964,16 @@ class SQLiteResourceRepository:
                 continue
             except Exception:
                 break
-        if worker.done():
-            with suppress(Exception):
-                worker.result()
+        failure: BaseException | None = None
+        if worker.done() and not worker.cancelled():
+            failure = worker.exception()
         if cancellation is not None:
             raise cancellation
-        raise ResourceRepositoryError()
+        # A read that overran its deadline but did not itself fail was slowed
+        # by contention (lock waits, a saturated host), so it is retryable.
+        if is_database_busy(failure) or (timed_out and failure is None):
+            raise ResourceRepositoryError("DATABASE_IN_USE") from failure
+        raise ResourceRepositoryError() from failure
 
     def _open_connection(
         self,
@@ -1145,7 +1135,6 @@ class SQLiteResourceRepository:
             "created_at": _datetime_from_us(row["created_at_us"]),
             "updated_at": _datetime_from_us(row["updated_at_us"]),
         }
-        _reject_canonical_root(public_value, workspace)
         return RecordSummary.model_validate(public_value), deleted
 
     def _read_rules_sync(
@@ -1191,7 +1180,6 @@ class SQLiteResourceRepository:
                     "enabled": _flag(row["enabled"]),
                     "created_at": _datetime_from_us(row["created_at_us"]),
                 }
-                _reject_canonical_root(public_value, workspace)
                 values.append(RuleView.model_validate(public_value))
             return values
         finally:
@@ -1417,7 +1405,6 @@ class SQLiteResourceRepository:
                         "added_at": added_at,
                         "expires_at": expires_at,
                     }
-                    _reject_canonical_root(public_value, workspace)
                     item = ActiveContextItem.model_validate(public_value)
                     ordered_values.append(
                         (

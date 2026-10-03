@@ -755,23 +755,25 @@ class CoreOperationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(10_001, bundle.manifest["event_count"])
         snapshot_builder.assert_called_once()
 
-    async def test_export_rejects_nested_absolute_path_strings(self) -> None:
-        secret = str(self.fixture.root / "private" / "nested-secret.txt")
+    async def test_export_carries_user_text_that_mentions_paths(self) -> None:
+        # Context is user text (UD-3); only the raw path columns are refused.
+        note = "Crash fixed in C:\\proj\\src\\app.py; see /health"
         self.fixture.append(
             "nested path source",
             occurred_at_us=1_700_000_000_000_000,
             recorded_at_us=1_700_000_000_000_100,
-            context_note=secret,
+            context_note=note,
         )
 
-        with self.assertRaises(Exception) as caught:
-            await self._operations()["workspace_export"](
-                workspace=self.fixture.workspace,
-                request=_request("workspace_export", workspace_id=WORKSPACE_ID),
-            )
+        bundle = await self._operations()["workspace_export"](
+            workspace=self.fixture.workspace,
+            request=_request("workspace_export", workspace_id=WORKSPACE_ID),
+        )
 
-        self.assertEqual("WORKSPACE_PATH_ESCAPE", caught.exception.code)
-        self.assertNotIn(secret, str(caught.exception))
+        self.assertEqual(
+            {"note": note},
+            bundle.events[0].payload["data"]["record"]["context"],
+        )
 
     async def test_cancelled_sqlite_work_propagates_and_finishes_privately(
         self,

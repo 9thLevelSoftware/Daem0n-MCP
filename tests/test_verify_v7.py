@@ -7,6 +7,7 @@ import sqlite3
 import subprocess
 import sys
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -196,6 +197,32 @@ def test_verify_v7_replays_every_authority_domain(tmp_path: Path) -> None:
     }
     assert report["checks"]["canonical_replay"]["ok"] is True
     assert report["checks"]["active_pointer"]["generation"] == 1
+
+
+def test_verify_v7_reports_superseded_generation_counts(tmp_path: Path) -> None:
+    """A GC that has stopped making progress must be visible without logs."""
+    from daem0nmcp.retrieval.projections import LexicalProjectionBuilder
+
+    storage, database = _storage(tmp_path)
+    with sqlite3.connect(database) as connection:
+        connection.execute("PRAGMA foreign_keys=ON")
+        with patch(
+            "daem0nmcp.retrieval.projections.collect_superseded_generations",
+            return_value=0,
+        ):
+            for _ in range(3):
+                LexicalProjectionBuilder(connection).rebuild(WORKSPACE_ID)
+        connection.commit()
+
+    report = verify_v7(storage, WORKSPACE_ID)
+
+    inventory = report["checks"]["projection_generations"]
+    assert inventory["ok"] is True
+    # Three generations: one active, two superseded and uncollected.
+    assert inventory["lexical"] == 2
+    assert inventory["outcome"] == 0
+    # Only the partitions themselves, never their FTS5 shadow tables.
+    assert inventory["fts_partitions"] == 3
 
 
 def test_verify_v7_accepts_intact_active_code_generation(tmp_path: Path) -> None:

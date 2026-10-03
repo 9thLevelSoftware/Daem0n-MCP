@@ -247,33 +247,36 @@ class PrimitiveBoundaryTests(unittest.TestCase):
                 '{"tool":"memory_store","arguments":{"x":NaN}}'
             )
 
-    def test_every_wire_model_rejects_absolute_paths_in_free_text_and_json(
-        self,
-    ) -> None:
+    def test_wire_models_reject_absolute_paths_outside_user_text(self) -> None:
         _, models = _load(self)
 
+        # A remedy echoes the caller's own arguments, which may mention paths.
+        models.ErrorRemedy(
+            tool="memory_store",
+            arguments={"context": {"note": "Inspect C:\\private\\secret.txt"}},
+        )
         with self.assertRaises(ValidationError):
-            models.ErrorRemedy(
-                tool="memory_store",
-                arguments={
-                    "context": {
-                        "note": "Inspect C:\\private\\secret.txt before release"
-                    }
-                },
+            models.CapabilityState(
+                name="storage",
+                status="failed",
+                remediation="Repair C:\\private\\storage",
             )
 
+        summary = {
+            "record_id": RECORD_ID,
+            "record_type": "warning",
+            "excerpt": "Do not read /home/private/.ssh/id_rsa",
+            "tags": ["C:\\proj"],
+            "relative_file_path": None,
+            "current_status": "current",
+            "content_hash": "a" * 64,
+            "created_at": NOW,
+            "updated_at": NOW,
+        }
+        # Excerpts and tags are user text (UD-3); the path field is not.
+        models.RecordSummary(**summary)
         with self.assertRaises(ValidationError):
-            models.RecordSummary(
-                record_id=RECORD_ID,
-                record_type="warning",
-                excerpt="Do not read /home/private/.ssh/id_rsa",
-                tags=[],
-                relative_file_path=None,
-                current_status="current",
-                content_hash="a" * 64,
-                created_at=NOW,
-                updated_at=NOW,
-            )
+            models.RecordSummary(**{**summary, "relative_file_path": "/home/x"})
 
 
 class EnvelopeTests(unittest.TestCase):

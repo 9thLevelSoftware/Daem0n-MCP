@@ -1320,8 +1320,9 @@ class V7ApplyRollbackTests(unittest.TestCase):
             self.assertEqual("reactivate", reactivated.action)
             active = sqlite3.connect(resolve_active_database(storage).path)
             try:
+                # Generation 1 is superseded twice over and is collected.
                 self.assertEqual(
-                    [(1, "ready"), (2, "ready"), (3, "active")],
+                    [(2, "ready"), (3, "active")],
                     active.execute(
                         "SELECT generation,status FROM projection_manifests "
                         "WHERE projection_name='lexical' ORDER BY generation"

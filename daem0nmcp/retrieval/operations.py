@@ -9,7 +9,12 @@ from collections.abc import Callable, Mapping
 from dataclasses import asdict
 from typing import Any
 
-from .projections import LexicalProjectionBuilder, ProjectionBuildError
+from .projections import (
+    COLLECTABLE_PROJECTIONS,
+    LexicalProjectionBuilder,
+    ProjectionBuildError,
+    collect_superseded_generations,
+)
 
 _WORKSPACE_ID = re.compile(r"^ws_[0-9a-f]{24}$")
 _PROJECTIONS = frozenset(
@@ -157,8 +162,81 @@ def projection_status(
     }
 
 
+def compact_projections(
+    connection: sqlite3.Connection,
+    workspace_id: str,
+    *,
+    vacuum: bool = True,
+) -> dict[str, Any]:
+    """Drain every superseded generation offline, then reclaim the file.
+
+    Online activations collect at most five generations each, so a database
+    that grew before the garbage collector existed needs about a hundred
+    writes to drain — and a ``VACUUM`` before that only rewrites the dead
+    generations. This runs the same collector in a loop until it reports
+    nothing left, so the following ``VACUUM`` actually reclaims the space.
+    The caller owns the offline exclusive lock; no activation may run
+    concurrently.
+    """
+
+    if not isinstance(connection, sqlite3.Connection):
+        raise ProjectionOperationError("PROJECTION_DATABASE_INVALID")
+    _validate_workspace(workspace_id)
+    if connection.in_transaction:
+        raise ProjectionOperationError("PROJECTION_DATABASE_INVALID")
+    collected: dict[str, int] = {}
+    try:
+        before = _generation_counts(connection, workspace_id)
+        for projection in sorted(COLLECTABLE_PROJECTIONS):
+            removed = 0
+            while True:
+                passed = collect_superseded_generations(
+                    connection, workspace_id, projection
+                )
+                if passed == 0:
+                    break
+                removed += passed
+            collected[projection] = removed
+        if vacuum:
+            connection.execute("VACUUM")
+        after = _generation_counts(connection, workspace_id)
+    except sqlite3.Error as exc:
+        raise ProjectionOperationError("PROJECTION_COMPACTION_FAILED") from exc
+    return {
+        "collected": collected,
+        "superseded_manifests_after": after[0],
+        "superseded_manifests_before": before[0],
+        "vacuumed": bool(vacuum),
+        "workspace_id": workspace_id,
+    }
+
+
+def _generation_counts(
+    connection: sqlite3.Connection,
+    workspace_id: str,
+) -> tuple[int, int]:
+    placeholders = ",".join("?" for _ in COLLECTABLE_PROJECTIONS)
+    projections = sorted(COLLECTABLE_PROJECTIONS)
+    superseded = int(
+        connection.execute(
+            "SELECT COUNT(*) FROM projection_manifests WHERE workspace_id=? "
+            f"AND projection_name IN ({placeholders}) AND status<>'active'",
+            (workspace_id, *projections),
+        ).fetchone()[0]
+    )
+    total = int(
+        connection.execute(
+            "SELECT COUNT(*) FROM projection_manifests WHERE workspace_id=? "
+            f"AND projection_name IN ({placeholders})",
+            (workspace_id, *projections),
+        ).fetchone()[0]
+    )
+    return superseded, total
+
+
 __all__ = [
     "ProjectionOperationError",
+    "compact_projections",
     "projection_status",
     "rebuild_projection",
 ]
