@@ -70,6 +70,7 @@ class ErrorRegistryTests(unittest.TestCase):
             "STALE_PROJECTION_ID",
             "CAPABILITY_DISABLED",
             "CAPABILITY_DEGRADED",
+            "MIGRATION_REQUIRED",
             "LEXICAL_UNAVAILABLE",
             "COMMUNION_REQUIRED",
             "COUNSEL_REQUIRED",

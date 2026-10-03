@@ -23,7 +23,11 @@ from ...covenant import (
 from ...event_store import AppendedEvent, EventStreamConflict
 from ...retrieval import RetrievalQuery
 from ...workspace import Workspace
-from .errors import DATABASE_IN_USE_RETRY_AFTER_MS, ErrorCode
+from .errors import (
+    DATABASE_IN_USE_RETRY_AFTER_MS,
+    MIGRATION_REQUIRED_MESSAGE,
+    ErrorCode,
+)
 from .models import (
     ApiResponse,
     ApiWarning,
@@ -156,6 +160,11 @@ _EXPECTED_SERVICE_ERRORS = MappingProxyType(
             ErrorCode.CAPABILITY_DEGRADED,
             "The active v7 workspace is unavailable.",
             True,
+        ),
+        "MIGRATION_REQUIRED": (
+            ErrorCode.MIGRATION_REQUIRED,
+            MIGRATION_REQUIRED_MESSAGE,
+            False,
         ),
         "FEDERATION_UNAVAILABLE": (
             ErrorCode.CAPABILITY_DISABLED,
@@ -574,7 +583,7 @@ class PinnedHandlers:
                         target_tool=request.target_tool,
                         expires_at=None,
                     ),
-                    warnings=([draft_warning] if draft_warning is not None else ()),
+                    warnings=[draft_warning] if draft_warning is not None else (),
                 )
             token = self._dependencies.covenant_gate.issue_preflight(
                 scope,

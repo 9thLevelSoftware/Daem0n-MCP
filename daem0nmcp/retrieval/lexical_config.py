@@ -6,6 +6,13 @@ import hashlib
 import json
 import re
 
+# The projections a retrieval provider serves.  ``projection_manifests`` also
+# carries the migration's table snapshots (``memory_records`` and friends), so
+# readers of retrieval freshness must select these names instead of refusing
+# every other one.
+RETRIEVAL_PROJECTION_NAMES = frozenset(
+    {"lexical", "dense", "graph", "temporal", "procedure", "outcome", "code"}
+)
 LEXICAL_BM25_WEIGHTS = (1.0, 0.7, 1.5)
 LEXICAL_TOKENIZER = "unicode61 remove_diacritics 2"
 LEXICAL_BUILD_CONFIG = {
@@ -57,6 +64,7 @@ def lexical_fts_table_name(workspace_id: str, generation: int) -> str:
 
 __all__ = [
     "GENERATION_TABLES",
+    "RETRIEVAL_PROJECTION_NAMES",
     "LEXICAL_BM25_WEIGHTS",
     "LEXICAL_BUILD_CONFIG",
     "LEXICAL_TOKENIZER",

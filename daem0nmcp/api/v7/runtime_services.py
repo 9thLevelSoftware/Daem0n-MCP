@@ -64,6 +64,7 @@ from .models import (
     RecordSummary,
     RetrievalData,
     TokenUsage,
+    stored_relative_path,
 )
 from .models import (
     EvidenceItem as PublicEvidenceItem,
@@ -192,6 +193,9 @@ class WorkspaceStorageResolver:
         workspace: Workspace,
     ) -> Iterator[ResolvedActiveDatabase]:
         with self.locked_current(workspace) as active:
+            if active.format_version == 6:
+                # An intact but un-migrated v6 store: retrying never helps.
+                raise RuntimeServiceError("MIGRATION_REQUIRED")
             if (
                 active.pointer is None
                 or active.format_version != _FORMAT_VERSION
@@ -448,8 +452,9 @@ def _load_record_row(
     ).fetchall()
     if len(rows) != 1:
         raise RuntimeServiceError("NOT_FOUND")
-    if rows[0]["file_path"] is not None:
-        raise RuntimeServiceError("MEMORY_RECORD_INTEGRITY_FAILED")
+    # A migrated v6 row keeps the host-absolute ``file_path`` v6 wrote.  It is
+    # never emitted (``_record_summary`` and ``_record_state`` drop it), so it
+    # is legacy provenance, not corruption.
     return rows[0]
 
 
@@ -459,8 +464,10 @@ def _record_summary(
     evidence_status: str = "current",
 ) -> RecordSummary:
     tags = _parse_json(row["tags_json"], list, "MEMORY_RECORD_INTEGRITY_FAILED")
+    # v6 accepted empty content; the bounded summary renders it as the
+    # migration's marker rather than denying the whole read.
     content = row["content"]
-    if not isinstance(content, str) or not content:
+    if not isinstance(content, str):
         raise RuntimeServiceError("MEMORY_RECORD_INTEGRITY_FAILED")
     try:
         return RecordSummary.model_validate(
@@ -469,9 +476,7 @@ def _record_summary(
                 "record_type": str(row["record_type"]),
                 "excerpt": content[:4000],
                 "tags": tags,
-                "relative_file_path": None
-                if row["file_path_relative"] is None
-                else str(row["file_path_relative"]),
+                "relative_file_path": stored_relative_path(row["file_path_relative"]),
                 "current_status": _record_status(row, evidence_status),
                 "content_hash": str(row["content_hash"]),
                 "created_at": _datetime_from_us(row["created_at_us"]),
@@ -495,7 +500,7 @@ def _record_state(row: sqlite3.Row) -> dict[str, Any]:
         "context": context,
         "tags": tags,
         "file_path": None,
-        "file_path_relative": row["file_path_relative"],
+        "file_path_relative": stored_relative_path(row["file_path_relative"]),
         "keywords": row["keywords"],
         "is_permanent": bool(row["is_permanent"]),
         "pinned": bool(row["pinned"]),
@@ -1316,7 +1321,7 @@ class Task8RecallService:
                     "AND event.stream_id=record.record_id LIMIT 2",
                     (query.workspace_id, *key),
                 ).fetchall()
-                if len(rows) != 1 or rows[0]["file_path"] is not None:
+                if len(rows) != 1:
                     raise RuntimeServiceError("EVIDENCE_AUTHENTICATION_FAILED")
                 hydrated[key] = rows[0]
 
@@ -1448,7 +1453,7 @@ class Task8RecallService:
                     "AND event.stream_id=record.record_id LIMIT 2",
                     (query.workspace_id, *key),
                 ).fetchall()
-                if len(rows) != 1 or rows[0]["file_path"] is not None:
+                if len(rows) != 1:
                     raise RuntimeServiceError("EVIDENCE_AUTHENTICATION_FAILED")
                 hydrated[key] = rows[0]
 

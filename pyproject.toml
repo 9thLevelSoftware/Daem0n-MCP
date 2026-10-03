@@ -106,7 +106,7 @@ include = ["daem0nmcp*"]
     "static/*.js",
     "static/renderers/*.js",
 ]
-"daem0nmcp.opencode_assets" = ["*.ts"]
+"daem0nmcp.opencode_assets" = ["*.ts", "commands/*.md"]
 
 # Ruff configuration
 [tool.ruff]

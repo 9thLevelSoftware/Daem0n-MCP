@@ -737,6 +737,46 @@ class SandboxOperationAvailabilityTests(unittest.IsolatedAsyncioTestCase):
             "Set E2B_API_KEY to enable isolated Python execution.",
         )
 
+    async def test_disabling_the_profile_switches_remote_execution_off(self) -> None:
+        """The advertised opt-out must also stop the sandbox."""
+        from daem0nmcp.api.v7.external_operations import (
+            ExternalOperationDependencies,
+            ExternalOperationError,
+            build_external_operations,
+        )
+        from daem0nmcp.api.v7.record_operations import RecordOperationDependencies
+        from daem0nmcp.workspace import WorkspaceRegistry
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            workspace = WorkspaceRegistry([root], default_root=root).default
+            operations = build_external_operations(
+                ExternalOperationDependencies(
+                    record_dependencies=RecordOperationDependencies(),
+                    environment={
+                        "E2B_API_KEY": "key",
+                        "DAEM0NMCP_AGENCY_E2B_ENABLED": "false",
+                    },
+                    sandbox_provider_factory=lambda: self.fail("provider was built"),
+                )
+            )
+            with self.assertRaises(ExternalOperationError) as caught:
+                await operations["sandbox_execute_python"](
+                    workspace=workspace,
+                    request=_request(
+                        "sandbox_execute_python",
+                        workspace_id=workspace.workspace_id,
+                        code="print(1)",
+                        timeout_seconds=1,
+                        preflight_token=PREFLIGHT_TOKEN,
+                    ),
+                )
+
+        self.assertEqual(caught.exception.code, "CAPABILITY_DISABLED")
+        state = caught.exception.capability_states[0]
+        self.assertEqual(state.name, "agency-e2b")
+        self.assertIn("DAEM0NMCP_AGENCY_E2B_ENABLED", str(state.remediation))
+
 
 if __name__ == "__main__":
     unittest.main()

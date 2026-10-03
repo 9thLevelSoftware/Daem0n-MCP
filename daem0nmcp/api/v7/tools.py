@@ -53,6 +53,7 @@ from .models import (
     Tag,
     ToolName,
     TriggerId,
+    UniqueTags,
     UserJsonObject,
     UserText,
     UtcDateTime,
@@ -1118,7 +1119,7 @@ class MemoryStoreInput(WireModel):
         | None
     ) = None
     context: RecordContext = Field(default_factory=dict)
-    tags: list[Tag] = Field(default_factory=list, max_length=32)
+    tags: UniqueTags = Field(default_factory=list, max_length=32)
     relative_file_path: RelativePath | None = None
     happened_at: AwareDateTime | None = None
     procedure_steps: list[UserMediumText] = Field(default_factory=list, max_length=100)
@@ -1154,7 +1155,7 @@ class MemoryCapturePromoteInput(WireModel):
     ]
     rationale: OptionalUserMediumText = None
     context: RecordContext = Field(default_factory=dict)
-    tags: list[Tag] = Field(default_factory=list, max_length=16)
+    tags: UniqueTags = Field(default_factory=list, max_length=16)
     idempotency_key: IdempotencyKey
     preflight_token: PreflightToken
 
@@ -1185,7 +1186,7 @@ class ActiveContextListInput(WireModel):
 class ContextTriggersMatchInput(WireModel):
     workspace_id: WorkspaceId
     relative_file_path: RelativePath | None = None
-    tags: list[Tag] = Field(default_factory=list, max_length=32)
+    tags: UniqueTags = Field(default_factory=list, max_length=32)
     entities: list[UserNameText] = Field(default_factory=list, max_length=32)
     limit: Annotated[int, Field(ge=1, le=20)] = 5
 
@@ -1273,7 +1274,7 @@ class MemoryCreate(WireModel):
         | None
     ) = None
     context: RecordContext = Field(default_factory=dict)
-    tags: list[Tag] = Field(default_factory=list, max_length=32)
+    tags: UniqueTags = Field(default_factory=list, max_length=32)
     relative_file_path: RelativePath | None = None
     happened_at: AwareDateTime | None = None
     procedure_steps: list[UserMediumText] = Field(default_factory=list, max_length=100)

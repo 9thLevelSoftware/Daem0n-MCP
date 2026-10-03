@@ -11,6 +11,46 @@
 - OpenCode edits are no longer gated either: the OpenCode plugin runs the same `pre_edit` hook, which now always allows the edit. The plugin does not yet show the reminder; that rework comes with the edit-bridge removal.
 - `install-claude-hooks` and `uninstall-claude-hooks` refuse to touch a `~/.claude/settings.json` that is not valid JSON, instead of replacing it.
 - The manual `hooks/daem0n_*.py` scripts are deprecated stubs that print a notice and exit 0, and `hooks/settings.json.example` is removed. If you installed them by hand, re-run `python -m daem0nmcp.cli install-claude-hooks`; it also removes the old entries.
+- **Behaviour change — installed profiles now turn themselves on.** An unset (or
+  empty) `DAEM0NMCP_<PROFILE>_ENABLED` means "auto": the profile is ready when
+  its extra is installed and disabled otherwise. `false` still turns it off, and
+  `true` with packages missing is still degraded. An empty value used to mean
+  `false`. What this costs if you installed an extra and never set the flag:
+  `[graph]` imports networkx, igraph and leidenalg at startup, adds a graph
+  provider to recall (so rankings change) and lets dreaming refresh communities;
+  `[local]`/`[models-local]` import sentence-transformers and onnxruntime at
+  startup, download the embedding model on first use, and rebuild the dense
+  projection, which re-embeds the whole workspace once. Opt out per profile with
+  `DAEM0NMCP_<PROFILE>_ENABLED=false`.
+- `sandbox_execute_python` now honours `DAEM0NMCP_AGENCY_E2B_ENABLED=false`; it
+  previously required only `E2B_API_KEY`.
+- `system_health` and `meta.capability_states` report the profile's real
+  remediation (install command or environment variable) instead of "Review the
+  &lt;name&gt; capability profile."
+- `start_daem0nmcp_server.bat` serves the directory you run it from (or its first
+  argument, or an exported `DAEM0NMCP_PROJECT_ROOT`) instead of the Daem0n-MCP
+  checkout, and `install-opencode` installs the four `.opencode/commands/` files.
+- **Migration payload change — re-migrate a store migrated by an earlier
+  v7 development build.** `migrate-v7` no longer copies a v6 host path into the
+  event it writes: the columns that hold one (`file_path`, `project_path`,
+  `database_path`, and a `file_path_relative` that is not workspace-relative)
+  are recorded as a `{"$host_path": {...}}` digest, so an export bundle from a
+  migrated workspace no longer discloses the origin host's directory layout.
+  The raw value stays in the retained v6 tables and in
+  `.daem0nmcp/storage/migrations/v7/<id>/source.snapshot.db`. Because the
+  digest changes the lossless payload, a store migrated before this build fails
+  `verify-v7` with "retained legacy source provenance differs" and must be
+  migrated again from its intact v6 source (`migrate-v7 --rollback`, then
+  `migrate-v7 --apply`). v7 is unreleased, so this affects development stores
+  only.
+- **Migrated v6 workspaces are usable end to end.** `session_brief`, recall,
+  outcomes, the four resources and `workspace_export` all work on a migrated
+  store; `migrate-v7` reports in `warnings` whatever it could not copy
+  faithfully; an un-migrated v6 workspace answers the new non-retryable
+  `MIGRATION_REQUIRED` naming the command instead of a retryable error with no
+  remedy; and `migrate-v7 --rollback` refuses with `ROLLBACK_WOULD_HIDE_WRITES`
+  rather than silently stranding writes made since activation (pass
+  `--discard-v7-writes` to accept that).
 
 ## [6.0.0] - 2026-01-29
 

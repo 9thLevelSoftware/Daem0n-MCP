@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import hmac
+import logging
 import os
 import re
 import secrets
@@ -52,8 +53,14 @@ from ...storage_activation import (
 )
 from ...workspace import Workspace
 from .application import AdmittedRequest
-from .errors import STABLE_ERROR_CODE_SET
-from .models import EvidenceRef, Page, RecordSummary, RelativePath
+from .errors import STABLE_ERROR_CODE_SET, is_database_busy
+from .models import (
+    EvidenceRef,
+    Page,
+    RecordSummary,
+    RelativePath,
+    stored_relative_path,
+)
 from .portable_projections import (
     ImportFinalizationLease,
     PortableTransferError,
@@ -95,6 +102,7 @@ _CURSOR_RE = re.compile(r"^cur_([0-9a-f]{64})$")
 _RAW_PATH_KEYS = frozenset({"file_path", "project_path", "database_path"})
 _RELATIVE_PATH_KEYS = frozenset({"relative_file_path", "file_path_relative"})
 _RELATIVE_PATH_ADAPTER: TypeAdapter[str] = TypeAdapter(RelativePath)
+_PATH_PAIR_NAMES = _RAW_PATH_KEYS | _RELATIVE_PATH_KEYS
 _EVENT_COLUMNS = (
     "event_id,workspace_id,stream_id,stream_kind,stream_version,event_type,"
     "event_schema_version,occurred_at_us,recorded_at_us,actor_type,actor_id,"
@@ -142,6 +150,8 @@ _UNIX_EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
 # This is intentionally not the event loop's default executor.  The semaphore
 # remains owned by the concurrent future after an asyncio waiter is cancelled,
 # so cancellation cannot release capacity while SQLite still holds a lock.
+_LOGGER = logging.getLogger(__name__)
+
 _CORE_OPERATION_WORKERS = BoundedWorkerPool(
     max_workers=4,
     thread_name_prefix="daem0nmcp-v7-core",
@@ -222,6 +232,31 @@ def _validated_storage_path(
     return resolved
 
 
+def _portable_failure_code(error: BaseException, operation: str) -> str:
+    """Name a transfer failure the caller can act on, and log its cause.
+
+    A concurrent writer (a projection drain or a dreaming job) can hold the
+    SQLite write lock past the busy timeout while a transfer does its session
+    bookkeeping. That is a transient, retryable condition, not an invalid
+    bundle, and reporting it as one leaves the caller with no next step.
+    Only the explicit ``raise ... from`` chain counts: a bundle rejected while
+    an unrelated busy error is in flight is still an invalid bundle.
+    """
+
+    seen: set[int] = set()
+    cause: BaseException | None = error
+    while cause is not None and id(cause) not in seen:
+        seen.add(id(cause))
+        if is_database_busy(cause):
+            _LOGGER.warning("%s deferred: %s", operation, cause)
+            return "DATABASE_IN_USE"
+        cause = cause.__cause__
+    _LOGGER.warning(
+        "%s rejected the bundle: %s", operation, type(error).__name__, exc_info=error
+    )
+    return "IMPORT_INVALID"
+
+
 def _verify_schema(connection: sqlite3.Connection) -> None:
     try:
         row = connection.execute(
@@ -244,6 +279,9 @@ def _active_connection(
     try:
         with DatabaseFileLock(storage, "shared"):
             active = resolve_active_database(storage)
+            if active.format_version == 6:
+                # An intact but un-migrated v6 store: retrying never helps.
+                raise CoreOperationError("MIGRATION_REQUIRED")
             if active.format_version != _FORMAT_VERSION:
                 raise CoreOperationError("CAPABILITY_DEGRADED")
             connection = sqlite3.connect(active.path, timeout=5.0)
@@ -468,6 +506,25 @@ def _reject_raw_paths(value: object) -> None:
             if key != "context":
                 _reject_raw_paths(item)
     elif isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        # A migrated event carries its v6 row as ``[name, value]`` pairs, so a
+        # path column is a list element rather than a mapping key.  Check that
+        # shape too: the migration replaces these with a digest, and a
+        # regression must fail here rather than reach the wire.
+        if (
+            len(value) == 2
+            # A column name is a string; anything else here is an ordinary
+            # two-element list, whose members may be unhashable.
+            and isinstance(value[0], str)
+            and value[0] in _PATH_PAIR_NAMES
+            and isinstance(value[1], str)
+            and value[1]
+        ):
+            if value[0] in _RAW_PATH_KEYS:
+                raise CoreOperationError("WORKSPACE_PATH_ESCAPE")
+            try:
+                _RELATIVE_PATH_ADAPTER.validate_python(value[1])
+            except ValidationError:
+                raise CoreOperationError("WORKSPACE_PATH_ESCAPE") from None
         for item in value:
             _reject_raw_paths(item)
     elif isinstance(value, (bytes, bytearray, memoryview)):
@@ -633,7 +690,7 @@ def _summary(
     record = _record_from_event(event)
     content = record.get("content")
     tags = record.get("tags", [])
-    relative = record.get("file_path_relative")
+    relative = stored_relative_path(record.get("file_path_relative"))
     if not isinstance(content, str) or not content or not isinstance(tags, list):
         raise CoreOperationError("IMPORT_INVALID")
     if record.get("deleted_at_us") is not None:
@@ -1037,9 +1094,14 @@ def _export_sync(
         except CoreOperationError:
             raise
         except PortableTransferError as exc:
-            raise CoreOperationError(exc.code) from exc
+            code = exc.code
+            if code == "IMPORT_INVALID":
+                code = _portable_failure_code(exc, "workspace_export")
+            raise CoreOperationError(code) from exc
         except Exception as exc:
-            raise CoreOperationError("IMPORT_INVALID") from exc
+            raise CoreOperationError(
+                _portable_failure_code(exc, "workspace_export")
+            ) from exc
 
 
 def _journal_payload(bundle: ExportBundle, merge: bool) -> dict[str, Any]:
@@ -1456,7 +1518,10 @@ def _import_v2_sync(
             if vector_candidate is not None:
                 vector_candidate.discard(connection, workspace.workspace_id)
                 vector_candidate = None
-            raise CoreOperationError(exc.code) from exc
+            code = exc.code
+            if code == "IMPORT_INVALID":
+                code = _portable_failure_code(exc, "workspace_import")
+            raise CoreOperationError(code) from exc
         except CoreOperationError:
             if connection.in_transaction:
                 connection.rollback()
@@ -1484,7 +1549,9 @@ def _import_v2_sync(
             if vector_candidate is not None:
                 vector_candidate.discard(connection, workspace.workspace_id)
             vector_candidate = None
-            raise CoreOperationError("IMPORT_INVALID") from exc
+            raise CoreOperationError(
+                _portable_failure_code(exc, "workspace_import")
+            ) from exc
         finally:
             if lease is not None and not committed:
                 with suppress(Exception):

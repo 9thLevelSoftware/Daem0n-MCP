@@ -353,6 +353,14 @@ def main():
         help="Roll back the active migration run (default: latest)",
     )
     migrate_v7_parser.add_argument(
+        "--discard-v7-writes",
+        action="store_true",
+        help=(
+            "Roll back even though events recorded after activation would "
+            "become unreachable"
+        ),
+    )
+    migrate_v7_parser.add_argument(
         "--batch-size",
         type=_v7_batch_size,
         default=500,
@@ -660,7 +668,11 @@ def main():
         service = MigrationV7Service(registry)
         try:
             if args.rollback is not None:
-                result = service.rollback(args.project_path, args.rollback)
+                result = service.rollback(
+                    args.project_path,
+                    args.rollback,
+                    discard_v7_writes=args.discard_v7_writes,
+                )
             elif args.apply:
                 result = service.apply(args.project_path, batch_size=args.batch_size)
             else:
@@ -702,7 +714,15 @@ def main():
                 "checkpoints": {},
                 "validation": {},
                 "warnings": [],
-                "error": {"code": exc.code, "message": exc.code},
+                # Migration details stay redacted to the code, except the
+                # rollback refusal, whose detail is the operator signal: a
+                # count and the storage-relative candidate, never a host path.
+                "error": {
+                    "code": exc.code,
+                    "message": str(exc)
+                    if exc.code == "ROLLBACK_WOULD_HIDE_WRITES"
+                    else exc.code,
+                },
             }
             exit_code = 2 if exc.code == "UNSAFE_MIGRATION_PATH" else 1
         except Exception:
@@ -736,8 +756,10 @@ def main():
                 )
             if payload.get("active_generation") is not None:
                 print(f"Generation: {payload['active_generation']}")
+            for warning in payload.get("warnings") or ():
+                print(f"Warning: {warning}")
             if payload.get("error"):
-                print(f"Error: {payload['error']['code']}")
+                print(f"Error: {payload['error']['message']}")
         sys.exit(exit_code)
 
     if args.command == "recover-consolidation":
@@ -1259,15 +1281,18 @@ def main():
             if args.json:
                 print(
                     json.dumps(
-                        {"error": "tree-sitter-languages not installed", "indexed": 0}
+                        {
+                            "error": "tree-sitter-language-pack not installed",
+                            "indexed": 0,
+                        }
                     )
                 )
             else:
                 print(
-                    "ERROR: Code indexing requires tree-sitter-languages",
+                    "ERROR: Code indexing requires tree-sitter-language-pack",
                     file=sys.stderr,
                 )
-                print("Install with: pip install tree-sitter-languages")
+                print("Install with: pip install 'daem0nmcp[apps]'")
             sys.exit(1)
 
         project_path = Path(args.project_path or os.getcwd()).resolve()

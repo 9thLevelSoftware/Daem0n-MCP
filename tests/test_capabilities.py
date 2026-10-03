@@ -218,6 +218,95 @@ class TestCapabilityRegistry(unittest.TestCase):
             "DAEM0NMCP_MODELS_LOCAL_ENABLED=true",
         )
 
+    def test_unset_variable_enables_an_installed_profile(self):
+        """An installed extra turns its profile on without any variable."""
+        from daem0nmcp.capabilities import CapabilityRegistry
+
+        capability = CapabilityRegistry(
+            environ={}, module_available=lambda _: True
+        ).get("graph")
+
+        self.assertEqual(capability["status"], "ready")
+
+    def test_unset_variable_leaves_a_missing_extra_disabled(self):
+        """Without the extra, an unrequested profile is off, not degraded."""
+        from daem0nmcp.capabilities import CapabilityRegistry
+
+        capability = CapabilityRegistry(
+            environ={}, module_available=lambda name: name != "leidenalg"
+        ).get("graph")
+
+        self.assertEqual(capability["status"], "disabled")
+        self.assertEqual(
+            capability["remediation"],
+            {
+                "action": "install_extra",
+                "command": "pip install 'daem0nmcp[graph]'",
+                "missing": ["leidenalg"],
+            },
+        )
+
+    def test_an_empty_value_is_treated_as_unset(self):
+        """An empty variable means auto, as an unset one does."""
+        from daem0nmcp.capabilities import CapabilityRegistry
+
+        installed = CapabilityRegistry(
+            environ={"DAEM0NMCP_GRAPH_ENABLED": "  "},
+            module_available=lambda _: True,
+        ).get("graph")
+        missing = CapabilityRegistry(
+            environ={"DAEM0NMCP_GRAPH_ENABLED": ""},
+            module_available=lambda _: False,
+        ).get("graph")
+
+        self.assertEqual(installed["status"], "ready")
+        self.assertEqual(missing["status"], "disabled")
+        self.assertEqual(missing["remediation"]["action"], "install_extra")
+
+    def test_explicit_false_disables_an_installed_profile(self):
+        """The variable still turns an installed profile off, without probing."""
+        from daem0nmcp.capabilities import CapabilityRegistry
+
+        def probe(distribution):
+            raise AssertionError(f"probed {distribution} for a disabled profile")
+
+        capability = CapabilityRegistry(
+            environ={"DAEM0NMCP_GRAPH_ENABLED": "false"},
+            module_available=probe,
+        ).get("graph")
+
+        self.assertEqual(capability["status"], "disabled")
+        self.assertEqual(capability["remediation"]["action"], "enable_configuration")
+        self.assertIn(
+            "Unset DAEM0NMCP_GRAPH_ENABLED or set it to true",
+            capability["remediation"]["message"],
+        )
+
+    def test_explicit_true_with_a_missing_extra_is_degraded(self):
+        """Asking for a profile whose packages are absent is a degraded request."""
+        from daem0nmcp.capabilities import CapabilityRegistry
+
+        capability = CapabilityRegistry(
+            environ={"DAEM0NMCP_GRAPH_ENABLED": "true"},
+            module_available=lambda name: name != "leidenalg",
+        ).get("graph")
+
+        self.assertEqual(capability["status"], "degraded")
+        self.assertEqual(capability["remediation"]["action"], "install_extra")
+        self.assertEqual(capability["remediation"]["missing"], ["leidenalg"])
+
+    def test_unset_models_local_is_disabled_on_unsupported_python(self):
+        """Auto mode never reports an unrequested profile as degraded."""
+        from daem0nmcp.capabilities import CapabilityRegistry
+
+        with patch("daem0nmcp.capabilities.sys.version_info", (3, 10, 21)):
+            capability = CapabilityRegistry(
+                environ={}, module_available=lambda _: True
+            ).get("models-local")
+
+        self.assertEqual(capability["status"], "disabled")
+        self.assertEqual(capability["remediation"]["action"], "upgrade_python")
+
     def test_invalid_enablement_value_is_failed_with_structured_remediation(self):
         """An invalid profile setting is a configuration failure, not a missing extra."""
         from daem0nmcp.capabilities import CapabilityRegistry
@@ -234,6 +323,7 @@ class TestCapabilityRegistry(unittest.TestCase):
         self.assertEqual(
             capability["remediation"]["environment"], "DAEM0NMCP_MODELS_LOCAL_ENABLED"
         )
+        self.assertIn("unset", capability["remediation"]["message"])
 
     def test_ready_profile_checks_only_the_requested_profile(self):
         """Capability inspection must not import or probe every optional subsystem."""
