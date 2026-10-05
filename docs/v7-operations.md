@@ -201,6 +201,11 @@ do not relax normalized POSIX path arguments or workspace containment.
 Explore requests retain baseline packing in every retention mode; shadow mode
 reuses that identical composition instead of packing the same evidence twice.
 Other intents still compute their distinct shadow variant.
+Structured outcomes and each procedure step use the same source-aware excerpt
+limit as body text, including the reduced limit for stale evidence. Step counts
+and short facts remain unchanged; longer facts are prefix excerpts, not complete
+procedures. Full record views retain the original facts. No-intent and explore
+packing remain unchanged.
 
 Repository code-binding checks validate current bounded source content rather
 than trusting file size and modification time. Parsed fingerprints are reused

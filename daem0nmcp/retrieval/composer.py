@@ -445,7 +445,7 @@ class EvidenceComposer:
 
         source_order = {id(source): index for index, source in enumerate(ordered)}
         prepared.sort(key=lambda item: source_order[id(item.source)])
-        prepared = self._resequence(prepared, label_applicability)
+        prepared = self._resequence(prepared, label_applicability, retention)
 
         text = "\n\n".join(item.block for item in prepared)
         rendered_tokens = self._count(text)
@@ -458,6 +458,7 @@ class EvidenceComposer:
             excerpt_start = cursor + item.block.index("\n") + 1
             excerpt_end = excerpt_start + len(item.excerpt)
             source = item.source
+            fact_limit = self._excerpt_limit(source, retention)
             relation_paths = self._relation_paths(source.candidate)
             evidence_item = EvidenceItem(
                 citation=item.marker,
@@ -473,13 +474,13 @@ class EvidenceComposer:
                 worked=source.worked,
                 superseded_by_version_id=source.superseded_by_version_id,
                 outcome=(
-                    self._bounded(source.outcome)
+                    self._bounded(source.outcome, fact_limit)
                     if source.outcome is not None
                     else None
                 ),
                 outcome_failed=source.outcome_failed,
                 procedure_steps=tuple(
-                    self._bounded(step) for step in source.procedure_steps
+                    self._bounded(step, fact_limit) for step in source.procedure_steps
                 ),
                 relation_path=relation_paths[0] if relation_paths else (),
                 relation_paths=relation_paths,
@@ -513,7 +514,10 @@ class EvidenceComposer:
         return CompositionResult(items=tuple(items), context=context)
 
     def _resequence(
-        self, prepared: list[_PreparedItem], label_applicability: bool = False
+        self,
+        prepared: list[_PreparedItem],
+        label_applicability: bool = False,
+        retention: RetentionPolicy | None = None,
     ) -> list[_PreparedItem]:
         """Assign contiguous markers after restoring caller-selected order."""
 
@@ -525,6 +529,7 @@ class EvidenceComposer:
                 item.source,
                 item.excerpt,
                 label_applicability=label_applicability,
+                fact_limit=self._excerpt_limit(item.source, retention),
             )
             resequenced.append(
                 replace(
@@ -583,10 +588,15 @@ class EvidenceComposer:
     ) -> _PreparedItem | None:
         marker = f"[E{len(prepared) + 1}]"
         full_excerpt = self._full_excerpt(source)
-        excerpt = self._bounded(full_excerpt, self._excerpt_limit(source, retention))
+        fact_limit = self._excerpt_limit(source, retention)
+        excerpt = self._bounded(full_excerpt, fact_limit)
         truncated = excerpt != full_excerpt
         block = self._render_block(
-            marker, source, excerpt, label_applicability=label_applicability
+            marker,
+            source,
+            excerpt,
+            label_applicability=label_applicability,
+            fact_limit=fact_limit,
         )
         if self._combined_count(prepared, block) > budget:
             compressed = self._compress_excerpt(
@@ -598,7 +608,11 @@ class EvidenceComposer:
             )
             if compressed is not None:
                 compressed_block = self._render_block(
-                    marker, source, compressed, label_applicability=label_applicability
+                    marker,
+                    source,
+                    compressed,
+                    label_applicability=label_applicability,
+                    fact_limit=fact_limit,
                 )
                 if self._combined_count(prepared, compressed_block) <= budget:
                     excerpt = compressed
@@ -612,11 +626,16 @@ class EvidenceComposer:
                 prepared,
                 budget,
                 label_applicability,
+                fact_limit,
             )
             if excerpt is None:
                 return None
             block = self._render_block(
-                marker, source, excerpt, label_applicability=label_applicability
+                marker,
+                source,
+                excerpt,
+                label_applicability=label_applicability,
+                fact_limit=fact_limit,
             )
             truncated = True
         if truncated:
@@ -686,6 +705,7 @@ class EvidenceComposer:
         prepared: list[_PreparedItem],
         budget: int,
         label_applicability: bool = False,
+        fact_limit: int | None = None,
     ) -> str | None:
         low = 1
         high = len(excerpt)
@@ -696,7 +716,11 @@ class EvidenceComposer:
             if not candidate:
                 candidate = excerpt[:1]
             block = self._render_block(
-                marker, source, candidate, label_applicability=label_applicability
+                marker,
+                source,
+                candidate,
+                label_applicability=label_applicability,
+                fact_limit=fact_limit,
             )
             if self._combined_count(prepared, block) <= budget:
                 best = candidate
@@ -719,6 +743,7 @@ class EvidenceComposer:
         excerpt: str,
         *,
         label_applicability: bool = False,
+        fact_limit: int | None = None,
     ) -> str:
         channels = ",".join(sorted(source.candidate.channels))
         lines = [
@@ -735,11 +760,15 @@ class EvidenceComposer:
             )
         if source.outcome is not None:
             outcome_label = "Failed outcome" if source.outcome_failed else "Outcome"
-            lines.append(f"{outcome_label}: {self._bounded(source.outcome)}")
+            lines.append(
+                f"{outcome_label}: {self._bounded(source.outcome, fact_limit)}"
+            )
         if source.procedure_steps:
             lines.append(
                 "Steps: "
-                + " | ".join(self._bounded(step) for step in source.procedure_steps)
+                + " | ".join(
+                    self._bounded(step, fact_limit) for step in source.procedure_steps
+                )
             )
         relation_paths = self._relation_paths(source.candidate)
         if relation_paths:

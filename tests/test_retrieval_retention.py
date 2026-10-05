@@ -11,6 +11,7 @@ from daem0nmcp.retrieval.composer import (
     RetentionPolicy,
     query_identifiers,
 )
+from daem0nmcp.retrieval.runtime import CoreTokenizer
 from daem0nmcp.retrieval.service import RetrievalService
 from daem0nmcp.retrieval.types import RetrievalQuery
 from tests.api_v7.test_runtime_services import _RuntimeServiceFixtures
@@ -158,6 +159,165 @@ class RetentionComposerTests(unittest.TestCase):
                 ).items[0]
                 self.assertLessEqual(len(item.excerpt), 300)
 
+    def test_structured_facts_share_source_caps_and_rendered_exports(self):
+        composer = EvidenceComposer(tokenizer=CoreTokenizer(), max_excerpt_chars=800)
+        long_fact = "recovery detail " * 130
+        source = replace(
+            _source(
+                "1",
+                long_fact,
+                score=1.0,
+                outcome=long_fact,
+                outcome_failed=True,
+                procedure_steps=(long_fact, "verify health"),
+            ),
+            code_bindings=(("src/cache.py", "pkg.Cache.apply"),),
+        )
+        cases = (
+            source,
+            replace(source, procedure_steps=(), outcome_failed=False),
+            replace(
+                source,
+                status="superseded",
+                superseded_by_version_id="fact_" + "a" * 64,
+            ),
+            replace(
+                source,
+                applicability="needs_revalidation",
+                changed_bindings=("src/cache.py",),
+            ),
+        )
+        baseline = composer.compose((source,), token_budget=4000)
+        for retention in (None, RetentionPolicy("explore", frozenset())):
+            self.assertEqual(
+                baseline,
+                composer.compose((source,), token_budget=4000, retention=retention),
+            )
+        lengths = []
+        for selected in cases:
+            result = composer.compose(
+                (selected,),
+                token_budget=4000,
+                retention=RetentionPolicy("implement", frozenset()),
+            )
+            item = result.items[0]
+            lengths.append(len(item.outcome))
+            self.assertEqual(item.excerpt, item.outcome)
+            self.assertTrue(long_fact.startswith(item.outcome))
+            self.assertEqual(selected.outcome_failed, item.outcome_failed)
+            label = "Failed outcome" if selected.outcome_failed else "Outcome"
+            self.assertIn(label + ": " + item.outcome, result.context.text)
+            self.assertEqual(len(selected.procedure_steps), len(item.procedure_steps))
+            if selected.procedure_steps:
+                self.assertEqual(item.outcome, item.procedure_steps[0])
+                self.assertEqual("verify health", item.procedure_steps[1])
+                self.assertIn(
+                    "Steps: " + " | ".join(item.procedure_steps), result.context.text
+                )
+            self.assertEqual(
+                composer.compose(
+                    (selected,), token_budget=4000
+                ).context.requested_tokens,
+                result.context.requested_tokens,
+            )
+            self.assertEqual(
+                result.context.requested_tokens - result.context.rendered_tokens,
+                result.context.dropped_tokens,
+            )
+        self.assertEqual(len(baseline.items[0].outcome), lengths[0])
+        self.assertLess(lengths[1], lengths[0])
+        self.assertLess(lengths[2], lengths[1])
+        self.assertEqual(lengths[2], lengths[3])
+        matched = composer.compose(
+            (cases[1],),
+            token_budget=4000,
+            retention=RetentionPolicy("implement", frozenset({"cache.py"})),
+        )
+        self.assertEqual(baseline.items[0].outcome, matched.items[0].outcome)
+
+    def test_core_tokenizer_retains_stale_warning_and_current_evidence(self):
+        tokenizer = CoreTokenizer()
+        composer = EvidenceComposer(tokenizer=tokenizer)
+        warning = replace(
+            _source(
+                "1",
+                "obsolete recovery guidance " * 100,
+                score=1.0,
+                category="warning",
+                outcome="recovery failed " * 100,
+                outcome_failed=True,
+                procedure_steps=("inspect recovery health " * 90, "verify health"),
+            ),
+            status="superseded",
+            superseded_by_version_id="fact_" + "a" * 64,
+        )
+        current = tuple(
+            _source(digit, "current routing evidence", score=0.9) for digit in "234"
+        )
+        selected = (warning,) + current
+        baseline = composer.compose(selected, token_budget=256)
+        result = composer.compose(
+            selected,
+            token_budget=256,
+            retention=RetentionPolicy("implement", frozenset()),
+        )
+        self.assertEqual(
+            [source.candidate.record_id for source in selected],
+            [item.evidence_refs[0].record_id for item in result.items],
+        )
+        self.assertNotIn(
+            warning.candidate.record_id,
+            [item.evidence_refs[0].record_id for item in baseline.items],
+        )
+        stale = result.items[0]
+        self.assertLessEqual(len(stale.outcome), 300)
+        self.assertLessEqual(len(stale.procedure_steps[0]), 300)
+        self.assertEqual("verify health", stale.procedure_steps[1])
+        self.assertIn("Failed outcome: " + stale.outcome, result.context.text)
+        self.assertIn(
+            "Steps: " + " | ".join(stale.procedure_steps), result.context.text
+        )
+        self.assertEqual(
+            tokenizer.count_tokens(result.context.text), result.context.rendered_tokens
+        )
+        self.assertLessEqual(result.context.rendered_tokens, 256)
+        self.assertEqual(
+            [f"[E{index}]" for index in range(1, 5)],
+            [item.citation for item in result.items],
+        )
+        for item, citation in zip(result.items, result.context.citations, strict=True):
+            self.assertEqual(item.citation, citation.marker)
+            self.assertEqual(
+                item.excerpt,
+                result.context.text[citation.excerpt_start : citation.excerpt_end],
+            )
+
+    def test_short_structured_facts_are_unchanged(self):
+        source = _source(
+            "1",
+            "brief guidance",
+            score=1.0,
+            outcome="recovery failed",
+            outcome_failed=True,
+            procedure_steps=("inspect lease", "verify health"),
+        )
+        for retention in (
+            None,
+            RetentionPolicy("explore", frozenset()),
+            RetentionPolicy("implement", frozenset()),
+            RetentionPolicy("debug", frozenset()),
+            RetentionPolicy("review", frozenset()),
+        ):
+            with self.subTest(retention=retention):
+                result = EvidenceComposer(tokenizer=CoreTokenizer()).compose(
+                    (source,), token_budget=256, retention=retention
+                )
+                self.assertEqual(source.outcome, result.items[0].outcome)
+                self.assertEqual(
+                    source.procedure_steps, result.items[0].procedure_steps
+                )
+                self.assertTrue(result.items[0].outcome_failed)
+
     def test_intent_priority_reservation_fractions(self):
         warning = _source("a", "x " * 1000, score=1.0, category="warning")
         composer = EvidenceComposer(tokenizer=WordTokenizer(), max_excerpt_chars=4000)
@@ -221,6 +381,75 @@ class RetentionServiceTests(unittest.IsolatedAsyncioTestCase):
             composer=EvidenceComposer(tokenizer=WordTokenizer()),
             retention_mode=mode,
         )
+
+    async def test_service_accepts_prefix_capped_facts_without_losing_steps(self):
+        long_fact = "recovery detail " * 130
+        sources = (
+            _source(
+                "1",
+                long_fact,
+                score=1.0,
+                category="warning",
+                outcome=long_fact,
+                outcome_failed=True,
+                procedure_steps=(long_fact, "verify health"),
+            ),
+            _source("2", long_fact, score=0.9, outcome=long_fact),
+        )
+        repository = CanonicalRepository(
+            contents={source.candidate.record_id: source.content for source in sources},
+            changes={sources[0].candidate.record_id: {"category": "warning"}},
+            selected_changes={
+                sources[0].candidate.record_id: {
+                    "category": "warning",
+                    "applicability": "needs_revalidation",
+                    "changed_bindings": ("src/cache.py",),
+                    "outcome": long_fact,
+                    "outcome_failed": True,
+                    "procedure_steps": sources[0].procedure_steps,
+                },
+                sources[1].candidate.record_id: {"outcome": long_fact},
+            },
+        )
+        provider = StaticProvider(
+            "lexical",
+            _provider_result(
+                "lexical",
+                replace(_candidate("1", "lexical", 1), highlights=()),
+                replace(_candidate("2", "lexical", 2), highlights=()),
+            ),
+            [],
+        )
+        service = RetrievalService(
+            providers={"lexical": provider},
+            repository=repository,
+            composer=EvidenceComposer(tokenizer=CoreTokenizer()),
+            retention_mode="apply",
+        )
+        result = await service.retrieve(
+            RetrievalQuery(
+                workspace_id=WORKSPACE_ID,
+                text="recovery detail",
+                limit=2,
+                token_budget=4000,
+                intent="implement",
+            )
+        )
+        self.assertFalse(result.abstained)
+        self.assertEqual(2, len(result.items))
+        by_id = {item.evidence_refs[0].record_id: item for item in result.items}
+        stale = by_id[sources[0].candidate.record_id]
+        ordinary = by_id[sources[1].candidate.record_id]
+        self.assertEqual(stale.excerpt, stale.outcome)
+        self.assertEqual(stale.outcome, stale.procedure_steps[0])
+        self.assertEqual("verify health", stale.procedure_steps[1])
+        self.assertTrue(stale.outcome_failed)
+        self.assertEqual(ordinary.excerpt, ordinary.outcome)
+        self.assertLess(len(stale.outcome), len(ordinary.outcome))
+        for item in result.items:
+            self.assertTrue(long_fact.startswith(item.outcome))
+            label = "Failed outcome" if item.outcome_failed else "Outcome"
+            self.assertIn(label + ": " + item.outcome, result.context.text)
 
     async def test_shadow_is_byte_identical_and_apply_retains_procedure(self):
         query = RetrievalQuery(
