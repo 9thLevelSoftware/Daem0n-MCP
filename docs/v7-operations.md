@@ -182,6 +182,12 @@ reserve evidence capacity for `implement` and `debug` requests. A query naming
 symbols also retain their final name. Unrelated paths do not gain that priority.
 This affects context selection, not stored-record retention or authorization.
 
+Repository code-binding checks validate current bounded source content rather
+than trusting file size and modification time. Parsed fingerprints are reused
+only when normalized source bytes match, so timestamp-preserving edits still
+produce `needs_revalidation`. This detects a changed binding; it is not a
+trusted test receipt or proof that the recorded guidance remains correct.
+
 ## Resources and diagnostics
 
 The four bounded data resources require an authorized workspace session:

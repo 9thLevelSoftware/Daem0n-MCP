@@ -206,11 +206,11 @@ def capture_bindings(
 
 
 class BindingEvaluator:
-    """Reuse bounded source snapshots only while their filesystem identity agrees."""
+    """Reuse bounded parsed snapshots only while their source content agrees."""
 
     def __init__(self) -> None:
         self._lock = Lock()
-        self._cache: OrderedDict[tuple[Path, int, int], _FileSnapshot] = OrderedDict()
+        self._cache: OrderedDict[Path, _FileSnapshot] = OrderedDict()
 
     def _current_fingerprint(self, root: Path, binding: CodeBinding) -> str:
         try:
@@ -220,15 +220,15 @@ class BindingEvaluator:
             raise CodeBindingError("bound file is missing or inaccessible") from exc
         if stat.st_size > _MAX_BINDING_FILE_BYTES:
             raise CodeBindingError("bound file exceeds size limit")
-        key = (path, stat.st_mtime_ns, stat.st_size)
+        source = _read_source(path)
         with self._lock:
-            snapshot = self._cache.get(key)
-            if snapshot is None:
-                snapshot = _FileSnapshot(_read_source(path))
-                self._cache[key] = snapshot
+            snapshot = self._cache.get(path)
+            if snapshot is None or snapshot.source != source:
+                snapshot = _FileSnapshot(source)
+                self._cache[path] = snapshot
                 if len(self._cache) > 256:
                     self._cache.popitem(last=False)
-            self._cache.move_to_end(key)
+            self._cache.move_to_end(path)
             if (
                 binding.qualified_name is not None
                 and binding.qualified_name in snapshot.fingerprints

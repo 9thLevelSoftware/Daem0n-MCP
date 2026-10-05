@@ -66,6 +66,34 @@ def test_file_binding_detects_edit_and_deletion(workspace):
     assert evaluator.evaluate(workspace.root, context).changed == ("notes.md",)
 
 
+@pytest.mark.parametrize("qualified_name", [None, "settings.target"])
+def test_binding_detects_content_changes_with_preserved_metadata(
+    workspace, qualified_name
+):
+    if qualified_name is not None:
+        require_parser()
+    path = workspace.root / "settings.py"
+    original = b"def target():\n    return 1\n"
+    path.write_bytes(original)
+    context = context_for(workspace, [("settings.py", qualified_name)])
+    evaluator = BindingEvaluator()
+    assert evaluator.evaluate(workspace.root, context).applicability == "current"
+    metadata = path.stat()
+    path.write_bytes(original.replace(b"1", b"9"))
+    os.utime(path, ns=(metadata.st_atime_ns, metadata.st_mtime_ns))
+    assert path.stat().st_size == metadata.st_size
+    assert path.stat().st_mtime_ns == metadata.st_mtime_ns
+    result = evaluator.evaluate(workspace.root, context)
+    assert result.applicability == "needs_revalidation"
+    label = "settings.py"
+    if qualified_name is not None:
+        label += "::" + qualified_name
+    assert result.changed == (label,)
+    path.write_bytes(original)
+    os.utime(path, ns=(metadata.st_atime_ns, metadata.st_mtime_ns))
+    assert evaluator.evaluate(workspace.root, context).applicability == "current"
+
+
 def test_symbol_binding_distinguishes_sibling_and_bound_edit(workspace):
     require_parser()
     path = workspace.root / "sample.py"
