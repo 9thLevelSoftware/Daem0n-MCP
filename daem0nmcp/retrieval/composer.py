@@ -167,9 +167,11 @@ def query_identifiers(text: str) -> frozenset[str]:
         ):
             identifiers.add(token)
             if "." in token or "/" in token:
-                segment = re.split(r"[./]", token)[-1]
+                segment = token.rsplit("/", 1)[-1]
                 if segment:
                     identifiers.add(segment)
+                    if "." in segment:
+                        identifiers.add(segment.rsplit(".", 1)[-1])
     return frozenset(identifiers)
 
 

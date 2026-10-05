@@ -175,6 +175,13 @@ idempotency key. For authorized federation, `memory_recall` accepts
 `linked_workspace_ids`; returned evidence remains attributed to its source
 workspace.
 
+Intent-aware context packing is staged with
+`DAEM0NMCP_RETRIEVAL_RETENTION_MODE=shadow` by default. Set it to `apply` to
+reserve evidence capacity for `implement` and `debug` requests. A query naming
+`src/http/router.ts` retains the same filename affinity as `router.ts`; qualified
+symbols also retain their final name. Unrelated paths do not gain that priority.
+This affects context selection, not stored-record retention or authorization.
+
 ## Resources and diagnostics
 
 The four bounded data resources require an authorized workspace session:

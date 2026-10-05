@@ -42,24 +42,43 @@ def _sources():
 
 
 class RetentionComposerTests(unittest.TestCase):
-    def test_identifiers_extract_dotted_snake_case_paths_and_camel_case(self):
-        self.assertEqual(
-            frozenset(
-                {
-                    "pkg.handle_call",
-                    "handle_call",
-                    "src/cache.py",
-                    "py",
-                    "snake_case",
-                    "camelCase",
-                }
-            ),
-            query_identifiers(
-                "inspect pkg.handle_call src/cache.py snake_case camelCase plain Upper"
-            ),
+    def test_path_and_symbol_queries_preserve_bound_evidence_under_budget(self):
+        composer = EvidenceComposer(tokenizer=WordTokenizer())
+        background = tuple(
+            _source(digit, "background detail " * 150, score=1.0) for digit in "1234"
         )
-        self.assertEqual(frozenset(), query_identifiers("ordinary words Upper"))
-        self.assertEqual(frozenset({"src/"}), query_identifiers("src/"))
+        bound = replace(
+            _source(
+                "5", "Acquire a lease before replacing the routing snapshot.", score=0.1
+            ),
+            code_bindings=(("src/http/router.ts", "pkg.Router.apply_routes"),),
+        )
+        cases = (
+            ("src/http/router.ts", True),
+            ("router.ts", True),
+            ("pkg.Router.apply_routes", True),
+            ("apply_routes", True),
+            ("src/http/other.ts", False),
+            ("unrelated.Symbol", False),
+            ("src/", False),
+        )
+        for intent in ("implement", "debug"):
+            for identifier, expected in cases:
+                with self.subTest(intent=intent, identifier=identifier):
+                    result = composer.compose(
+                        background + (bound,),
+                        token_budget=256,
+                        retention=RetentionPolicy(
+                            intent, query_identifiers("Inspect " + identifier)
+                        ),
+                    )
+                    retained_ids = {
+                        item.evidence_refs[0].record_id for item in result.items
+                    }
+                    self.assertEqual(
+                        expected, bound.candidate.record_id in retained_ids
+                    )
+                    self.assertLessEqual(result.context.rendered_tokens, 256)
 
     def test_implement_retains_late_procedure_under_256_token_budget(self):
         composer = EvidenceComposer(tokenizer=WordTokenizer())
