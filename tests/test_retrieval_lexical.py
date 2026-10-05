@@ -377,6 +377,90 @@ class LexicalProjectionTests(unittest.IsolatedAsyncioTestCase):
             [candidate.evidence.record_id for candidate in result.candidates],
         )
 
+    async def test_content_and_rationale_matches_precede_tag_only_matches(self):
+        from daem0nmcp.retrieval.projections import LexicalProjectionBuilder
+        from daem0nmcp.retrieval.providers import LexicalProvider
+        from daem0nmcp.retrieval.types import RetrievalQuery
+
+        tag_only = self._append_record(
+            "a",
+            "Operational notes",
+            "Scheduled maintenance",
+            ["checkpoint journal recovery " * 8, "catalogue"],
+        )
+        body = self._append_record(
+            "b",
+            "Checkpoint journal recovery " + "Operational details " * 20,
+            "Restore durable state",
+            [],
+        )
+        rationale = self._append_record(
+            "c",
+            "Restore durable state",
+            "Checkpoint journal recovery " + "Operational details " * 20,
+            [],
+        )
+        LexicalProjectionBuilder(self.connection).rebuild(WORKSPACE_ID)
+        self.connection.commit()
+        provider = LexicalProvider(self.connection)
+        query = RetrievalQuery(
+            workspace_id=WORKSPACE_ID, text="checkpoint journal recovery"
+        )
+
+        result = await provider.search(query, 10)
+
+        self.assertEqual("ready", result.status)
+        self.assertEqual(
+            {body, rationale},
+            {candidate.evidence.record_id for candidate in result.candidates[:2]},
+        )
+        self.assertEqual(tag_only, result.candidates[2].evidence.record_id)
+        self.assertEqual(
+            sorted(
+                result.candidates[:2],
+                key=lambda item: (-item.raw_score, item.evidence.record_id),
+            ),
+            list(result.candidates[:2]),
+        )
+        bounded = await provider.search(query, 2)
+        self.assertEqual(result.candidates[:2], bounded.candidates)
+
+        tags = await provider.search(
+            RetrievalQuery(workspace_id=WORKSPACE_ID, text="catalogue"), 10
+        )
+        self.assertEqual("ready", tags.status)
+        self.assertEqual(
+            [tag_only],
+            [candidate.evidence.record_id for candidate in tags.candidates],
+        )
+
+    async def test_content_tier_requires_the_complete_winning_expression(self):
+        from daem0nmcp.retrieval.projections import LexicalProjectionBuilder
+        from daem0nmcp.retrieval.providers import LexicalProvider
+        from daem0nmcp.retrieval.types import RetrievalQuery
+
+        mixed = self._append_record("a", "Snapshot", "Maintenance", ["retention"])
+        split = self._append_record("b", "Snapshot", "Retention", [])
+        tied = self._append_record("c", "Snapshot", "Retention", [])
+        partial = self._append_record("d", "Snapshot", "Maintenance", [])
+        LexicalProjectionBuilder(self.connection).rebuild(WORKSPACE_ID)
+        self.connection.commit()
+
+        result = await LexicalProvider(self.connection).search(
+            RetrievalQuery(workspace_id=WORKSPACE_ID, text="snapshot retention"),
+            10,
+        )
+
+        self.assertEqual("ready", result.status)
+        self.assertEqual(
+            [split, tied, mixed],
+            [candidate.evidence.record_id for candidate in result.candidates],
+        )
+        self.assertNotIn(
+            partial,
+            [candidate.evidence.record_id for candidate in result.candidates],
+        )
+
     async def test_or_fallback_ignores_question_scaffolding(self):
         """Generic question words must not create lexical ranking noise."""
 

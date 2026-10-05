@@ -265,7 +265,11 @@ class LexicalProvider:
                                {expected_table}, {content_weight},
                                {rationale_weight}, {tags_weight}
                            ) AS score,
-                           snippet({expected_table}, 0, '', '', ' … ', 18)
+                           snippet({expected_table}, 0, '', '', ' … ', 18),
+                           "{expected_table}".rowid IN (
+                               SELECT rowid FROM "{expected_table}"
+                               WHERE "{expected_table}" MATCH ?
+                           ) AS content_match
                     FROM "{expected_table}"
                     JOIN (
                         SELECT document_rowid,record_id,content_hash,
@@ -276,10 +280,11 @@ class LexicalProvider:
                     ) AS document
                       ON document.document_rowid="{expected_table}".rowid
                     WHERE "{expected_table}" MATCH ?
-                    ORDER BY score ASC, document.record_id ASC
+                    ORDER BY content_match DESC, score ASC, document.record_id ASC
                     LIMIT ?
                     """,
                     (
+                        "{content rationale}: (" + fts_query + ")",
                         query.workspace_id,
                         generation,
                         fts_query,

@@ -175,6 +175,12 @@ idempotency key. For authorized federation, `memory_recall` accepts
 `linked_workspace_ids`; returned evidence remains attributed to its source
 workspace.
 
+Lexical recall first ranks records whose content or rationale satisfy the
+selected full-text expression, then tag-assisted matches. Ordinary BM25 and
+record-ID tie-breaking still order each group. Tags remain searchable, and the
+existing precision-first query ladder remains unchanged; no projection rebuild
+is required for this query-side ordering change.
+
 Intent-aware context packing is staged with
 `DAEM0NMCP_RETRIEVAL_RETENTION_MODE=shadow` by default. Set it to `apply` to
 reserve evidence capacity for `implement` and `debug` requests. A query naming
