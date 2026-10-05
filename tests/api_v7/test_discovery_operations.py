@@ -1233,6 +1233,81 @@ class DiscoveryOperationTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(retried.ok)
         self.assertEqual(2, len(retried.data.items))
 
+    async def test_missing_tables_with_contention_words_are_not_retryable(self) -> None:
+        with closing(sqlite3.connect(self.database)) as connection:
+            connection.execute("DROP TABLE schema_version")
+            connection.commit()
+
+        handler = self._handler("entity_list")
+        for table in ("busy_records", "locked_cache", "ordinary_missing"):
+            with (
+                self.subTest(table=table),
+                closing(sqlite3.connect(self.database)) as connection,
+            ):
+                connection.execute(
+                    f"CREATE VIEW schema_version AS SELECT version FROM {table}"
+                )
+                connection.commit()
+                try:
+                    with self.assertRaises(sqlite3.OperationalError) as raised:
+                        connection.execute("SELECT version FROM schema_version")
+                    self.assertIn(table, str(raised.exception))
+                    code = getattr(raised.exception, "sqlite_errorcode", None)
+                    if code is not None:
+                        self.assertEqual(1, code)
+
+                    response = await handler(workspace_id=self.workspace.workspace_id)
+                    self.assertFalse(response.ok)
+                    self.assertEqual("CAPABILITY_DEGRADED", response.error.code)
+                    self.assertFalse(response.error.retryable)
+                    self.assertIsNone(response.error.retry_after_ms)
+                    self.assertIsNone(response.error.remedy)
+                finally:
+                    connection.execute("DROP VIEW schema_version")
+                    connection.commit()
+
+    def test_sqlite_contention_message_fallback_is_canonical_only(self) -> None:
+        from daem0nmcp.api.v7.discovery_operations import _translate_error
+
+        for message in (
+            "database is locked",
+            "database is busy",
+            "database table is locked",
+            "database schema is locked",
+            "database table is locked: memory_records",
+            "database schema is locked: main",
+            "DATABASE IS LOCKED",
+        ):
+            with self.subTest(message=message):
+                error = sqlite3.OperationalError(message)
+                self.assertIsNone(getattr(error, "sqlite_errorcode", None))
+                self.assertEqual("DATABASE_IN_USE", _translate_error(error).code)
+
+        for message in (
+            "no such table: busy_records",
+            "no such table: locked_cache",
+            "database is locked unexpectedly",
+            "busy",
+            "locked",
+        ):
+            with self.subTest(message=message):
+                self.assertEqual(
+                    "CAPABILITY_DEGRADED",
+                    _translate_error(sqlite3.OperationalError(message)).code,
+                )
+
+    def test_contention_translation_preserves_typed_and_stable_errors(self) -> None:
+        from daem0nmcp.api.v7.discovery_operations import (
+            DiscoveryOperationError,
+            _translate_error,
+        )
+
+        error = DiscoveryOperationError("NOT_FOUND")
+        self.assertIs(error, _translate_error(error))
+        classified = sqlite3.OperationalError("database is locked")
+        classified.code = "CAPABILITY_DEGRADED"
+        self.assertEqual("CAPABILITY_DEGRADED", _translate_error(classified).code)
+
     async def test_nonbusy_sqlite_failure_is_not_retryable_through_router(self) -> None:
         self._activate_discovery()
         with closing(sqlite3.connect(self.database)) as connection:

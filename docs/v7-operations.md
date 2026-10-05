@@ -200,7 +200,9 @@ Query path tokens normalize Windows separators and repeated slashes. An explicit
 do not relax normalized POSIX path arguments or workspace containment.
 Explore requests retain baseline packing in every retention mode; shadow mode
 reuses that identical composition instead of packing the same evidence twice.
-Other intents still compute their distinct shadow variant.
+Enabled retention reports `RETENTION_NOT_APPLICABLE` for explore rather than
+implying an alternate packing was applied. Other intents still compute their
+distinct shadow variant.
 Structured outcomes and each procedure step use the same source-aware excerpt
 limit as body text, including the reduced limit for stale evidence. Step counts
 and short facts remain unchanged; longer facts are prefix excerpts, not complete
@@ -245,10 +247,12 @@ review the guidance before recording a successful outcome with `rebind_code`.
 
 Symbol capture fails with retryable `CAPABILITY_DEGRADED` when the parser is
 unavailable, fails, returns unusable entities, or source access is temporarily
-unavailable; failed captures write no memory or outcome events. Restore the
-capability or source access before obtaining fresh counsel and retrying with the
-same idempotency key. Missing symbols, unsupported symbol-file extensions, and
-sources above the 5 MiB raw-file limit remain `INVALID_ARGUMENT`.
+unavailable; failed captures write no memory or outcome events. Parser failure
+can include syntactically invalid source. Repair the source or restore the
+capability/access before obtaining fresh counsel and retrying with the same
+idempotency key; an immediate retry cannot fix unchanged malformed source.
+Missing symbols, unsupported symbol-file extensions, and sources above the
+5 MiB raw-file limit remain `INVALID_ARGUMENT`.
 Fully qualified symbol identities take precedence. A short name is accepted only
 when it identifies one canonical symbol; ambiguous names are `INVALID_ARGUMENT`,
 not a binding to every same-named definition. If an existing short binding

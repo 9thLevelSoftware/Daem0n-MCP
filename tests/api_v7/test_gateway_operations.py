@@ -9,12 +9,13 @@ from unittest.mock import AsyncMock, patch
 
 from fastmcp import Client
 
+from daem0nmcp.api.v7.fastmcp import _tool_adapter
 from daem0nmcp.api.v7.gateway_operations import (
     CORE_LISTED_TOOLS,
     GATEWAY_TOOL_NAMES,
     bind_gateway_handlers,
 )
-from daem0nmcp.api.v7.models import ErrorCode, FieldError
+from daem0nmcp.api.v7.models import ApiResponse, ErrorCode, FieldError
 from daem0nmcp.api.v7.policy import V7_TOOL_LEVELS
 from daem0nmcp.api.v7.production import build_production_surface, create_v7_server
 from daem0nmcp.api.v7.responses import ResponseFactory
@@ -308,7 +309,7 @@ class GatewayOperationsTests(unittest.IsolatedAsyncioTestCase):
             response_factory=ResponseFactory(),
         )
         for exception, expected in (
-            (TypeError("private argument detail"), ErrorCode.INVALID_ARGUMENT),
+            (TypeError("private argument detail"), ErrorCode.INTERNAL_ERROR),
             (RuntimeError("private runtime detail"), ErrorCode.INTERNAL_ERROR),
             (ValueError("private runtime detail"), ErrorCode.INTERNAL_ERROR),
         ):
@@ -325,17 +326,148 @@ class GatewayOperationsTests(unittest.IsolatedAsyncioTestCase):
                 self.assertFalse(result.error.retryable)
                 self.assertIsNone(result.error.remedy)
                 self.assertEqual(result.meta.request_id, result.error.correlation_id)
-                if expected == ErrorCode.INVALID_ARGUMENT:
-                    self.assertEqual(
-                        [
-                            FieldError(
-                                field="arguments",
-                                code="INVALID_VALUE",
-                                message="Invalid value.",
-                            )
-                        ],
-                        result.error.field_errors,
-                    )
-                else:
-                    self.assertEqual([], result.error.field_errors)
+                self.assertEqual([], result.error.field_errors)
                 self.assertNotIn("private", result.model_dump_json())
+
+    async def test_binder_returns_internal_envelopes_for_malformed_output(self) -> None:
+        valid = (
+            ResponseFactory()
+            .begin(self.workspace.workspace_id)
+            .success({"items": []})
+            .model_dump(mode="json")
+        )
+        failure = (
+            ResponseFactory()
+            .begin(self.workspace.workspace_id)
+            .failure(ErrorCode.INVALID_ARGUMENT, "Invalid value.")
+            .model_dump(mode="json")
+        )
+        cases = {
+            "missing_meta": {
+                key: value for key, value in valid.items() if key != "meta"
+            },
+            "invalid_meta": {**valid, "meta": {"request_id": "private-output-detail"}},
+            "missing_data": {
+                key: value for key, value in valid.items() if key != "data"
+            },
+            "null_data": {**valid, "data": None},
+            "invalid_data": {**valid, "data": ["private-output-detail"]},
+            "invalid_json_data": {
+                **valid,
+                "data": {"private-output-detail": float("nan")},
+            },
+            "missing_ok": {key: value for key, value in valid.items() if key != "ok"},
+            "invalid_ok": {**valid, "ok": "true"},
+            "missing_error": {
+                key: value for key, value in failure.items() if key != "error"
+            },
+            "invalid_error": {**failure, "error": {"code": "private-output-detail"}},
+            "conflicting_branches": {**valid, "error": failure["error"]},
+        }
+        for name, malformed in cases.items():
+            with self.subTest(case=name):
+
+                async def adapter(_malformed=malformed, **arguments):
+                    return _malformed
+
+                handlers = bind_gateway_handlers(
+                    manifest=self.surface.manifest,
+                    adapters={"memory_search_text": adapter},
+                    listed_tools=CORE_LISTED_TOOLS,
+                    response_factory=ResponseFactory(),
+                )
+                with patch("daem0nmcp.api.v7.responses._LOGGER"):
+                    result = await handlers["daem0n_tool_call"](
+                        **self.scope,
+                        tool="memory_search_text",
+                        arguments={"query": "x"},
+                    )
+                envelope = ApiResponse.model_validate_json(result.model_dump_json())
+                self.assertFalse(envelope.ok)
+                self.assertEqual(ErrorCode.INTERNAL_ERROR, envelope.error.code)
+                self.assertEqual([], envelope.error.field_errors)
+                self.assertIsNone(envelope.error.remedy)
+                self.assertFalse(envelope.error.retryable)
+                self.assertEqual(
+                    envelope.meta.request_id, envelope.error.correlation_id
+                )
+                self.assertNotIn("private-output-detail", result.model_dump_json())
+
+    async def test_real_target_adapter_output_validation_is_internal(self) -> None:
+        async def malformed_handler(**arguments):
+            return {"ok": True, "data": {"private-output-detail": None}}
+
+        spec = next(
+            spec
+            for spec in self.surface.manifest.tools
+            if spec.name == "memory_search_text"
+        ).replace(handler=malformed_handler)
+        adapter = _tool_adapter(spec, tasks_enabled=False, sync_timeout_seconds=5.0)
+        handlers = bind_gateway_handlers(
+            manifest=self.surface.manifest,
+            adapters={"memory_search_text": adapter},
+            listed_tools=CORE_LISTED_TOOLS,
+            response_factory=ResponseFactory(),
+        )
+        with patch("daem0nmcp.api.v7.responses._LOGGER"):
+            result = await handlers["daem0n_tool_call"](
+                **self.scope,
+                tool="memory_search_text",
+                arguments={"query": "x"},
+            )
+        self.assertFalse(result.ok)
+        self.assertEqual(ErrorCode.INTERNAL_ERROR, result.error.code)
+        self.assertEqual([], result.error.field_errors)
+        self.assertNotIn("private-output-detail", result.model_dump_json())
+
+        async def failing_service(**arguments):
+            spec.output_model.model_validate(
+                {"ok": True, "data": {"private-output-detail": None}}
+            )
+
+        handlers = bind_gateway_handlers(
+            manifest=self.surface.manifest,
+            adapters={
+                "memory_search_text": _tool_adapter(
+                    spec.replace(handler=failing_service),
+                    tasks_enabled=False,
+                    sync_timeout_seconds=5.0,
+                )
+            },
+            listed_tools=CORE_LISTED_TOOLS,
+            response_factory=ResponseFactory(),
+        )
+        with patch("daem0nmcp.api.v7.responses._LOGGER"):
+            service_result = await handlers["daem0n_tool_call"](
+                **self.scope,
+                tool="memory_search_text",
+                arguments={"query": "x"},
+            )
+        self.assertFalse(service_result.ok)
+        self.assertEqual(ErrorCode.INTERNAL_ERROR, service_result.error.code)
+        self.assertEqual([], service_result.error.field_errors)
+        self.assertNotIn("private-output-detail", service_result.model_dump_json())
+
+    async def test_invalid_arguments_never_invoke_target_adapter(self) -> None:
+        async def handler(**arguments):
+            self.fail("Invalid caller arguments reached the target handler.")
+
+        spec = next(
+            spec
+            for spec in self.surface.manifest.tools
+            if spec.name == "memory_search_text"
+        ).replace(handler=handler)
+        adapter = _tool_adapter(spec, tasks_enabled=False, sync_timeout_seconds=5.0)
+
+        handlers = bind_gateway_handlers(
+            manifest=self.surface.manifest,
+            adapters={"memory_search_text": adapter},
+            listed_tools=CORE_LISTED_TOOLS,
+            response_factory=ResponseFactory(),
+        )
+        result = await handlers["daem0n_tool_call"](
+            **self.scope, tool="memory_search_text", arguments={}
+        )
+        self.assertFalse(result.ok)
+        self.assertEqual(ErrorCode.INVALID_ARGUMENT, result.error.code)
+        self.assertEqual("arguments.query", result.error.field_errors[0].field)

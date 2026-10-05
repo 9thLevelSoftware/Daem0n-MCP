@@ -25,6 +25,10 @@ CORE_LISTED_TOOLS = PINNED_TOOL_NAMES | {"edit_preflight"} | GATEWAY_TOOL_NAMES
 _DIAGNOSTIC_FIELD = re.compile(r"[A-Za-z_][A-Za-z0-9_.\[\]-]*")
 
 
+class _ToolArgumentValidationError(ValidationError):
+    """Identify validation failures at the target adapter's input boundary."""
+
+
 def _argument_field(location: tuple[object, ...]) -> str:
     field = "arguments"
     for part in location:
@@ -127,25 +131,15 @@ def bind_gateway_handlers(
             target["workspace_id"] = workspace_id
         try:
             result = await adapters[tool](**target)
-        except (ValidationError, TypeError) as exc:
-            field_errors = (
-                [
-                    FieldError(
-                        field=_argument_field(error["loc"]),
-                        code="INVALID_VALUE",
-                        message="Invalid value.",
-                    )
-                    for error in exc.errors()[:50]
-                ]
-                if isinstance(exc, ValidationError)
-                else [
-                    FieldError(
-                        field="arguments",
-                        code="INVALID_VALUE",
-                        message="Invalid value.",
-                    )
-                ]
-            )
+        except _ToolArgumentValidationError as exc:
+            field_errors = [
+                FieldError(
+                    field=_argument_field(error["loc"]),
+                    code="INVALID_VALUE",
+                    message="Invalid value.",
+                )
+                for error in exc.errors()[:50]
+            ]
             return response.failure(
                 ErrorCode.INVALID_ARGUMENT,
                 "Arguments do not match the tool's input schema; "
@@ -155,39 +149,50 @@ def bind_gateway_handlers(
         except Exception as exc:
             return response.internal_error(exc)
 
-        meta = ResponseMeta.model_validate(result["meta"])
-        response = response.with_covenant(meta.covenant)
-        if result["ok"]:
-            return response.success(
-                ToolCallData(tool=tool, data=result["data"]),
+        try:
+            ok = result["ok"]
+            if not isinstance(ok, bool):
+                raise ValueError("adapter response ok must be boolean")
+            if ok:
+                if result.get("data") is None or result.get("error") is not None:
+                    raise ValueError("adapter response must contain only data")
+            elif result.get("data") is not None or result.get("error") is None:
+                raise ValueError("adapter response must contain only error")
+            meta = ResponseMeta.model_validate(result["meta"])
+            response = response.with_covenant(meta.covenant)
+            if ok:
+                return response.success(
+                    ToolCallData(tool=tool, data=result["data"]),
+                    warnings=meta.warnings,
+                    capability_states=meta.capability_states,
+                )
+            error = ApiError.model_validate(result["error"])
+            remedy = error.remedy
+            if (
+                remedy is not None
+                and listed_tools is not None
+                and remedy.tool not in listed_tools
+            ):
+                remedy = ErrorRemedy(
+                    tool="daem0n_tool_call",
+                    arguments={
+                        "workspace_id": workspace_id,
+                        "tool": remedy.tool,
+                        "arguments": {
+                            key: value
+                            for key, value in remedy.arguments.items()
+                            if key != "workspace_id"
+                        },
+                    },
+                )
+            return response.relay_failure(
+                error,
+                remedy=remedy,
                 warnings=meta.warnings,
                 capability_states=meta.capability_states,
             )
-        error = ApiError.model_validate(result["error"])
-        remedy = error.remedy
-        if (
-            remedy is not None
-            and listed_tools is not None
-            and remedy.tool not in listed_tools
-        ):
-            remedy = ErrorRemedy(
-                tool="daem0n_tool_call",
-                arguments={
-                    "workspace_id": workspace_id,
-                    "tool": remedy.tool,
-                    "arguments": {
-                        key: value
-                        for key, value in remedy.arguments.items()
-                        if key != "workspace_id"
-                    },
-                },
-            )
-        return response.relay_failure(
-            error,
-            remedy=remedy,
-            warnings=meta.warnings,
-            capability_states=meta.capability_states,
-        )
+        except Exception as exc:
+            return response.internal_error(exc)
 
     return {
         "daem0n_tools_search": tools_search,

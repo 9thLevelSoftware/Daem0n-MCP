@@ -386,6 +386,8 @@ class RetrievalService:
                         reason=(
                             "RETENTION_FAILED"
                             if retention_failed
+                            else "RETENTION_NOT_APPLICABLE"
+                            if retention.intent == "explore"
                             else "RETENTION_APPLIED"
                             if self._retention_mode == "apply"
                             else "RETENTION_SHADOW"

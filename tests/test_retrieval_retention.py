@@ -471,6 +471,48 @@ class RetentionServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("RETENTION_APPLIED", applied.providers[-1].reason)
         self.assertEqual(len(applied.items), shadow.providers[-1].returned_count)
 
+    async def test_intent_diagnostics_preserve_explore_baseline(self):
+        query = RetrievalQuery(
+            workspace_id=WORKSPACE_ID,
+            text="deploy release rollout",
+            limit=5,
+            token_budget=256,
+        )
+        baseline = await self._service("off").retrieve(query)
+        self.assertFalse(baseline.abstained)
+        self.assertTrue(baseline.items)
+        for intent in ("explore", "implement", "debug"):
+            intent_query = replace(query, intent=intent)
+            off = await self._service("off").retrieve(intent_query)
+            self.assertEqual(baseline.items, off.items)
+            self.assertEqual(baseline.context, off.context)
+            self.assertFalse(
+                any(item.provider == "retention" for item in off.providers)
+            )
+            for mode in ("shadow", "apply"):
+                with self.subTest(intent=intent, mode=mode):
+                    result = await self._service(mode).retrieve(intent_query)
+                    self.assertFalse(result.abstained)
+                    diagnostic = result.providers[-1]
+                    self.assertEqual("retention", diagnostic.provider)
+                    self.assertEqual("ready", diagnostic.status)
+                    self.assertIsNone(diagnostic.manifest_generation)
+                    self.assertGreaterEqual(diagnostic.elapsed_ms, 0)
+                    self.assertEqual(
+                        "RETENTION_NOT_APPLICABLE"
+                        if intent == "explore"
+                        else "RETENTION_APPLIED"
+                        if mode == "apply"
+                        else "RETENTION_SHADOW",
+                        diagnostic.reason,
+                    )
+                    if intent == "explore" or mode == "shadow":
+                        self.assertEqual(baseline.items, result.items)
+                        self.assertEqual(baseline.context, result.context)
+                    if intent == "explore" or mode == "apply":
+                        self.assertEqual(len(result.items), diagnostic.returned_count)
+                    self.assertLessEqual(result.context.rendered_tokens, 256)
+
     async def test_none_does_not_compute_or_change_context(self):
         query = RetrievalQuery(
             workspace_id=WORKSPACE_ID, text="deploy", limit=5, token_budget=256
@@ -642,14 +684,50 @@ class FederatedRetentionTests(unittest.TestCase):
             retention_mode="apply",
         )
         self.assertEqual("5", single.items[0].record.record_id[-1])
-        for intent in (None, "explore"):
-            unchanged = compose_federated_results(
-                results,
-                replace(query, intent=intent),
-                retention_mode="apply",
+        for intent in (None, "explore", "implement", "debug"):
+            intent_query = replace(query, intent=intent)
+            off = compose_federated_results(results, intent_query)
+            self.assertEqual(baseline.items, off.items)
+            self.assertEqual(baseline.rendered_context, off.rendered_context)
+            self.assertEqual(baseline.token_usage, off.token_usage)
+            self.assertFalse(
+                any(item.provider == "retention" for item in off.provider_diagnostics)
             )
-            self.assertEqual(baseline.items, unchanged.items)
-            self.assertEqual(baseline.rendered_context, unchanged.rendered_context)
+            for mode in ("shadow", "apply"):
+                with self.subTest(intent=intent, mode=mode):
+                    result = compose_federated_results(
+                        results, intent_query, retention_mode=mode
+                    )
+                    if intent in (None, "explore") or mode == "shadow":
+                        self.assertEqual(baseline.items, result.items)
+                        self.assertEqual(
+                            baseline.rendered_context, result.rendered_context
+                        )
+                        self.assertEqual(baseline.token_usage, result.token_usage)
+                    self.assertLessEqual(result.token_usage.rendered, 256)
+                    if intent is None:
+                        self.assertFalse(
+                            any(
+                                item.provider == "retention"
+                                for item in result.provider_diagnostics
+                            )
+                        )
+                        continue
+                    diagnostic = result.provider_diagnostics[-1]
+                    self.assertEqual("retention", diagnostic.provider)
+                    self.assertEqual("ready", diagnostic.status)
+                    self.assertIsNone(diagnostic.manifest_generation)
+                    self.assertGreaterEqual(diagnostic.elapsed_ms, 0)
+                    self.assertEqual(
+                        "RETENTION_NOT_APPLICABLE"
+                        if intent == "explore"
+                        else "RETENTION_APPLIED"
+                        if mode == "apply"
+                        else "RETENTION_SHADOW",
+                        diagnostic.reason,
+                    )
+                    if intent == "explore" or mode == "apply":
+                        self.assertEqual(len(result.items), diagnostic.returned_count)
         slices = sliced_queries(query, WORKSPACE_ID, ["ws_" + "b" * 24])
         self.assertTrue(all(item.intent == "implement" for item in slices.values()))
 

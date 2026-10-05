@@ -892,6 +892,54 @@ def _verify_manifests(connection: sqlite3.Connection) -> tuple[int, int, int]:
     return total, stale, sum(int(value[1]) for value in latest_local.values())
 
 
+def _replay_authority(
+    source: sqlite3.Connection, replay: sqlite3.Connection
+) -> dict[str, Any]:
+    checks: dict[str, dict[str, Any]] = {}
+    authority = {"memory_events": 0, "governance_events": 0, "federation_events": 0}
+    roots: dict[str, tuple[int, str]] = {}
+    authority_roots: dict[str, tuple[int, str]] = {}
+    try:
+        authority["memory_events"], roots = _memory_replay(source, replay)
+        checks["memory_events"] = _check(True, count=authority["memory_events"])
+    except Exception as exc:
+        checks["memory_events"] = _check(False, error=type(exc).__name__)
+    try:
+        authority["governance_events"] = _governance_replay(source, replay)
+        checks["governance_events"] = _check(True, count=authority["governance_events"])
+    except Exception as exc:
+        checks["governance_events"] = _check(False, error=type(exc).__name__)
+    try:
+        authority["federation_events"] = _verify_federation(source)
+        checks["federation_events"] = _check(True, count=authority["federation_events"])
+    except Exception as exc:
+        checks["federation_events"] = _check(False, error=type(exc).__name__)
+    try:
+        authority_roots = {
+            "memory_events": _ledger_root(source, "memory_events"),
+            "governance_events": _ledger_root(source, "governance_events"),
+            "federation_events": _ledger_root(source, "workspace_link_events"),
+        }
+    except (TypeError, ValueError):
+        authority_roots = {}
+    try:
+        count = _verify_sequence(source)
+        checks["session_update_sequence"] = _check(True, count=count)
+    except Exception as exc:
+        checks["session_update_sequence"] = _check(False, error=type(exc).__name__)
+    try:
+        count = _verify_mappings(source, replay)
+        checks["migration_mappings"] = _check(True, count=count)
+    except Exception as exc:
+        checks["migration_mappings"] = _check(False, error=type(exc).__name__)
+    return {
+        "checks": checks,
+        "authority": authority,
+        "roots": roots,
+        "authority_roots": authority_roots,
+    }
+
+
 def _verify_database(
     path: Path, workspace_id: str, replay_path: Path
 ) -> dict[str, Any]:
@@ -934,43 +982,11 @@ def _verify_database(
             foreign_key_violations=len(foreign),
         )
         replay = _initialize_replay(replay_path, workspace_id)
-        try:
-            authority["memory_events"], roots = _memory_replay(source, replay)
-            checks["memory_events"] = _check(True, count=authority["memory_events"])
-        except Exception as exc:
-            checks["memory_events"] = _check(False, error=type(exc).__name__)
-        try:
-            authority["governance_events"] = _governance_replay(source, replay)
-            checks["governance_events"] = _check(
-                True, count=authority["governance_events"]
-            )
-        except Exception as exc:
-            checks["governance_events"] = _check(False, error=type(exc).__name__)
-        try:
-            authority["federation_events"] = _verify_federation(source)
-            checks["federation_events"] = _check(
-                True, count=authority["federation_events"]
-            )
-        except Exception as exc:
-            checks["federation_events"] = _check(False, error=type(exc).__name__)
-        try:
-            authority_roots = {
-                "memory_events": _ledger_root(source, "memory_events"),
-                "governance_events": _ledger_root(source, "governance_events"),
-                "federation_events": _ledger_root(source, "workspace_link_events"),
-            }
-        except (TypeError, ValueError):
-            authority_roots = {}
-        try:
-            count = _verify_sequence(source)
-            checks["session_update_sequence"] = _check(True, count=count)
-        except Exception as exc:
-            checks["session_update_sequence"] = _check(False, error=type(exc).__name__)
-        try:
-            count = _verify_mappings(source, replay)
-            checks["migration_mappings"] = _check(True, count=count)
-        except Exception as exc:
-            checks["migration_mappings"] = _check(False, error=type(exc).__name__)
+        replayed = _replay_authority(source, replay)
+        checks.update(replayed["checks"])
+        authority = replayed["authority"]
+        roots = replayed["roots"]
+        authority_roots = replayed["authority_roots"]
         try:
             manifest_count, stale, local_stale = _verify_manifests(source)
             checks["projection_manifests"] = _check(

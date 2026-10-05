@@ -865,6 +865,9 @@ class EventStore:
         payload: dict[str, Any],
         event_id: str,
     ) -> None:
+        record = payload.get("record")
+        if not isinstance(record, dict):
+            raise ValueError("memory event requires a supported record object")
         informed_by: list[str] = []
         if "provenance" in payload:
             provenance = payload["provenance"]
@@ -934,7 +937,7 @@ class EventStore:
                     command.recorded_at_us,
                 ),
             )
-        worked = payload["record"].get("worked")
+        worked = record.get("worked")
         if command.event_type == "memory.outcome_recorded" and isinstance(worked, bool):
             from .retrieval.utility import verification_weight
 

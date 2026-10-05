@@ -9,14 +9,19 @@ import operator
 from collections.abc import Mapping
 from importlib import metadata
 from types import MethodType
-from typing import Annotated, Any
+from typing import Annotated, Any, cast
 
-from pydantic import Field, TypeAdapter
+from pydantic import Field, TypeAdapter, ValidationError
+from pydantic_core import InitErrorDetails
 
 from ... import __version__
 from ...covenant import invocation_scope_var
 from .errors import ErrorCode
-from .gateway_operations import GATEWAY_TOOL_NAMES, bind_gateway_handlers
+from .gateway_operations import (
+    GATEWAY_TOOL_NAMES,
+    _ToolArgumentValidationError,
+    bind_gateway_handlers,
+)
 from .middleware import ListedToolsMiddleware, V7InvocationMiddleware
 from .registry import ToolSpec, V7Manifest
 from .responses import ResponseFactory
@@ -170,7 +175,14 @@ def _tool_adapter(
     foreground_policy: ForegroundExecutionPolicy | None = None,
 ):
     async def invoke(**arguments: Any) -> dict[str, Any]:
-        request = spec.input_model.model_validate(arguments)
+        try:
+            request = spec.input_model.model_validate(arguments)
+        except ValidationError as exc:
+            raise _ToolArgumentValidationError.from_exception_data(
+                exc.title,
+                cast(list[InitErrorDetails], exc.errors(include_url=False)),
+                hide_input=True,
+            ) from exc
 
         effective_arguments = request.model_dump(mode="json")
 

@@ -7,6 +7,7 @@ import json
 import sqlite3
 import subprocess
 import sys
+from contextlib import closing
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
@@ -111,6 +112,86 @@ def _fixture(
         storage, ActiveDatabasePointer(7, 1, "daem0nmcp.db", None, None)
     )
     return storage, database, registry
+
+
+def _orphaned_learning_fixture(root: Path, *, deleted: bool = False):
+    storage, database, registry = _fixture(root, maximum_version=33, with_event=False)
+    expected = {}
+    orphan_ids = []
+    with closing(sqlite3.connect(database)) as connection:
+        connection.execute("PRAGMA foreign_keys=ON")
+        store = EventStore(connection)
+        for index, workspace_id in enumerate(
+            (registry.default.workspace_id, "ws_" + "b" * 24), start=1
+        ):
+            record_id = "mem_" + str(index) * 64
+            source_id = "mem_" + str(index + 2) * 64
+            orphan_ids.append((record_id,))
+            store.append_and_project(
+                EventCommand(
+                    workspace_id=workspace_id,
+                    stream_id=source_id,
+                    stream_kind="memory",
+                    event_type="memory.created",
+                    occurred_at_us=10 + index,
+                    recorded_at_us=10 + index,
+                    actor_type="user",
+                    payload={"record": _state("preserved source")},
+                )
+            )
+            final = _state("latest canonical state")
+            final.update(worked=False, outcome="latest state differs from outcome")
+            events = [
+                ("memory.created", _state("original state"), 20 + index),
+                (
+                    "memory.outcome_recorded",
+                    {**_state("outcome state"), "worked": True, "outcome": "worked"},
+                    40 + index,
+                ),
+                ("memory.updated", final, 30 + index),
+            ]
+            if deleted and index == 1:
+                events.append(
+                    (
+                        "memory.deleted",
+                        {**final, "deleted_at_us": 50 + index},
+                        50 + index,
+                    )
+                )
+            for version, (event_type, record, timestamp) in enumerate(events, start=1):
+                payload = {"record": record}
+                if event_type in {"memory.created", "memory.outcome_recorded"}:
+                    payload["provenance"] = {"informed_by": [source_id]}
+                store.append_and_project(
+                    EventCommand(
+                        workspace_id=workspace_id,
+                        stream_id=record_id,
+                        stream_kind="memory",
+                        event_type=event_type,
+                        occurred_at_us=timestamp,
+                        recorded_at_us=timestamp,
+                        actor_type="user",
+                        expected_stream_version=version,
+                        payload=payload,
+                    )
+                )
+            connection.commit()
+        for table in (
+            "memory_records",
+            "memory_provenance_edges",
+            "memory_outcome_signals",
+        ):
+            expected[table] = connection.execute(
+                f"SELECT * FROM {table} ORDER BY 1,2,3"
+            ).fetchall()
+        connection.execute("DROP TABLE memory_provenance_edges")
+        connection.execute("DROP TABLE memory_outcome_signals")
+        connection.execute("DELETE FROM schema_version WHERE version=33")
+        connection.executemany(
+            "DELETE FROM memory_records WHERE record_id=?", orphan_ids
+        )
+        connection.commit()
+    return storage, database, registry, expected
 
 
 def _authority_rows(path: Path) -> dict[str, list[tuple[object, ...]]]:
@@ -415,6 +496,268 @@ def test_upgrade_backfills_native_outcomes_without_inventing_legacy_evidence(
         assert replay.execute(
             "SELECT COUNT(*) FROM memory_provenance_edges"
         ).fetchone() == (0,)
+
+
+@pytest.mark.parametrize("payload", [{}, {"record": None}, {"record": []}])
+def test_upgrade_rejects_invalid_memory_record_without_publishing_schema(
+    tmp_path: Path, payload: dict[str, object]
+):
+    from daem0nmcp.event_store import canonical_json_bytes, sha256_json
+
+    storage, source, registry = _fixture(tmp_path, maximum_version=32)
+    workspace_id = registry.default.workspace_id
+    with closing(sqlite3.connect(source)) as connection:
+        previous_hash = connection.execute(
+            "SELECT event_hash FROM memory_events WHERE stream_id=?", (MEMORY_ID,)
+        ).fetchone()[0]
+    envelope = {
+        "workspace_id": workspace_id,
+        "stream_id": MEMORY_ID,
+        "stream_kind": "memory",
+        "stream_version": 2,
+        "event_type": "memory.created",
+        "event_schema_version": 1,
+        "occurred_at_us": 12,
+        "recorded_at_us": 12,
+        "actor_type": "user",
+        "actor_id": None,
+        "causation_event_id": None,
+        "correlation_id": None,
+        "payload_hash": sha256_json(payload),
+        "previous_event_hash": previous_hash,
+    }
+    event_hash = sha256_json(envelope)
+    columns = (
+        "event_id",
+        *envelope,
+        "payload_json",
+        "event_hash",
+    )
+    values = (
+        "evt_" + event_hash,
+        *envelope.values(),
+        canonical_json_bytes(payload).decode("utf-8"),
+        event_hash,
+    )
+    with closing(sqlite3.connect(source)) as connection:
+        connection.execute(
+            f"INSERT INTO memory_events ({','.join(columns)}) "
+            f"VALUES ({','.join('?' for _ in columns)})",
+            values,
+        )
+        connection.commit()
+    source_bytes = source.read_bytes()
+    pointer_bytes = (storage / "active-db.json").read_bytes()
+
+    with pytest.raises(MigrationV7Error) as raised:
+        MigrationV7Service(registry).apply(tmp_path)
+
+    assert raised.value.code == "SCHEMA_UPGRADE_FAILED"
+    assert isinstance(raised.value.__cause__, ValueError)
+    assert source.read_bytes() == source_bytes
+    assert (storage / "active-db.json").read_bytes() == pointer_bytes
+    candidate = next((storage / "migrations").rglob("candidate.db.partial"))
+    assert max(_schema_versions(candidate)) == 32
+    with closing(sqlite3.connect(candidate)) as connection:
+        assert (
+            connection.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' "
+                "AND name IN ('memory_provenance_edges','memory_outcome_signals')"
+            ).fetchall()
+            == []
+        )
+
+
+@pytest.mark.parametrize("deleted", [False, True])
+def test_upgrade_restores_missing_learning_parents_from_complete_replay(
+    tmp_path: Path, deleted: bool
+):
+    from daem0nmcp.verification_v7 import verify_v7
+
+    storage, source, registry, expected = _orphaned_learning_fixture(
+        tmp_path, deleted=deleted
+    )
+    source_bytes = source.read_bytes()
+    authority = _authority_rows(source)
+
+    MigrationV7Service(registry).apply(tmp_path)
+
+    active = resolve_active_database(storage)
+    assert active.generation == 2
+    assert source.read_bytes() == source_bytes
+    assert _authority_rows(active.path) == authority
+    with closing(sqlite3.connect(active.path)) as connection:
+        for table, rows in expected.items():
+            assert (
+                connection.execute(f"SELECT * FROM {table} ORDER BY 1,2,3").fetchall()
+                == rows
+            )
+        assert connection.execute("PRAGMA foreign_key_check").fetchone() is None
+    report = verify_v7(storage, registry.default.workspace_id)
+    assert report["status"] == "verified"
+    assert report["checks"]["canonical_replay"]["ok"]
+
+
+@pytest.mark.parametrize(
+    "corruption",
+    ["memory_hash", "memory_gap", "workspace", "sequence", "governance", "federation"],
+)
+def test_learning_parent_recovery_requires_complete_valid_authority(
+    tmp_path: Path, corruption: str
+):
+    from daem0nmcp.event_store import GovernanceEventCommand, GovernanceEventStore
+
+    storage, source, registry, _expected = _orphaned_learning_fixture(tmp_path)
+    workspace_id = registry.default.workspace_id
+    with closing(sqlite3.connect(source)) as connection:
+        if corruption == "federation":
+            connection.execute(
+                "INSERT INTO workspace_link_events VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    "evt_" + "f" * 64,
+                    workspace_id,
+                    "ws_" + "c" * 24,
+                    1,
+                    "workspace.linked",
+                    "related",
+                    "invalid hash",
+                    8,
+                    8,
+                    None,
+                    "f" * 64,
+                ),
+            )
+        else:
+            if corruption == "governance":
+                rule_id = "rule_" + "a" * 64
+                GovernanceEventStore(connection).append_and_project(
+                    GovernanceEventCommand(
+                        workspace_id=workspace_id,
+                        stream_id=rule_id,
+                        stream_kind="rule",
+                        event_type="rule.created",
+                        occurred_at_us=9,
+                        recorded_at_us=9,
+                        actor_type="user",
+                        payload={
+                            "rule_id": rule_id,
+                            "trigger": "parent recovery",
+                            "must_do": [],
+                            "must_not": [],
+                            "ask_first": [],
+                            "warnings": [],
+                            "priority": 0,
+                            "enabled": True,
+                            "created_at_us": 9,
+                            "updated_at_us": 9,
+                        },
+                    )
+                )
+                trigger = "governance_events_no_update"
+                sql = "UPDATE governance_events SET payload_json='{}'"
+                parameters = ()
+            elif corruption == "sequence":
+                trigger = "session_update_sequence_no_delete"
+                sql = (
+                    "DELETE FROM session_update_sequence WHERE event_id IN "
+                    "(SELECT event_id FROM memory_events WHERE stream_id=?)"
+                )
+                parameters = (MEMORY_ID,)
+            elif corruption == "memory_gap":
+                trigger = "memory_events_no_delete"
+                sql = "DELETE FROM memory_events WHERE stream_id=? AND stream_version=1"
+                parameters = (MEMORY_ID,)
+            else:
+                trigger = "memory_events_no_update"
+                assignment = (
+                    "payload_json='{}'"
+                    if corruption == "memory_hash"
+                    else "workspace_id='ws_" + "c" * 24 + "'"
+                )
+                sql = (
+                    f"UPDATE memory_events SET {assignment} "
+                    "WHERE stream_id=? AND stream_version=1"
+                )
+                parameters = (MEMORY_ID,)
+            trigger_sql = connection.execute(
+                "SELECT sql FROM sqlite_master WHERE type='trigger' AND name=?",
+                (trigger,),
+            ).fetchone()[0]
+            connection.execute(f'DROP TRIGGER "{trigger}"')
+            connection.execute(sql, parameters)
+            connection.execute(trigger_sql)
+        connection.commit()
+    source_bytes = source.read_bytes()
+    pointer_bytes = (storage / "active-db.json").read_bytes()
+
+    with pytest.raises(MigrationV7Error) as raised:
+        MigrationV7Service(registry).apply(tmp_path)
+
+    assert raised.value.code == "SCHEMA_UPGRADE_AUTHORITY_INVALID"
+    assert source.read_bytes() == source_bytes
+    assert (storage / "active-db.json").read_bytes() == pointer_bytes
+    candidate = next((storage / "migrations").rglob("candidate.db.partial"))
+    assert max(_schema_versions(candidate)) == 32
+    with closing(sqlite3.connect(candidate)) as connection:
+        assert (
+            connection.execute(
+                "SELECT record_id FROM memory_records WHERE record_id=?", (MEMORY_ID,)
+            ).fetchone()
+            is None
+        )
+        assert (
+            connection.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' "
+                "AND name IN ('memory_provenance_edges','memory_outcome_signals')"
+            ).fetchall()
+            == []
+        )
+
+
+def test_learning_parent_recovery_interruption_rolls_back_and_retries(tmp_path: Path):
+    storage, source, registry, expected = _orphaned_learning_fixture(
+        tmp_path, deleted=True
+    )
+    source_bytes = source.read_bytes()
+    pointer_bytes = (storage / "active-db.json").read_bytes()
+
+    def interrupt(stage, _details):
+        if stage == "schema_upgrade_after_learning_parent_restore":
+            raise MigrationInterrupted(stage)
+
+    with pytest.raises(MigrationInterrupted):
+        MigrationV7Service(registry, fault_injector=interrupt).apply(tmp_path)
+
+    assert source.read_bytes() == source_bytes
+    assert (storage / "active-db.json").read_bytes() == pointer_bytes
+    candidate = next((storage / "migrations").rglob("candidate.db.partial"))
+    assert max(_schema_versions(candidate)) == 32
+    with closing(sqlite3.connect(candidate)) as connection:
+        assert (
+            connection.execute(
+                "SELECT record_id FROM memory_records WHERE record_id=?", (MEMORY_ID,)
+            ).fetchone()
+            is None
+        )
+        assert (
+            connection.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' "
+                "AND name IN ('memory_provenance_edges','memory_outcome_signals')"
+            ).fetchall()
+            == []
+        )
+
+    MigrationV7Service(registry).apply(tmp_path)
+
+    assert source.read_bytes() == source_bytes
+    active = resolve_active_database(storage)
+    assert active.generation == 2
+    with closing(sqlite3.connect(active.path)) as connection:
+        for table, rows in expected.items():
+            assert (
+                connection.execute(f"SELECT * FROM {table} ORDER BY 1,2,3").fetchall()
+                == rows
+            )
 
 
 def test_pointerless_schema_32_retains_canonical_v7_recognition(tmp_path: Path):

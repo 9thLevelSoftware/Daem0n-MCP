@@ -49,7 +49,7 @@ from ...workspace import (
     validate_index_patterns,
 )
 from .application import AdmittedRequest
-from .errors import STABLE_ERROR_CODE_SET
+from .errors import STABLE_ERROR_CODE_SET, is_database_busy
 from .models import (
     CapabilityState,
     Page,
@@ -710,8 +710,16 @@ def _translate_error(error: Exception) -> DiscoveryOperationError:
     code = getattr(error, "code", None)
     if isinstance(code, str) and code in STABLE_ERROR_CODE_SET:
         return DiscoveryOperationError(code)
-    if isinstance(error, sqlite3.OperationalError) and any(
-        word in str(error).casefold() for word in ("busy", "locked")
+    if isinstance(error, sqlite3.OperationalError) and (
+        is_database_busy(error)
+        or (
+            not isinstance(getattr(error, "sqlite_errorcode", None), int)
+            and re.fullmatch(
+                r"database is busy|database (?:table|schema) is locked: .+",
+                str(error).casefold(),
+            )
+            is not None
+        )
     ):
         return DiscoveryOperationError("DATABASE_IN_USE")
     return DiscoveryOperationError("CAPABILITY_DEGRADED")

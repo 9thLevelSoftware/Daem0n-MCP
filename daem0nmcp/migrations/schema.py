@@ -10,6 +10,7 @@ import logging
 import os
 import sqlite3
 import time
+from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -3294,6 +3295,7 @@ def run_migrations(
     *,
     workspace_id: str | None = None,
     maximum_version: int | None = None,
+    before_memory_learning_backfill: Callable[[sqlite3.Connection], None] | None = None,
 ) -> tuple[int, list[str]]:
     """
     Run all pending migrations on the database.
@@ -3302,6 +3304,8 @@ def run_migrations(
         db_path: Path to the SQLite database.
         maximum_version: Optional inclusive migration ceiling for a retained
             format-specific maintenance path.
+        before_memory_learning_backfill: Optional transaction-local preparation
+            of learning-evidence parents before the strict v33 backfill.
 
     Returns:
         Tuple of (migrations_run, list of descriptions)
@@ -3377,6 +3381,8 @@ def run_migrations(
                 if version >= 21 and workspace_id is not None:
                     backfill_retained_governance(conn, workspace_id)
                 if version == 33:
+                    if before_memory_learning_backfill is not None:
+                        before_memory_learning_backfill(conn)
                     _backfill_memory_learning_evidence(conn)
 
                 # Record migration

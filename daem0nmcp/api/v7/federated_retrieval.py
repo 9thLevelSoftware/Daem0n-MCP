@@ -504,6 +504,8 @@ def compose_federated_results(
                         reason=(
                             "RETENTION_FAILED"
                             if retention_failed
+                            else "RETENTION_NOT_APPLICABLE"
+                            if query.intent == "explore"
                             else "RETENTION_APPLIED"
                             if retention_mode == "apply"
                             else "RETENTION_SHADOW"

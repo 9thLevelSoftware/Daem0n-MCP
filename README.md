@@ -1074,8 +1074,16 @@ recall remains read-only. Outcomes may include
 `verification={"kind": "test", "command": "pytest", "exit_code": 0}`; verification
 is caller-reported evidence, not a command executed by the server.
 
+Schema 33 derives learning signals and provenance from canonical events. The
+v7 upgrader restores missing derived record parents only after complete canonical
+authority replay succeeds, then backfills learning evidence in the same
+transaction. Invalid authority fails closed; failed upgrades leave the active
+database and pointer unchanged.
+
 Utility ranking defaults to **shadow**: it reports estimates and diagnostics
-without changing retrieval order. Opt in with:
+without changing retrieval order. Shadow still computes those estimates and can
+add database work and query latency; use `off` to skip that computation. Opt in
+to ranking changes with:
 
 ```bash
 DAEM0NMCP_RETRIEVAL_UTILITY_MODE=apply

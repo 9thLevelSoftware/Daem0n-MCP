@@ -693,6 +693,64 @@ def _verify_published_candidate(candidate: Path, workspace_id: str) -> dict[str,
     return result
 
 
+def _restore_missing_learning_parents(
+    connection: sqlite3.Connection, workspace_id: str, scratch_root: Path
+) -> int:
+    from ..verification_v7 import _all_ok, _initialize_replay, _replay_authority
+
+    missing = connection.execute(
+        "SELECT DISTINCT event.workspace_id,event.stream_id "
+        "FROM memory_events event LEFT JOIN memory_records record "
+        "ON record.record_id=event.stream_id "
+        "AND record.workspace_id=event.workspace_id "
+        "WHERE event.stream_kind='memory' "
+        "AND event.event_type IN ('memory.created','memory.outcome_recorded') "
+        "AND record.record_id IS NULL"
+    ).fetchall()
+    if not missing:
+        return 0
+    with tempfile.TemporaryDirectory(
+        prefix="daem0nmcp-learning-parents-", dir=scratch_root
+    ) as raw:
+        replay = _initialize_replay(Path(raw) / "replay.db", workspace_id)
+        try:
+            row_factory = connection.row_factory
+            connection.row_factory = sqlite3.Row
+            try:
+                report = _replay_authority(connection, replay)
+            finally:
+                connection.row_factory = row_factory
+            if not _all_ok(report["checks"]):
+                raise MigrationV7Error(
+                    "SCHEMA_UPGRADE_AUTHORITY_INVALID",
+                    "canonical authority could not restore learning-evidence parents",
+                )
+            columns = [
+                str(row[1])
+                for row in connection.execute('PRAGMA table_info("memory_records")')
+            ]
+            quoted = ",".join(f'"{column}"' for column in columns)
+            placeholders = ",".join("?" for _ in columns)
+            for record_workspace_id, record_id in missing:
+                row = replay.execute(
+                    f"SELECT {quoted} FROM memory_records "
+                    "WHERE workspace_id=? AND record_id=?",
+                    (record_workspace_id, record_id),
+                ).fetchone()
+                if row is None:
+                    raise MigrationV7Error(
+                        "SCHEMA_UPGRADE_AUTHORITY_INVALID",
+                        "learning-evidence parent is absent from canonical replay",
+                    )
+                connection.execute(
+                    f"INSERT INTO memory_records ({quoted}) VALUES ({placeholders})",
+                    tuple(row),
+                )
+        finally:
+            replay.close()
+    return len(missing)
+
+
 def _verify_and_repair_candidate(candidate: Path, workspace_id: str) -> dict[str, Any]:
     from ..verification_v7 import (
         _refresh_manifests,
@@ -959,8 +1017,21 @@ class V7SchemaUpgradeService:
         _sqlite_backup(snapshot, candidate_partial)
         _require_regular(candidate_partial, run_dir)
         self._fault("schema_upgrade_after_candidate_copy", migration_run_id=run_id)
+
+        def restore_missing_learning_parents(connection: sqlite3.Connection) -> None:
+            restored = _restore_missing_learning_parents(
+                connection, workspace_id, run_dir
+            )
+            if restored:
+                self._fault(
+                    "schema_upgrade_after_learning_parent_restore",
+                    migration_run_id=run_id,
+                )
+
         applied_count, applied = run_migrations(
-            str(candidate_partial), workspace_id=workspace_id
+            str(candidate_partial),
+            workspace_id=workspace_id,
+            before_memory_learning_backfill=restore_missing_learning_parents,
         )
         self._checkpoint(candidate_partial)
         candidate_inventory = inventory_database(candidate_partial)
