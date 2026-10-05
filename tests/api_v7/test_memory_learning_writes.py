@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import subprocess
+import sys
 import tempfile
 import unittest
 from contextlib import closing
@@ -266,6 +268,140 @@ class MemoryLearningWriteTests(unittest.IsolatedAsyncioTestCase):
                     _outcome_command(record_id, worked=worked, rebind_code=True),
                 )
         self.assertEqual(1, len(self._payloads()))
+
+    async def _assert_missing_parser_writes(self) -> None:
+        self.assertFalse(default_code_indexer_factory().available)
+        source = self.fixture.root / "handler.py"
+        source.write_text("def handler():\n    return 1\n", encoding="utf-8")
+        with self.assertRaisesRegex(RuntimeServiceError, "CAPABILITY_DEGRADED"):
+            await self.writer.store(
+                self.fixture.workspace,
+                _store_command(code_refs=(("handler.py", "handler"),)),
+            )
+        self.assertEqual([], self._payloads())
+        stored = await self.writer.store(
+            self.fixture.workspace,
+            _store_command(
+                context={
+                    "code_bindings": [
+                        {
+                            "relative_file_path": "handler.py",
+                            "qualified_name": "handler",
+                            "fingerprint": "0" * 64,
+                            "head_commit": None,
+                        }
+                    ]
+                }
+            ),
+        )
+        before = self._payloads()
+        with self.assertRaisesRegex(RuntimeServiceError, "CAPABILITY_DEGRADED"):
+            await self.writer.record_outcome(
+                self.fixture.workspace,
+                _outcome_command(stored.record.record_id, rebind_code=True),
+            )
+        self.assertEqual(before, self._payloads())
+        with closing(sqlite3.connect(self.fixture.database)) as connection:
+            self.assertEqual(
+                (None, None),
+                connection.execute(
+                    "SELECT outcome, worked FROM memory_records WHERE record_id=?",
+                    (stored.record.record_id,),
+                ).fetchone(),
+            )
+
+    def test_package_absence_capture_and_rebind_fail_without_events(self) -> None:
+        script = (
+            "import sys; sys.modules['tree_sitter_language_pack'] = None\n"
+            "import unittest\n"
+            "from pathlib import Path\n"
+            "sys.path.insert(0, str(Path.cwd() / 'tests'))\n"
+            "from api_v7.test_memory_learning_writes import "
+            "MemoryLearningWriteTests\n"
+            "suite = unittest.TestSuite([MemoryLearningWriteTests("
+            "'_assert_missing_parser_writes')])\n"
+            "result = unittest.TextTestRunner().run(suite)\n"
+            "sys.exit(0 if result.wasSuccessful() else 1)\n"
+        )
+        result = subprocess.run(
+            [sys.executable, "-c", script],
+            cwd=Path(__file__).resolve().parents[2],
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=False,
+        )
+        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+
+    async def test_real_parser_failure_and_reference_errors_are_atomic(self) -> None:
+        if not default_code_indexer_factory().available:
+            self.skipTest("code parser is unavailable")
+        source = self.fixture.root / "handler.py"
+        source.write_text("def handler():\n    return 1\n", encoding="utf-8")
+        stored = await self.writer.store(
+            self.fixture.workspace,
+            _store_command(code_refs=(("handler.py", "handler"),)),
+        )
+        before = self._payloads()
+        cases = (
+            ("handler.py", "def handler(:\n", "CAPABILITY_DEGRADED"),
+            ("handler.py", "def other():\n    return 1\n", "INVALID_ARGUMENT"),
+            ("handler.md", "# handler\n", "INVALID_ARGUMENT"),
+        )
+        for index, (relative, content, code) in enumerate(cases):
+            with self.subTest(relative=relative, content=content):
+                target = self.fixture.root / relative
+                target.write_text(content, encoding="utf-8")
+                with self.assertRaisesRegex(RuntimeServiceError, code):
+                    await self.writer.store(
+                        self.fixture.workspace,
+                        _store_command(
+                            idempotency_key=f"capture-failure-{index:04d}",
+                            code_refs=(("handler.py", None), (relative, "handler")),
+                        ),
+                    )
+                self.assertEqual(before, self._payloads())
+                if relative == "handler.py":
+                    with self.assertRaisesRegex(RuntimeServiceError, code):
+                        await self.writer.record_outcome(
+                            self.fixture.workspace,
+                            _outcome_command(stored.record.record_id, rebind_code=True),
+                        )
+                    self.assertEqual(before, self._payloads())
+        source.write_text("def handler():\n    return 2\n", encoding="utf-8")
+        await self.writer.record_outcome(
+            self.fixture.workspace,
+            _outcome_command(stored.record.record_id, rebind_code=True),
+        )
+        self.assertEqual(2, len(self._payloads()))
+
+    async def test_unsupported_symbol_rebind_is_a_client_error(self) -> None:
+        if not default_code_indexer_factory().available:
+            self.skipTest("code parser is unavailable")
+        source = self.fixture.root / "handler.md"
+        source.write_text("# handler\n", encoding="utf-8")
+        stored = await self.writer.store(
+            self.fixture.workspace,
+            _store_command(
+                context={
+                    "code_bindings": [
+                        {
+                            "relative_file_path": "handler.md",
+                            "qualified_name": "handler",
+                            "fingerprint": "0" * 64,
+                            "head_commit": None,
+                        }
+                    ]
+                }
+            ),
+        )
+        before = self._payloads()
+        with self.assertRaisesRegex(RuntimeServiceError, "INVALID_ARGUMENT"):
+            await self.writer.record_outcome(
+                self.fixture.workspace,
+                _outcome_command(stored.record.record_id, rebind_code=True),
+            )
+        self.assertEqual(before, self._payloads())
 
     async def _recall_binding(self, mode: str):
         config = Settings(

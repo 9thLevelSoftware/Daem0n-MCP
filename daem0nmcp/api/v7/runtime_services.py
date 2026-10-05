@@ -25,6 +25,7 @@ from ... import __version__
 from ...bounded_workers import BoundedWorkerBusyError, BoundedWorkerPool
 from ...code_bindings import (
     CodeBindingError,
+    CodeBindingUnavailableError,
     binding_refs_from_context,
     capture_bindings,
 )
@@ -667,6 +668,8 @@ class SQLiteMemoryEventWriter:
         if command.code_refs:
             try:
                 bindings = capture_bindings(workspace, command.code_refs)
+            except CodeBindingUnavailableError as exc:
+                raise RuntimeServiceError("CAPABILITY_DEGRADED") from exc
             except CodeBindingError as exc:
                 raise RuntimeServiceError("INVALID_ARGUMENT") from exc
             context["code_bindings"] = [binding.to_json() for binding in bindings]
@@ -879,6 +882,8 @@ class SQLiteMemoryEventWriter:
                             if not refs:
                                 raise CodeBindingError("record has no code bindings")
                             bindings = capture_bindings(workspace, refs)
+                        except CodeBindingUnavailableError as exc:
+                            raise RuntimeServiceError("CAPABILITY_DEGRADED") from exc
                         except CodeBindingError as exc:
                             raise RuntimeServiceError("INVALID_ARGUMENT") from exc
                         record["context"]["code_bindings"] = [

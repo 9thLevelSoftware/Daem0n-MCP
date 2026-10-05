@@ -225,6 +225,12 @@ Navigation spans and projection identities remain unchanged. Previously stored
 decorated-symbol fingerprints may require revalidation once after this change;
 review the guidance before recording a successful outcome with `rebind_code`.
 
+Symbol capture fails with retryable `CAPABILITY_DEGRADED` when the parser is
+unavailable, fails, or returns unusable entities; failed captures write no memory
+or outcome events. Restore the parsing capability before obtaining fresh counsel
+and retrying with the same idempotency key. Missing symbols and unsupported
+symbol-file extensions remain `INVALID_ARGUMENT`, requiring a corrected request.
+
 ## Resources and diagnostics
 
 The four bounded data resources require an authorized workspace session:

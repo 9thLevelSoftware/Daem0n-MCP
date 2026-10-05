@@ -30,6 +30,14 @@ class _UnverifiableBindingError(CodeBindingError):
     pass
 
 
+class CodeBindingUnavailableError(_UnverifiableBindingError):
+    """The server cannot currently verify a symbol binding."""
+
+
+class CodeBindingReferenceError(_UnverifiableBindingError):
+    """The requested symbol reference is unsupported."""
+
+
 @runtime_checkable
 class _BindingCodeIndexer(Protocol):
     @property
@@ -138,7 +146,7 @@ class _ReadBatch:
 def _read_source(path: Path, batch: _ReadBatch | None = None) -> bytes:
     remaining = batch.remaining_bytes if batch is not None else None
     if remaining == 0:
-        raise _UnverifiableBindingError("binding read budget is exhausted")
+        raise CodeBindingUnavailableError("binding read budget is exhausted")
     limit = (
         min(_MAX_BINDING_FILE_BYTES, remaining)
         if remaining is not None
@@ -156,7 +164,7 @@ def _read_source(path: Path, batch: _ReadBatch | None = None) -> bytes:
     if raw_bytes > _MAX_BINDING_FILE_BYTES:
         raise CodeBindingError("bound file exceeds size limit")
     if remaining is not None and raw_bytes > remaining:
-        raise _UnverifiableBindingError("binding read budget is exhausted")
+        raise CodeBindingUnavailableError("binding read budget is exhausted")
     return source.replace(b"\r\n", b"\n")
 
 
@@ -168,16 +176,18 @@ def _fingerprint(path: Path, root: Path, source: bytes, name: str | None) -> str
     try:
         producer = default_code_indexer_factory()
         if not isinstance(producer, _BindingCodeIndexer) or not producer.available:
-            raise _UnverifiableBindingError("code parser is unavailable")
+            raise CodeBindingUnavailableError("code parser is unavailable")
         supported = producer.get_supported_extensions()
         if path.suffix.lower() not in supported:
-            raise _UnverifiableBindingError("bound symbol extension is unsupported")
+            raise CodeBindingReferenceError("bound symbol extension is unsupported")
         entities = producer.index_source_strict(path, root, source)
         lines = source.split(b"\n")
         chunks = []
         for entity in entities:
             if not isinstance(entity, Mapping):
-                raise _UnverifiableBindingError("code parser returned invalid entities")
+                raise CodeBindingUnavailableError(
+                    "code parser returned invalid entities"
+                )
             if name not in (entity.get("qualified_name"), entity.get("name")):
                 continue
             navigation_start, end = entity.get("line_start"), entity.get("line_end")
@@ -191,14 +201,14 @@ def _fingerprint(path: Path, root: Path, source: bytes, name: str | None) -> str
                 or isinstance(end, bool)
                 or not 1 <= start <= navigation_start <= end <= len(lines)
             ):
-                raise _UnverifiableBindingError(
+                raise CodeBindingUnavailableError(
                     "code parser returned invalid line bounds"
                 )
             chunks.append(b"\n".join(lines[start - 1 : end]))
     except _UnverifiableBindingError:
         raise
     except Exception as exc:
-        raise _UnverifiableBindingError("code parser failed") from exc
+        raise CodeBindingUnavailableError("code parser failed") from exc
     if not chunks:
         raise CodeBindingError("bound symbol is missing")
     return hashlib.sha256(b"\n".join(chunks)).hexdigest()
@@ -288,7 +298,7 @@ class BindingEvaluator:
         source = batch.sources.get(path) if batch is not None else None
         if source is None:
             if batch is not None and stat.st_size > batch.remaining_bytes:
-                raise _UnverifiableBindingError("binding read budget is exhausted")
+                raise CodeBindingUnavailableError("binding read budget is exhausted")
             source = _read_source(path, batch)
             if batch is not None:
                 batch.sources[path] = source
@@ -313,8 +323,13 @@ class BindingEvaluator:
             ):
                 from .api.v7.discovery_operations import default_code_indexer_factory
 
-                if not getattr(default_code_indexer_factory(), "available", False):
-                    raise _UnverifiableBindingError("code parser is unavailable")
+                try:
+                    if not getattr(default_code_indexer_factory(), "available", False):
+                        raise CodeBindingUnavailableError("code parser is unavailable")
+                except _UnverifiableBindingError:
+                    raise
+                except Exception as exc:
+                    raise CodeBindingUnavailableError("code parser failed") from exc
             if binding.qualified_name not in snapshot.fingerprints:
                 snapshot.fingerprints[binding.qualified_name] = _fingerprint(
                     path, root, snapshot.source, binding.qualified_name

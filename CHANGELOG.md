@@ -22,6 +22,7 @@
 - Citation-lookalike text is neutralized in federated excerpts and revalidation labels, preventing forged context citations and direct-recall denial while preserving canonical content and raw binding paths.
 - Retained federated evidence and citation manifests export channel arrays in canonical order, eliminating hash-seed-dependent payload drift across server restarts.
 - Explore-intent shadow retention reuses the identical primary composition in direct and federated recall, avoiding duplicate packing while preserving evidence and diagnostics.
+- Symbol-bound writes distinguish unavailable or failed parsing (`CAPABILITY_DEGRADED`, retryable) from invalid symbol references (`INVALID_ARGUMENT`), preserving atomic capture and replay-safe outcome rebinding.
 - Local dense projection cleanup closes staging collection persistence before deleting it, preventing leaked SQLite handles on failed or cancelled builds.
 - Claude Code hooks remind instead of block. `pre_edit` adds a one-line gateway file-recall reminder; `stop` suggests direct replay-safe memory calls with counsel-challenge retry guidance. Neither hook writes memory, denies an edit, or keeps the agent running.
 - OpenCode edits are no longer gated either: the OpenCode plugin runs the same `pre_edit` hook, which now always allows the edit. The plugin does not yet show the reminder; that rework comes with the edit-bridge removal.
