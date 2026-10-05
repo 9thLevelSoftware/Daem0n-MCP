@@ -25,6 +25,7 @@
 - Symbol-bound writes distinguish unavailable or failed parsing (`CAPABILITY_DEGRADED`, retryable) from invalid symbol references (`INVALID_ARGUMENT`), preserving atomic capture and replay-safe outcome rebinding.
 - Symbol bindings prefer exact qualified identities and reject ambiguous short names instead of hashing unrelated definitions together; existing aliases that become ambiguous are `unverifiable`.
 - Binding checks report oversized or environmentally inaccessible source as `unverifiable`, not inferred changed content. Definite missing files, directory replacements and workspace escapes still require revalidation; environmental capture failures are retryable capability errors.
+- Public retrieval envelopes enforce exact ordered citation-marker parity with their manifests, rejecting missing, repeated, reordered and unbacked citations instead of accepting forged rendered context.
 - Local dense projection cleanup closes staging collection persistence before deleting it, preventing leaked SQLite handles on failed or cancelled builds.
 - Claude Code hooks remind instead of block. `pre_edit` adds a one-line gateway file-recall reminder; `stop` suggests direct replay-safe memory calls with counsel-challenge retry guidance. Neither hook writes memory, denies an edit, or keeps the agent running.
 - OpenCode edits are no longer gated either: the OpenCode plugin runs the same `pre_edit` hook, which now always allows the edit. The plugin does not yet show the reminder; that rework comes with the edit-bridge removal.

@@ -222,6 +222,9 @@ Citation-like strings stored inside evidence or binding filenames are displayed
 with neutralized brackets, not interpreted as manifest citations. Direct and
 linked-workspace recall apply the same presentation rule; canonical content and
 typed `changed_bindings` paths remain unchanged for follow-up operations.
+Public retrieval envelopes also require exactly one rendered marker per manifest
+entry in the same order. Missing, repeated, reordered or unbacked markers fail
+validation rather than becoming an apparently valid cited response.
 
 Symbol fingerprints include decorators owned by the parsed definition, including
 multiline Python decorators and TypeScript decorators separated by comments.

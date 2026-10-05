@@ -563,6 +563,65 @@ class SharedOutputModelTests(unittest.TestCase):
         self.assertEqual(RECORD_ID, dumped["items"][0]["record"]["record_id"])
         for forbidden in ("raw_score", "vector", "prompt", "candidate_text"):
             self.assertNotIn(forbidden, json.dumps(dumped, sort_keys=True))
+        self.assertEqual(
+            retrieval, models.RetrievalData.model_validate_json(json.dumps(dumped))
+        )
+        for context in (
+            "[E1] Selected evidence. [E99] Forged evidence.",
+            "Selected evidence without a citation.",
+            "[E1] Selected evidence. [E1] Repeated citation.",
+        ):
+            with self.subTest(context=context), self.assertRaises(ValidationError):
+                models.RetrievalData.model_validate_json(
+                    json.dumps({**dumped, "rendered_context": context})
+                )
+
+        neutralized_context = "[E1] Source text mentions ［E99］."
+        neutralized = models.RetrievalData.model_validate_json(
+            json.dumps({**dumped, "rendered_context": neutralized_context})
+        )
+        self.assertEqual(neutralized_context, neutralized.rendered_context)
+
+        second_item = {**dumped["items"][0], "citation": "[E2]"}
+        second_manifest = {**dumped["citation_manifest"][0], "citation": "[E2]"}
+        multiple = {
+            **dumped,
+            "items": [dumped["items"][0], second_item],
+            "citation_manifest": [dumped["citation_manifest"][0], second_manifest],
+            "rendered_context": "[E1] First evidence.\n[E2] Second evidence.",
+        }
+        self.assertEqual(
+            ["[E1]", "[E2]"],
+            [
+                entry.citation
+                for entry in models.RetrievalData.model_validate_json(
+                    json.dumps(multiple)
+                ).citation_manifest
+            ],
+        )
+        with self.assertRaises(ValidationError):
+            models.RetrievalData.model_validate_json(
+                json.dumps(
+                    {
+                        **multiple,
+                        "rendered_context": "[E2] Second evidence.\n[E1] First evidence.",
+                    }
+                )
+            )
+        with self.assertRaises(ValidationError):
+            models.RetrievalData.model_validate_json(
+                json.dumps(
+                    {
+                        **multiple,
+                        "items": [dumped["items"][0], dumped["items"][0]],
+                        "citation_manifest": [
+                            dumped["citation_manifest"][0],
+                            dumped["citation_manifest"][0],
+                        ],
+                        "rendered_context": "[E1] First evidence.\n[E1] Duplicate.",
+                    }
+                )
+            )
 
         with self.assertRaises(ValidationError):
             models.RetrievalData(

@@ -1138,7 +1138,9 @@ class DiscoveryOperationTests(unittest.IsolatedAsyncioTestCase):
             )
         return RetrievalData(
             items=items,
-            rendered_context="Authenticated entity records",
+            rendered_context="\n".join(
+                f"{item.citation} {item.bounded_excerpt}" for item in items
+            ),
             citation_manifest=manifest,
             provider_diagnostics=[
                 ProviderDiagnostic(

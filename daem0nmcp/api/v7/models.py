@@ -55,6 +55,7 @@ _WINDOWS_ABSOLUTE_PATH = re.compile(
 _POSIX_ABSOLUTE_PATH = re.compile(r"(?<![A-Za-z0-9:/])/(?!/)[A-Za-z0-9_.-]")
 _FILE_URI = re.compile(r"(?i)\bfile:(?://)?/")
 _CONTROL_CHAR = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+_CITATION_IN_TEXT = re.compile(r"\[E[1-9][0-9]*\]")
 
 
 def is_host_absolute_path(value: str) -> bool:
@@ -961,6 +962,8 @@ class RetrievalData(WireModel):
             set(item_citations)
         ):
             raise ValueError("selected evidence must match the citation manifest")
+        if manifest_citations != _CITATION_IN_TEXT.findall(self.rendered_context):
+            raise ValueError("rendered context must match the citation manifest")
         return self
 
 
