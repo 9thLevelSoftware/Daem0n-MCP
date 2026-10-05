@@ -183,6 +183,9 @@ evidence. Path and qualified-symbol queries preserve the supplied scope rather
 than promoting same-named files or symbols elsewhere. Bare names remain
 intentionally broader. This affects context selection, not stored-record
 retention or authorization.
+Explore requests retain baseline packing in every retention mode; shadow mode
+reuses that identical composition instead of packing the same evidence twice.
+Other intents still compute their distinct shadow variant.
 
 Repository code-binding checks validate current bounded source content rather
 than trusting file size and modification time. Parsed fingerprints are reused

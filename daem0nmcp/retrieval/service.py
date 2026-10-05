@@ -365,7 +365,7 @@ class RetrievalService:
             if retention is not None:
                 retained = composition
                 retention_failed = False
-                if self._retention_mode == "shadow":
+                if self._retention_mode == "shadow" and retention.intent != "explore":
                     try:
                         retained = await self._composer.compose_async(
                             candidates.selected,

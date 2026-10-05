@@ -485,7 +485,8 @@ def compose_federated_results(
             retained = None
         result = (
             retained
-            if retention_mode == "apply" and retained is not None
+            if retained is not None
+            and (retention_mode == "apply" or query.intent == "explore")
             else compose_federated_results(
                 results, query, label_applicability=label_applicability
             )

@@ -17,6 +17,7 @@
 - Discovery reads return retryable `DATABASE_IN_USE` for SQLite contention, including lexical catch-up checks, and healthy graph-generation advances during recall. Invalid schemas, corrupt projections and permanent retrieval failures remain non-retryable.
 - Intent-aware evidence retention matches full or boundary-suffix paths and qualified symbols, preserving scope instead of promoting unrelated same-named files or symbols; bare filename and symbol queries remain supported.
 - Code-binding validity checks re-read bounded source content before reusing parsed snapshots, detecting same-size edits even when file timestamps are preserved.
+- Explore-intent shadow retention reuses the identical primary composition in direct and federated recall, avoiding duplicate packing while preserving evidence and diagnostics.
 - Local dense projection cleanup closes staging collection persistence before deleting it, preventing leaked SQLite handles on failed or cancelled builds.
 - Claude Code hooks remind instead of block. `pre_edit` adds a one-line gateway file-recall reminder; `stop` suggests direct replay-safe memory calls with counsel-challenge retry guidance. Neither hook writes memory, denies an edit, or keeps the agent running.
 - OpenCode edits are no longer gated either: the OpenCode plugin runs the same `pre_edit` hook, which now always allows the edit. The plugin does not yet show the reminder; that rework comes with the edit-bridge removal.
