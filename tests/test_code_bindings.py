@@ -15,6 +15,8 @@ from daem0nmcp.api.v7 import discovery_operations
 from daem0nmcp.code_bindings import (
     BindingEvaluator,
     CodeBindingError,
+    CodeBindingReferenceError,
+    CodeBindingUnavailableError,
     binding_refs_from_context,
     capture_bindings,
 )
@@ -116,6 +118,112 @@ def test_symbol_binding_distinguishes_sibling_and_bound_edit(workspace):
     assert result.changed == ("sample.py::target",)
     edit(path, "def sibling(value):\n    return value * 2\n")
     assert evaluator.evaluate(workspace.root, context).changed == ("sample.py::target",)
+
+
+def test_ambiguous_alias_is_rejected_and_qualified_binding_is_isolated(workspace):
+    require_parser()
+    path = workspace.root / "dup.py"
+    original = (
+        "class A:\n    def target(self):\n        return 1\n\n"
+        "class B:\n    def target(self):\n        return 2\n"
+    )
+    path.write_text(original, encoding="utf-8")
+    with pytest.raises(CodeBindingReferenceError, match="ambiguous"):
+        capture_bindings(workspace, [("dup.py", "target")])
+    context = context_for(workspace, [("dup.py", "dup.A.target")])
+    evaluator = BindingEvaluator()
+    edit(path, original.replace("return 2", "return 3"))
+    assert evaluator.evaluate(workspace.root, context).applicability == "current"
+    edit(path, original.replace("return 1", "return 4"))
+    result = evaluator.evaluate(workspace.root, context)
+    assert result.applicability == "needs_revalidation"
+    assert result.changed == ("dup.py::dup.A.target",)
+
+
+def test_unique_alias_becoming_ambiguous_is_unverifiable(workspace):
+    require_parser()
+    path = workspace.root / "dup.py"
+    original = "class A:\n    def target(self):\n        return 1\n"
+    path.write_text(original, encoding="utf-8")
+    context = context_for(workspace, [("dup.py", "target")])
+    assert (
+        BindingEvaluator().evaluate(workspace.root, context).applicability == "current"
+    )
+    edit(path, original + "\nclass B:\n    def target(self):\n        return 2\n")
+    result = BindingEvaluator().evaluate(workspace.root, context)
+    assert result.applicability == "unverifiable"
+    assert result.changed == ()
+
+
+@pytest.mark.parametrize("name", ["target", "sample.target"])
+def test_same_identity_overload_spans_remain_grouped(workspace, name):
+    require_parser()
+    path = workspace.root / "sample.py"
+    original = (
+        "from typing import overload\n\n"
+        "@overload\ndef target(value: int) -> int: ...\n\n"
+        "@overload\ndef target(value: str) -> str: ...\n\n"
+        "def target(value):\n    return value\n"
+    )
+    path.write_text(original, encoding="utf-8")
+    context = context_for(workspace, [("sample.py", name)])
+    evaluator = BindingEvaluator()
+    assert evaluator.evaluate(workspace.root, context).applicability == "current"
+    edit(path, original.replace("value: int", "value: float"))
+    result = evaluator.evaluate(workspace.root, context)
+    assert result.applicability == "needs_revalidation"
+    assert result.changed == (f"sample.py::{name}",)
+
+
+def test_exact_identity_takes_precedence_over_short_name_match(workspace):
+    require_parser()
+    path = workspace.root / "__init__.py"
+    original = (
+        "def target():\n    return 1\n\n"
+        "class A:\n    def target(self):\n        return 2\n"
+    )
+    path.write_text(original, encoding="utf-8")
+    context = context_for(workspace, [("__init__.py", "target")])
+    evaluator = BindingEvaluator()
+    edit(path, original.replace("return 2", "return 3"))
+    assert evaluator.evaluate(workspace.root, context).applicability == "current"
+    edit(path, original.replace("return 1", "return 4"))
+    assert (
+        evaluator.evaluate(workspace.root, context).applicability
+        == "needs_revalidation"
+    )
+
+
+@pytest.mark.parametrize("identity", [None, "", "   ", 12])
+def test_alias_without_usable_parser_identity_is_unverifiable(
+    workspace, monkeypatch, identity
+):
+    require_parser()
+    path = workspace.root / "sample.py"
+    path.write_text("def target():\n    return 1\n", encoding="utf-8")
+    context = context_for(workspace, [("sample.py", "target")])
+    producer = discovery_operations.default_code_indexer_factory()
+
+    class MissingIdentityProducer:
+        available = True
+
+        def get_supported_extensions(self):
+            return producer.get_supported_extensions()
+
+        def index_source_strict(self, *args):
+            return [
+                {**entity, "qualified_name": identity}
+                for entity in producer.index_source_strict(*args)
+            ]
+
+    monkeypatch.setattr(
+        discovery_operations, "default_code_indexer_factory", MissingIdentityProducer
+    )
+    with pytest.raises(CodeBindingUnavailableError, match="usable symbol identity"):
+        capture_bindings(workspace, [("sample.py", "target")])
+    result = BindingEvaluator().evaluate(workspace.root, context)
+    assert result.applicability == "unverifiable"
+    assert result.changed == ()
 
 
 @pytest.mark.parametrize("fallback", [False, True])

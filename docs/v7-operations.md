@@ -232,6 +232,11 @@ unavailable, fails, or returns unusable entities; failed captures write no memor
 or outcome events. Restore the parsing capability before obtaining fresh counsel
 and retrying with the same idempotency key. Missing symbols and unsupported
 symbol-file extensions remain `INVALID_ARGUMENT`, requiring a corrected request.
+Fully qualified symbol identities take precedence. A short name is accepted only
+when it identifies one canonical symbol; ambiguous names are `INVALID_ARGUMENT`,
+not a binding to every same-named definition. If an existing short binding
+becomes ambiguous, recall reports `unverifiable` until it is rebound explicitly.
+Multiple definition spans belonging to the same qualified identity remain grouped.
 
 ## Resources and diagnostics
 

@@ -347,6 +347,12 @@ class MemoryLearningWriteTests(unittest.IsolatedAsyncioTestCase):
             ("handler.py", "def handler(:\n", "CAPABILITY_DEGRADED"),
             ("handler.py", "def other():\n    return 1\n", "INVALID_ARGUMENT"),
             ("handler.md", "# handler\n", "INVALID_ARGUMENT"),
+            (
+                "handler.py",
+                "class A:\n    def handler(self):\n        return 1\n\n"
+                "class B:\n    def handler(self):\n        return 2\n",
+                "INVALID_ARGUMENT",
+            ),
         )
         for index, (relative, content, code) in enumerate(cases):
             with self.subTest(relative=relative, content=content):

@@ -182,14 +182,31 @@ def _fingerprint(path: Path, root: Path, source: bytes, name: str | None) -> str
             raise CodeBindingReferenceError("bound symbol extension is unsupported")
         entities = producer.index_source_strict(path, root, source)
         lines = source.split(b"\n")
-        chunks = []
+        exact = []
+        aliases = []
         for entity in entities:
             if not isinstance(entity, Mapping):
                 raise CodeBindingUnavailableError(
                     "code parser returned invalid entities"
                 )
-            if name not in (entity.get("qualified_name"), entity.get("name")):
-                continue
+            if entity.get("qualified_name") == name:
+                exact.append(entity)
+            elif entity.get("name") == name:
+                aliases.append(entity)
+        selected = exact or aliases
+        if not exact and aliases:
+            identities = set()
+            for entity in aliases:
+                identity = entity.get("qualified_name")
+                if not isinstance(identity, str) or not identity.strip():
+                    raise CodeBindingUnavailableError(
+                        "code parser returned no usable symbol identity"
+                    )
+                identities.add(identity)
+            if len(identities) != 1:
+                raise CodeBindingReferenceError("bound symbol reference is ambiguous")
+        chunks = []
+        for entity in selected:
             navigation_start, end = entity.get("line_start"), entity.get("line_end")
             start = entity.get("binding_line_start", navigation_start)
             if (
