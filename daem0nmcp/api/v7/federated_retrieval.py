@@ -17,6 +17,7 @@ from ...retrieval.composer import (
     EvidenceComposer,
     RetentionPolicy,
     SelectedEvidence,
+    _normalize_evidence_text,
     query_identifiers,
 )
 from ...retrieval.runtime import CoreTokenizer
@@ -312,7 +313,7 @@ def _fit_excerpt(
     tokenizer: CoreTokenizer,
     applicability_label: str = "",
 ) -> tuple[str, int] | None:
-    normalized = " ".join(content.split())[:8000].strip()
+    normalized = _normalize_evidence_text(content)[:8000].strip()
     if not normalized:
         return None
 
@@ -522,11 +523,13 @@ def compose_federated_results(
 
     def applicability_label(item: FederatedCandidate) -> str:
         if label_applicability and item.applicability == "needs_revalidation":
-            return "\nNeeds revalidation: " + "; ".join(item.changed_bindings)
+            return "\nNeeds revalidation: " + "; ".join(
+                _normalize_evidence_text(path) for path in item.changed_bindings
+            )
         return ""
 
     requested_lines = [
-        f"[E{index}] {' '.join(item.content.split())[:8000].strip()}"
+        f"[E{index}] {_normalize_evidence_text(item.content)[:8000].strip()}"
         + applicability_label(item)
         for index, (_score, _workspace, _record, item) in enumerate(ranked, 1)
     ]

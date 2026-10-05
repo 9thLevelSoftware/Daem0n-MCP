@@ -205,6 +205,11 @@ holds at most 32 MiB of normalized bytes and 256 files; this is not a total-heap
 limit. The batch is not an atomic filesystem snapshot, a trusted test receipt,
 or proof that recorded guidance remains correct.
 
+Citation-like strings stored inside evidence or binding filenames are displayed
+with neutralized brackets, not interpreted as manifest citations. Direct and
+linked-workspace recall apply the same presentation rule; canonical content and
+typed `changed_bindings` paths remain unchanged for follow-up operations.
+
 Symbol fingerprints include decorators owned by the parsed definition, including
 multiline Python decorators and TypeScript decorators separated by comments.
 Navigation spans and projection identities remain unchanged. Previously stored

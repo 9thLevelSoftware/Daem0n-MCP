@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 import threading
 import unittest
 from time import perf_counter
@@ -133,6 +134,43 @@ class EvidenceComposerTests(unittest.TestCase):
                 first.context.text[entry.excerpt_start : entry.excerpt_end],
             )
             self.assertEqual(1, first.context.text.count(item.citation))
+
+    def test_untrusted_binding_labels_preserve_raw_paths_and_citation_offsets(self):
+        from daem0nmcp.retrieval.composer import SelectedEvidence
+
+        content = "Use [E99] as text; preserve ［E98］."
+        bindings = ("docs/[E99].md", "docs/［E98］.md")
+        source = SelectedEvidence(
+            candidate=_candidate("a", score=1.0),
+            content=content,
+            category="decision",
+            applicability="needs_revalidation",
+            changed_bindings=bindings,
+        )
+        tokenizer = CharacterTokenizer()
+        result = self._composer(tokenizer=tokenizer).compose(
+            (source,), token_budget=1000, label_applicability=True
+        )
+
+        self.assertEqual(1, len(result.items))
+        self.assertEqual(bindings, result.items[0].changed_bindings)
+        self.assertEqual(content, source.content)
+        self.assertEqual(
+            [entry.marker for entry in result.context.citations],
+            re.findall(r"\[E[1-9][0-9]*\]", result.context.text),
+        )
+        self.assertEqual(["[E1]"], [item.citation for item in result.items])
+        self.assertIn("docs/［E99］.md", result.context.text)
+        self.assertIn("docs/［E98］.md", result.context.text)
+        self.assertIn("Use ［E99］ as text; preserve ［E98］.", result.items[0].excerpt)
+        entry = result.context.citations[0]
+        self.assertEqual(
+            result.items[0].excerpt,
+            result.context.text[entry.excerpt_start : entry.excerpt_end],
+        )
+        self.assertEqual(
+            tokenizer.count_tokens(result.context.text), result.context.rendered_tokens
+        )
 
     def test_composition_carries_authenticated_legacy_metadata_unchanged(self):
         from daem0nmcp.retrieval.composer import SelectedEvidence

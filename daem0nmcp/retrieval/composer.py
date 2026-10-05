@@ -729,7 +729,10 @@ class EvidenceComposer:
             excerpt,
         ]
         if label_applicability and source.applicability == "needs_revalidation":
-            lines.append("Needs revalidation: " + "; ".join(source.changed_bindings))
+            lines.append(
+                "Needs revalidation: "
+                + "; ".join(self._clean(path) for path in source.changed_bindings)
+            )
         if source.outcome is not None:
             outcome_label = "Failed outcome" if source.outcome_failed else "Outcome"
             lines.append(f"{outcome_label}: {self._bounded(source.outcome)}")
