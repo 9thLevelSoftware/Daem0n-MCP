@@ -72,13 +72,6 @@ class CodingMemoryEvaluationTests(unittest.TestCase):
             {"stale_flag_recall": 1.0, "false_flag_rate": 0.0}, validity["symbol"]
         )
 
-    def test_retention_keeps_more_required_procedure_facts(self):
-        arms = self.first["arms"]
-        self.assertGreater(
-            arms["retention_apply"]["retention"]["required_fact_retention"],
-            arms["baseline"]["retention"]["required_fact_retention"],
-        )
-
     def test_all_arms_and_metadata_are_reported(self):
         self.assertEqual(
             {

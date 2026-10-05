@@ -280,7 +280,12 @@ class LexicalProvider:
                     ) AS document
                       ON document.document_rowid="{expected_table}".rowid
                     WHERE "{expected_table}" MATCH ?
-                    ORDER BY content_match DESC, score ASC, document.record_id ASC
+                    ORDER BY content_match DESC,
+                             CASE WHEN content_match THEN bm25(
+                                 {expected_table}, {content_weight},
+                                 {rationale_weight}, 0
+                             ) ELSE score END ASC,
+                             document.record_id ASC
                     LIMIT ?
                     """,
                     (

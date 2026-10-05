@@ -415,13 +415,6 @@ class LexicalProjectionTests(unittest.IsolatedAsyncioTestCase):
             {candidate.evidence.record_id for candidate in result.candidates[:2]},
         )
         self.assertEqual(tag_only, result.candidates[2].evidence.record_id)
-        self.assertEqual(
-            sorted(
-                result.candidates[:2],
-                key=lambda item: (-item.raw_score, item.evidence.record_id),
-            ),
-            list(result.candidates[:2]),
-        )
         bounded = await provider.search(query, 2)
         self.assertEqual(result.candidates[:2], bounded.candidates)
 
@@ -432,6 +425,95 @@ class LexicalProjectionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             [tag_only],
             [candidate.evidence.record_id for candidate in tags.candidates],
+        )
+
+    async def test_body_matches_rank_without_tag_amplification(self):
+        from daem0nmcp.retrieval.lexical_config import (
+            LEXICAL_BM25_WEIGHTS,
+            lexical_fts_table_name,
+        )
+        from daem0nmcp.retrieval.projections import LexicalProjectionBuilder
+        from daem0nmcp.retrieval.providers import LexicalProvider
+        from daem0nmcp.retrieval.types import RetrievalQuery
+
+        amplifier = self._append_record(
+            "a",
+            "Rotate signing keys draft inventory for review.",
+            "",
+            ["rotate signing keys " * 16],
+        )
+        useful = self._append_record(
+            "b",
+            "Rotate signing keys and invalidate active sessions.",
+            "",
+            [],
+        )
+        LexicalProjectionBuilder(self.connection).rebuild(WORKSPACE_ID)
+        self.connection.commit()
+
+        result = await LexicalProvider(self.connection).search(
+            RetrievalQuery(workspace_id=WORKSPACE_ID, text="rotate signing keys"),
+            10,
+        )
+
+        self.assertEqual("ready", result.status)
+        self.assertEqual(
+            [useful, amplifier],
+            [candidate.evidence.record_id for candidate in result.candidates],
+        )
+        self.assertEqual([1, 2], [candidate.rank for candidate in result.candidates])
+        self.assertGreater(
+            result.candidates[1].raw_score, result.candidates[0].raw_score
+        )
+        table = lexical_fts_table_name(WORKSPACE_ID, result.manifest_generation)
+        content_weight, rationale_weight, tags_weight = LEXICAL_BM25_WEIGHTS
+        diagnostics = dict(
+            self.connection.execute(
+                f"""
+                SELECT document.record_id,
+                       bm25("{table}", {content_weight},
+                            {rationale_weight}, {tags_weight})
+                FROM "{table}"
+                JOIN retrieval_documents AS document
+                  ON document.document_rowid="{table}".rowid
+                WHERE document.workspace_id=? AND document.projection_generation=?
+                  AND "{table}" MATCH ?
+                """,
+                (
+                    WORKSPACE_ID,
+                    result.manifest_generation,
+                    '"rotate" "signing" "keys"',
+                ),
+            ).fetchall()
+        )
+        for candidate in result.candidates:
+            self.assertEqual(
+                max(0.0, -diagnostics[candidate.evidence.record_id]),
+                candidate.raw_score,
+            )
+
+    async def test_tag_only_matches_keep_weighted_bm25_order(self):
+        from daem0nmcp.retrieval.projections import LexicalProjectionBuilder
+        from daem0nmcp.retrieval.providers import LexicalProvider
+        from daem0nmcp.retrieval.types import RetrievalQuery
+
+        ordinary = self._append_record("a", "Snapshot", "", ["retention"])
+        amplified = self._append_record("b", "Snapshot", "", ["retention " * 16])
+        LexicalProjectionBuilder(self.connection).rebuild(WORKSPACE_ID)
+        self.connection.commit()
+
+        result = await LexicalProvider(self.connection).search(
+            RetrievalQuery(workspace_id=WORKSPACE_ID, text="retention"),
+            10,
+        )
+
+        self.assertEqual("ready", result.status)
+        self.assertEqual(
+            [amplified, ordinary],
+            [candidate.evidence.record_id for candidate in result.candidates],
+        )
+        self.assertGreater(
+            result.candidates[0].raw_score, result.candidates[1].raw_score
         )
 
     async def test_content_tier_requires_the_complete_winning_expression(self):

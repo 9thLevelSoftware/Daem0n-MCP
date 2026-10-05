@@ -176,10 +176,12 @@ idempotency key. For authorized federation, `memory_recall` accepts
 workspace.
 
 Lexical recall first ranks records whose content or rationale satisfy the
-selected full-text expression, then tag-assisted matches. Ordinary BM25 and
-record-ID tie-breaking still order each group. Tags remain searchable, and the
-existing precision-first query ladder remains unchanged; no projection rebuild
-is required for this query-side ordering change.
+selected full-text expression, then tag-assisted matches. Content-tier ordering
+uses the existing content/rationale BM25 weights without a tag contribution;
+tag-assisted matches use ordinary weighted BM25. Record IDs break ties. Original
+weighted scores remain diagnostics, not a guarantee of rank order. Tags remain
+searchable, and the precision-first query ladder remains unchanged; no projection
+rebuild is required for this query-side ordering change.
 Direct and linked-workspace recall expose provider channels in canonical sorted
 order, including retained contexts, so equivalent evidence does not acquire
 different channel-array order after a server restart.
