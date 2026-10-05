@@ -205,6 +205,12 @@ holds at most 32 MiB of normalized bytes and 256 files; this is not a total-heap
 limit. The batch is not an atomic filesystem snapshot, a trusted test receipt,
 or proof that recorded guidance remains correct.
 
+Symbol fingerprints include decorators owned by the parsed definition, including
+multiline Python decorators and TypeScript decorators separated by comments.
+Navigation spans and projection identities remain unchanged. Previously stored
+decorated-symbol fingerprints may require revalidation once after this change;
+review the guidance before recording a successful outcome with `rebind_code`.
+
 ## Resources and diagnostics
 
 The four bounded data resources require an authorized workspace session:

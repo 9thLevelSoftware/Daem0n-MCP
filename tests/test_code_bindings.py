@@ -10,6 +10,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from daem0nmcp import code_indexer
 from daem0nmcp.api.v7 import discovery_operations
 from daem0nmcp.code_bindings import (
     BindingEvaluator,
@@ -115,6 +116,234 @@ def test_symbol_binding_distinguishes_sibling_and_bound_edit(workspace):
     assert result.changed == ("sample.py::target",)
     edit(path, "def sibling(value):\n    return value * 2\n")
     assert evaluator.evaluate(workspace.root, context).changed == ("sample.py::target",)
+
+
+@pytest.mark.parametrize("fallback", [False, True])
+@pytest.mark.parametrize("short_name", [False, True])
+@pytest.mark.parametrize("kind", ["method", "function", "class"])
+@pytest.mark.parametrize("mutation", ["add", "change", "remove", "multiline"])
+def test_python_decorator_changes_revalidate_binding(
+    workspace, monkeypatch, fallback, short_name, kind, mutation
+):
+    require_parser()
+    if fallback:
+        monkeypatch.delitem(code_indexer.ENTITY_QUERIES, "python")
+    path = workspace.root / "sample.py"
+    if kind == "method":
+        prefix, indent = "class Service:\n", "    "
+        definition = "def target(value):\n        return value\n"
+        qualified_name = "sample.Service.target"
+    elif kind == "function":
+        prefix, indent = "", ""
+        definition = "def target(value):\n    return value\n"
+        qualified_name = "sample.target"
+    else:
+        prefix, indent = "", ""
+        definition = "class target:\n    value = 1\n"
+        qualified_name = "sample.target"
+    before = "" if mutation == "add" else f"{indent}@route('old')\n"
+    if mutation == "multiline":
+        before = f"{indent}@route(\n{indent}    'old',\n{indent})\n"
+    after = {
+        "add": f"{indent}@route('new')\n",
+        "change": f"{indent}@route('new')\n",
+        "remove": "",
+        "multiline": f"{indent}@route(\n{indent}    'new',\n{indent})\n",
+    }[mutation]
+    original = prefix + before + indent + definition
+    path.write_text(original, encoding="utf-8")
+    name = "target" if short_name else qualified_name
+    context = context_for(workspace, [("sample.py", name)])
+    evaluator = BindingEvaluator()
+    assert evaluator.evaluate(workspace.root, context).applicability == "current"
+    edit(path, prefix + after + indent + definition)
+    result = evaluator.evaluate(workspace.root, context)
+    assert result.applicability == "needs_revalidation"
+    assert result.changed == (f"sample.py::{name}",)
+
+
+@pytest.mark.parametrize("fallback", [False, True])
+def test_python_sibling_decorator_does_not_revalidate_binding(
+    workspace, monkeypatch, fallback
+):
+    require_parser()
+    if fallback:
+        monkeypatch.delitem(code_indexer.ENTITY_QUERIES, "python")
+    path = workspace.root / "sample.py"
+    original = (
+        "class Service:\n"
+        "    @staticmethod\n"
+        "    def target(value):\n"
+        "        return value\n"
+        "    @route('old')\n"
+        "    def sibling(value):\n"
+        "        return value\n"
+    )
+    path.write_text(original, encoding="utf-8")
+    context = context_for(workspace, [("sample.py", "sample.Service.target")])
+    evaluator = BindingEvaluator()
+    edit(path, original.replace("@route('old')", "@route('new')"))
+    assert evaluator.evaluate(workspace.root, context).applicability == "current"
+    edit(path, original.replace("@staticmethod", "@classmethod"))
+    assert (
+        evaluator.evaluate(workspace.root, context).applicability
+        == "needs_revalidation"
+    )
+
+
+@pytest.mark.parametrize("fallback", [False, True])
+def test_typescript_decorator_owns_intervening_comment(
+    workspace, monkeypatch, fallback
+):
+    require_parser()
+    if fallback:
+        monkeypatch.delitem(code_indexer.ENTITY_QUERIES, "typescript")
+    path = workspace.root / "sample.ts"
+    original = (
+        "class Service {\n"
+        "  @route('old')\n"
+        "  // attached comment\n"
+        "  target() { return 1; }\n"
+        "  // ordinary comment containing @route('old')\n"
+        "  sibling() { return 2; }\n"
+        "}\n"
+    )
+    path.write_text(original, encoding="utf-8")
+    bound = context_for(workspace, [("sample.ts", "sample.Service.target")])
+    ordinary = context_for(workspace, [("sample.ts", "sample.Service.sibling")])
+    evaluator = BindingEvaluator()
+    edit(path, original.replace("  @route('old')", "  @route('new')"))
+    assert (
+        evaluator.evaluate(workspace.root, bound).applicability == "needs_revalidation"
+    )
+    assert evaluator.evaluate(workspace.root, ordinary).applicability == "current"
+    edit(path, original.replace("attached comment", "changed attached comment"))
+    assert (
+        evaluator.evaluate(workspace.root, bound).applicability == "needs_revalidation"
+    )
+    edit(path, original.replace("ordinary comment", "changed ordinary comment"))
+    assert evaluator.evaluate(workspace.root, bound).applicability == "current"
+    assert evaluator.evaluate(workspace.root, ordinary).applicability == "current"
+
+
+@pytest.mark.parametrize("extension", ["py", "ts"])
+def test_query_and_fallback_bindings_are_interchangeable(
+    workspace, monkeypatch, extension
+):
+    require_parser()
+    path = workspace.root / f"sample.{extension}"
+    if extension == "py":
+        language = "python"
+        original = (
+            "class Service:\n"
+            "    @route(\n"
+            "        'old',\n"
+            "    )\n"
+            "    def target(self):\n"
+            "        return 1\n"
+        )
+    else:
+        language = "typescript"
+        original = (
+            "class Service {\n"
+            "  @route('old')\n"
+            "  // attached comment\n"
+            "  target() { return 1; }\n"
+            "}\n"
+        )
+    path.write_text(original, encoding="utf-8")
+    refs = [(path.name, "sample.Service.target")]
+    query_context = context_for(workspace, refs)
+    monkeypatch.delitem(code_indexer.ENTITY_QUERIES, language)
+    fallback_context = context_for(workspace, refs)
+    assert fallback_context == query_context
+    evaluator = BindingEvaluator()
+    assert evaluator.evaluate(workspace.root, query_context).applicability == "current"
+    edit(path, original.replace("'old'", "'new'"))
+    for context in (query_context, fallback_context):
+        assert (
+            evaluator.evaluate(workspace.root, context).applicability
+            == "needs_revalidation"
+        )
+
+
+@pytest.mark.parametrize(
+    "bounds",
+    [
+        {"binding_line_start": None},
+        {"binding_line_start": True},
+        {"binding_line_start": "1"},
+        {"binding_line_start": 1.0},
+        {"binding_line_start": 0},
+        {"binding_line_start": 3},
+        {"line_start": True},
+        {"line_end": True},
+        {"line_end": 100},
+    ],
+)
+def test_invalid_binding_span_is_unverifiable(workspace, monkeypatch, bounds):
+    require_parser()
+    path = workspace.root / "sample.py"
+    path.write_text("@route('old')\ndef target():\n    return 1\n", encoding="utf-8")
+    context = context_for(workspace, [("sample.py", "sample.target")])
+    producer = discovery_operations.default_code_indexer_factory()
+
+    class InvalidSpanProducer:
+        available = True
+
+        def get_supported_extensions(self):
+            return producer.get_supported_extensions()
+
+        def index_source_strict(self, *args):
+            return [
+                {**entity, **bounds} for entity in producer.index_source_strict(*args)
+            ]
+
+    monkeypatch.setattr(
+        discovery_operations, "default_code_indexer_factory", InvalidSpanProducer
+    )
+    result = BindingEvaluator().evaluate(workspace.root, context)
+    assert result.applicability == "unverifiable"
+    assert result.changed == ()
+    with pytest.raises(CodeBindingError):
+        capture_bindings(workspace, [("sample.py", "sample.target")])
+
+
+def test_legacy_decorated_binding_requires_revalidation(workspace, monkeypatch):
+    require_parser()
+    path = workspace.root / "sample.py"
+    path.write_text("@route('old')\ndef target():\n    return 1\n", encoding="utf-8")
+    producer = discovery_operations.default_code_indexer_factory()
+
+    class NavigationSpanProducer:
+        available = True
+
+        def get_supported_extensions(self):
+            return producer.get_supported_extensions()
+
+        def index_source_strict(self, *args):
+            return [
+                {
+                    key: value
+                    for key, value in entity.items()
+                    if key != "binding_line_start"
+                }
+                for entity in producer.index_source_strict(*args)
+            ]
+
+    with monkeypatch.context() as patch:
+        patch.setattr(
+            discovery_operations, "default_code_indexer_factory", NavigationSpanProducer
+        )
+        context = context_for(workspace, [("sample.py", "sample.target")])
+        assert (
+            BindingEvaluator().evaluate(workspace.root, context).applicability
+            == "current"
+        )
+    assert (
+        BindingEvaluator().evaluate(workspace.root, context).applicability
+        == "needs_revalidation"
+    )
 
 
 def test_capture_rejects_workspace_escape(workspace):

@@ -432,10 +432,28 @@ class TreeSitterIndexer:
                         def_node, source, lang, file_path
                     ),
                     "line_start": def_node.start_point[0] + 1,  # 1-indexed
+                    "binding_line_start": self._binding_line_start(def_node, source),
                     "line_end": def_node.end_point[0] + 1,
                     "signature": signature,
                     "docstring": docstring,
                 }
+
+    def _binding_line_start(self, node, source: bytes) -> int:
+        parent = node.parent
+        if parent is not None and parent.type == "decorated_definition":
+            return parent.start_point[0] + 1
+
+        start = node.start_point[0] + 1
+        current = node
+        previous = current.prev_named_sibling
+        while previous is not None and previous.type in {"decorator", "comment"}:
+            if source[previous.end_byte : current.start_byte].strip():
+                break
+            if previous.type == "decorator":
+                start = previous.start_point[0] + 1
+            current = previous
+            previous = current.prev_named_sibling
+        return start
 
     def _is_descendant(self, ancestor, node) -> bool:
         """Check if node is a descendant of ancestor."""
@@ -565,6 +583,7 @@ class TreeSitterIndexer:
                         node, source, lang, file_path
                     ),
                     "line_start": node.start_point[0] + 1,
+                    "binding_line_start": self._binding_line_start(node, source),
                     "line_end": node.end_point[0] + 1,
                     "signature": self._extract_signature(node, source),
                     "docstring": None,

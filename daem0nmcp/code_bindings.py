@@ -180,11 +180,16 @@ def _fingerprint(path: Path, root: Path, source: bytes, name: str | None) -> str
                 raise _UnverifiableBindingError("code parser returned invalid entities")
             if name not in (entity.get("qualified_name"), entity.get("name")):
                 continue
-            start, end = entity.get("line_start"), entity.get("line_end")
+            navigation_start, end = entity.get("line_start"), entity.get("line_end")
+            start = entity.get("binding_line_start", navigation_start)
             if (
                 not isinstance(start, int)
+                or isinstance(start, bool)
+                or not isinstance(navigation_start, int)
+                or isinstance(navigation_start, bool)
                 or not isinstance(end, int)
-                or not 1 <= start <= end <= len(lines)
+                or isinstance(end, bool)
+                or not 1 <= start <= navigation_start <= end <= len(lines)
             ):
                 raise _UnverifiableBindingError(
                     "code parser returned invalid line bounds"
