@@ -5,7 +5,9 @@ from __future__ import annotations
 import hashlib
 import re
 from collections import OrderedDict
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Iterable, Iterator, Mapping, Sequence
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from pathlib import Path, PureWindowsPath
 from threading import Lock
@@ -14,6 +16,8 @@ from typing import Literal, Protocol, runtime_checkable
 from .workspace import IndexPathError, Workspace, resolve_index_file
 
 _MAX_BINDING_FILE_BYTES = 5 * 1024 * 1024
+_MAX_BINDING_BATCH_BYTES = 32 * 1024 * 1024
+_MAX_CACHED_SOURCE_BYTES = 32 * 1024 * 1024
 _FINGERPRINT = re.compile(r"[0-9a-f]{64}\Z")
 _HEAD = re.compile(r"[0-9a-f]{40,64}\Z")
 
@@ -125,14 +129,34 @@ class _FileSnapshot:
     fingerprints: dict[str | None, str] = field(default_factory=dict)
 
 
-def _read_source(path: Path) -> bytes:
+@dataclass(slots=True)
+class _ReadBatch:
+    remaining_bytes: int
+    sources: dict[Path, bytes] = field(default_factory=dict)
+
+
+def _read_source(path: Path, batch: _ReadBatch | None = None) -> bytes:
+    remaining = batch.remaining_bytes if batch is not None else None
+    if remaining == 0:
+        raise _UnverifiableBindingError("binding read budget is exhausted")
+    limit = (
+        min(_MAX_BINDING_FILE_BYTES, remaining)
+        if remaining is not None
+        else _MAX_BINDING_FILE_BYTES
+    )
     try:
         with path.open("rb") as source_file:
-            source = source_file.read(_MAX_BINDING_FILE_BYTES + 1)
+            source = source_file.read(limit)
+            overflow = source_file.read(1) if len(source) == limit else b""
     except OSError as exc:
         raise CodeBindingError("bound file cannot be read") from exc
-    if len(source) > _MAX_BINDING_FILE_BYTES:
+    raw_bytes = len(source) + len(overflow)
+    if batch is not None:
+        batch.remaining_bytes = max(0, batch.remaining_bytes - raw_bytes)
+    if raw_bytes > _MAX_BINDING_FILE_BYTES:
         raise CodeBindingError("bound file exceeds size limit")
+    if remaining is not None and raw_bytes > remaining:
+        raise _UnverifiableBindingError("binding read budget is exhausted")
     return source.replace(b"\r\n", b"\n")
 
 
@@ -206,11 +230,46 @@ def capture_bindings(
 
 
 class BindingEvaluator:
-    """Reuse bounded parsed snapshots only while their source content agrees."""
+    """Reuse parsed snapshots capped by entries and normalized source bytes.
+
+    The source-byte cap is not a total heap cap for parsers or fingerprints.
+    """
 
     def __init__(self) -> None:
         self._lock = Lock()
         self._cache: OrderedDict[Path, _FileSnapshot] = OrderedDict()
+        self._cached_source_bytes = 0
+        self._batch_context: ContextVar[_ReadBatch | None] = ContextVar(
+            "binding_read_batch", default=None
+        )
+
+    @contextmanager
+    def read_batch(
+        self, *, budget_bytes: int = _MAX_BINDING_BATCH_BYTES
+    ) -> Iterator[None]:
+        """Memoize each resolved source within this context, not atomically.
+
+        Every evaluation still resolves and stats the file before using its
+        memoized bytes. Later content edits become visible in the next batch or
+        an unbatched evaluation; this is not an atomic filesystem snapshot.
+        The internal budget counts raw bytes before newline normalization,
+        including failed size/budget probes, but not failed OSError reads.
+        Reads deliver at most the budget plus one overflow-probe byte in total;
+        memo hits are free and stat-based refusals preserve the remaining budget.
+        """
+        if (
+            not isinstance(budget_bytes, int)
+            or isinstance(budget_bytes, bool)
+            or budget_bytes < 0
+        ):
+            raise ValueError("binding read budget must be a nonnegative integer")
+        if self._batch_context.get() is not None:
+            raise RuntimeError("binding read batch is already active")
+        token = self._batch_context.set(_ReadBatch(budget_bytes))
+        try:
+            yield
+        finally:
+            self._batch_context.reset(token)
 
     def _current_fingerprint(self, root: Path, binding: CodeBinding) -> str:
         try:
@@ -220,15 +279,29 @@ class BindingEvaluator:
             raise CodeBindingError("bound file is missing or inaccessible") from exc
         if stat.st_size > _MAX_BINDING_FILE_BYTES:
             raise CodeBindingError("bound file exceeds size limit")
-        source = _read_source(path)
+        batch = self._batch_context.get()
+        source = batch.sources.get(path) if batch is not None else None
+        if source is None:
+            if batch is not None and stat.st_size > batch.remaining_bytes:
+                raise _UnverifiableBindingError("binding read budget is exhausted")
+            source = _read_source(path, batch)
+            if batch is not None:
+                batch.sources[path] = source
         with self._lock:
             snapshot = self._cache.get(path)
             if snapshot is None or snapshot.source != source:
+                if snapshot is not None:
+                    self._cached_source_bytes -= len(snapshot.source)
                 snapshot = _FileSnapshot(source)
                 self._cache[path] = snapshot
-                if len(self._cache) > 256:
-                    self._cache.popitem(last=False)
+                self._cached_source_bytes += len(source)
             self._cache.move_to_end(path)
+            while (
+                len(self._cache) > 256
+                or self._cached_source_bytes > _MAX_CACHED_SOURCE_BYTES
+            ):
+                _, evicted = self._cache.popitem(last=False)
+                self._cached_source_bytes -= len(evicted.source)
             if (
                 binding.qualified_name is not None
                 and binding.qualified_name in snapshot.fingerprints

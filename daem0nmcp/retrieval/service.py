@@ -638,21 +638,22 @@ class RetrievalService:
 
         def evaluate() -> tuple[SelectedEvidence, ...]:
             evaluated = []
-            for source in selected:
-                evaluation = (
-                    self._binding_evaluator.evaluate(root, source.binding_context)
-                    if source.code_bindings
-                    else None
-                )
-                evaluated.append(
-                    replace(
-                        source,
-                        applicability=evaluation.applicability,
-                        changed_bindings=evaluation.changed,
+            with self._binding_evaluator.read_batch():
+                for source in selected:
+                    evaluation = (
+                        self._binding_evaluator.evaluate(root, source.binding_context)
+                        if source.code_bindings
+                        else None
                     )
-                    if evaluation is not None
-                    else source
-                )
+                    evaluated.append(
+                        replace(
+                            source,
+                            applicability=evaluation.applicability,
+                            changed_bindings=evaluation.changed,
+                        )
+                        if evaluation is not None
+                        else source
+                    )
             return tuple(evaluated)
 
         try:

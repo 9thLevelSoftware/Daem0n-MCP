@@ -190,8 +190,16 @@ Other intents still compute their distinct shadow variant.
 Repository code-binding checks validate current bounded source content rather
 than trusting file size and modification time. Parsed fingerprints are reused
 only when normalized source bytes match, so timestamp-preserving edits still
-produce `needs_revalidation`. This detects a changed binding; it is not a
-trusted test receipt or proof that the recorded guidance remains correct.
+produce `needs_revalidation`.
+
+Each recall shares successfully read files within its worker-local validation
+batch; the next recall reads them afresh. The batch permits 32 MiB of raw source
+bytes plus one overflow-detection byte. Unread bindings beyond that budget are
+`unverifiable`, not asserted current or changed. Missing and oversized files
+retain their existing `needs_revalidation` classification. Parsed source caching
+holds at most 32 MiB of normalized bytes and 256 files; this is not a total-heap
+limit. The batch is not an atomic filesystem snapshot, a trusted test receipt,
+or proof that recorded guidance remains correct.
 
 ## Resources and diagnostics
 
