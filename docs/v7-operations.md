@@ -213,8 +213,10 @@ only when normalized source bytes match, so timestamp-preserving edits still
 produce `needs_revalidation`.
 
 Each recall shares successfully read files within its worker-local validation
-batch; the next recall reads them afresh. The batch permits 32 MiB of raw source
-bytes plus one overflow-detection byte. Unread bindings beyond that budget are
+batch; the next recall reads them afresh. After exact byte verification, unchanged
+files share the cached byte object, avoiding repeated full-file comparisons
+inside that batch. The batch permits 32 MiB of raw source bytes plus one
+overflow-detection byte. Unread bindings beyond that budget are
 `unverifiable`, not asserted current or changed. Oversized files and environmental
 access failures are also `unverifiable`: inability to read does not prove a
 content change. Missing files, directory substitutions, and workspace escapes

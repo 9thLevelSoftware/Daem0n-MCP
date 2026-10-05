@@ -352,6 +352,8 @@ class BindingEvaluator:
                 snapshot = _FileSnapshot(source)
                 self._cache[path] = snapshot
                 self._cached_source_bytes += len(source)
+            if batch is not None:
+                batch.sources[path] = snapshot.source
             self._cache.move_to_end(path)
             while (
                 len(self._cache) > 256
