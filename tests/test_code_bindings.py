@@ -10,7 +10,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from daem0nmcp import code_indexer
+from daem0nmcp import code_bindings, code_indexer
 from daem0nmcp.api.v7 import discovery_operations
 from daem0nmcp.code_bindings import (
     BindingEvaluator,
@@ -463,8 +463,149 @@ def test_capture_rejects_oversized_file(workspace):
     path = workspace.root / "large.txt"
     with path.open("wb") as output:
         output.truncate(5 * 1024 * 1024 + 1)
-    with pytest.raises(CodeBindingError, match="size limit"):
+    with pytest.raises(CodeBindingReferenceError, match="size limit"):
         capture_bindings(workspace, [("large.txt", None)])
+
+
+def test_oversized_newlines_do_not_prove_normalized_content_changed(
+    workspace, monkeypatch
+):
+    monkeypatch.setattr(code_bindings, "_MAX_BINDING_FILE_BYTES", 8)
+    path = workspace.root / "notes.txt"
+    original = b"x\n" * 4
+    path.write_bytes(original)
+    context = context_for(workspace, [("notes.txt", None)])
+    evaluator = BindingEvaluator()
+    assert evaluator.evaluate(workspace.root, context).applicability == "current"
+    expanded = original.replace(b"\n", b"\r\n")
+    assert (
+        hashlib.sha256(expanded.replace(b"\r\n", b"\n")).hexdigest()
+        == (context["code_bindings"][0]["fingerprint"])
+    )
+    path.write_bytes(expanded)
+    result = evaluator.evaluate(workspace.root, context)
+    assert result.applicability == "unverifiable"
+    assert result.changed == ()
+    with pytest.raises(CodeBindingReferenceError, match="size limit"):
+        capture_bindings(workspace, [("notes.txt", None)])
+    path.write_bytes(original)
+    assert evaluator.evaluate(workspace.root, context).applicability == "current"
+
+
+@pytest.mark.parametrize("operation", ["resolve", "stat", "open"])
+@pytest.mark.parametrize("error_type", [PermissionError, OSError])
+def test_environmental_file_fault_is_unverifiable_and_restores_current(
+    workspace, monkeypatch, operation, error_type
+):
+    path = workspace.root / "notes.txt"
+    path.write_bytes(b"unchanged")
+    changed = workspace.root / "changed.txt"
+    changed.write_bytes(b"before")
+    context = context_for(workspace, [("notes.txt", None)])
+    mixed = context_for(workspace, [("notes.txt", None), ("changed.txt", None)])
+    changed.write_bytes(b"after")
+    evaluator = BindingEvaluator()
+    assert evaluator.evaluate(workspace.root, context).applicability == "current"
+    original = getattr(type(path), operation)
+
+    def refuse(self, *args, **kwargs):
+        if self == path:
+            raise error_type("temporary filesystem fault")
+        return original(self, *args, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(type(path), operation, refuse)
+        result = evaluator.evaluate(workspace.root, context)
+        assert result.applicability == "unverifiable"
+        assert result.changed == ()
+        result = evaluator.evaluate(workspace.root, mixed)
+        assert result.applicability == "needs_revalidation"
+        assert result.changed == ("changed.txt",)
+        if operation != "stat":
+            with pytest.raises(CodeBindingUnavailableError):
+                capture_bindings(workspace, [("notes.txt", None)])
+        else:
+            assert capture_bindings(workspace, [("notes.txt", None)])
+    assert evaluator.evaluate(workspace.root, context).applicability == "current"
+
+
+@pytest.mark.parametrize("operation", ["resolve", "stat"])
+def test_batch_memo_does_not_hide_environmental_fault(
+    workspace, monkeypatch, operation
+):
+    path = workspace.root / "notes.txt"
+    path.write_bytes(b"notes")
+    context = context_for(workspace, [("notes.txt", None)])
+    evaluator = BindingEvaluator()
+    original = getattr(type(path), operation)
+
+    def refuse(self, *args, **kwargs):
+        if self == path:
+            raise PermissionError("temporary filesystem fault")
+        return original(self, *args, **kwargs)
+
+    with evaluator.read_batch(budget_bytes=5):
+        assert evaluator.evaluate(workspace.root, context).applicability == "current"
+        with monkeypatch.context() as patch:
+            patch.setattr(type(path), operation, refuse)
+            result = evaluator.evaluate(workspace.root, context)
+            assert result.applicability == "unverifiable"
+            assert result.changed == ()
+        assert evaluator.evaluate(workspace.root, context).applicability == "current"
+
+
+@pytest.mark.parametrize(
+    "error_type", [FileNotFoundError, NotADirectoryError, IsADirectoryError]
+)
+@pytest.mark.parametrize("operation", ["resolve", "stat", "open"])
+def test_definite_path_fault_remains_changed(
+    workspace, monkeypatch, error_type, operation
+):
+    path = workspace.root / "notes.txt"
+    path.write_bytes(b"notes")
+    context = context_for(workspace, [("notes.txt", None)])
+    original = getattr(type(path), operation)
+
+    def refuse(self, *args, **kwargs):
+        if self == path:
+            raise error_type("definite path fault")
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(type(path), operation, refuse)
+    result = BindingEvaluator().evaluate(workspace.root, context)
+    assert result.applicability == "needs_revalidation"
+    assert result.changed == ("notes.txt",)
+    if operation != "stat":
+        with pytest.raises(CodeBindingError) as caught:
+            capture_bindings(workspace, [("notes.txt", None)])
+        assert type(caught.value) is CodeBindingError
+    else:
+        assert capture_bindings(workspace, [("notes.txt", None)])
+
+
+@pytest.mark.parametrize("mutation", ["deleted", "directory", "escape"])
+def test_definite_filesystem_mutation_remains_changed(
+    workspace, tmp_path_factory, mutation
+):
+    path = workspace.root / "notes.txt"
+    path.write_bytes(b"notes")
+    context = context_for(workspace, [("notes.txt", None)])
+    path.unlink()
+    if mutation == "directory":
+        path.mkdir()
+    elif mutation == "escape":
+        outside = tmp_path_factory.mktemp("outside-binding") / "notes.txt"
+        outside.write_bytes(b"notes")
+        try:
+            path.symlink_to(outside)
+        except OSError:
+            pytest.skip("symlink creation unavailable")
+    result = BindingEvaluator().evaluate(workspace.root, context)
+    assert result.applicability == "needs_revalidation"
+    assert result.changed == ("notes.txt",)
+    with pytest.raises(CodeBindingError) as caught:
+        capture_bindings(workspace, [("notes.txt", None)])
+    assert type(caught.value) is CodeBindingError
 
 
 def test_unavailable_parser_is_unverifiable(workspace, monkeypatch):
@@ -593,8 +734,12 @@ def test_read_batch_rechecks_file_constraints_before_memo(workspace, mutation):
             with path.open("wb") as output:
                 output.truncate(5 * 1024 * 1024 + 1)
         result = evaluator.evaluate(workspace.root, context)
-        assert result.applicability == "needs_revalidation"
-        assert result.changed == ("notes.md",)
+        if mutation == "missing":
+            assert result.applicability == "needs_revalidation"
+            assert result.changed == ("notes.md",)
+        else:
+            assert result.applicability == "unverifiable"
+            assert result.changed == ()
 
 
 def test_zero_read_budget_preserves_missing_binding_precedence(workspace):
@@ -672,17 +817,16 @@ def test_file_growth_during_read_never_verifies_partial_source(
     evaluator = BindingEvaluator()
     with evaluator.read_batch(budget_bytes=budget):
         result = evaluator.evaluate(workspace.root, context)
-        if grow_past_file_limit:
-            assert result.applicability == "needs_revalidation"
-            assert result.changed == ("notes.md",)
-        else:
-            assert result.applicability == "unverifiable"
-            assert result.changed == ()
+        assert result.applicability == "unverifiable"
+        assert result.changed == ()
         assert evaluator.evaluate(workspace.root, small).applicability == "unverifiable"
-    assert (
-        evaluator.evaluate(workspace.root, context).applicability
-        == "needs_revalidation"
-    )
+    result = evaluator.evaluate(workspace.root, context)
+    if grow_past_file_limit:
+        assert result.applicability == "unverifiable"
+        assert result.changed == ()
+    else:
+        assert result.applicability == "needs_revalidation"
+        assert result.changed == ("notes.md",)
     with evaluator.read_batch(budget_bytes=1):
         assert evaluator.evaluate(workspace.root, small).applicability == "current"
 

@@ -10,6 +10,7 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from pathlib import Path, PureWindowsPath
+from stat import S_ISDIR
 from threading import Lock
 from typing import Literal, Protocol, runtime_checkable
 
@@ -31,11 +32,11 @@ class _UnverifiableBindingError(CodeBindingError):
 
 
 class CodeBindingUnavailableError(_UnverifiableBindingError):
-    """The server cannot currently verify a symbol binding."""
+    """The server cannot currently verify a code binding."""
 
 
 class CodeBindingReferenceError(_UnverifiableBindingError):
-    """The requested symbol reference is unsupported."""
+    """The requested code binding reference is unsupported."""
 
 
 @runtime_checkable
@@ -143,6 +144,19 @@ class _ReadBatch:
     sources: dict[Path, bytes] = field(default_factory=dict)
 
 
+def _file_error(message: str, error: BaseException) -> CodeBindingError:
+    cause: BaseException | None = error
+    while cause is not None:
+        if isinstance(
+            cause, (FileNotFoundError, NotADirectoryError, IsADirectoryError)
+        ):
+            return CodeBindingError(message)
+        if isinstance(cause, OSError):
+            return CodeBindingUnavailableError(message)
+        cause = cause.__cause__
+    return CodeBindingError(message)
+
+
 def _read_source(path: Path, batch: _ReadBatch | None = None) -> bytes:
     remaining = batch.remaining_bytes if batch is not None else None
     if remaining == 0:
@@ -157,12 +171,21 @@ def _read_source(path: Path, batch: _ReadBatch | None = None) -> bytes:
             source = source_file.read(limit)
             overflow = source_file.read(1) if len(source) == limit else b""
     except OSError as exc:
-        raise CodeBindingError("bound file cannot be read") from exc
+        error = _file_error("bound file cannot be read", exc)
+        if isinstance(error, CodeBindingUnavailableError):
+            try:
+                mode = path.stat().st_mode
+            except OSError:
+                pass
+            else:
+                if S_ISDIR(mode):
+                    error = CodeBindingError("bound file is a directory")
+        raise error from exc
     raw_bytes = len(source) + len(overflow)
     if batch is not None:
         batch.remaining_bytes = max(0, batch.remaining_bytes - raw_bytes)
     if raw_bytes > _MAX_BINDING_FILE_BYTES:
-        raise CodeBindingError("bound file exceeds size limit")
+        raise CodeBindingReferenceError("bound file exceeds size limit")
     if remaining is not None and raw_bytes > remaining:
         raise CodeBindingUnavailableError("binding read budget is exhausted")
     return source.replace(b"\r\n", b"\n")
@@ -245,9 +268,9 @@ def capture_bindings(
         relative, name = _validate_ref(*ref)
         try:
             path = resolve_index_file(workspace.root, workspace.root / relative)
-        except IndexPathError as exc:
-            raise CodeBindingError(
-                "bound file is missing or outside the workspace"
+        except (IndexPathError, OSError) as exc:
+            raise _file_error(
+                "bound file is missing or outside the workspace", exc
             ) from exc
         fingerprint = _fingerprint(path, workspace.root, _read_source(path), name)
         fingerprints.append((relative, name, fingerprint))
@@ -308,9 +331,11 @@ class BindingEvaluator:
             path = resolve_index_file(root, root / binding.relative_file_path)
             stat = path.stat()
         except (IndexPathError, OSError) as exc:
-            raise CodeBindingError("bound file is missing or inaccessible") from exc
+            raise _file_error("bound file is missing or inaccessible", exc) from exc
+        if S_ISDIR(stat.st_mode):
+            raise CodeBindingError("bound file is a directory")
         if stat.st_size > _MAX_BINDING_FILE_BYTES:
-            raise CodeBindingError("bound file exceeds size limit")
+            raise CodeBindingReferenceError("bound file exceeds size limit")
         batch = self._batch_context.get()
         source = batch.sources.get(path) if batch is not None else None
         if source is None:

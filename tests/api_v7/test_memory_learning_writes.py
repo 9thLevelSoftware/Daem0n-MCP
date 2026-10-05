@@ -269,6 +269,58 @@ class MemoryLearningWriteTests(unittest.IsolatedAsyncioTestCase):
                 )
         self.assertEqual(1, len(self._payloads()))
 
+    async def test_environmental_code_ref_failure_is_atomic_and_restorable(
+        self,
+    ) -> None:
+        first = self.fixture.root / "first.txt"
+        blocked = self.fixture.root / "blocked.txt"
+        first.write_bytes(b"first")
+        blocked.write_bytes(b"unchanged")
+        command = _store_command(code_refs=(("first.txt", None), ("blocked.txt", None)))
+        original_open = type(blocked).open
+
+        def refuse(path, *args, **kwargs):
+            if path == blocked:
+                raise PermissionError("temporary sharing violation")
+            return original_open(path, *args, **kwargs)
+
+        with (
+            patch.object(type(blocked), "open", refuse),
+            self.assertRaisesRegex(RuntimeServiceError, "CAPABILITY_DEGRADED"),
+        ):
+            await self.writer.store(self.fixture.workspace, command)
+        self.assertEqual([], self._payloads())
+        stored = await self.writer.store(self.fixture.workspace, command)
+        before = self._payloads()
+        with (
+            patch.object(type(blocked), "open", refuse),
+            self.assertRaisesRegex(RuntimeServiceError, "CAPABILITY_DEGRADED"),
+        ):
+            await self.writer.record_outcome(
+                self.fixture.workspace,
+                _outcome_command(stored.record.record_id, rebind_code=True),
+            )
+        self.assertEqual(before, self._payloads())
+        await self.writer.record_outcome(
+            self.fixture.workspace,
+            _outcome_command(stored.record.record_id, rebind_code=True),
+        )
+
+    async def test_oversized_code_ref_capture_is_invalid_and_atomic(self) -> None:
+        first = self.fixture.root / "first.txt"
+        large = self.fixture.root / "large.txt"
+        first.write_bytes(b"ok")
+        large.write_bytes(b"x\r\n" * 4)
+        with (
+            patch("daem0nmcp.code_bindings._MAX_BINDING_FILE_BYTES", 8),
+            self.assertRaisesRegex(RuntimeServiceError, "INVALID_ARGUMENT"),
+        ):
+            await self.writer.store(
+                self.fixture.workspace,
+                _store_command(code_refs=(("first.txt", None), ("large.txt", None))),
+            )
+        self.assertEqual([], self._payloads())
+
     async def _assert_missing_parser_writes(self) -> None:
         self.assertFalse(default_code_indexer_factory().available)
         source = self.fixture.root / "handler.py"

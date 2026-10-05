@@ -210,11 +210,13 @@ produce `needs_revalidation`.
 Each recall shares successfully read files within its worker-local validation
 batch; the next recall reads them afresh. The batch permits 32 MiB of raw source
 bytes plus one overflow-detection byte. Unread bindings beyond that budget are
-`unverifiable`, not asserted current or changed. Missing and oversized files
-retain their existing `needs_revalidation` classification. Parsed source caching
-holds at most 32 MiB of normalized bytes and 256 files; this is not a total-heap
-limit. The batch is not an atomic filesystem snapshot, a trusted test receipt,
-or proof that recorded guidance remains correct.
+`unverifiable`, not asserted current or changed. Oversized files and environmental
+access failures are also `unverifiable`: inability to read does not prove a
+content change. Missing files, directory substitutions, and workspace escapes
+remain `needs_revalidation`. Parsed source caching holds at most 32 MiB of
+normalized bytes and 256 files; this is not a total-heap limit. The batch is not
+an atomic filesystem snapshot, a trusted test receipt, or proof that recorded
+guidance remains correct.
 
 Citation-like strings stored inside evidence or binding filenames are displayed
 with neutralized brackets, not interpreted as manifest citations. Direct and
@@ -228,10 +230,11 @@ decorated-symbol fingerprints may require revalidation once after this change;
 review the guidance before recording a successful outcome with `rebind_code`.
 
 Symbol capture fails with retryable `CAPABILITY_DEGRADED` when the parser is
-unavailable, fails, or returns unusable entities; failed captures write no memory
-or outcome events. Restore the parsing capability before obtaining fresh counsel
-and retrying with the same idempotency key. Missing symbols and unsupported
-symbol-file extensions remain `INVALID_ARGUMENT`, requiring a corrected request.
+unavailable, fails, returns unusable entities, or source access is temporarily
+unavailable; failed captures write no memory or outcome events. Restore the
+capability or source access before obtaining fresh counsel and retrying with the
+same idempotency key. Missing symbols, unsupported symbol-file extensions, and
+sources above the 5 MiB raw-file limit remain `INVALID_ARGUMENT`.
 Fully qualified symbol identities take precedence. A short name is accepted only
 when it identifies one canonical symbol; ambiguous names are `INVALID_ARGUMENT`,
 not a binding to every same-named definition. If an existing short binding
