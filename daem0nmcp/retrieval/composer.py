@@ -12,6 +12,7 @@ import math
 import re
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field, replace
+from pathlib import PurePosixPath
 from typing import Literal, Protocol
 
 from ..bounded_workers import BoundedWorkerBusyError, BoundedWorkerPool
@@ -161,7 +162,13 @@ class RetentionPolicy:
 
 def query_identifiers(text: str) -> frozenset[str]:
     identifiers: set[str] = set()
-    for token in re.split(r"[^\w./-]+", text):
+    for token in re.split(r"[^\w./\\-]+", text):
+        token = token.replace("\\", "/")
+        if "/" in token and not token.endswith("/"):
+            rooted = token.startswith("./")
+            token = PurePosixPath(token).as_posix()
+            if rooted:
+                token = "./" + token
         if any(character in token for character in "_./") or any(
             character.isupper() for character in token[1:]
         ):
@@ -536,8 +543,8 @@ class EvidenceComposer:
         if retention is None or retention.intent not in {"implement", "debug"}:
             return False
         return bool(source.procedure_steps) or any(
-            relative == identifier
-            or relative.endswith("/" + identifier)
+            relative == identifier.removeprefix("./")
+            or (not identifier.startswith("./") and relative.endswith("/" + identifier))
             or (
                 qualified_name is not None
                 and (

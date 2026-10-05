@@ -183,6 +183,10 @@ evidence. Path and qualified-symbol queries preserve the supplied scope rather
 than promoting same-named files or symbols elsewhere. Bare names remain
 intentionally broader. This affects context selection, not stored-record
 retention or authorization.
+Query path tokens normalize Windows separators and repeated slashes. An explicit
+`./` remains workspace-root scoped: `./router.ts` does not match
+`src/http/router.ts`, while the bare `router.ts` may. These query-text aliases
+do not relax normalized POSIX path arguments or workspace containment.
 Explore requests retain baseline packing in every retention mode; shadow mode
 reuses that identical composition instead of packing the same evidence twice.
 Other intents still compute their distinct shadow variant.

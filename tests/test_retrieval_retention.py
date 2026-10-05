@@ -55,6 +55,9 @@ class RetentionComposerTests(unittest.TestCase):
         )
         cases = (
             ("src/http/router.ts", True),
+            ("./src/http/router.ts", True),
+            ("src//http/router.ts", True),
+            (r"src\http\router.ts", True),
             ("http/router.ts", True),
             ("router.ts", True),
             ("pkg.Router.apply_routes", True),
@@ -62,10 +65,15 @@ class RetentionComposerTests(unittest.TestCase):
             ("apply_routes", True),
             ("src/http/other.ts", False),
             ("src/admin/router.ts", False),
+            ("./src/admin/router.ts", False),
+            ("src//admin/router.ts", False),
+            (r"src\admin\router.ts", False),
             ("admin/router.ts", False),
             ("other.Router.apply_routes", False),
             ("unrelated.Symbol", False),
+            ("./router.ts", False),
             ("src/", False),
+            (r"src\http" + "\\", False),
         )
         for intent in ("implement", "debug"):
             for identifier, expected in cases:
