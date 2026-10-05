@@ -321,6 +321,44 @@ class MemoryLearningWriteTests(unittest.IsolatedAsyncioTestCase):
             )
         self.assertEqual([], self._payloads())
 
+    async def test_later_missing_shared_source_symbol_is_atomic_and_restorable(
+        self,
+    ) -> None:
+        if not default_code_indexer_factory().available:
+            self.skipTest("code parser is unavailable")
+        source = self.fixture.root / "handler.py"
+        first = "def first():\n    return 1\n"
+        both = first + "\ndef second():\n    return 2\n"
+        command = _store_command(
+            code_refs=(("handler.py", "first"), ("./handler.py", "second"))
+        )
+
+        def records():
+            with closing(sqlite3.connect(self.fixture.database)) as connection:
+                return connection.execute(
+                    "SELECT * FROM memory_records ORDER BY record_id"
+                ).fetchall()
+
+        source.write_text(first, encoding="utf-8")
+        before_records = records()
+        with self.assertRaisesRegex(RuntimeServiceError, "INVALID_ARGUMENT"):
+            await self.writer.store(self.fixture.workspace, command)
+        self.assertEqual([], self._payloads())
+        self.assertEqual(before_records, records())
+        source.write_text(both, encoding="utf-8")
+        stored = await self.writer.store(self.fixture.workspace, command)
+        before_events = self._payloads()
+        before_records = records()
+        source.write_text(first, encoding="utf-8")
+        outcome = _outcome_command(stored.record.record_id, rebind_code=True)
+        with self.assertRaisesRegex(RuntimeServiceError, "INVALID_ARGUMENT"):
+            await self.writer.record_outcome(self.fixture.workspace, outcome)
+        self.assertEqual(before_events, self._payloads())
+        self.assertEqual(before_records, records())
+        source.write_text(both.replace("return 2", "return 3"), encoding="utf-8")
+        await self.writer.record_outcome(self.fixture.workspace, outcome)
+        self.assertEqual(2, len(self._payloads()))
+
     async def _assert_missing_parser_writes(self) -> None:
         self.assertFalse(default_code_indexer_factory().available)
         source = self.fixture.root / "handler.py"

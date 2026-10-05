@@ -50,6 +50,134 @@ def require_parser():
         pytest.skip("tree-sitter parser unavailable")
 
 
+@pytest.mark.parametrize("whole_file_first", [False, True])
+def test_capture_shared_source_is_consistent_and_next_capture_is_fresh(
+    workspace, monkeypatch, whole_file_first
+):
+    require_parser()
+    path = workspace.root / "sample.py"
+    target_spans = (
+        "@overload\ndef target(value: int) -> int: ...",
+        "@overload\ndef target(value: str) -> str: ...",
+        "@route('original')\ndef target(value):\n    return value",
+    )
+    sibling_span = "@route('original')\ndef sibling():\n    return 2"
+    original = (
+        "from typing import overload\n\n"
+        + "\n\n".join((*target_spans, sibling_span))
+        + "\n"
+    ).encode()
+    replacement = (
+        original.replace(b"original", b"changed")
+        .replace(b"value: int", b"value: float")
+        .replace(b"return value", b"return value + 1")
+        .replace(b"return 2", b"return 200")
+    )
+    refs = [
+        ("sample.py", "sample.target"),
+        ("./sample.py", "sibling"),
+        ("sample.py", None),
+        ("./sample.py", "target"),
+        ("sample.py", "sample.sibling"),
+    ]
+    if whole_file_first:
+        refs.insert(0, refs.pop(2))
+    path.write_bytes(original)
+    old_bindings = capture_bindings(workspace, refs)
+    expected = {
+        None: hashlib.sha256(original).hexdigest(),
+        "target": hashlib.sha256("\n".join(target_spans).encode()).hexdigest(),
+        "sibling": hashlib.sha256(sibling_span.encode()).hexdigest(),
+    }
+    assert [binding.fingerprint for binding in old_bindings] == [
+        expected[name.rsplit(".", 1)[-1] if name else None] for _, name in refs
+    ]
+    path.write_bytes(replacement)
+    new_bindings = capture_bindings(workspace, refs)
+    assert all(
+        old.fingerprint != new.fingerprint
+        for old, new in zip(old_bindings, new_bindings, strict=True)
+    )
+    path.write_bytes(original)
+    producer_type = type(discovery_operations.default_code_indexer_factory())
+    parse = producer_type.index_source_strict
+    pending_mutation = True
+
+    def parse_then_replace(producer, file_path, root, source):
+        nonlocal pending_mutation
+        entities = tuple(parse(producer, file_path, root, source))
+        if pending_mutation:
+            pending_mutation = False
+            path.write_bytes(replacement)
+        return entities
+
+    monkeypatch.setattr(producer_type, "index_source_strict", parse_then_replace)
+    captured = capture_bindings(workspace, refs)
+    assert path.read_bytes() == replacement
+    assert [(b.relative_file_path, b.qualified_name) for b in captured] == refs
+    assert captured == old_bindings
+    assert capture_bindings(workspace, refs) == new_bindings
+
+
+def test_capture_shared_sources_preserve_workspace_symbol_identities(workspace):
+    require_parser()
+    nested_root = workspace.root / "sub"
+    nested_root.mkdir()
+    nested = WorkspaceRegistry([nested_root], default_root=nested_root).default
+    path = nested_root / "__init__.py"
+    path.write_bytes(
+        b"@route('original')\ndef handler():\n    return 1\n\n"
+        b"def sibling():\n    return 2\n"
+    )
+    parent = capture_bindings(
+        workspace,
+        [
+            ("sub/__init__.py", "sub.handler"),
+            ("sub/./__init__.py", "handler"),
+            ("sub/__init__.py", "sub.sibling"),
+            ("sub/__init__.py", None),
+        ],
+    )
+    child = capture_bindings(
+        nested,
+        [
+            ("__init__.py", "handler"),
+            ("./__init__.py", "handler"),
+            ("__init__.py", "sibling"),
+            ("__init__.py", None),
+        ],
+    )
+    assert [b.fingerprint for b in parent] == [b.fingerprint for b in child]
+    with pytest.raises(CodeBindingError, match="missing"):
+        capture_bindings(
+            nested, [("__init__.py", "handler"), ("__init__.py", "sub.handler")]
+        )
+
+
+@pytest.mark.parametrize("invalid_name", [False, True])
+def test_capture_validates_and_resolves_later_shared_source_ref(
+    workspace, monkeypatch, invalid_name
+):
+    require_parser()
+    path = workspace.root / "sample.py"
+    path.write_bytes(b"def target():\n    return 1\n")
+    producer_type = type(discovery_operations.default_code_indexer_factory())
+    parse = producer_type.index_source_strict
+
+    def parse_then_remove(producer, file_path, root, source):
+        entities = tuple(parse(producer, file_path, root, source))
+        path.unlink()
+        return entities
+
+    monkeypatch.setattr(producer_type, "index_source_strict", parse_then_remove)
+    later_name = " " if invalid_name else "target"
+    message = "reference is invalid" if invalid_name else "missing or outside"
+    with pytest.raises(CodeBindingError, match=message):
+        capture_bindings(
+            workspace, [("sample.py", "target"), ("./sample.py", later_name)]
+        )
+
+
 def test_file_binding_detects_edit_and_deletion(workspace):
     path = workspace.root / "notes.md"
     path.write_bytes(b"original\r\n")

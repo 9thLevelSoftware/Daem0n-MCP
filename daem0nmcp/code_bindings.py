@@ -305,11 +305,18 @@ def _fingerprint(
 def capture_bindings(
     workspace: Workspace, refs: Sequence[tuple[str, str | None]]
 ) -> tuple[CodeBinding, ...]:
+    """Capture a fresh first-read source view per resolved file in input order.
+
+    References are validated and resolved individually, even for shared files.
+    Sources and parsed spans live only for this call; different files and HEAD
+    are not an atomic repository snapshot.
+    """
     from .api.v7.resource_repository import read_git_output_sync
 
     if len(refs) > 16:
         raise CodeBindingError("too many code bindings")
     fingerprints = []
+    snapshots: dict[Path, _FileSnapshot] = {}
     for ref in refs:
         if not isinstance(ref, (tuple, list)) or len(ref) != 2:
             raise CodeBindingError("code binding reference is invalid")
@@ -320,7 +327,13 @@ def capture_bindings(
             raise _file_error(
                 "bound file is missing or outside the workspace", exc
             ) from exc
-        fingerprint = _fingerprint(path, workspace.root, _read_source(path), name)
+        snapshot = snapshots.get(path)
+        if snapshot is None:
+            snapshot = _FileSnapshot(_read_source(path))
+            snapshots[path] = snapshot
+        fingerprint = _fingerprint(
+            path, workspace.root, snapshot.source, name, snapshot=snapshot
+        )
         fingerprints.append((relative, name, fingerprint))
     head_raw = read_git_output_sync(workspace, ["rev-parse", "HEAD"])
     head = head_raw.decode("ascii", errors="replace").strip() if head_raw else None

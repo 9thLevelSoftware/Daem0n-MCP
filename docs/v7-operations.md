@@ -254,6 +254,11 @@ when it identifies one canonical symbol; ambiguous names are `INVALID_ARGUMENT`,
 not a binding to every same-named definition. If an existing short binding
 becomes ambiguous, recall reports `unverifiable` until it is rebound explicitly.
 Multiple definition spans belonging to the same qualified identity remain grouped.
+Each store or outcome rebind captures one fresh source view per resolved file,
+sharing it across that request's references. This prevents mixed versions of one
+file inside a binding set; the next capture reads afresh. Every reference still
+validates workspace containment. The existing 16-reference and 5 MiB raw-file
+limits remain; this is not an atomic snapshot of multiple files or Git HEAD.
 
 ## Resources and diagnostics
 
