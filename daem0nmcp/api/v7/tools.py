@@ -41,6 +41,8 @@ from .models import (
     JsonObject,
     MutationReceipt,
     Page,
+    PreflightGuidance,
+    PreflightToken,
     Preview,
     RecordId,
     RecordSummary,
@@ -49,12 +51,14 @@ from .models import (
     RelativePath,
     RetrievalData,
     RuleId,
+    RuleView,
     SelectionToken,
     Tag,
     ToolName,
     TriggerId,
     UniqueTags,
     UserJsonObject,
+    UserMediumText,
     UserText,
     UtcDateTime,
     VersionId,
@@ -65,7 +69,7 @@ from .models import (
 )
 from .policy import V7_TOOL_LEVELS, V7ArgumentNormalizer
 from .registry import PINNED_TOOL_NAMES, ManifestError, ToolSpec
-from .resources import ActiveContextItem, RuleView
+from .resources import ActiveContextItem
 
 NameText = Annotated[
     str,
@@ -83,10 +87,6 @@ UserShortText = Annotated[
 UserNameText = Annotated[
     UserText,
     StringConstraints(strict=True, min_length=1, max_length=256),
-]
-UserMediumText = Annotated[
-    UserText,
-    StringConstraints(strict=True, min_length=1, max_length=2000),
 ]
 UserLongText = Annotated[
     UserText,
@@ -113,15 +113,6 @@ IdempotencyKey = Annotated[
         min_length=8,
         max_length=128,
         pattern=r"^[A-Za-z0-9][A-Za-z0-9._~-]*$",
-    ),
-]
-PreflightToken = Annotated[
-    str,
-    StringConstraints(
-        strict=True,
-        min_length=16,
-        max_length=8192,
-        pattern=r"^[A-Za-z0-9._~-]+$",
     ),
 ]
 EditRequestId = Annotated[
@@ -394,15 +385,6 @@ class SessionBriefData(WireModel):
     covenant_next_steps: list[CovenantNextStep] = Field(
         default_factory=list, max_length=10
     )
-
-
-class PreflightGuidance(WireModel):
-    records: list[RecordSummary] = Field(default_factory=list, max_length=20)
-    rules: list[RuleView] = Field(default_factory=list, max_length=20)
-    must_do: list[UserMediumText] = Field(default_factory=list, max_length=50)
-    must_not: list[UserMediumText] = Field(default_factory=list, max_length=50)
-    ask_first: list[UserMediumText] = Field(default_factory=list, max_length=50)
-    warnings: list[UserMediumText] = Field(default_factory=list, max_length=50)
 
 
 class PreflightData(WireModel):
@@ -1065,6 +1047,36 @@ class DecisionDebateData(WireModel):
     evidence_refs: list[EvidenceRef] = Field(default_factory=list, max_length=200)
 
 
+class ToolDescriptor(WireModel):
+    name: ToolName
+    description: MediumText
+    category: NameText
+    covenant: Literal["exempt", "communion", "counsel", "destructive"]
+    read_only: bool
+    listed: bool
+    input_schema: JsonObject
+
+
+class ToolsSearchInput(WireModel):
+    query: UserShortText
+    limit: Annotated[int, Field(ge=1, le=10)] = 5
+
+
+class ToolsSearchData(WireModel):
+    tools: list[ToolDescriptor] = Field(max_length=10)
+
+
+class ToolCallInput(WireModel):
+    workspace_id: WorkspaceId
+    tool: ToolName
+    arguments: UserJsonObject = Field(default_factory=dict)
+
+
+class ToolCallData(WireModel):
+    tool: ToolName
+    data: UserJsonObject
+
+
 class SessionBriefInput(WireModel):
     workspace_id: WorkspaceId
     focus_areas: list[UserShortText] = Field(default_factory=list, max_length=10)
@@ -1152,7 +1164,7 @@ class MemoryStoreInput(WireModel):
     informed_by: InformedByRecordIds = Field(default_factory=list, max_length=32)
     code_refs: list[CodeRef] = Field(default_factory=list, max_length=16)
     idempotency_key: IdempotencyKey
-    preflight_token: PreflightToken
+    preflight_token: PreflightToken | None = None
 
     @model_validator(mode="after")
     def validate_procedure_steps(self) -> MemoryStoreInput:
@@ -1185,7 +1197,7 @@ class MemoryCapturePromoteInput(WireModel):
     context: RecordContext = Field(default_factory=dict)
     tags: UniqueTags = Field(default_factory=list, max_length=16)
     idempotency_key: IdempotencyKey
-    preflight_token: PreflightToken
+    preflight_token: PreflightToken | None = None
 
 
 class MemoryRecordOutcomeInput(WireModel):
@@ -1321,7 +1333,7 @@ class MemoryStoreBatchInput(WireModel):
     workspace_id: WorkspaceId
     records: list[MemoryCreate] = Field(min_length=1, max_length=100)
     idempotency_key: IdempotencyKey
-    preflight_token: PreflightToken
+    preflight_token: PreflightToken | None = None
 
 
 class MemoryLinkInput(WireModel):
@@ -1332,7 +1344,7 @@ class MemoryLinkInput(WireModel):
     description: OptionalUserMediumText = None
     confidence: Annotated[float, Field(ge=0, le=1, allow_inf_nan=False)] = 1.0
     idempotency_key: IdempotencyKey
-    preflight_token: PreflightToken
+    preflight_token: PreflightToken | None = None
 
     @model_validator(mode="after")
     def validate_endpoints(self) -> MemoryLinkInput:
@@ -1344,14 +1356,14 @@ class MemoryLinkInput(WireModel):
 class MemoryUnlinkInput(WireModel):
     workspace_id: WorkspaceId
     relationship_id: RelationshipId
-    preflight_token: PreflightToken
+    preflight_token: PreflightToken | None = None
 
 
 class MemoryPinSetInput(WireModel):
     workspace_id: WorkspaceId
     record_id: RecordId
     pinned: bool
-    preflight_token: PreflightToken
+    preflight_token: PreflightToken | None = None
 
 
 class ActiveContextAddInput(WireModel):
@@ -1360,19 +1372,19 @@ class ActiveContextAddInput(WireModel):
     reason: OptionalUserMediumText = None
     priority: Annotated[int, Field(ge=-100, le=100)] = 0
     expires_at: AwareDateTime | None = None
-    preflight_token: PreflightToken
+    preflight_token: PreflightToken | None = None
 
 
 class ActiveContextRemoveInput(WireModel):
     workspace_id: WorkspaceId
     active_context_id: ActiveContextId
-    preflight_token: PreflightToken
+    preflight_token: PreflightToken | None = None
 
 
 class ActiveContextClearInput(WireModel):
     workspace_id: WorkspaceId
     selection_token: SelectionToken
-    preflight_token: PreflightToken
+    preflight_token: PreflightToken | None = None
 
 
 class DocumentIngestUrlInput(WireModel):
@@ -1381,7 +1393,7 @@ class DocumentIngestUrlInput(WireModel):
     topic: UserMediumText
     chunk_size: Annotated[int, Field(ge=256, le=16_000)] = 2000
     idempotency_key: IdempotencyKey
-    preflight_token: PreflightToken
+    preflight_token: PreflightToken | None = None
 
 
 class MemoryVerifyInput(WireModel):
@@ -1402,7 +1414,7 @@ class SandboxExecutePythonInput(WireModel):
         StringConstraints(strict=True, min_length=1, max_length=100_000),
     ]
     timeout_seconds: Annotated[int, Field(ge=1, le=60)] = 30
-    preflight_token: PreflightToken
+    preflight_token: PreflightToken | None = None
 
 
 class CodeIndexInput(WireModel):
@@ -1456,7 +1468,7 @@ class CodeTodosScanAndStoreInput(WireModel):
     limit: Annotated[int, Field(ge=1, le=500)] = 100
     record_type: Literal["warning"] = "warning"
     idempotency_key: IdempotencyKey
-    preflight_token: PreflightToken
+    preflight_token: PreflightToken | None = None
 
 
 class CodeRefactorProposeInput(WireModel):
@@ -1474,7 +1486,7 @@ class RuleCreateInput(WireModel):
     warnings: list[UserMediumText] = Field(default_factory=list, max_length=50)
     priority: Annotated[int, Field(ge=-1000, le=1000)] = 0
     idempotency_key: IdempotencyKey
-    preflight_token: PreflightToken
+    preflight_token: PreflightToken | None = None
 
 
 class RulePatch(WireModel):
@@ -1497,7 +1509,7 @@ class RuleUpdateInput(WireModel):
     workspace_id: WorkspaceId
     rule_id: RuleId
     patch: RulePatch
-    preflight_token: PreflightToken
+    preflight_token: PreflightToken | None = None
 
 
 class RuleListInput(WireModel):
@@ -1515,7 +1527,7 @@ class ContextTriggerCreateInput(WireModel):
     categories: RecordTypeSet | None = None
     enabled: bool = True
     idempotency_key: IdempotencyKey
-    preflight_token: PreflightToken
+    preflight_token: PreflightToken | None = None
 
 
 class ContextTriggerListInput(WireModel):
@@ -1528,7 +1540,7 @@ class ContextTriggerListInput(WireModel):
 class ContextTriggerDeleteInput(WireModel):
     workspace_id: WorkspaceId
     trigger_id: TriggerId
-    preflight_token: PreflightToken
+    preflight_token: PreflightToken | None = None
 
 
 class MemoryRelatedInput(WireModel):
@@ -1589,7 +1601,7 @@ class CommunityRebuildInput(WireModel):
     min_community_size: Annotated[int, Field(ge=2, le=1000)] = 2
     resolution: Annotated[float, Field(gt=0, le=100, allow_inf_nan=False)] = 1.0
     idempotency_key: IdempotencyKey
-    preflight_token: PreflightToken
+    preflight_token: PreflightToken | None = None
 
 
 class EntityListInput(WireModel):
@@ -1603,7 +1615,7 @@ class EntityBackfillInput(WireModel):
     workspace_id: WorkspaceId
     force: bool = False
     idempotency_key: IdempotencyKey
-    preflight_token: PreflightToken
+    preflight_token: PreflightToken | None = None
 
 
 class EntityEvolutionTraceInput(WireModel):
@@ -1644,14 +1656,14 @@ class MemoryPrunePreviewInput(WireModel):
 
 class MemoryPruneInput(MemoryPrunePreviewInput):
     selection_token: SelectionToken
-    preflight_token: PreflightToken
+    preflight_token: PreflightToken | None = None
 
 
 class MemoryArchiveSetInput(WireModel):
     workspace_id: WorkspaceId
     record_id: RecordId
     archived: bool
-    preflight_token: PreflightToken
+    preflight_token: PreflightToken | None = None
 
 
 class MemoryDuplicatesPreviewInput(WireModel):
@@ -1661,7 +1673,7 @@ class MemoryDuplicatesPreviewInput(WireModel):
 
 class MemoryDuplicatesCleanupInput(MemoryDuplicatesPreviewInput):
     selection_token: SelectionToken
-    preflight_token: PreflightToken
+    preflight_token: PreflightToken | None = None
 
 
 class MemoryCompactionPreviewInput(WireModel):
@@ -1683,7 +1695,7 @@ class MemoryCompactionPreviewInput(WireModel):
 class MemoryCompactInput(MemoryCompactionPreviewInput):
     selection_token: SelectionToken
     idempotency_key: IdempotencyKey
-    preflight_token: PreflightToken
+    preflight_token: PreflightToken | None = None
 
 
 class ProjectionRebuildInput(WireModel):
@@ -1718,7 +1730,7 @@ class WorkspaceImportInput(WireModel):
     finalize: bool = True
     merge: bool = True
     idempotency_key: IdempotencyKey
-    preflight_token: PreflightToken
+    preflight_token: PreflightToken | None = None
 
     @model_validator(mode="after")
     def validate_import_action(self) -> WorkspaceImportInput:
@@ -1736,7 +1748,7 @@ class WorkspaceLinkInput(WireModel):
     linked_workspace_id: WorkspaceId
     relationship: WorkspaceRelationship = "related"
     label: OptionalUserMediumText = None
-    preflight_token: PreflightToken
+    preflight_token: PreflightToken | None = None
 
     @model_validator(mode="after")
     def validate_link(self) -> WorkspaceLinkInput:
@@ -1748,7 +1760,7 @@ class WorkspaceLinkInput(WireModel):
 class WorkspaceUnlinkInput(WireModel):
     workspace_id: WorkspaceId
     linked_workspace_id: WorkspaceId
-    preflight_token: PreflightToken
+    preflight_token: PreflightToken | None = None
 
 
 class WorkspaceLinksListInput(WireModel):
@@ -1771,7 +1783,7 @@ class WorkspaceConsolidationPreviewInput(WireModel):
 class WorkspaceConsolidateInput(WorkspaceConsolidationPreviewInput):
     idempotency_key: IdempotencyKey
     selection_token: SelectionToken
-    preflight_token: PreflightToken
+    preflight_token: PreflightToken | None = None
 
 
 class WorkspaceConsolidateAndArchiveSourcesInput(WorkspaceConsolidateInput):
@@ -1785,7 +1797,7 @@ class DreamDuplicatesPreviewInput(WireModel):
 class DreamDuplicatesPurgeInput(WireModel):
     workspace_id: WorkspaceId
     selection_token: SelectionToken
-    preflight_token: PreflightToken
+    preflight_token: PreflightToken | None = None
 
 
 class DecisionSimulateInput(WireModel):
@@ -1812,7 +1824,7 @@ class DecisionDebateInput(WireModel):
     ]
     max_rounds: Annotated[int, Field(ge=1, le=20)] = 5
     idempotency_key: IdempotencyKey
-    preflight_token: PreflightToken
+    preflight_token: PreflightToken | None = None
 
 
 SessionBriefOutput = ApiResponse[SessionBriefData]
@@ -1825,6 +1837,8 @@ SystemHealthOutput = ApiResponse[HealthData]
 
 _TOOL_MODELS: Mapping[str, tuple[type[WireModel], type[WireModel]]] = MappingProxyType(
     {
+        "daem0n_tools_search": (ToolsSearchInput, ToolsSearchData),
+        "daem0n_tool_call": (ToolCallInput, ToolCallData),
         "active_context_add": (ActiveContextAddInput, ActiveContextItem),
         "active_context_clear": (
             ActiveContextClearInput,
@@ -2036,6 +2050,7 @@ _OPTIONAL_TOOLS = frozenset(
 
 _READ_ONLY_TOOLS = frozenset(
     {
+        "daem0n_tools_search",
         "session_brief",
         "memory_preflight",
         "memory_capture_list",
@@ -2135,7 +2150,9 @@ _CATEGORY_TOOLS: Mapping[str, frozenset[str]] = MappingProxyType(
             }
         ),
         "edit": frozenset({"edit_preflight"}),
-        "system": frozenset({"system_health"}),
+        "system": frozenset(
+            {"system_health", "daem0n_tools_search", "daem0n_tool_call"}
+        ),
         "context": frozenset(
             {
                 "active_context_list",
@@ -2235,6 +2252,8 @@ _DASHBOARD_TOOL_URIS = {
 }
 V7_NATIVE_TOOL_NAMES = frozenset(
     {
+        "daem0n_tools_search",
+        "daem0n_tool_call",
         "edit_preflight",
         "memory_capture_list",
         "memory_capture_promote",
@@ -2366,6 +2385,11 @@ __all__ = [
     "SessionBriefOutput",
     "SystemHealthInput",
     "SystemHealthOutput",
+    "ToolCallData",
+    "ToolCallInput",
+    "ToolDescriptor",
+    "ToolsSearchData",
+    "ToolsSearchInput",
     "TOOL_DATA_MODELS",
     "TOOL_INPUT_MODELS",
     "V7_NATIVE_TOOL_NAMES",

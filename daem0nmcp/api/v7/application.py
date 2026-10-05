@@ -15,6 +15,7 @@ from pydantic import ValidationError
 
 from ...covenant import CovenantGate, InvocationScope
 from ...workspace import Workspace
+from .ceremony import CovenantCeremony
 from .errors import DATABASE_IN_USE_RETRY_AFTER_MS, ErrorCode
 from .models import CapabilityState
 from .policy import V7_TOOL_LEVELS
@@ -64,6 +65,7 @@ class V7ApplicationDependencies:
     scope_provider: Callable[[], InvocationScope | None]
     operations: Mapping[str, ToolOperation]
     response_factory: ResponseFactory
+    ceremony: CovenantCeremony | None = None
 
 
 _VIOLATION_MESSAGES: Mapping[str, str] = MappingProxyType(
@@ -84,8 +86,6 @@ _VIOLATION_MESSAGES: Mapping[str, str] = MappingProxyType(
         "PREFLIGHT_TARGET_NOT_PROTECTED": "The preflight target is not protected.",
     }
 )
-
-_DURABLE_VALIDATION_TOKEN = "durable.task.validation"
 
 
 async def _resolve(value: object) -> object:
@@ -146,18 +146,18 @@ class V7ToolRouter:
             raise ValueError("unknown v7 tool") from exc
 
         async def invoke(**arguments: Any) -> object:
-            # Durable admission persists only normalized arguments and an
-            # authorization receipt; it deliberately never persists the
-            # bearer preflight.  Recognize the exact worker-installed context
-            # before adding a syntax-only value for strict model validation.
-            # A caller-supplied value always follows the ordinary gate below.
+            # Durable admission persists credential-free normalized arguments.
+            # Only the exact worker-installed context may bypass the gate.
             candidate_arguments = dict(arguments)
             trusted_durable = (
                 "preflight_token" not in candidate_arguments
                 and is_durable_task_execution(tool_name, candidate_arguments)
             )
-            if trusted_durable and "preflight_token" in input_model.model_fields:
-                candidate_arguments["preflight_token"] = _DURABLE_VALIDATION_TOKEN
+            if durable_task_execution_var.get() is not None and not trusted_durable:
+                return self._dependencies.response_factory.begin(None).failure(
+                    ErrorCode.INVALID_ARGUMENT,
+                    "Request arguments are invalid.",
+                )
             try:
                 validated = input_model.model_validate(candidate_arguments)
             except (TypeError, ValueError, ValidationError):
@@ -196,6 +196,11 @@ class V7ToolRouter:
             durable_execution = trusted_durable and is_durable_task_execution(
                 tool_name, effective
             )
+            if durable_task_execution_var.get() is not None and not durable_execution:
+                return response.failure(
+                    ErrorCode.INVALID_ARGUMENT,
+                    "Request arguments are invalid.",
+                )
             if durable_execution:
                 execution = durable_task_execution_var.get()
                 if execution is None or not execution.transport_session_id:
@@ -228,15 +233,54 @@ class V7ToolRouter:
             token = effective.get("preflight_token")
             operation = self._dependencies.operations.get(tool_name)
             admission_only = task_admission_only_var.get()
-            violation = None
+            violation: Mapping[str, Any] | None = None
             if not durable_execution:
-                violation = self._dependencies.covenant_gate.authorize(
-                    tool_name,
-                    effective,
-                    scope,
-                    preflight_token=token if isinstance(token, str) else None,
-                    consume_capability=(operation is not None and not admission_only),
-                )
+                ceremony = self._dependencies.ceremony
+                if ceremony is None:
+                    violation = self._dependencies.covenant_gate.authorize(
+                        tool_name,
+                        effective,
+                        scope,
+                        preflight_token=token if isinstance(token, str) else None,
+                        consume_capability=(
+                            operation is not None and not admission_only
+                        ),
+                    )
+                else:
+                    outcome = await ceremony.admit(
+                        tool_name,
+                        effective,
+                        workspace,
+                        scope,
+                        preflight_token=token if isinstance(token, str) else None,
+                        consume_capability=(
+                            operation is not None and not admission_only
+                        ),
+                        counsel_mode=(
+                            "off"
+                            if operation is None
+                            else "challenge"
+                            if admission_only
+                            else "inline"
+                        ),
+                    )
+                    response = response.with_covenant(outcome.notice)
+                    violation = outcome.violation
+                    if outcome.challenge is not None:
+                        return response.failure(
+                            ErrorCode.COUNSEL_REQUIRED,
+                            "Review error.counsel, then retry exactly error.remedy.",
+                            remedy_tool=tool_name,
+                            remedy_arguments={
+                                **{
+                                    k: v
+                                    for k, v in effective.items()
+                                    if k != "preflight_token"
+                                },
+                                "preflight_token": outcome.challenge.preflight_token,
+                            },
+                            counsel=outcome.challenge,
+                        )
             if violation is not None:
                 code = str(violation.get("violation", "INTERNAL_ERROR"))
                 if code not in _VIOLATION_MESSAGES:

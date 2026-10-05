@@ -55,6 +55,7 @@ OPTIONAL_TOOLS = frozenset(
 
 READ_ONLY_TOOLS = frozenset(
     {
+        "daem0n_tools_search",
         "session_brief",
         "memory_capture_list",
         "memory_preflight",
@@ -177,6 +178,8 @@ PINNED_INPUT_FIELDS = {
         "idempotency_key",
     },
     "system_health": {"workspace_id", "include_components"},
+    "daem0n_tools_search": {"query", "limit"},
+    "daem0n_tool_call": {"workspace_id", "tool", "arguments"},
 }
 
 
@@ -259,7 +262,7 @@ class ToolManifestTests(unittest.TestCase):
         names = [spec.name for spec in specs]
         mapped_names = {name for row in V6_TO_V7_MAPPINGS for name in row.new_tools}
 
-        self.assertEqual(len(names), 75)
+        self.assertEqual(len(names), 77)
         self.assertEqual(len(names), len(set(names)))
         self.assertEqual(set(names), set(V7_TOOL_LEVELS))
         self.assertEqual(set(names), mapped_names | V7_NATIVE_TOOL_NAMES)
@@ -333,11 +336,36 @@ class ToolManifestTests(unittest.TestCase):
                     _schema_property_names(output_schema),
                     {"api_version", "ok", "data", "error", "meta"},
                 )
+                self.assertEqual(
+                    _schema_property_names(output_schema["$defs"]["ResponseMeta"]),
+                    {
+                        "request_id",
+                        "workspace_id",
+                        "started_at",
+                        "duration_ms",
+                        "warnings",
+                        "capability_states",
+                        "covenant",
+                    },
+                )
+                self.assertEqual(
+                    _schema_property_names(output_schema["$defs"]["ApiError"]),
+                    {
+                        "code",
+                        "message",
+                        "retryable",
+                        "retry_after_ms",
+                        "field_errors",
+                        "remedy",
+                        "correlation_id",
+                        "counsel",
+                    },
+                )
                 encoded = str(input_schema).lower()
                 self.assertNotIn("project_path", encoded)
                 self.assertNotIn("'action'", encoded)
 
-    def test_six_pinned_inputs_have_exact_top_level_parameters(self) -> None:
+    def test_pinned_and_gateway_inputs_have_exact_top_level_parameters(self) -> None:
         # Catches nested request objects and accidental public signature drift.
         from daem0nmcp.api.v7.tools import build_tool_specs
 
@@ -347,6 +375,24 @@ class ToolManifestTests(unittest.TestCase):
                 self.assertEqual(
                     _schema_property_names(by_name[name].input_schema), expected
                 )
+
+    def test_gateway_classification_and_required_fields_are_exact(self) -> None:
+        from daem0nmcp.api.v7.tools import build_tool_specs
+        from daem0nmcp.covenant import CovenantLevel
+
+        by_name = {spec.name: spec for spec in build_tool_specs(_handler_map())}
+        required_fields = {
+            "daem0n_tools_search": {"query"},
+            "daem0n_tool_call": {"workspace_id", "tool"},
+        }
+        for name, required in required_fields.items():
+            with self.subTest(tool=name):
+                spec = by_name[name]
+                self.assertIn(name, V7_NATIVE_TOOL_NAMES)
+                self.assertIs(spec.covenant, CovenantLevel.EXEMPT)
+                self.assertEqual(spec.category, "system")
+                self.assertFalse(spec.pinned)
+                self.assertEqual(set(spec.input_schema["required"]), required)
 
     def test_pinned_defaults_bounds_and_cross_field_rules_are_strict(self) -> None:
         # Catches coercion, unsafe paths, unbounded recall, and procedure leakage.
@@ -398,6 +444,41 @@ class ToolManifestTests(unittest.TestCase):
         self.assertEqual(procedure.procedure_steps, ["do it"])
         with self.assertRaises(ValidationError):
             MemoryStoreInput(**common, record_id="mem_" + "1" * 64)
+
+    def test_protected_tokens_are_optional_but_keep_value_bounds(self) -> None:
+        from daem0nmcp.api.v7.policy import V7ArgumentNormalizer
+        from daem0nmcp.api.v7.tools import TOOL_INPUT_MODELS, MemoryStoreInput
+
+        for name, model in TOOL_INPUT_MODELS.items():
+            token_field = model.model_fields.get("preflight_token")
+            if token_field is None:
+                continue
+            with self.subTest(tool=name):
+                self.assertFalse(token_field.is_required())
+                self.assertIsNone(token_field.default)
+                self.assertNotIn(
+                    "preflight_token", model.model_json_schema().get("required", [])
+                )
+        common = {
+            "workspace_id": "ws_" + "a" * 24,
+            "record_type": "decision",
+            "content": "Use the event store.",
+            "idempotency_key": "decision-0001",
+        }
+        self.assertIsNone(MemoryStoreInput(**common).preflight_token)
+        self.assertIsNone(
+            MemoryStoreInput(**common, preflight_token=None).preflight_token
+        )
+        normalizer = V7ArgumentNormalizer({"memory_store": MemoryStoreInput})
+        expected = normalizer("memory_store", common, ".")
+        for token in (None, "capability-token-0001"):
+            self.assertEqual(
+                normalizer("memory_store", {**common, "preflight_token": token}, "."),
+                expected,
+            )
+        for invalid in ("short", "a" * 8193, 123):
+            with self.subTest(token=invalid), self.assertRaises(ValidationError):
+                MemoryStoreInput(**common, preflight_token=invalid)
 
     def test_exactly_one_selector_models_reject_zero_or_two_selectors(self) -> None:
         # Catches ambiguous entity/code lookups that could cross object scopes.

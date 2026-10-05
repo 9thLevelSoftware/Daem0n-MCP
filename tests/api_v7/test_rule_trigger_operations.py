@@ -254,7 +254,7 @@ class RuleTriggerOperationTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_rule_create_is_opaque_atomic_and_replay_safe(self) -> None:
         """A replay must not create a second row or expose its integer key."""
-        from daem0nmcp.api.v7.resources import RuleView
+        from daem0nmcp.api.v7.models import RuleView
         from daem0nmcp.api.v7.rule_trigger_operations import (
             RuleTriggerOperationError,
         )

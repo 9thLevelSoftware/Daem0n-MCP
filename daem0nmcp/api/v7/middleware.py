@@ -55,7 +55,7 @@ else:
 
 TransportMode = Literal["stdio", "streamable-http"]
 RESOURCE_SUFFIXES = frozenset({"warnings", "failures", "rules", "active-context"})
-WORKSPACE_OPTIONAL_TOOLS = frozenset({"system_health"})
+WORKSPACE_OPTIONAL_TOOLS = frozenset({"system_health", "daem0n_tools_search"})
 
 _WORKSPACE_ID_ADAPTER = TypeAdapter(WorkspaceId)
 _ADMISSION_FAILURE = object()
@@ -130,6 +130,20 @@ def _resource_workspace_id(uri: object) -> WorkspaceId:
     ):
         raise ValueError("resource URI is not a v7 workspace resource")
     return _WORKSPACE_ID_ADAPTER.validate_python(segments[1], strict=True)
+
+
+class ListedToolsMiddleware(_MiddlewareBase):
+    """Filter discovery without changing tool resolution or invocation."""
+
+    def __init__(self, listed_tools: frozenset[str]) -> None:
+        if FASTMCP_MIDDLEWARE_AVAILABLE:
+            super().__init__()
+        self._listed = listed_tools
+
+    async def on_list_tools(
+        self, context: Any, call_next: Callable[[Any], Awaitable[Any]]
+    ) -> Any:
+        return [tool for tool in await call_next(context) if tool.name in self._listed]
 
 
 class V7InvocationMiddleware(_MiddlewareBase):
@@ -517,6 +531,7 @@ class ResourceCommunionAuthorizer:
 
 __all__ = [
     "FASTMCP_MIDDLEWARE_AVAILABLE",
+    "ListedToolsMiddleware",
     "RESOURCE_SUFFIXES",
     "ResourceAuthorizationError",
     "ResourceCommunionAuthorizer",

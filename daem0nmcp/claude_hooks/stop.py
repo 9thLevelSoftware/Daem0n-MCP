@@ -268,7 +268,6 @@ def _memory_store_suggestion(
     }
     if relative_path is not None:
         target_arguments["relative_file_path"] = relative_path
-    encoded = json.dumps(target_arguments, ensure_ascii=True, separators=(",", ":"))
     store_fields = [
         f'workspace_id="{workspace_id}"',
         f"record_type={json.dumps(target_arguments['record_type'])}",
@@ -277,20 +276,11 @@ def _memory_store_suggestion(
     ]
     if relative_path is not None:
         store_fields.append(f"relative_file_path={json.dumps(relative_path)}")
-    store_fields.extend(
-        (
-            f'idempotency_key="{target_arguments["idempotency_key"]}"',
-            'preflight_token="<token-from-memory_preflight>"',
-        )
-    )
+    store_fields.append(f'idempotency_key="{target_arguments["idempotency_key"]}"')
     return "\n".join(
         (
-            (
-                "  - mcp__daem0nmcp__memory_preflight("
-                f'workspace_id="{workspace_id}", target_tool="memory_store", '
-                f"target_arguments={encoded})"
-            ),
-            "    mcp__daem0nmcp__memory_store(" + ", ".join(store_fields) + ")",
+            "  - mcp__daem0nmcp__memory_store(" + ", ".join(store_fields) + ")",
+            "    (if COUNSEL_REQUIRED: review error.counsel, then retry error.remedy)",
         )
     )
 
@@ -372,8 +362,10 @@ async def analyse_and_remember(
         message=(
             "Daem0n: this task looks finished and no outcome was recorded. "
             "The hook wrote nothing. To keep a durable decision, ask Claude to "
-            "run memory_preflight and then memory_store for it. Once the result "
-            "is known, ask Claude to call mcp__daem0nmcp__memory_record_outcome("
+            "call memory_store directly with a stable idempotency_key. "
+            "If COUNSEL_REQUIRED: review error.counsel, then retry exactly "
+            "error.remedy. Once the result is known, ask Claude to call "
+            "mcp__daem0nmcp__memory_record_outcome("
             f'workspace_id="{workspace_id}", record_id="<mem_id>", '
             'outcome_text="<verified result>", worked=true, '
             f'idempotency_key="{outcome_key}").'

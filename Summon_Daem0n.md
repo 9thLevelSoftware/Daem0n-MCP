@@ -62,14 +62,9 @@ mcp__daem0nmcp__system_health(
 
 ## 3. Begin every scoped session
 
-Use the configured, opaque workspace selector exactly as issued. The first
-scoped call is:
+Use the configured, opaque workspace selector exactly as issued.
 
-```text
-mcp__daem0nmcp__session_brief(
-    workspace_id="<opaque-workspace-id>"
-)
-```
+The first Daem0n call in a session briefs automatically; the compact brief is returned in `meta.covenant.auto_brief`. Call `session_brief` for the full brief.
 
 The server-issued session and authenticated transport establish scope. Request
 headers, addresses, client descriptions, and arbitrary caller-supplied metadata
@@ -91,28 +86,18 @@ mcp__daem0nmcp__memory_recall(
 Treat returned evidence as counsel. Respect `must_not`, warnings, and failed
 approaches before protected work.
 
-## 5. Preflight the exact protected request
+## 5. Direct protected calls and advance planning
 
-Before `memory_store`, call `memory_preflight` for that exact tool and its exact
-arguments. Exclude only `workspace_id` and `preflight_token` from
-`target_arguments`:
+Call `memory_store` (or any protected tool) directly. If it returns `COUNSEL_REQUIRED`, read `error.counsel` (guidance and reasons), then retry exactly `error.remedy`. `memory_preflight` remains available for planning a change in advance.
 
-```text
-mcp__daem0nmcp__memory_preflight(
-    workspace_id="<opaque-workspace-id>",
-    target_tool="memory_store",
-    target_arguments={
-        "record_type": "decision",
-        "content": "Use signed session cookies",
-        "rationale": "Avoid shared server-side session state",
-        "idempotency_key": "decision-auth-cookie-0001"
-    },
-    description="Record the authentication decision"
-)
-```
+Use `daem0n_tools_search(query)`, then `daem0n_tool_call(workspace_id, tool, arguments)`.
 
-Use the returned `preflight_token` only once with the exact request it
-authorizes. If the arguments change, request a new preflight.
+Tokens remain exact-argument, single-use capabilities valid for 300 seconds,
+bound to workspace, principal, session, and tool. Respect all returned guidance.
+Defaults are `DAEM0NMCP_COVENANT_MODE=guided` and `DAEM0NMCP_TOOL_SURFACE=core`.
+Set `DAEM0NMCP_COVENANT_MODE=strict` for explicit `session_brief`, exact
+`memory_preflight`, and token-bearing writes; `DAEM0NMCP_TOOL_SURFACE=full`
+lists all registered tools.
 
 ## 6. Store durable knowledge replay-safely
 
@@ -125,8 +110,7 @@ mcp__daem0nmcp__memory_store(
     record_type="decision",
     content="Use signed session cookies",
     rationale="Avoid shared server-side session state",
-    idempotency_key="decision-auth-cookie-0001",
-    preflight_token="<token-from-memory_preflight>"
+    idempotency_key="decision-auth-cookie-0001"
 )
 ```
 
@@ -179,12 +163,12 @@ them writes Daem0n memory.
 
 | Event (matcher) | Hook | What it does | Input | Reminds only |
 |-----------------|------|--------------|-------|--------------|
-| `SessionStart` | `session_start` | Adds a line to the model's context asking it to call `session_brief` with this workspace's `workspace_id` | `CLAUDE_PROJECT_DIR` env | Yes |
-| `PreToolUse` (`Edit\|Write\|NotebookEdit`) | `pre_edit` | Inside a Daem0n project, adds a one-line `additionalContext` reminder to call `memory_recall_file` for the file and `memory_preflight` for the change; silent elsewhere | stdin event | Yes |
+| `SessionStart` | `session_start` | Explains automatic session briefing and optional `session_brief` for the full brief | `CLAUDE_PROJECT_DIR` env | Yes |
+| `PreToolUse` (`Edit\|Write\|NotebookEdit`) | `pre_edit` | Adds a one-line `additionalContext` reminder to call `memory_recall_file` through `daem0n_tool_call` for past decisions and warnings; silent outside a Daem0n project | stdin event | Yes |
 | `PreToolUse` (`Bash`) | `pre_bash` | Checks the command against Daem0n rules. Currently inert: it reads a `TOOL_INPUT` env var that Claude Code does not set | `TOOL_INPUT` env | Yes (always exits 0) |
 | `PostToolUse` (`mcp__.*__edit_preflight`) | `post_edit_preflight` | Edit-bridge plumbing: stages an `edit_preflight` receipt for a bridge edit request. Nothing in Claude Code creates those requests any more, so it is a no-op | stdin event | Yes |
 | `PostToolUse` (`Edit\|Write\|NotebookEdit`) | `post_edit` | Edit-bridge plumbing: reports a bridge-approved edit as a capture candidate. Only loads the bridge when the project is paired; a no-op in Claude Code today | stdin event | Yes |
-| `Stop`, `SubagentStop` | `stop` | When the transcript shows a finished task with no recorded outcome, shows you suggested `memory_preflight`/`memory_store`/`memory_record_outcome` calls to ask Claude for, as a `systemMessage`. Never writes memory | stdin event (`transcript_path`) | Yes |
+| `Stop`, `SubagentStop` | `stop` | Suggests direct `memory_store` calls with challenge-retry guidance and `memory_record_outcome` calls as a `systemMessage`. Never writes memory | stdin event (`transcript_path`) | Yes |
 
 No hook blocks a tool call or keeps the agent running: every hook exits 0 and none
 returns a `permissionDecision` or `decision`.
@@ -201,6 +185,6 @@ The generated source of truth for renamed or split v6 capabilities is
 [`docs/v6-to-v7-tools.json`](docs/v6-to-v7-tools.json). Consult that mapping
 instead of copying an older invocation into a prompt, hook, or skill.
 
-The complete ritual is therefore: `session_brief`, bounded `memory_recall`,
-exact `memory_preflight`, replay-safe `memory_store`, and verified
-`memory_record_outcome`, with `system_health` available for diagnostics.
+The guided ritual is automatic briefing, bounded `memory_recall`, direct
+replay-safe `memory_store` with challenge retries when needed, and verified
+`memory_record_outcome`; `memory_preflight` is available for advance planning.

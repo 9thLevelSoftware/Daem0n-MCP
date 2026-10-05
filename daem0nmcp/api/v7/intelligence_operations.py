@@ -34,11 +34,11 @@ from .errors import STABLE_ERROR_CODE_SET
 from .models import (
     EvidenceRef,
     RecordSummary,
+    RuleView,
     parse_wire_datetime,
     stored_relative_path,
 )
 from .public_ids import PublicObjectIdNotFound, PublicObjectIdRepository
-from .resources import RuleView
 from .runtime_protocols import ActiveStorageResolver, WorkerPool
 from .runtime_services import WorkspaceStorageResolver
 from .tools import (

@@ -23,6 +23,7 @@ from ...covenant import (
 from ...event_store import AppendedEvent, EventStreamConflict
 from ...retrieval import RetrievalQuery
 from ...workspace import Workspace
+from .ceremony import ArgumentNormalizer, CovenantCeremony, PreflightService
 from .errors import (
     DATABASE_IN_USE_RETRY_AFTER_MS,
     MIGRATION_REQUIRED_MESSAGE,
@@ -32,6 +33,7 @@ from .models import (
     ApiResponse,
     ApiWarning,
     CapabilityState,
+    PreflightGuidance,
     RecordSummary,
     RetrievalData,
 )
@@ -54,7 +56,6 @@ from .tools import (
     MemoryStoreOutput,
     OutcomeData,
     PreflightData,
-    PreflightGuidance,
     SessionBriefData,
     SessionBriefInput,
     SessionBriefOutput,
@@ -238,30 +239,11 @@ class PinnedWorkspaceResolver(Protocol):
     def resolve(self, workspace_id: str) -> Workspace | Awaitable[Workspace]: ...
 
 
-class ArgumentNormalizer(Protocol):
-    def __call__(
-        self,
-        operation: str,
-        arguments: Mapping[str, Any] | None,
-        workspace: str,
-    ) -> dict[str, Any]: ...
-
-
 class BriefingService(Protocol):
     def assemble(
         self,
         workspace: Workspace,
         request: SessionBriefInput,
-    ) -> object | Awaitable[object]: ...
-
-
-class PreflightService(Protocol):
-    def guidance(
-        self,
-        workspace: Workspace,
-        target_tool: str,
-        normalized_arguments: Mapping[str, Any],
-        description: str | None,
     ) -> object | Awaitable[object]: ...
 
 
@@ -299,6 +281,7 @@ class PinnedDependencies:
     response_factory: ResponseFactory = field(default_factory=ResponseFactory)
     scope_provider: Callable[[], InvocationScope | None] = invocation_scope_var.get
     clock: Callable[[], datetime] = _utc_now
+    ceremony: CovenantCeremony | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -514,11 +497,25 @@ class PinnedHandlers:
             return failure
         assert scope is not None
         call_arguments = request.model_dump()
-        violation = self._dependencies.covenant_gate.authorize(
-            "memory_preflight",
-            call_arguments,
-            scope,
-        )
+        violation: Mapping[str, Any] | None
+        if self._dependencies.ceremony is None:
+            violation = self._dependencies.covenant_gate.authorize(
+                "memory_preflight",
+                call_arguments,
+                scope,
+            )
+        else:
+            outcome = await self._dependencies.ceremony.admit(
+                "memory_preflight",
+                call_arguments,
+                workspace,
+                scope,
+                preflight_token=None,
+                consume_capability=True,
+                counsel_mode="off",
+            )
+            response = response.with_covenant(outcome.notice)
+            violation = outcome.violation
         if violation is not None:
             code = violation.get("violation")
             if code == ErrorCode.COMMUNION_REQUIRED.value:
@@ -683,11 +680,25 @@ class PinnedHandlers:
             if failure is not None:
                 return failure
             assert scope is not None
-        violation = self._dependencies.covenant_gate.authorize(
-            "memory_recall",
-            effective,
-            scope,
-        )
+        violation: Mapping[str, Any] | None
+        if durable_execution or self._dependencies.ceremony is None:
+            violation = self._dependencies.covenant_gate.authorize(
+                "memory_recall",
+                effective,
+                scope,
+            )
+        else:
+            outcome = await self._dependencies.ceremony.admit(
+                "memory_recall",
+                effective,
+                workspace,
+                scope,
+                preflight_token=None,
+                consume_capability=True,
+                counsel_mode="off",
+            )
+            response = response.with_covenant(outcome.notice)
+            violation = outcome.violation
         if violation is not None:
             code = violation.get("violation")
             if code == ErrorCode.COMMUNION_REQUIRED.value:
@@ -810,7 +821,7 @@ class PinnedHandlers:
         informed_by: list[str] | None = None,
         code_refs: list[dict[str, object]] | None = None,
         idempotency_key: str,
-        preflight_token: str,
+        preflight_token: str | None = None,
     ) -> MemoryStoreOutput:
         payload: dict[str, object] = {
             "workspace_id": workspace_id,
@@ -853,12 +864,37 @@ class PinnedHandlers:
                 exclude={"workspace_id", "preflight_token"},
             ),
         }
-        violation = self._dependencies.covenant_gate.authorize(
-            "memory_store",
-            request.model_dump(),
-            scope,
-            preflight_token=request.preflight_token,
-        )
+        violation: Mapping[str, Any] | None
+        if self._dependencies.ceremony is None:
+            violation = self._dependencies.covenant_gate.authorize(
+                "memory_store",
+                request.model_dump(),
+                scope,
+                preflight_token=request.preflight_token,
+            )
+        else:
+            outcome = await self._dependencies.ceremony.admit(
+                "memory_store",
+                request.model_dump(),
+                workspace,
+                scope,
+                preflight_token=request.preflight_token,
+                consume_capability=True,
+                counsel_mode="inline",
+            )
+            response = response.with_covenant(outcome.notice)
+            violation = outcome.violation
+            if outcome.challenge is not None:
+                return response.failure(
+                    ErrorCode.COUNSEL_REQUIRED,
+                    "Review error.counsel, then retry exactly error.remedy.",
+                    remedy_tool="memory_store",
+                    remedy_arguments={
+                        **request.model_dump(mode="json", exclude={"preflight_token"}),
+                        "preflight_token": outcome.challenge.preflight_token,
+                    },
+                    counsel=outcome.challenge,
+                )
         if violation is not None:
             code = violation.get("violation")
             try:
@@ -880,6 +916,9 @@ class PinnedHandlers:
             }:
                 remedy_tool = "memory_preflight"
                 remedy_arguments = preflight_remedy
+            elif stable_code is ErrorCode.COMMUNION_REQUIRED:
+                remedy_tool = "session_brief"
+                remedy_arguments = {"workspace_id": request.workspace_id}
             return response.failure(
                 stable_code,
                 "The preflight capability was rejected.",
@@ -934,8 +973,14 @@ class PinnedHandlers:
             )
         except Exception as exc:
             if getattr(exc, "code", None) == ErrorCode.DATABASE_IN_USE.value:
-                # authorize() already spent the token, so a retry needs a new
-                # one; the idempotency key keeps the retry replay-safe.
+                if self._dependencies.ceremony is not None:
+                    return response.failure(
+                        ErrorCode.DATABASE_IN_USE,
+                        "The workspace database is currently in use. Retry with "
+                        "the same idempotency_key.",
+                        retryable=True,
+                        retry_after_ms=DATABASE_IN_USE_RETRY_AFTER_MS,
+                    )
                 return response.failure(
                     ErrorCode.DATABASE_IN_USE,
                     "The workspace database is currently in use. Request a new "
@@ -987,11 +1032,25 @@ class PinnedHandlers:
         if failure is not None:
             return failure
         assert scope is not None
-        violation = self._dependencies.covenant_gate.authorize(
-            "memory_record_outcome",
-            request.model_dump(),
-            scope,
-        )
+        violation: Mapping[str, Any] | None
+        if self._dependencies.ceremony is None:
+            violation = self._dependencies.covenant_gate.authorize(
+                "memory_record_outcome",
+                request.model_dump(),
+                scope,
+            )
+        else:
+            outcome = await self._dependencies.ceremony.admit(
+                "memory_record_outcome",
+                request.model_dump(),
+                workspace,
+                scope,
+                preflight_token=None,
+                consume_capability=True,
+                counsel_mode="off",
+            )
+            response = response.with_covenant(outcome.notice)
+            violation = outcome.violation
         if violation is not None:
             code = violation.get("violation")
             if code == ErrorCode.COMMUNION_REQUIRED.value:
@@ -1135,7 +1194,6 @@ def build_pinned_handlers(
 
 
 __all__ = [
-    "ArgumentNormalizer",
     "BriefingService",
     "HealthService",
     "IdempotencyConflict",
@@ -1146,7 +1204,6 @@ __all__ = [
     "PinnedDependencies",
     "PinnedHandlers",
     "PinnedWorkspaceResolver",
-    "PreflightService",
     "RecallService",
     "RecordedOutcome",
     "StoredMemory",

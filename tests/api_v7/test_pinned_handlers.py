@@ -77,7 +77,7 @@ class _PreflightService:
         normalized_arguments: object,
         description: str | None,
     ) -> object:
-        from daem0nmcp.api.v7.tools import PreflightGuidance
+        from daem0nmcp.api.v7.models import PreflightGuidance
 
         expected = {
             "record_type": "decision",
@@ -1150,8 +1150,9 @@ class PinnedHandlerTests(unittest.TestCase):
         self.assertEqual(gate.state_store.status(scope)["active_capabilities"], 0)
 
     def test_description_only_preflight_returns_guidance_without_a_token(self) -> None:
+        from daem0nmcp.api.v7.models import PreflightGuidance
         from daem0nmcp.api.v7.pinned import build_pinned_handlers
-        from daem0nmcp.api.v7.tools import MemoryPreflightOutput, PreflightGuidance
+        from daem0nmcp.api.v7.tools import MemoryPreflightOutput
 
         workspace = Workspace(WORKSPACE_ID, Path.cwd())
         scope = InvocationScope("principal", "session", str(workspace.root))

@@ -61,19 +61,14 @@ the same tool in any of these exact forms:
 If none of those forms is available, proceed without Daem0n. Do not guess a
 legacy tool name.
 
-### 1. Start the scoped session
+### 1. Brief automatically
 
-Immediately call:
-
-```text
-daem0nmcp_session_brief(workspace_id="<workspace_id>")
-```
+The first Daem0n call in a session briefs automatically; the compact brief is returned in `meta.covenant.auto_brief`. Call `session_brief` for the full brief.
 
 The server-issued session and authenticated transport identity establish the
-scope. Headers, IP addresses, client information, and `_client_meta` are not
-identity inputs.
+scope. Headers, IP addresses and client information are not identity inputs.
 
-### 2. Recall and preflight before protected work
+### 2. Recall, direct writes, and advance planning
 
 Use bounded recall when you need relevant history:
 
@@ -81,24 +76,18 @@ Use bounded recall when you need relevant history:
 daem0nmcp_memory_recall(workspace_id="<workspace_id>", query="authentication", limit=10)
 ```
 
-Before a protected tool, request counsel for that exact tool and its exact
-arguments (excluding `workspace_id` and `preflight_token`):
+Call `memory_store` (or any protected tool) directly. If it returns `COUNSEL_REQUIRED`, read `error.counsel` (guidance and reasons), then retry exactly `error.remedy`. `memory_preflight` remains available for planning a change in advance.
 
-```text
-daem0nmcp_memory_preflight(
-    workspace_id="<workspace_id>",
-    target_tool="memory_store",
-    target_arguments={
-        "record_type": "decision",
-        "content": "Use signed session cookies",
-        "idempotency_key": "decision-auth-cookie-0001"
-    },
-    description="Record the authentication decision"
-)
-```
+Respect warnings, failed approaches, and `must_not` guidance. Challenge tokens
+remain exact-argument, single-use capabilities valid for 300 seconds and bound
+to workspace, principal, session, and tool.
 
-Respect warnings, failed approaches, and `must_not` guidance. Use the returned
-`preflight_token` only with the exact protected request it authorizes.
+Use `daem0n_tools_search(query)`, then `daem0n_tool_call(workspace_id, tool, arguments)`.
+
+Defaults are `DAEM0NMCP_COVENANT_MODE=guided` and `DAEM0NMCP_TOOL_SURFACE=core`.
+Set `DAEM0NMCP_COVENANT_MODE=strict` for explicit `session_brief` then exact
+`memory_preflight` and token-bearing writes; `DAEM0NMCP_TOOL_SURFACE=full`
+lists all registered tools.
 
 ### 3. Store durable decisions replay-safely
 
@@ -108,8 +97,7 @@ daem0nmcp_memory_store(
     record_type="decision",
     content="Use signed session cookies",
     rationale="Avoid server-side session state",
-    idempotency_key="decision-auth-cookie-0001",
-    preflight_token="<token-from-memory_preflight>"
+    idempotency_key="decision-auth-cookie-0001"
 )
 ```
 

@@ -26,6 +26,8 @@ V7_TOOL_LEVELS: Mapping[str, CovenantLevel] = MappingProxyType(
             "session_brief",
             "system_health",
             "covenant_status",
+            "daem0n_tools_search",
+            "daem0n_tool_call",
         ),
         **_levels(
             CovenantLevel.COMMUNION,
@@ -147,7 +149,6 @@ class V7ArgumentNormalizer:
     """Validate one v7 input model and return capability-bound arguments."""
 
     _EXCLUDED = frozenset({"workspace_id", "preflight_token"})
-    _PREFLIGHT_PLACEHOLDER = "capability-validation-placeholder"
 
     def __init__(self, input_models: Mapping[str, type[BaseModel]]) -> None:
         copied = dict(input_models)
@@ -176,9 +177,6 @@ class V7ArgumentNormalizer:
         except KeyError as exc:
             raise UnknownCovenantOperation(operation) from exc
         supplied = dict(arguments or {})
-        fields = model.model_fields
-        if "preflight_token" in fields and "preflight_token" not in supplied:
-            supplied["preflight_token"] = self._PREFLIGHT_PLACEHOLDER
         try:
             validated = model.model_validate(supplied)
             normalized = validated.model_dump(mode="json", exclude=set(self._EXCLUDED))

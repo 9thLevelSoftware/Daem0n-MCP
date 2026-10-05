@@ -43,6 +43,7 @@ from ...transport_security import (
 )
 from ...workspace import Workspace, WorkspaceRegistry
 from ...workspace_access import WorkspaceAccessPolicy
+from .ceremony import CovenantCeremony
 from .code_entity_operations import (
     CodeEntityOperationDependencies,
     build_code_entity_operations,
@@ -82,7 +83,7 @@ from .maintenance_operations import (
     MaintenanceOperationDependencies,
     build_maintenance_operations,
 )
-from .models import CapabilityState, RecordSummary, WireModel
+from .models import CapabilityState, RecordSummary, RuleView, WireModel
 from .opaque_capabilities import OpaqueCapabilityAuthority
 from .operations import CoreOperationDependencies, build_core_operations
 from .pinned import PinnedDependencies
@@ -104,7 +105,6 @@ from .resources import (
     ResourceReader,
     ResourceReadRequest,
     ResourceRow,
-    RuleView,
 )
 from .responses import ResponseFactory
 from .rule_trigger_operations import (
@@ -495,6 +495,77 @@ def _unique_text(values: list[str], *, limit: int) -> list[str]:
         if len(result) == limit:
             break
     return result
+
+
+def _compact_brief_reader(readers: ResourceRepositoryReaders):
+    async def read(workspace: Workspace) -> dict[str, object]:
+        try:
+            _active_database(workspace)
+        except ProductionConfigurationError as exc:
+            raise RuntimeServiceError(exc.code) from None
+        except Exception:
+            raise RuntimeServiceError("ACTIVE_V7_UNAVAILABLE") from None
+        snapshot_reader = readers.briefing_snapshot_reader
+        if snapshot_reader is not None:
+            snapshot = await snapshot_reader(
+                workspace,
+                warning_limit=5,
+                failure_limit=5,
+                rule_limit=50,
+                active_context_limit=1,
+                include_git_changes=False,
+            )
+            warnings = _public_items(snapshot.warnings, RecordSummary)
+            failures = _public_items(snapshot.failures, RecordSummary)
+            rules = _public_items(snapshot.rules, RuleView)
+            statistics = dict(snapshot.workspace_statistics)
+        else:
+            warnings = await _read_items(
+                readers.warning_reader,
+                workspace,
+                ResourceReadRequest("warnings", 5, "updated_at_desc"),
+                RecordSummary,
+            )
+            failures = await _read_items(
+                readers.failure_reader,
+                workspace,
+                ResourceReadRequest("failures", 5, "updated_at_desc"),
+                RecordSummary,
+            )
+            rules = await _read_items(
+                readers.rule_reader,
+                workspace,
+                ResourceReadRequest("rules", 50, "priority_desc", enabled_only=True),
+                RuleView,
+            )
+            active_context = await _read_items(
+                readers.active_context_reader,
+                workspace,
+                ResourceReadRequest("active_context", 1, "priority_desc"),
+                ActiveContextItem,
+            )
+            statistics = {
+                "warnings": len(warnings),
+                "failed_outcomes": len(failures),
+                "rules": len(rules),
+                "active_context": len(active_context),
+            }
+        return {
+            "briefed_at": datetime.now(timezone.utc),
+            "workspace_statistics": statistics,
+            "warnings": warnings,
+            "failed_records": failures,
+            "must_not": _unique_text(
+                [value for rule in rules for value in rule.must_not],
+                limit=20,
+            ),
+            "ask_first": _unique_text(
+                [value for rule in rules for value in rule.ask_first],
+                limit=20,
+            ),
+        }
+
+    return read
 
 
 def _briefing_reader(readers: ResourceRepositoryReaders):
@@ -892,6 +963,17 @@ def _assemble(
         dreaming_provider=dreaming.health,
         runtime_diagnostics_provider=runtime_health.inspect,
     )
+    preflight_service = BasicPreflightService(reader=_guidance_reader(resource_readers))
+    ceremony = (
+        CovenantCeremony(
+            covenant_gate=gate,
+            argument_normalizer=normalizer,
+            preflight_service=preflight_service,
+            brief_reader=_compact_brief_reader(resource_readers),
+        )
+        if loaded_settings.covenant_mode == "guided"
+        else None
+    )
     pinned = PinnedDependencies(
         workspace_resolver=registry,
         covenant_gate=gate,
@@ -899,13 +981,12 @@ def _assemble(
         briefing_service=BasicBriefingService(
             reader=_briefing_reader(resource_readers)
         ),
-        preflight_service=BasicPreflightService(
-            reader=_guidance_reader(resource_readers)
-        ),
+        preflight_service=preflight_service,
         recall_service=recall,
         memory_event_writer=writer,
         health_service=health,
         response_factory=ResponseFactory(),
+        ceremony=ceremony,
     )
     record_dependencies = RecordOperationDependencies(
         storage_resolver=storage_resolver,
@@ -1005,6 +1086,7 @@ def _assemble(
         rule_reader=resource_readers.rule_reader,
         active_context_reader=resource_readers.active_context_reader,
         transport_mode=transport_mode,
+        tool_surface=loaded_settings.tool_surface,
         process_principal=_local_authority_principal(loaded_settings),
         allow_unauthenticated_loopback=(
             transport_mode == "streamable-http" and auth is None

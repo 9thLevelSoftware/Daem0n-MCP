@@ -25,15 +25,11 @@ def reminder(event: dict) -> str | None:
         else None
     )
     path = relative_project_path(project, raw, event.get("cwd"))
-    recall = (
-        f"memory_recall_file(relative_file_path={json.dumps(path)})"
-        if path
-        else "memory_recall_file"
-    )
-    text = (
-        f"Daem0n: before this edit, call {recall} for past decisions and "
-        "warnings, and memory_preflight for the exact change."
-    )
+    recall = 'daem0n_tool_call(tool="memory_recall_file"'
+    if path:
+        recall += f', arguments={{"relative_file_path": {json.dumps(path)}}}'
+    recall += ")"
+    text = f"Daem0n: before this edit, call {recall} for past decisions and warnings."
     return json.dumps(
         {
             "hookSpecificOutput": {

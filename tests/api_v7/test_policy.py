@@ -26,6 +26,8 @@ PINNED_TOOLS = frozenset(
 
 GRANULAR_TOOLS = frozenset(
     {
+        "daem0n_tools_search",
+        "daem0n_tool_call",
         "active_context_list",
         "context_triggers_match",
         "session_updates_get",

@@ -15,11 +15,20 @@
 
 ## v7 Protocol Cutover
 
-The public v7 MCP surface is strict and workspace-scoped. Begin with
-`session_brief`, use `memory_recall` for bounded context, obtain an exact
-`memory_preflight` capability before protected work, write decisions through
-replay-safe `memory_store`, and finish with `memory_record_outcome`. Use
-`system_health` for diagnostics.
+The public v7 MCP surface is guided and workspace-scoped:
+
+1. The first Daem0n call in a session briefs automatically; the compact brief is returned in `meta.covenant.auto_brief`. Call `session_brief` for the full brief.
+2. Call `memory_store` (or any protected tool) directly. If it returns `COUNSEL_REQUIRED`, read `error.counsel` (guidance and reasons), then retry exactly `error.remedy`. `memory_preflight` remains available for planning a change in advance.
+3. Use `daem0n_tools_search(query)`, then `daem0n_tool_call(workspace_id, tool, arguments)`.
+
+The default listing contains nine tools; all 77 remain registered and callable.
+Set `DAEM0NMCP_TOOL_SURFACE=full` to list every tool, or
+`DAEM0NMCP_COVENANT_MODE=strict` to require explicit briefing and preflight.
+Tokens remain exact-argument bound, single-use, and valid for 300 seconds.
+Destructive operations always require a counsel challenge. Linked workspaces
+still require their own explicit `session_brief`; task submission stays strict.
+Run long-running targets directly as MCP tasks, using the full listing if
+needed; the gateway does not submit tasks. Use `system_health` for diagnostics.
 
 Each scoped call uses an opaque `workspace_id`. The supported transports are
 stdio and Streamable HTTP at `/mcp`. Read-only warnings, failures, rules, and
@@ -132,8 +141,8 @@ python -m daem0nmcp.cli uninstall-claude-hooks     # Remove
 
 | Hook | Purpose |
 |------|---------|
-| `session_start` | Suggest scoped `session_brief` at session dawn |
-| `pre_edit` | Fail closed with exact `memory_preflight` guidance |
+| `session_start` | Explain automatic briefing and optional full `session_brief` |
+| `pre_edit` | Remind agents to recall file guidance through `daem0n_tool_call` |
 | `pre_bash` | Rule enforcement on bash commands |
 | `post_edit` | Suggest replay-safe memory calls for significant changes |
 | `stop` | Suggest memory and outcome calls without writing directly |
@@ -376,17 +385,20 @@ For OpenCode setup, see the [OpenCode Integration](#opencode-integration) sectio
 
 ## v7 MCP API
 
-The v7 public API uses strict, workspace-scoped tools rather than action
-dispatch. The core protocol surface is:
+The v7 public API uses strict input schemas and opaque workspace scope. The
+default core-plus-gateway listing is:
 
 | Tool | Purpose |
 |---|---|
-| `session_brief` | Establish the server-issued session scope and return a bounded briefing |
-| `memory_preflight` | Recall guidance and issue a capability for one exact protected request |
+| `session_brief` | Return the full briefing; the first gated call already briefs automatically |
+| `memory_preflight` | Plan ahead with guidance and a capability for one exact protected request |
 | `memory_recall` | Retrieve bounded, evidence-bearing records |
 | `memory_store` | Append one replay-safe memory record |
 | `memory_record_outcome` | Append a verified success or failure outcome |
 | `system_health` | Return bounded service and projection diagnostics |
+| `edit_preflight` | Admit native edit-bridge requests |
+| `daem0n_tools_search` | Discover other registered tools and their input schemas |
+| `daem0n_tool_call` | Call a discovered tool and relay its guidance or result |
 
 The read-only JSON resources are:
 
@@ -518,6 +530,8 @@ Recognize only the exact canonical name or its host prefix:
 | `memory_store` | `mcp__daem0nmcp__memory_store` | `daem0nmcp_memory_store` |
 | `memory_record_outcome` | `mcp__daem0nmcp__memory_record_outcome` | `daem0nmcp_memory_record_outcome` |
 | `system_health` | `mcp__daem0nmcp__system_health` | `daem0nmcp_system_health` |
+| `daem0n_tools_search` | `mcp__daem0nmcp__daem0n_tools_search` | `daem0nmcp_daem0n_tools_search` |
+| `daem0n_tool_call` | `mcp__daem0nmcp__daem0n_tool_call` | `daem0nmcp_daem0n_tool_call` |
 
 Host metadata is never an identity source. Authentication comes from the
 transport, and every scoped request is resolved through `workspace_id`.
@@ -525,6 +539,9 @@ transport, and every scoped request is resolved through `workspace_id`.
 ## Usage Examples
 
 ### Session Start
+
+The first gated call returns a compact automatic brief. Request the full brief
+explicitly when needed:
 
 ```text
 session_brief(
@@ -546,24 +563,7 @@ memory_recall(
 
 ### Store a Memory
 
-First request a capability bound to the exact target arguments:
-
-```text
-memory_preflight(
-    workspace_id="<workspace_id>",
-    target_tool="memory_store",
-    target_arguments={
-        "record_type": "decision",
-        "content": "Use signed session cookies",
-        "rationale": "Avoid server-side session state",
-        "tags": ["auth", "architecture"],
-        "relative_file_path": "src/auth/session.py",
-        "idempotency_key": "decision-auth-session-0001"
-    }
-)
-```
-
-Then use the same arguments and returned token:
+Call directly; no preflight is needed for a benign write in guided mode:
 
 ```text
 memory_store(
@@ -573,10 +573,14 @@ memory_store(
     rationale="Avoid server-side session state",
     tags=["auth", "architecture"],
     relative_file_path="src/auth/session.py",
-    idempotency_key="decision-auth-session-0001",
-    preflight_token="<token-from-memory_preflight>"
+    idempotency_key="decision-auth-session-0001"
 )
 ```
+
+If the response is `COUNSEL_REQUIRED`, review `error.counsel`, then call
+`error.remedy.tool` with exactly `error.remedy.arguments`. The remedy already
+includes its pre-minted token. `memory_preflight` remains available for advance
+planning and is required in strict mode. Keep the idempotency key on retries.
 
 ### Track Outcomes
 
@@ -595,11 +599,10 @@ memory_record_outcome(
 The recommended workflow for AI agents:
 
 ```text
-session_brief
+first gated call (automatic brief)
     -> memory_recall (when relevant)
-    -> memory_preflight (exact protected tool + exact arguments)
-    -> protected tool with preflight_token
-    -> memory_store (for durable decisions, replay-safe)
+    -> protected tool directly
+    -> review error.counsel and retry error.remedy (only when challenged)
     -> memory_record_outcome (after verification, replay-safe)
 ```
 
@@ -624,12 +627,12 @@ Daem0n keeps its own state in `~/.daem0nmcp/`). Other hooks in that file are kep
 
 | Event (matcher) | Hook | What it does | Input | Reminds only |
 |-----------------|------|--------------|-------|--------------|
-| `SessionStart` | `session_start` | Adds a line to the model's context asking it to call `session_brief` with this workspace's `workspace_id` | `CLAUDE_PROJECT_DIR` env | Yes |
-| `PreToolUse` (`Edit\|Write\|NotebookEdit`) | `pre_edit` | Inside a Daem0n project, adds a one-line `additionalContext` reminder to call `memory_recall_file` for the file and `memory_preflight` for the change; silent elsewhere | stdin event | Yes |
+| `SessionStart` | `session_start` | Explains that the first Daem0n call establishes the session and brief; `session_brief` returns the full brief | `CLAUDE_PROJECT_DIR` env | Yes |
+| `PreToolUse` (`Edit\|Write\|NotebookEdit`) | `pre_edit` | Inside a Daem0n project, adds a one-line `additionalContext` reminder to call `daem0n_tool_call` targeting `memory_recall_file`; silent elsewhere | stdin event | Yes |
 | `PreToolUse` (`Bash`) | `pre_bash` | Checks the command against Daem0n rules. Currently inert: it reads a `TOOL_INPUT` env var that Claude Code does not set | `TOOL_INPUT` env | Yes (always exits 0) |
 | `PostToolUse` (`mcp__.*__edit_preflight`) | `post_edit_preflight` | Edit-bridge plumbing: stages an `edit_preflight` receipt for a bridge edit request. Nothing in Claude Code creates those requests any more, so it is a no-op | stdin event | Yes |
 | `PostToolUse` (`Edit\|Write\|NotebookEdit`) | `post_edit` | Edit-bridge plumbing: reports a bridge-approved edit as a capture candidate. Only loads the bridge when the project is paired; a no-op in Claude Code today | stdin event | Yes |
-| `Stop`, `SubagentStop` | `stop` | When the transcript shows a finished task with no recorded outcome, shows you suggested `memory_preflight`/`memory_store`/`memory_record_outcome` calls to ask Claude for, as a `systemMessage`. Never writes memory | stdin event (`transcript_path`) | Yes |
+| `Stop`, `SubagentStop` | `stop` | When the transcript shows a finished task with no recorded outcome, suggests direct `memory_store` and `memory_record_outcome` calls with counsel-challenge retry guidance as a `systemMessage`. Never writes memory | stdin event (`transcript_path`) | Yes |
 
 No hook blocks a tool call or keeps the agent running: every hook exits 0 and none
 returns a `permissionDecision` or `decision`.
@@ -1224,6 +1227,11 @@ background procedure drafts with task tags: this prevents category diversity
 from automatically rescuing the actionable procedure and tests actual packing
 under a 256-token budget. These synthetic gains are not a competitor comparison.
 The release-frozen retrieval corpus and its digest remain unchanged.
+
+`bash autoresearch.sh` runs the same offline lexical workload with 24 topics,
+seed 20261004 and a fixed event clock, emitting `METRIC coding_memory_ndcg`
+(higher is better) plus ranking, retention, validity and token metrics. It
+uses the project virtual environment and excludes wall-clock latency.
 
 ## Support
 

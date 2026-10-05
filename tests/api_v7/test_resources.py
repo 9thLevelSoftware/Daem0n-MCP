@@ -116,9 +116,9 @@ def _dependencies(
 
 class ResourceModelTests(unittest.TestCase):
     def test_documents_are_strict_json_objects_bounded_to_fifty_items(self) -> None:
+        from daem0nmcp.api.v7.models import RuleView
         from daem0nmcp.api.v7.resources import (
             ActiveContextItem,
-            RuleView,
             WarningResourceDocument,
         )
 
@@ -291,11 +291,11 @@ class ResourceHandlerTests(unittest.IsolatedAsyncioTestCase):
     async def test_rules_and_active_context_return_only_highest_priority_active_items(
         self,
     ) -> None:
+        from daem0nmcp.api.v7.models import RuleView
         from daem0nmcp.api.v7.resources import (
             ActiveContextItem,
             ResourceHandlers,
             ResourceRow,
-            RuleView,
         )
 
         def rule(index: int, priority: int, *, enabled: bool = True) -> RuleView:

@@ -521,6 +521,7 @@ def _server(roots: tuple[Path, ...]):
         settings=Settings(
             project_root=str(roots[0]),
             workspace_roots=[str(root) for root in roots],
+            tool_surface="full",
             dream_enabled=False,
         ),
         environ=PROFILE_ENVIRONMENT,
@@ -719,6 +720,11 @@ def _seeded(tool: str, base: dict[str, Any], path: tuple, kind: object, text: st
             "idempotency_key": "mech-preflight-target-0001",
         }
         return arguments
+    if (tool, path) == ("daem0n_tool_call", ("arguments",)):
+        # Gateway payloads follow the selected target's schema, not a context bag.
+        target["tool"] = "memory_search_text"
+        target["arguments"] = {"query": text}
+        return arguments
     target[name] = _seed_value(kind, text)
     return arguments
 
@@ -772,6 +778,8 @@ async def _seed_free_text(invoke, workspace_id: str, tool: str, arguments: dict)
     labels = []
     for path, kind in _free_text_paths(TOOL_INPUT_MODELS[tool]):
         label = f"{tool}.{'.'.join(map(str, path))}"
+        if (tool, path) == ("daem0n_tool_call", ("arguments",)):
+            label = "daem0n_tool_call.arguments.query"
         if label in FETCH_FIRST:
             continue
         labels.append(label)
@@ -806,7 +814,7 @@ async def _read_everything(invoke, workspace_id: str, seed) -> dict[str, str]:
         if _is_write(tool) or tool in CROSS_WORKSPACE_TOOLS:
             continue
         plain = _fresh_keys(_own_read_arguments(arguments), f"{tool}-{len(codes)}")
-        codes[tool] = _code(await invoke(tool, {"workspace_id": workspace_id, **plain}))
+        codes[tool] = _code(await _target_call(invoke, workspace_id, tool, plain))
     return codes
 
 
@@ -989,6 +997,7 @@ async def test_every_free_text_field_accepts_paths_and_every_read_survives(tmp_p
         "memory_store.procedure_steps",
         "memory_store_batch.records.0.content",
         "memory_preflight.target_arguments",
+        "daem0n_tool_call.arguments.query",
         "entity_evolution_trace.entity_name",
         "rule_update.patch.must_do",
         "workspace_link.label",

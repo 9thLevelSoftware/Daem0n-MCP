@@ -141,6 +141,110 @@ class ErrorRegistryTests(unittest.TestCase):
                 models.ApiError(**values)
 
 
+class CovenantModelTests(unittest.TestCase):
+    def test_notice_requires_content_and_preserves_user_text(self) -> None:
+        _, models = _load(self)
+        with self.assertRaises(ValidationError):
+            models.CovenantNotice()
+        brief = models.CovenantBrief(briefed_at=NOW, workspace_statistics={})
+        self.assertEqual([], brief.warnings)
+        self.assertEqual([], brief.failed_records)
+        record = models.RecordSummary(
+            record_id=RECORD_ID,
+            record_type="warning",
+            excerpt="Review the change.",
+            current_status="current",
+            content_hash="a" * 64,
+            created_at=NOW,
+            updated_at=NOW,
+        )
+        for field in ("warnings", "failed_records"):
+            with self.subTest(field=field), self.assertRaises(ValidationError):
+                models.CovenantBrief(
+                    briefed_at=NOW, workspace_statistics={}, **{field: [record] * 6}
+                )
+        counsel = models.InlineCounsel(
+            target_tool="memory_store", must_do=["Inspect C:/project/file.py."]
+        )
+        notice = models.CovenantNotice(auto_brief=brief, counsel=counsel)
+        self.assertEqual(counsel, notice.counsel)
+        for field in ("must_not", "ask_first"):
+            with self.subTest(field=field), self.assertRaises(ValidationError):
+                models.CovenantBrief(
+                    briefed_at=NOW, workspace_statistics={}, **{field: ["text"] * 21}
+                )
+        with self.assertRaises(ValidationError):
+            models.InlineCounsel(target_tool="memory_store", must_do=["text"] * 21)
+        with self.assertRaises(ValidationError):
+            models.InlineCounsel(target_tool="memory_store", must_do=["x" * 2001])
+
+    def test_challenge_bounds_and_error_code_binding(self) -> None:
+        errors, models = _load(self)
+        values = {
+            "guidance": models.PreflightGuidance(),
+            "preflight_token": "a" * 16,
+            "expires_at": NOW,
+            "reasons": ["RULE_MUST_NOT"],
+        }
+        challenge = models.CounselChallenge(**values)
+        for override in (
+            {"reasons": []},
+            {"reasons": ["RULE_WARNING"] * 8},
+            {"reasons": ["UNKNOWN_REASON"]},
+            {"preflight_token": "short"},
+            {"preflight_token": "a" * 8193},
+            {"expires_at": NOW.replace(tzinfo=None)},
+        ):
+            with self.subTest(override=override), self.assertRaises(ValidationError):
+                models.CounselChallenge(**{**values, **override})
+        common = {
+            "retryable": False,
+            "correlation_id": REQUEST_ID,
+            "counsel": challenge,
+        }
+        accepted = models.ApiError(
+            code=errors.ErrorCode.COUNSEL_REQUIRED, message="Review counsel.", **common
+        )
+        self.assertEqual(challenge, accepted.counsel)
+        with self.assertRaisesRegex(
+            ValidationError, "counsel requires COUNSEL_REQUIRED"
+        ):
+            models.ApiError(code="NOT_FOUND", message="Not found.", **common)
+        with self.assertRaisesRegex(ValidationError, "INTERNAL_ERROR cannot carry"):
+            models.ApiError(
+                code="INTERNAL_ERROR", message=errors.INTERNAL_ERROR_MESSAGE, **common
+            )
+
+    def test_envelope_property_sets_include_optional_covenant_fields(self) -> None:
+        _, models = _load(self)
+        self.assertEqual(
+            set(models.ResponseMeta.model_json_schema()["properties"]),
+            {
+                "request_id",
+                "workspace_id",
+                "started_at",
+                "duration_ms",
+                "warnings",
+                "capability_states",
+                "covenant",
+            },
+        )
+        self.assertEqual(
+            set(models.ApiError.model_json_schema()["properties"]),
+            {
+                "code",
+                "message",
+                "retryable",
+                "retry_after_ms",
+                "field_errors",
+                "remedy",
+                "correlation_id",
+                "counsel",
+            },
+        )
+        self.assertIsNone(_meta(models).covenant)
+
+
 class PrimitiveBoundaryTests(unittest.TestCase):
     def test_public_ids_are_exact_lowercase_opaque_strings(self) -> None:
         _, models = _load(self)

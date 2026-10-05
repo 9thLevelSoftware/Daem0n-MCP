@@ -32,7 +32,7 @@ from ...schema_version import CURRENT_SCHEMA_VERSION
 from ...storage_activation import DatabaseFileLock, ResolvedActiveDatabase
 from ...workspace import Workspace, normalize_resolved_path
 from .errors import is_database_busy
-from .models import RecordSummary, stored_relative_path
+from .models import RecordSummary, RuleView, stored_relative_path
 from .public_ids import PublicObjectIdRepository
 from .resources import (
     RESOURCE_FETCH_LIMIT,
@@ -40,7 +40,6 @@ from .resources import (
     ResourceReader,
     ResourceReadRequest,
     ResourceRow,
-    RuleView,
 )
 
 

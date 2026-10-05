@@ -9,10 +9,14 @@
 - Shadow-first utility ranking with immediate or discounted provenance credit, repository code-binding validity and successful-outcome rebinding, and intent-aware evidence retention across direct and linked-workspace recall.
 - Optional Python 3.11+ `late-interaction` profile for lazy ColBERT/MaxSim reranking. Missing profiles report unavailable instead of falling back to embedding reranking.
 - Graded coding-memory evaluation with deterministic lexical fixtures and optional real-provider arms, reporting ranking quality, validity, retained procedure facts, tokens and latency without changing the frozen retrieval benchmark.
+- Canonical offline `bash autoresearch.sh` harness reports coding-memory nDCG and deterministic quality metrics using the existing fixed lexical workload.
 
 ### Changed
+- Guided covenant defaults: the first gated call attaches a compact automatic brief; benign protected calls proceed with inline counsel, while relevant risk and every destructive operation return guidance and an exact retry capability. `DAEM0NMCP_COVENANT_MODE=strict` restores explicit ceremony; tokens retain exact binding, single use and 300-second expiry.
+- Core-plus-gateway listing defaults to nine tools, with all 77 still registered and callable. `daem0n_tools_search` discovers hidden schemas and `daem0n_tool_call` relays results and callable challenge remedies; `DAEM0NMCP_TOOL_SURFACE=full` lists every tool.
+- Gateway results preserve legitimate user text, including host-looking paths, after the target's typed output validation. Invalid argument diagnostics omit unsafe field names rather than breaking the public error envelope.
 - Local dense projection cleanup closes staging collection persistence before deleting it, preventing leaked SQLite handles on failed or cancelled builds.
-- Claude Code hooks remind instead of block. `pre_edit` adds a one-line `memory_recall_file`/`memory_preflight` reminder to the model's context and never denies an edit; `stop` reads its stdin event, shows suggestions as a `systemMessage` and never keeps the agent running.
+- Claude Code hooks remind instead of block. `pre_edit` adds a one-line gateway file-recall reminder; `stop` suggests direct replay-safe memory calls with counsel-challenge retry guidance. Neither hook writes memory, denies an edit, or keeps the agent running.
 - OpenCode edits are no longer gated either: the OpenCode plugin runs the same `pre_edit` hook, which now always allows the edit. The plugin does not yet show the reminder; that rework comes with the edit-bridge removal.
 - `install-claude-hooks` and `uninstall-claude-hooks` refuse to touch a `~/.claude/settings.json` that is not valid JSON, instead of replacing it.
 - The manual `hooks/daem0n_*.py` scripts are deprecated stubs that print a notice and exit 0, and `hooks/settings.json.example` is removed. If you installed them by hand, re-run `python -m daem0nmcp.cli install-claude-hooks`; it also removes the old entries.

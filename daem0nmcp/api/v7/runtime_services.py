@@ -66,6 +66,7 @@ from .federated_retrieval import (
 from .models import (
     CapabilityState,
     CitationManifestEntry,
+    PreflightGuidance,
     RecordSummary,
     RetrievalData,
     TokenUsage,
@@ -90,7 +91,6 @@ from .pinned import (
 from .tasks import await_task_terminal
 from .tools import (
     HealthData,
-    PreflightGuidance,
     SessionBriefData,
     SessionBriefInput,
 )

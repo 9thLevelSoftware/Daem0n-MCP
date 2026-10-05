@@ -716,7 +716,7 @@
                 </div>
                 <div class="feature-card">
                     <h3>The Silent Scribe</h3>
-                    <p>Read-only hooks whisper exact v7 calls as you work. Protected writes remain scoped, preflighted, and replay-safe.</p>
+                    <p>Read-only hooks whisper exact v7 calls as you work. Protected writes remain scoped and replay-safe, with inline counsel and risk challenges.</p>
                 </div>
                 <div class="feature-card">
                     <h3>The Coven Bond</h3>
@@ -724,7 +724,7 @@
                 </div>
                 <div class="feature-card">
                     <h3>Unified Workflows</h3>
-                    <p>The v7 ritual is explicit: brief, recall, preflight, store, and record the verified outcome with opaque workspace scope.</p>
+                    <p>The guided v7 ritual is automatic briefing, relevant recall, direct writes with counsel challenges when needed, and verified outcomes.</p>
                 </div>
                 <div class="feature-card">
                     <h3>Visions of the Void</h3>
@@ -825,13 +825,15 @@
                 Every scoped call uses the opaque <code>workspace_id</code> issued for the workspace.
             </p>
             <div class="ritual-code">
-<pre><span class="comment">SESSION DAWN</span>       <span class="string">session_brief(workspace_id="&lt;opaque-id&gt;")</span>
+<pre><span class="comment">FULL BRIEF (OPTIONAL)</span> <span class="string">session_brief(workspace_id="&lt;opaque-id&gt;")</span>
 <span class="comment">RELEVANT HISTORY</span>   <span class="string">memory_recall(workspace_id="&lt;opaque-id&gt;", query="topic", limit=10)</span>
-<span class="comment">BEFORE A WRITE</span>    <span class="string">memory_preflight(workspace_id="&lt;opaque-id&gt;", target_tool="memory_store", target_arguments={...})</span>
-<span class="comment">DURABLE DECISION</span>  <span class="string">memory_store(..., idempotency_key="stable-key", preflight_token="&lt;token&gt;")</span>
+<span class="comment">ADVANCE PLANNING</span>   <span class="string">memory_preflight(workspace_id="&lt;opaque-id&gt;", target_tool="memory_store", target_arguments={...})</span>
+<span class="comment">DURABLE DECISION</span>  <span class="string">memory_store(..., idempotency_key="stable-key")</span>
 <span class="comment">VERIFIED RESULT</span>  <span class="string">memory_record_outcome(..., worked=true, idempotency_key="stable-outcome-key")</span>
 <span class="comment">DIAGNOSTICS</span>      <span class="string">system_health(workspace_id="&lt;opaque-id&gt;")</span></pre>
             </div>
+            <p>The first Daem0n call briefs automatically in <code>meta.covenant.auto_brief</code>; <code>session_brief</code> returns the full brief. Call protected tools directly. On <code>COUNSEL_REQUIRED</code>, read <code>error.counsel</code>, then retry exactly <code>error.remedy</code>. <code>memory_preflight</code> remains available for advance planning.</p>
+            <p>Use <code>daem0n_tools_search(query)</code>, then <code>daem0n_tool_call(workspace_id, tool, arguments)</code> for other capabilities. Tokens remain exact-argument, single-use, and valid for 300 seconds. Defaults are guided/core; <code>DAEM0NMCP_COVENANT_MODE=strict</code> restores explicit briefing and preflight, and <code>DAEM0NMCP_TOOL_SURFACE=full</code> lists all tools.</p>
             <p class="intro-text" style="margin-top: 1.5rem; font-size: 1rem;">
                 Connect over stdio or Streamable HTTP at <code>/mcp</code>. Read-only context is available at:
             </p>

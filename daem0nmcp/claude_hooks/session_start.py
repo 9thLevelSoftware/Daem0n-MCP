@@ -104,9 +104,11 @@ def main() -> None:
         sys.exit(0)
     workspace_id = _workspace_id(project_path)
     succeed(
-        "[Daem0n] IMPORTANT: Before responding to the user, call "
+        "[Daem0n] IMPORTANT: The first Daem0n call establishes this invocation's "
+        "v7 session and brief automatically (meta.covenant.auto_brief). "
+        f'Use workspace_id="{workspace_id}". Call '
         f'mcp__daem0nmcp__session_brief(workspace_id="{workspace_id}") '
-        "to establish this invocation's v7 session scope."
+        "for the full brief."
     )
 
 

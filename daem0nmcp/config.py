@@ -39,6 +39,8 @@ class Settings(BaseSettings):
     # Server
     log_level: str = "INFO"
     ui_rendering_enabled: bool = True
+    tool_surface: Literal["core", "full"] = "core"
+    covenant_mode: Literal["guided", "strict"] = "guided"
     sync_timeout_seconds: float = Field(
         default=15.0, ge=1.0, le=60.0, allow_inf_nan=False
     )
