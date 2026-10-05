@@ -38,15 +38,16 @@ instead of copying an older invocation into this workflow.
 
 ## Session gate
 
-Before inspecting or synchronizing OpenSpec state, establish the scoped v7
-session:
+The first Daem0n call in a session briefs automatically; the compact brief is returned in `meta.covenant.auto_brief`. Call `session_brief` for the full brief.
 
-```text
-mcp__daem0nmcp__session_brief(
-    workspace_id="<opaque-workspace-id>",
-    focus_areas=["OpenSpec", "specifications", "proposal outcomes"]
-)
-```
+Call `memory_store` (or any protected tool) directly. If it returns `COUNSEL_REQUIRED`, read `error.counsel` (guidance and reasons), then retry exactly `error.remedy`. `memory_preflight` remains available for planning a change in advance.
+
+Use `daem0n_tools_search(query)`, then `daem0n_tool_call(workspace_id, tool, arguments)`.
+
+Tokens remain exact-argument, single-use, and valid for 300 seconds. Defaults
+are guided/core. `DAEM0NMCP_COVENANT_MODE=strict` requires explicit
+`session_brief`, exact `memory_preflight`, and token-bearing writes;
+`DAEM0NMCP_TOOL_SURFACE=full` lists every registered tool.
 
 Respect the returned warnings, failed outcomes, applicable rules, and next
 steps. If the tool is unavailable, continue with OpenSpec file work only; do
@@ -102,26 +103,7 @@ mcp__daem0nmcp__memory_recall(
 }
 ```
 
-6. Preflight those exact fields, excluding only `workspace_id` and the future
-   token:
-
-```text
-mcp__daem0nmcp__memory_preflight(
-    workspace_id="<opaque-workspace-id>",
-    target_tool="memory_store",
-    target_arguments={
-        "record_type": "pattern",
-        "content": "<bounded specification summary>",
-        "rationale": "OpenSpec specification is the source of truth",
-        "tags": ["openspec", "spec", "<spec-name>"],
-        "relative_file_path": "openspec/specs/<spec-name>/spec.md",
-        "idempotency_key": "openspec-spec-<stable-content-key>"
-    },
-    description="Store the reviewed OpenSpec summary"
-)
-```
-
-7. If guidance permits, make the exact protected call:
+6. Call `memory_store` directly with the reviewed fields:
 
 ```text
 mcp__daem0nmcp__memory_store(
@@ -131,8 +113,7 @@ mcp__daem0nmcp__memory_store(
     rationale="OpenSpec specification is the source of truth",
     tags=["openspec", "spec", "<spec-name>"],
     relative_file_path="openspec/specs/<spec-name>/spec.md",
-    idempotency_key="openspec-spec-<stable-content-key>",
-    preflight_token="<token-from-memory_preflight>"
+    idempotency_key="openspec-spec-<stable-content-key>"
 )
 ```
 
@@ -202,9 +183,9 @@ mcp__daem0nmcp__memory_record_outcome(
 Use `worked=false` when the implementation failed, was reverted, or did not
 meet the archived specification. State the observed failure precisely.
 
-5. Store any new reusable learning only through a fresh, exact
-   `memory_preflight` plus `memory_store` pair. Do not convert speculation into
-   a learning.
+5. Store new reusable learning through direct `memory_store`; on
+   `COUNSEL_REQUIRED`, review `error.counsel` and retry exactly `error.remedy`.
+   Do not convert speculation into a learning.
 
 ## Read-only context resources
 

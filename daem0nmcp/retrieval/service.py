@@ -13,14 +13,19 @@ import math
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
+from pathlib import Path
 from time import perf_counter_ns
 from types import MappingProxyType
-from typing import Protocol
+from typing import Literal, Protocol, runtime_checkable
 
+from ..bounded_workers import BoundedWorkerPool
+from ..code_bindings import BindingEvaluator
 from .composer import (
     CompositionResult,
+    RetentionPolicy,
     SelectedEvidence,
     _normalize_evidence_text,
+    query_identifiers,
 )
 from .fusion import (
     DEFAULT_RRF_K,
@@ -40,6 +45,11 @@ from .types import (
     RetrievalResult,
     _aware_datetime,
 )
+from .utility import UtilityContribution, UtilityEstimate, fold_utility, utility_signal
+
+_VALIDITY_WORKERS = BoundedWorkerPool(
+    max_workers=2, thread_name_prefix="daem0nmcp-validity"
+)
 
 _PROVIDER_ORDER = (
     "lexical",
@@ -50,6 +60,18 @@ _PROVIDER_ORDER = (
     "outcome",
 )
 _SUPPORTED_PROVIDERS = frozenset(_PROVIDER_ORDER)
+
+
+@runtime_checkable
+class UtilityContributionRepository(Protocol):
+    """Optional outcome-learning reads supported by canonical repositories."""
+
+    async def load_utility_contributions(
+        self,
+        workspace_id: str,
+        record_ids: tuple[str, ...],
+        transaction_at_us: int,
+    ) -> Mapping[str, tuple[UtilityContribution, ...]]: ...
 
 
 class RetrievalRepository(Protocol):
@@ -104,6 +126,8 @@ class AsyncEvidenceComposer(Protocol):
         selected: Iterable[SelectedEvidence],
         *,
         token_budget: int,
+        retention: RetentionPolicy | None = None,
+        label_applicability: bool = False,
     ) -> CompositionResult:
         """Compose under a total bounded-worker/timeout policy."""
         ...
@@ -185,6 +209,12 @@ class RetrievalService:
         provider_timeout_seconds: float = 10.0,
         weights: Mapping[str, float] = DEFAULT_RRF_WEIGHTS,
         rrf_k: int = DEFAULT_RRF_K,
+        utility_mode: Literal["off", "shadow", "apply"] = "off",
+        utility_weight: float = 0.1,
+        utility_credit: Literal["single_step", "trace"] = "trace",
+        utility_candidate_limit: int = 25,
+        validity_mode: Literal["off", "shadow", "apply"] = "off",
+        retention_mode: Literal["off", "shadow", "apply"] = "off",
     ) -> None:
         self._providers = self._validate_providers(providers)
         if not callable(
@@ -203,6 +233,37 @@ class RetrievalService:
             raise ValueError("reranker must provide rerank")
         if not isinstance(rerank_enabled, bool):
             raise ValueError("rerank_enabled must be boolean")
+        if utility_mode not in {"off", "shadow", "apply"}:
+            raise ValueError("utility_mode is invalid")
+        if utility_credit not in {"single_step", "trace"}:
+            raise ValueError("utility_credit is invalid")
+        if (
+            isinstance(utility_weight, bool)
+            or not isinstance(utility_weight, (int, float))
+            or not math.isfinite(utility_weight)
+            or not 0 <= utility_weight <= 1
+        ):
+            raise ValueError("utility_weight must be finite and between 0 and 1")
+        utility_candidate_limit = _positive_integer(
+            utility_candidate_limit, "utility_candidate_limit"
+        )
+        if utility_candidate_limit > 200:
+            raise ValueError("utility_candidate_limit must not exceed 200")
+        if utility_mode != "off" and not callable(
+            getattr(repository, "load_utility_contributions", None)
+        ):
+            raise ValueError("repository must provide utility contribution reads")
+        self._utility_mode = utility_mode
+        self._utility_weight = float(utility_weight)
+        self._utility_credit = utility_credit
+        self._utility_candidate_limit = utility_candidate_limit
+        if validity_mode not in {"off", "shadow", "apply"}:
+            raise ValueError("validity_mode is invalid")
+        self._validity_mode = validity_mode
+        self._binding_evaluator = BindingEvaluator()
+        if retention_mode not in {"off", "shadow", "apply"}:
+            raise ValueError("retention_mode is invalid")
+        self._retention_mode = retention_mode
 
         validated_weights = _validated_weights(weights)
         missing_weights = set(self._providers).difference(validated_weights)
@@ -263,10 +324,14 @@ class RetrievalService:
             validated[name] = provider
         return validated
 
-    async def retrieve(self, query: RetrievalQuery) -> RetrievalResult:
+    async def retrieve(
+        self, query: RetrievalQuery, *, workspace_root: Path | None = None
+    ) -> RetrievalResult:
         """Retrieve, authorize, select, and compose evidence for *query*."""
 
-        candidates = await self.retrieve_candidates(query)
+        candidates = await self.retrieve_candidates(
+            query, workspace_root=workspace_root
+        )
         if candidates.abstained:
             return RetrievalResult(
                 providers=candidates.providers,
@@ -275,10 +340,19 @@ class RetrievalService:
                 abstained=True,
                 reason=candidates.reason,
             )
+        diagnostics = list(candidates.providers)
+        retention = (
+            RetentionPolicy(query.intent, query_identifiers(query.text))
+            if query.intent is not None and self._retention_mode != "off"
+            else None
+        )
         try:
+            started = perf_counter_ns()
             composition = await self._composer.compose_async(
                 candidates.selected,
                 token_budget=query.token_budget,
+                retention=retention if self._retention_mode == "apply" else None,
+                label_applicability=self._validity_mode == "apply",
             )
             if not isinstance(composition, CompositionResult):
                 raise ValueError("composer returned an invalid result")
@@ -288,10 +362,43 @@ class RetrievalService:
             ):
                 raise ValueError("composer changed the validated token budget")
             items = self._validated_composed_items(composition, candidates.selected)
+            if retention is not None:
+                retained = composition
+                retention_failed = False
+                if self._retention_mode == "shadow" and retention.intent != "explore":
+                    try:
+                        retained = await self._composer.compose_async(
+                            candidates.selected,
+                            token_budget=query.token_budget,
+                            retention=retention,
+                            label_applicability=self._validity_mode == "apply",
+                        )
+                        if not isinstance(retained, CompositionResult):
+                            raise ValueError("composer returned an invalid result")
+                    except Exception:
+                        retention_failed = True
+                diagnostics.append(
+                    ProviderDiagnostic(
+                        provider="retention",
+                        status="degraded" if retention_failed else "ready",
+                        manifest_generation=None,
+                        elapsed_ms=(perf_counter_ns() - started) / 1_000_000,
+                        reason=(
+                            "RETENTION_FAILED"
+                            if retention_failed
+                            else "RETENTION_NOT_APPLICABLE"
+                            if retention.intent == "explore"
+                            else "RETENTION_APPLIED"
+                            if self._retention_mode == "apply"
+                            else "RETENTION_SHADOW"
+                        ),
+                        returned_count=0 if retention_failed else len(retained.items),
+                    )
+                )
         except Exception:
             return self._abstention(
                 "COMPOSITION_FAILED",
-                diagnostics=candidates.providers,
+                diagnostics=diagnostics,
                 rejection_counts=candidates.policy_rejection_counts,
             )
         if not items:
@@ -302,19 +409,19 @@ class RetrievalService:
             )
             return self._abstention(
                 reason,
-                diagnostics=candidates.providers,
+                diagnostics=diagnostics,
                 rejection_counts=candidates.policy_rejection_counts,
             )
         return RetrievalResult(
             items=items,
             context=composition.context,
-            providers=candidates.providers,
+            providers=tuple(diagnostics),
             weights=candidates.weights,
             policy_rejection_counts=candidates.policy_rejection_counts,
         )
 
     async def retrieve_candidates(
-        self, query: RetrievalQuery
+        self, query: RetrievalQuery, *, workspace_root: Path | None = None
     ) -> RetrievalCandidateResult:
         """Retrieve authenticated policy-valid evidence without composing it."""
 
@@ -456,6 +563,15 @@ class RetrievalService:
                 )
             diagnostics.append(reranker_diagnostic)
 
+        utility_estimates: dict[str, UtilityEstimate] = {}
+        if self._utility_mode != "off":
+            (
+                ordered_candidates,
+                utility_estimates,
+                diagnostic,
+            ) = await self._apply_utility(query, ordered_candidates, snapshot_time)
+            diagnostics.append(diagnostic)
+
         diverse_candidates = self._select_diverse_candidates(
             ordered_candidates,
             policy_records,
@@ -480,6 +596,21 @@ class RetrievalService:
             diverse = tuple(
                 content_cache[_identity(candidate)] for candidate in diverse_candidates
             )
+            diverse = tuple(
+                replace(
+                    source,
+                    utility=(
+                        estimate.q_single
+                        if self._utility_credit == "single_step"
+                        else estimate.q_trace
+                    ),
+                )
+                if (estimate := utility_estimates.get(source.candidate.record_id))
+                is not None
+                and estimate.evidence_count > 0
+                else source
+                for source in diverse
+            )
         except Exception:
             return self._candidate_abstention(
                 "EVIDENCE_CONTENT_UNAVAILABLE",
@@ -487,11 +618,146 @@ class RetrievalService:
                 rejection_counts=policy_result.rejection_counts,
             )
 
+        if (
+            self._validity_mode != "off"
+            and workspace_root is not None
+            and any(source.code_bindings for source in diverse)
+        ):
+            diverse, diagnostic = await self._evaluate_bindings(workspace_root, diverse)
+            diagnostics.append(diagnostic)
+
         return RetrievalCandidateResult(
             selected=diverse,
             providers=tuple(diagnostics),
             weights=self._reported_weights,
             policy_rejection_counts=policy_result.rejection_counts,
+        )
+
+    async def _evaluate_bindings(
+        self, root: Path, selected: tuple[SelectedEvidence, ...]
+    ) -> tuple[tuple[SelectedEvidence, ...], ProviderDiagnostic]:
+        started = perf_counter_ns()
+
+        def evaluate() -> tuple[SelectedEvidence, ...]:
+            evaluated = []
+            with self._binding_evaluator.read_batch():
+                for source in selected:
+                    evaluation = (
+                        self._binding_evaluator.evaluate(root, source.binding_context)
+                        if source.code_bindings
+                        else None
+                    )
+                    evaluated.append(
+                        replace(
+                            source,
+                            applicability=evaluation.applicability,
+                            changed_bindings=evaluation.changed,
+                        )
+                        if evaluation is not None
+                        else source
+                    )
+            return tuple(evaluated)
+
+        try:
+            evaluated = await _VALIDITY_WORKERS.run(evaluate)
+        except Exception:
+            return selected, ProviderDiagnostic(
+                provider="validity",
+                status="degraded",
+                manifest_generation=None,
+                elapsed_ms=(perf_counter_ns() - started) / 1_000_000,
+                reason="VALIDITY_FAILED",
+                returned_count=0,
+            )
+        return evaluated, ProviderDiagnostic(
+            provider="validity",
+            status="ready",
+            manifest_generation=None,
+            elapsed_ms=(perf_counter_ns() - started) / 1_000_000,
+            reason="VALIDITY_APPLIED"
+            if self._validity_mode == "apply"
+            else "VALIDITY_SHADOW",
+            returned_count=sum(
+                source.applicability == "needs_revalidation" for source in evaluated
+            ),
+        )
+
+    async def _apply_utility(
+        self,
+        query: RetrievalQuery,
+        ordered: tuple[FusedCandidate, ...],
+        snapshot_time: datetime,
+    ) -> tuple[
+        tuple[FusedCandidate, ...], dict[str, UtilityEstimate], ProviderDiagnostic
+    ]:
+        started = perf_counter_ns()
+        try:
+            head = ordered[: self._utility_candidate_limit]
+            transaction_time = query.as_of_transaction_time or snapshot_time
+            delta = transaction_time.astimezone(timezone.utc) - datetime(
+                1970, 1, 1, tzinfo=timezone.utc
+            )
+            transaction_at_us = (
+                delta.days * 86_400 + delta.seconds
+            ) * 1_000_000 + delta.microseconds
+            if not isinstance(self._repository, UtilityContributionRepository):
+                raise TypeError("repository must provide utility contribution reads")
+            contributions = await self._repository.load_utility_contributions(
+                query.workspace_id,
+                tuple(candidate.record_id for candidate in head),
+                transaction_at_us,
+            )
+            estimates = {
+                candidate.record_id: fold_utility(
+                    contributions.get(candidate.record_id, ())
+                )
+                for candidate in head
+            }
+            ranked = sorted(
+                enumerate(head),
+                key=lambda pair: (
+                    -(
+                        61 / (61 + pair[0])
+                        + self._utility_weight
+                        * utility_signal(
+                            estimates[pair[1].record_id], self._utility_credit
+                        )
+                    ),
+                    pair[0],
+                ),
+            )
+            sorted_head = tuple(candidate for _, candidate in ranked)
+            if self._utility_mode == "apply":
+                result = sorted_head + ordered[len(head) :]
+                reason = "UTILITY_APPLIED"
+            else:
+                result = ordered
+                reason = (
+                    "UTILITY_SHADOW_REORDER"
+                    if sorted_head != head
+                    else "UTILITY_SHADOW_SAME"
+                )
+            status = "ready"
+            returned_count = sum(
+                estimates[candidate.record_id].evidence_count > 0 for candidate in head
+            )
+        except Exception:
+            result = ordered
+            estimates = {}
+            status = "degraded"
+            reason = "UTILITY_FAILED"
+            returned_count = 0
+        return (
+            result,
+            estimates,
+            ProviderDiagnostic(
+                provider="utility",
+                status=status,
+                manifest_generation=None,
+                elapsed_ms=(perf_counter_ns() - started) / 1_000_000,
+                reason=reason,
+                returned_count=returned_count,
+            ),
         )
 
     async def _invoke_provider(
@@ -748,6 +1014,9 @@ class RetrievalService:
                 or item.rationale != source.rationale
                 or item.tags != source.tags
                 or item.worked != source.worked
+                or item.utility != source.utility
+                or item.applicability != source.applicability
+                or item.changed_bindings != source.changed_bindings
                 or item.status != source.status
                 or item.superseded_by_version_id != source.superseded_by_version_id
                 or not outcome_matches

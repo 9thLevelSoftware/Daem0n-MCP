@@ -92,9 +92,9 @@ async def test_production_ritual_and_restart(initialized_workspace, transport):
             "memory_record_outcome",
             "system_health",
         } <= names
-        denied = await call(session, "memory_recall", recall_arguments)
-        assert not denied["ok"]
-        assert denied["error"]["code"] == "COMMUNION_REQUIRED"
+        recalled = await call(session, "memory_recall", recall_arguments)
+        assert recalled["ok"], recalled
+        assert recalled["meta"]["covenant"]["auto_brief"] is not None
         await succeed(session, "session_brief", scope)
         health = await succeed(
             session, "system_health", {**scope, "include_components": True}
@@ -163,8 +163,9 @@ async def test_production_ritual_and_restart(initialized_workspace, transport):
         health = await succeed(session, "system_health", scope)
         assert health["storage_format_version"] == 7
     async with process_client(workspace.root, transport) as restarted:
-        denied = await call(restarted, "memory_recall", recall_arguments)
-        assert denied["error"]["code"] == "COMMUNION_REQUIRED"
+        recalled = await call(restarted, "memory_recall", recall_arguments)
+        assert recalled["ok"], recalled
+        assert recalled["meta"]["covenant"]["auto_brief"] is not None
         await succeed(restarted, "session_brief", scope)
         # A restarted server republishes the lexical generation in the
         # background, so the first recall after it can still read the

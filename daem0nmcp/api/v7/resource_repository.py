@@ -32,7 +32,7 @@ from ...schema_version import CURRENT_SCHEMA_VERSION
 from ...storage_activation import DatabaseFileLock, ResolvedActiveDatabase
 from ...workspace import Workspace, normalize_resolved_path
 from .errors import is_database_busy
-from .models import RecordSummary, stored_relative_path
+from .models import RecordSummary, RuleView, stored_relative_path
 from .public_ids import PublicObjectIdRepository
 from .resources import (
     RESOURCE_FETCH_LIMIT,
@@ -40,8 +40,58 @@ from .resources import (
     ResourceReader,
     ResourceReadRequest,
     ResourceRow,
-    RuleView,
 )
+
+
+def read_git_output_sync(workspace: Workspace, arguments: list[str]) -> bytes | None:
+    creation_flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    if os.name == "nt":
+        creation_flags |= 0x00000004  # CREATE_SUSPENDED: contain before execution
+    try:
+        # File capture avoids waiting on pipes inherited by Git descendants.
+        with tempfile.TemporaryFile() as output:
+            process = subprocess.Popen(
+                [
+                    "git",
+                    "--no-optional-locks",
+                    "-c",
+                    "core.fsmonitor=false",
+                    "-C",
+                    str(workspace.root),
+                    *arguments,
+                ],
+                stdin=subprocess.DEVNULL,
+                stdout=output,
+                stderr=subprocess.DEVNULL,
+                creationflags=creation_flags,
+                start_new_session=(os.name != "nt"),
+                env={**os.environ, "GIT_OPTIONAL_LOCKS": "0"},
+            )
+            job = None
+            try:
+                job = _WindowsKillOnCloseJob(process)
+                job.resume(process.pid)
+                try:
+                    process.wait(timeout=2.0)
+                except subprocess.TimeoutExpired:
+                    return None
+                output.seek(0)
+                raw = output.read(_MAX_GIT_OUTPUT_BYTES + 1)
+            finally:
+                if job is not None:
+                    job.close()
+                if os.name != "nt":
+                    # Even a successfully exited Git can leave descendants.
+                    with suppress(ProcessLookupError):
+                        getattr(os, "killpg")(process.pid, 9)  # noqa: B009 - absent in Windows stubs
+                if process.poll() is None:
+                    process.kill()
+                process.wait(timeout=0.5)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if process.returncode != 0 or len(raw) > _MAX_GIT_OUTPUT_BYTES:
+        return None
+    return raw
 
 
 class _WindowsKillOnCloseJob:
@@ -636,68 +686,10 @@ class SQLiteResourceRepository:
         )
 
     @staticmethod
-    def _read_git_output_sync(
-        workspace: Workspace, arguments: list[str]
-    ) -> bytes | None:
-        creation_flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-        if os.name == "nt":
-            creation_flags |= 0x00000004  # CREATE_SUSPENDED: contain before execution
-        try:
-            # A descendant may inherit captured pipe handles. On Windows,
-            # captured-pipe timeout cleanup then waits indefinitely for
-            # those pipes to close even after Git has been killed. A temporary
-            # file keeps both process waiting and output consumption bounded.
-            with tempfile.TemporaryFile() as output:
-                process = subprocess.Popen(
-                    [
-                        "git",
-                        "--no-optional-locks",
-                        "-c",
-                        "core.fsmonitor=false",
-                        "-C",
-                        str(workspace.root),
-                        *arguments,
-                    ],
-                    stdin=subprocess.DEVNULL,
-                    stdout=output,
-                    stderr=subprocess.DEVNULL,
-                    creationflags=creation_flags,
-                    start_new_session=(os.name != "nt"),
-                    env={**os.environ, "GIT_OPTIONAL_LOCKS": "0"},
-                )
-                job = None
-                try:
-                    job = _WindowsKillOnCloseJob(process)
-                    job.resume(process.pid)
-                    try:
-                        process.wait(timeout=2.0)
-                    except subprocess.TimeoutExpired:
-                        return None
-                    output.seek(0)
-                    raw = output.read(_MAX_GIT_OUTPUT_BYTES + 1)
-                finally:
-                    if job is not None:
-                        job.close()
-                    if os.name != "nt":
-                        # Even a successfully exited Git can leave descendants.
-                        with suppress(ProcessLookupError):
-                            getattr(os, "killpg")(process.pid, 9)  # noqa: B009 - absent in Windows stubs
-                    if process.poll() is None:
-                        process.kill()
-                    process.wait(timeout=0.5)
-        except (OSError, subprocess.SubprocessError):
-            return None
-        if process.returncode != 0 or len(raw) > _MAX_GIT_OUTPUT_BYTES:
-            return None
-        return raw
-
-    @staticmethod
     def _read_git_changes_sync(workspace: Workspace) -> list[object]:
         # Porcelain paths are repository-relative even when Git runs from a
         # nested workspace. Filter at Git and again before exposing public paths.
-        prefix_raw = SQLiteResourceRepository._read_git_output_sync(
-            workspace, ["rev-parse", "--show-prefix"]
-        )
+        prefix_raw = read_git_output_sync(workspace, ["rev-parse", "--show-prefix"])
         if prefix_raw is None:
             return []
         try:
@@ -713,7 +705,7 @@ class SQLiteResourceRepository:
             or not SQLiteResourceRepository._safe_relative_git_path(prefix[:-1])
         ):
             return []
-        raw = SQLiteResourceRepository._read_git_output_sync(
+        raw = read_git_output_sync(
             workspace,
             ["status", "--porcelain=v1", "-z", "--untracked-files=normal", "--", "."],
         )

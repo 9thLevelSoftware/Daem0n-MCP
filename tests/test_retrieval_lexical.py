@@ -170,6 +170,7 @@ class LexicalProjectionTests(unittest.IsolatedAsyncioTestCase):
         _apply_migration(self.connection, 16)
         _apply_migration(self.connection, 17)
         _apply_migration(self.connection, 18)
+        _apply_migration(self.connection, 33)
         self.connection.commit()
 
     def tearDown(self) -> None:
@@ -373,6 +374,172 @@ class LexicalProjectionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("ready", result.status)
         self.assertEqual(
             [complete],
+            [candidate.evidence.record_id for candidate in result.candidates],
+        )
+
+    async def test_content_and_rationale_matches_precede_tag_only_matches(self):
+        from daem0nmcp.retrieval.projections import LexicalProjectionBuilder
+        from daem0nmcp.retrieval.providers import LexicalProvider
+        from daem0nmcp.retrieval.types import RetrievalQuery
+
+        tag_only = self._append_record(
+            "a",
+            "Operational notes",
+            "Scheduled maintenance",
+            ["checkpoint journal recovery " * 8, "catalogue"],
+        )
+        body = self._append_record(
+            "b",
+            "Checkpoint journal recovery " + "Operational details " * 20,
+            "Restore durable state",
+            [],
+        )
+        rationale = self._append_record(
+            "c",
+            "Restore durable state",
+            "Checkpoint journal recovery " + "Operational details " * 20,
+            [],
+        )
+        LexicalProjectionBuilder(self.connection).rebuild(WORKSPACE_ID)
+        self.connection.commit()
+        provider = LexicalProvider(self.connection)
+        query = RetrievalQuery(
+            workspace_id=WORKSPACE_ID, text="checkpoint journal recovery"
+        )
+
+        result = await provider.search(query, 10)
+
+        self.assertEqual("ready", result.status)
+        self.assertEqual(
+            {body, rationale},
+            {candidate.evidence.record_id for candidate in result.candidates[:2]},
+        )
+        self.assertEqual(tag_only, result.candidates[2].evidence.record_id)
+        bounded = await provider.search(query, 2)
+        self.assertEqual(result.candidates[:2], bounded.candidates)
+
+        tags = await provider.search(
+            RetrievalQuery(workspace_id=WORKSPACE_ID, text="catalogue"), 10
+        )
+        self.assertEqual("ready", tags.status)
+        self.assertEqual(
+            [tag_only],
+            [candidate.evidence.record_id for candidate in tags.candidates],
+        )
+
+    async def test_body_matches_rank_without_tag_amplification(self):
+        from daem0nmcp.retrieval.lexical_config import (
+            LEXICAL_BM25_WEIGHTS,
+            lexical_fts_table_name,
+        )
+        from daem0nmcp.retrieval.projections import LexicalProjectionBuilder
+        from daem0nmcp.retrieval.providers import LexicalProvider
+        from daem0nmcp.retrieval.types import RetrievalQuery
+
+        amplifier = self._append_record(
+            "a",
+            "Rotate signing keys draft inventory for review.",
+            "",
+            ["rotate signing keys " * 16],
+        )
+        useful = self._append_record(
+            "b",
+            "Rotate signing keys and invalidate active sessions.",
+            "",
+            [],
+        )
+        LexicalProjectionBuilder(self.connection).rebuild(WORKSPACE_ID)
+        self.connection.commit()
+
+        result = await LexicalProvider(self.connection).search(
+            RetrievalQuery(workspace_id=WORKSPACE_ID, text="rotate signing keys"),
+            10,
+        )
+
+        self.assertEqual("ready", result.status)
+        self.assertEqual(
+            [useful, amplifier],
+            [candidate.evidence.record_id for candidate in result.candidates],
+        )
+        self.assertEqual([1, 2], [candidate.rank for candidate in result.candidates])
+        self.assertGreater(
+            result.candidates[1].raw_score, result.candidates[0].raw_score
+        )
+        table = lexical_fts_table_name(WORKSPACE_ID, result.manifest_generation)
+        content_weight, rationale_weight, tags_weight = LEXICAL_BM25_WEIGHTS
+        diagnostics = dict(
+            self.connection.execute(
+                f"""
+                SELECT document.record_id,
+                       bm25("{table}", {content_weight},
+                            {rationale_weight}, {tags_weight})
+                FROM "{table}"
+                JOIN retrieval_documents AS document
+                  ON document.document_rowid="{table}".rowid
+                WHERE document.workspace_id=? AND document.projection_generation=?
+                  AND "{table}" MATCH ?
+                """,
+                (
+                    WORKSPACE_ID,
+                    result.manifest_generation,
+                    '"rotate" "signing" "keys"',
+                ),
+            ).fetchall()
+        )
+        for candidate in result.candidates:
+            self.assertEqual(
+                max(0.0, -diagnostics[candidate.evidence.record_id]),
+                candidate.raw_score,
+            )
+
+    async def test_tag_only_matches_keep_weighted_bm25_order(self):
+        from daem0nmcp.retrieval.projections import LexicalProjectionBuilder
+        from daem0nmcp.retrieval.providers import LexicalProvider
+        from daem0nmcp.retrieval.types import RetrievalQuery
+
+        ordinary = self._append_record("a", "Snapshot", "", ["retention"])
+        amplified = self._append_record("b", "Snapshot", "", ["retention " * 16])
+        LexicalProjectionBuilder(self.connection).rebuild(WORKSPACE_ID)
+        self.connection.commit()
+
+        result = await LexicalProvider(self.connection).search(
+            RetrievalQuery(workspace_id=WORKSPACE_ID, text="retention"),
+            10,
+        )
+
+        self.assertEqual("ready", result.status)
+        self.assertEqual(
+            [amplified, ordinary],
+            [candidate.evidence.record_id for candidate in result.candidates],
+        )
+        self.assertGreater(
+            result.candidates[0].raw_score, result.candidates[1].raw_score
+        )
+
+    async def test_content_tier_requires_the_complete_winning_expression(self):
+        from daem0nmcp.retrieval.projections import LexicalProjectionBuilder
+        from daem0nmcp.retrieval.providers import LexicalProvider
+        from daem0nmcp.retrieval.types import RetrievalQuery
+
+        mixed = self._append_record("a", "Snapshot", "Maintenance", ["retention"])
+        split = self._append_record("b", "Snapshot", "Retention", [])
+        tied = self._append_record("c", "Snapshot", "Retention", [])
+        partial = self._append_record("d", "Snapshot", "Maintenance", [])
+        LexicalProjectionBuilder(self.connection).rebuild(WORKSPACE_ID)
+        self.connection.commit()
+
+        result = await LexicalProvider(self.connection).search(
+            RetrievalQuery(workspace_id=WORKSPACE_ID, text="snapshot retention"),
+            10,
+        )
+
+        self.assertEqual("ready", result.status)
+        self.assertEqual(
+            [split, tied, mixed],
+            [candidate.evidence.record_id for candidate in result.candidates],
+        )
+        self.assertNotIn(
+            partial,
             [candidate.evidence.record_id for candidate in result.candidates],
         )
 
@@ -1136,7 +1303,7 @@ class LexicalProjectionTests(unittest.IsolatedAsyncioTestCase):
             try:
                 first.execute("PRAGMA foreign_keys=ON")
                 second.execute("PRAGMA foreign_keys=ON")
-                for version in (16, 17, 18):
+                for version in (16, 17, 18, 33):
                     _apply_migration(first, version)
                 first.commit()
                 EventStore(first).append_and_project(

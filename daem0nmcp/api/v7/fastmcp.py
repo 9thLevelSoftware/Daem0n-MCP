@@ -9,14 +9,20 @@ import operator
 from collections.abc import Mapping
 from importlib import metadata
 from types import MethodType
-from typing import Annotated, Any
+from typing import Annotated, Any, cast
 
-from pydantic import Field, TypeAdapter
+from pydantic import Field, TypeAdapter, ValidationError
+from pydantic_core import InitErrorDetails
 
 from ... import __version__
 from ...covenant import invocation_scope_var
 from .errors import ErrorCode
-from .middleware import V7InvocationMiddleware
+from .gateway_operations import (
+    GATEWAY_TOOL_NAMES,
+    _ToolArgumentValidationError,
+    bind_gateway_handlers,
+)
+from .middleware import ListedToolsMiddleware, V7InvocationMiddleware
 from .registry import ToolSpec, V7Manifest
 from .responses import ResponseFactory
 from .task_dispatcher import DurableTaskDispatcher, TaskDispatcherError, TaskView
@@ -169,7 +175,14 @@ def _tool_adapter(
     foreground_policy: ForegroundExecutionPolicy | None = None,
 ):
     async def invoke(**arguments: Any) -> dict[str, Any]:
-        request = spec.input_model.model_validate(arguments)
+        try:
+            request = spec.input_model.model_validate(arguments)
+        except ValidationError as exc:
+            raise _ToolArgumentValidationError.from_exception_data(
+                exc.title,
+                cast(list[InitErrorDetails], exc.errors(include_url=False)),
+                hide_input=True,
+            ) from exc
 
         effective_arguments = request.model_dump(mode="json")
 
@@ -554,6 +567,7 @@ def build_fastmcp_server(
     task_dispatcher: DurableTaskDispatcher | None = None,
     auth: Any | None = None,
     middleware: tuple[Any, ...] = (),
+    listed_tools: frozenset[str] | None = None,
     lifespan: Any | None = None,
     sync_timeout_seconds: int | float = 15,
     foreground_policies: Mapping[str, ForegroundExecutionPolicy] = (
@@ -578,6 +592,10 @@ def build_fastmcp_server(
         raise FastMCPCompatibilityError(
             "owned task support requires exactly one durable dispatcher"
         )
+    if listed_tools is not None and not listed_tools.issubset(
+        spec.name for spec in manifest.tools
+    ):
+        raise FastMCPCompatibilityError("listed tools must be registered")
 
     optional_names = {
         spec.name for spec in manifest.tools if spec.task_mode == "optional"
@@ -621,6 +639,33 @@ def build_fastmcp_server(
     )
     for item in middleware:
         server.add_middleware(item)
+    if listed_tools is not None:
+        server.add_middleware(ListedToolsMiddleware(listed_tools))
+
+    adapters = {
+        spec.name: _tool_adapter(
+            spec,
+            tasks_enabled=tasks_enabled,
+            sync_timeout_seconds=validated_sync_timeout,
+            foreground_policy=configured_policies.get(spec.name),
+        )
+        for spec in manifest.tools
+        if spec.name not in GATEWAY_TOOL_NAMES
+    }
+    gateway = bind_gateway_handlers(
+        manifest=manifest,
+        adapters=adapters,
+        listed_tools=listed_tools,
+        response_factory=ResponseFactory(),
+    )
+    for spec in manifest.tools:
+        if spec.name in GATEWAY_TOOL_NAMES:
+            adapters[spec.name] = _tool_adapter(
+                spec.replace(handler=gateway[spec.name]),
+                tasks_enabled=tasks_enabled,
+                sync_timeout_seconds=validated_sync_timeout,
+                foreground_policy=configured_policies.get(spec.name),
+            )
 
     for spec in manifest.tools:
         registration: dict[str, Any] = {
@@ -633,14 +678,7 @@ def build_fastmcp_server(
             "output_schema": spec.output_schema,
         }
         registration["task"] = False
-        registered = server.tool(**registration)(
-            _tool_adapter(
-                spec,
-                tasks_enabled=tasks_enabled,
-                sync_timeout_seconds=validated_sync_timeout,
-                foreground_policy=configured_policies.get(spec.name),
-            )
-        )
+        registered = server.tool(**registration)(adapters[spec.name])
         if spec.task_mode == "optional" and tasks_enabled:
             import mcp.types
 

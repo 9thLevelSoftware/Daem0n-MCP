@@ -197,7 +197,7 @@ class _CanonicalFixture:
         self.repositories: list[SQLiteRetrievalRepository] = []
         self.connection = sqlite3.connect(self.database_path)
         self.connection.execute("PRAGMA foreign_keys=ON")
-        for statement in _migration_statements(16, 17, 18, 30):
+        for statement in _migration_statements(16, 17, 18, 30, 33):
             self.connection.execute(statement)
         self._insert_events()
         self._insert_records()
@@ -2423,3 +2423,208 @@ class SQLiteRetrievalRepositoryEvidenceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("Rotate credentials safely.", selected[0].content)
         self.assertNotIn(secondary_step, selected[0].procedure_steps)
         self.assertEqual(merged[0].evidence_refs, selected[0].candidate.evidence_refs)
+
+
+class SQLiteRetrievalRepositoryUtilityTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self) -> None:
+        self.fixture = _CanonicalFixture()
+        self.event_number = 1000
+        self.records: set[str] = set()
+
+    def tearDown(self) -> None:
+        self.fixture.close()
+
+    def record(self, number: int, workspace_id: str = WORKSPACE_ID) -> str:
+        record_id = f"mem_{number:064x}"
+        if record_id not in self.records:
+            self.fixture._insert_record(
+                record_id=record_id,
+                workspace_id=workspace_id,
+                record_type="decision",
+                content="Utility test decision.",
+                content_hash=_hash("1"),
+                source_event_id=_event_id("a"),
+                stream_version=1,
+                created_offset=0,
+                updated_offset=0,
+            )
+            self.records.add(record_id)
+        return record_id
+
+    def event(self, record_id: str, workspace_id: str, offset: int) -> str:
+        self.event_number += 1
+        event_id = f"evt_{self.event_number:064x}"
+        self.fixture.connection.execute(
+            """
+            INSERT INTO memory_events (
+                event_id,workspace_id,stream_id,stream_kind,stream_version,
+                event_type,event_schema_version,occurred_at_us,recorded_at_us,
+                actor_type,actor_id,causation_event_id,correlation_id,
+                payload_json,payload_hash,previous_event_hash,event_hash
+            ) VALUES (?,?,?,'memory',?,'memory.test',1,?,?,'system',NULL,
+                      NULL,NULL,'{}',?,NULL,?)
+            """,
+            (
+                event_id,
+                workspace_id,
+                record_id,
+                self.event_number,
+                BASE_US + offset,
+                BASE_US + offset,
+                hashlib.sha256(b"{}").hexdigest(),
+                f"{self.event_number:064x}",
+            ),
+        )
+        return event_id
+
+    def edge(
+        self,
+        source: str,
+        descendant: str,
+        *,
+        kind: str = "store",
+        offset: int = 10,
+        workspace_id: str = WORKSPACE_ID,
+        event_id: str | None = None,
+    ) -> str:
+        event_id = event_id or self.event(descendant, workspace_id, offset)
+        self.fixture.connection.execute(
+            "INSERT INTO memory_provenance_edges VALUES (?,?,?,?,?,?)",
+            (
+                workspace_id,
+                event_id,
+                descendant,
+                source,
+                kind,
+                BASE_US + offset,
+            ),
+        )
+        return event_id
+
+    def signal(
+        self,
+        record_id: str,
+        reward: float,
+        *,
+        offset: int = 20,
+        workspace_id: str = WORKSPACE_ID,
+        weight: float = 0.75,
+    ) -> str:
+        event_id = self.event(record_id, workspace_id, offset)
+        self.fixture.connection.execute(
+            "INSERT INTO memory_outcome_signals VALUES (?,?,?,?,?,?)",
+            (workspace_id, event_id, record_id, reward, weight, BASE_US + offset),
+        )
+        return event_id
+
+    async def load(self, *record_ids: str, offset: int = 100):
+        self.fixture.connection.commit()
+        return await self.fixture.repository().load_utility_contributions(
+            WORKSPACE_ID, record_ids, BASE_US + offset
+        )
+
+    async def test_direct_success_descendant_failure_and_outcome_edge_credit(self):
+        root, child, grandchild, unrelated = (
+            self.record(number) for number in range(10, 14)
+        )
+        self.edge(root, child)
+        self.edge(child, grandchild)
+        direct_success = self.signal(root, 1.0, offset=30, weight=1.0)
+        self.signal(root, 0.0)
+        child_failure = self.signal(child, 0.0)
+        grandchild_success = self.signal(grandchild, 1.0)
+        edge_failure = self.signal(unrelated, 0.0)
+        self.edge(root, unrelated, kind="outcome", event_id=edge_failure)
+        result = (await self.load(root))[root]
+        self.assertEqual(
+            {
+                direct_success: (0, 1.0, 1.0),
+                child_failure: (1, 0.0, 0.75),
+                grandchild_success: (2, 1.0, 0.75),
+                edge_failure: (1, 0.0, 0.75),
+            },
+            {item.event_id: (item.depth, item.reward, item.weight) for item in result},
+        )
+        self.assertEqual(
+            sorted((item.recorded_at_us, item.event_id) for item in result),
+            [(item.recorded_at_us, item.event_id) for item in result],
+        )
+        self.assertEqual({}, await self.load())
+
+    async def test_workspace_and_both_edge_and_signal_time_boundaries(self):
+        root, child, future_child, outsider = (
+            self.record(number) for number in range(20, 24)
+        )
+        foreign = self.record(24, OTHER_WORKSPACE_ID)
+        self.edge(root, child, offset=100)
+        self.edge(root, future_child, offset=101)
+        self.edge(root, foreign, workspace_id=OTHER_WORKSPACE_ID)
+        included = self.signal(child, 1.0, offset=100)
+        self.signal(child, 0.0, offset=101)
+        self.signal(future_child, 1.0)
+        self.signal(foreign, 1.0, workspace_id=OTHER_WORKSPACE_ID)
+        late_edge = self.signal(outsider, 1.0)
+        self.edge(root, outsider, kind="outcome", offset=101, event_id=late_edge)
+        late_signal = self.signal(outsider, 1.0, offset=101)
+        self.edge(root, outsider, kind="outcome", event_id=late_signal)
+        self.assertEqual(
+            [included], [item.event_id for item in (await self.load(root))[root]]
+        )
+        self.assertEqual((), (await self.load(root, offset=99))[root])
+
+    async def test_cycles_multiple_paths_and_outcome_edges_use_minimum_depth(self):
+        root, child, grandchild = (self.record(number) for number in range(30, 33))
+        self.edge(root, child)
+        self.edge(child, grandchild)
+        self.edge(grandchild, root)
+        self.edge(root, grandchild)
+        success = self.signal(root, 1.0)
+        self.edge(root, root, kind="outcome", event_id=success)
+        shared = self.signal(grandchild, 0.0)
+        self.edge(root, grandchild, kind="outcome", event_id=shared)
+        result = (await self.load(root, child))[root]
+        self.assertEqual(
+            {success: 0, shared: 1}, {item.event_id: item.depth for item in result}
+        )
+
+    async def test_outcome_edge_shortens_depth_two_signal(self):
+        root, child, grandchild = (self.record(number) for number in range(40, 43))
+        self.edge(root, child)
+        self.edge(child, grandchild)
+        shared = self.signal(grandchild, 0.0)
+        self.edge(root, grandchild, kind="outcome", event_id=shared)
+        result = (await self.load(root))[root]
+        self.assertEqual(
+            [(shared, 1)], [(item.event_id, item.depth) for item in result]
+        )
+
+    async def test_descendant_depth_is_limited_to_four(self):
+        chain = [self.record(number) for number in range(50, 56)]
+        signals = []
+        for parent, child in zip(chain, chain[1:], strict=False):
+            self.edge(parent, child)
+            signals.append(self.signal(child, 1.0))
+        result = (await self.load(chain[0]))[chain[0]]
+        self.assertEqual(
+            dict(zip(signals[:4], range(1, 5), strict=True)),
+            {item.event_id: item.depth for item in result},
+        )
+
+    async def test_descendant_count_is_bounded_with_deterministic_traversal(self):
+        root = self.record(100)
+        children = [self.record(number) for number in range(101, 166)]
+        signals = {}
+        for child in reversed(children):
+            self.edge(root, child)
+            self.edge(root, child)
+            signals[child] = self.signal(child, 1.0)
+        extra = self.record(166)
+        self.edge(children[0], extra)
+        self.signal(extra, 1.0)
+        result = (await self.load(root))[root]
+        self.assertEqual(64, len(result))
+        self.assertEqual(
+            {signals[child] for child in children[:64]},
+            {item.event_id for item in result},
+        )
+        self.assertTrue(all(item.depth == 1 for item in result))

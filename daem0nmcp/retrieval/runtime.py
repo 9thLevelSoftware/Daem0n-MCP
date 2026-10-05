@@ -21,6 +21,7 @@ from typing import Any, Literal
 from ..bounded_workers import BoundedWorkerBusyError, BoundedWorkerPool
 from .composer import EvidenceComposer
 from .jobs import ProjectionJobRun, ProjectionJobRunner
+from .late_interaction import LateInteractionReranker
 from .planner import RetrievalPlanner
 from .providers import DenseProvider, LexicalProvider
 from .repository import SQLiteRetrievalRepository, sqlite_read_connection_factory
@@ -483,11 +484,17 @@ def create_retrieval_service(
             max_branching=config.retrieval_graph_max_branching,
         )
     reranker = None
-    if config.retrieval_rerank_enabled and dense_ready:
-        reranker = EmbeddingSimilarityReranker(
-            query_encoder=query_encoder,
-            document_encoder=document_encoder,
-        )
+    if config.retrieval_rerank_enabled:
+        if config.retrieval_reranker == "late_interaction":
+            if _profile_ready(statuses, "late-interaction"):
+                reranker = LateInteractionReranker(
+                    model_name=config.retrieval_late_interaction_model,
+                )
+        elif dense_ready:
+            reranker = EmbeddingSimilarityReranker(
+                query_encoder=query_encoder,
+                document_encoder=document_encoder,
+            )
     return RetrievalService(
         providers=providers,
         repository=SQLiteRetrievalRepository(
@@ -507,6 +514,12 @@ def create_retrieval_service(
         provider_timeout_seconds=timeout,
         weights=config.retrieval_rrf_weights,
         rrf_k=config.rrf_k,
+        utility_mode=config.retrieval_utility_mode,
+        utility_weight=config.retrieval_utility_weight,
+        utility_credit=config.retrieval_utility_credit,
+        utility_candidate_limit=config.retrieval_utility_candidate_limit,
+        validity_mode=config.memory_validity_mode,
+        retention_mode=config.retrieval_retention_mode,
     )
 
 

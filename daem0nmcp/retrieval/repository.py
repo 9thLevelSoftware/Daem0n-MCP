@@ -21,7 +21,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from ..bounded_workers import BoundedWorkerBusyError, BoundedWorkerPool
-from ..event_store import canonical_json_bytes, sha256_json
+from ..code_bindings import binding_refs_from_context
+from ..event_store import canonical_json_bytes, memory_content_hash, sha256_json
 from .composer import SelectedEvidence
 from .policy import PolicyRecord, apply_retrieval_policy
 from .specialized_contract import (
@@ -29,6 +30,7 @@ from .specialized_contract import (
     specialized_manifest_matches_contract,
 )
 from .types import EvidenceRef, FusedCandidate, RetrievalQuery, _aware_datetime
+from .utility import MAX_DEPTH, MAX_DESCENDANTS, UtilityContribution
 
 _HASH = re.compile(r"^[0-9a-f]{64}$")
 _SUPPORTED_CHANNELS = frozenset(
@@ -41,6 +43,8 @@ _REQUIRED_TABLES = frozenset(
         "enrichment_decisions",
         "memory_events",
         "memory_fact_versions",
+        "memory_provenance_edges",
+        "memory_outcome_signals",
         "memory_records",
         "memory_relationship_versions",
         "projection_manifests",
@@ -326,6 +330,23 @@ class SQLiteRetrievalRepository:
             "EVIDENCE_CONTENT_UNAVAILABLE",
         )
 
+    async def load_utility_contributions(
+        self,
+        workspace_id: str,
+        record_ids: tuple[str, ...],
+        transaction_at_us: int,
+    ) -> dict[str, tuple[UtilityContribution, ...]]:
+        record_values = tuple(dict.fromkeys(record_ids))
+        if not record_values:
+            return {}
+        return await self._run_with_verified_root(
+            workspace_id,
+            lambda: self._load_utility_contributions_sync(
+                workspace_id, record_values, transaction_at_us
+            ),
+            "UTILITY_STATE_UNAVAILABLE",
+        )
+
     async def _run_with_verified_root(
         self,
         workspace_id: str,
@@ -440,6 +461,103 @@ class SQLiteRetrievalRepository:
             connection.close()
             raise
         return connection
+
+    def _load_utility_contributions_sync(
+        self,
+        workspace_id: str,
+        record_ids: tuple[str, ...],
+        transaction_at_us: int,
+    ) -> dict[str, tuple[UtilityContribution, ...]]:
+        connection = self._open_connection()
+        try:
+            revision = self._begin_read_snapshot(connection)
+            self._event_root(connection, workspace_id, revision)
+            result: dict[str, tuple[UtilityContribution, ...]] = {}
+            for record_id in record_ids:
+                depths = {record_id: 0}
+                frontier = (record_id,)
+                for depth in range(1, MAX_DEPTH + 1):
+                    remaining = MAX_DESCENDANTS - (len(depths) - 1)
+                    if not frontier or remaining == 0:
+                        break
+                    frontier_slots = ",".join("?" for _ in frontier)
+                    visited_slots = ",".join("?" for _ in depths)
+                    rows = connection.execute(
+                        "SELECT DISTINCT record_id FROM memory_provenance_edges "
+                        "WHERE workspace_id=? AND edge_kind='store' "
+                        f"AND informed_by_record_id IN ({frontier_slots}) "
+                        f"AND record_id NOT IN ({visited_slots}) "
+                        "AND recorded_at_us<=? ORDER BY record_id LIMIT ?",
+                        (
+                            workspace_id,
+                            *frontier,
+                            *depths,
+                            transaction_at_us,
+                            remaining,
+                        ),
+                    ).fetchall()
+                    frontier = tuple(str(row[0]) for row in rows)
+                    depths.update((descendant, depth) for descendant in frontier)
+
+                contributions: dict[str, UtilityContribution] = {}
+                record_slots = ",".join("?" for _ in depths)
+                rows = connection.execute(
+                    "SELECT recorded_at_us,event_id,record_id,reward,weight "
+                    "FROM memory_outcome_signals WHERE workspace_id=? "
+                    f"AND record_id IN ({record_slots}) AND recorded_at_us<=?",
+                    (workspace_id, *depths, transaction_at_us),
+                ).fetchall()
+                for row in rows:
+                    depth = depths[str(row[2])]
+                    if depth == 0 and float(row[3]) != 1.0:
+                        continue
+                    contribution = UtilityContribution(
+                        recorded_at_us=int(row[0]),
+                        event_id=str(row[1]),
+                        depth=depth,
+                        reward=float(row[3]),
+                        weight=float(row[4]),
+                    )
+                    contributions[contribution.event_id] = contribution
+
+                rows = connection.execute(
+                    "SELECT signals.recorded_at_us,signals.event_id,"
+                    "signals.reward,signals.weight "
+                    "FROM memory_provenance_edges AS edges "
+                    "JOIN memory_outcome_signals AS signals "
+                    "ON signals.event_id=edges.event_id "
+                    "AND signals.workspace_id=edges.workspace_id "
+                    "WHERE edges.workspace_id=? AND edges.edge_kind='outcome' "
+                    "AND edges.informed_by_record_id=? "
+                    "AND edges.recorded_at_us<=? AND signals.recorded_at_us<=?",
+                    (
+                        workspace_id,
+                        record_id,
+                        transaction_at_us,
+                        transaction_at_us,
+                    ),
+                ).fetchall()
+                for row in rows:
+                    contribution = UtilityContribution(
+                        recorded_at_us=int(row[0]),
+                        event_id=str(row[1]),
+                        depth=1,
+                        reward=float(row[2]),
+                        weight=float(row[3]),
+                    )
+                    previous = contributions.get(contribution.event_id)
+                    if previous is None or contribution.depth < previous.depth:
+                        contributions[contribution.event_id] = contribution
+                result[record_id] = tuple(
+                    sorted(
+                        contributions.values(),
+                        key=lambda item: (item.recorded_at_us, item.event_id),
+                    )
+                )
+            connection.rollback()
+            return result
+        finally:
+            connection.close()
 
     def _load_policy_records_sync(
         self,
@@ -619,7 +737,7 @@ class SQLiteRetrievalRepository:
     ) -> SelectedEvidence:
         record = connection.execute(
             "SELECT content,record_type,content_hash,source_event_id,"
-            "outcome,worked,rationale,tags_json FROM memory_records "
+            "outcome,worked,rationale,tags_json,context_json FROM memory_records "
             "WHERE workspace_id=? AND record_id=? AND deleted_at_us IS NULL",
             (query.workspace_id, candidate.record_id),
         ).fetchone()
@@ -645,6 +763,9 @@ class SQLiteRetrievalRepository:
         rationale = record[6]
         try:
             tags = json.loads(str(record[7]))
+            context = json.loads(str(record[8]))
+            if not isinstance(context, dict):
+                raise ValueError("record context must be an object")
         except (TypeError, ValueError, RecursionError) as exc:
             raise RetrievalRepositoryError("EVIDENCE_CONTENT_UNAVAILABLE") from exc
         if (
@@ -677,13 +798,25 @@ class SQLiteRetrievalRepository:
             superseded_by = None
 
         transaction_at_us = _datetime_us(query.as_of_transaction_time or snapshot_time)
-        procedure_steps = self._selected_procedure_steps(
-            connection,
-            query,
-            candidate.record_id,
-            transaction_at_us,
-            root,
-            manifests,
+        procedure_steps = (
+            self._canonical_procedure_steps(
+                connection,
+                query,
+                candidate.record_id,
+                str(record[3]),
+                state.content_hash,
+                transaction_at_us,
+                context,
+            )
+            if state.category == "procedure" and "steps" in context
+            else self._selected_procedure_steps(
+                connection,
+                query,
+                candidate.record_id,
+                transaction_at_us,
+                root,
+                manifests,
+            )
         )
         outcome, outcome_failed, worked = self._selected_outcome(
             connection,
@@ -702,6 +835,8 @@ class SQLiteRetrievalRepository:
             rationale=rationale,
             tags=tuple(tags),
             worked=worked,
+            code_bindings=binding_refs_from_context(context),
+            binding_context=context,
             status=status,
             superseded_by_version_id=superseded_by,
             outcome=outcome,
@@ -757,6 +892,49 @@ class SQLiteRetrievalRepository:
             )
         except RetrievalRepositoryError:
             return None
+
+    def _canonical_procedure_steps(
+        self,
+        connection: sqlite3.Connection,
+        query: RetrievalQuery,
+        record_id: str,
+        source_event_id: str,
+        content_hash: str,
+        transaction_at_us: int,
+        context: Mapping[str, object],
+    ) -> tuple[str, ...]:
+        event = self._source_event(connection, query.workspace_id, source_event_id)
+        if event.stream_id != record_id or event.stream_kind != "memory":
+            raise RetrievalRepositoryError("EVIDENCE_CONTENT_UNAVAILABLE")
+        if event.recorded_at_us > transaction_at_us:
+            return ()
+        row = connection.execute(
+            "SELECT payload_json,payload_hash FROM memory_events "
+            "WHERE workspace_id=? AND event_id=?",
+            (query.workspace_id, source_event_id),
+        ).fetchone()
+        try:
+            if row is None or not isinstance(row[0], str):
+                raise ValueError("procedure source payload is unavailable")
+            payload = json.loads(row[0])
+            if hashlib.sha256(row[0].encode("utf-8")).hexdigest() != _safe_hash(row[1]):
+                raise ValueError("procedure source payload hash differs")
+            record = payload.get("record") if isinstance(payload, dict) else None
+            if (
+                not isinstance(record, dict)
+                or record.get("record_type") != "procedure"
+                or record.get("context", {}) != context
+                or memory_content_hash(record) != content_hash
+            ):
+                raise ValueError("procedure source state differs")
+            steps = context.get("steps", [])
+            if not isinstance(steps, list) or not all(
+                isinstance(step, str) and step.strip() for step in steps
+            ):
+                raise ValueError("procedure steps are invalid")
+            return tuple(steps)
+        except (TypeError, ValueError, RecursionError) as exc:
+            raise RetrievalRepositoryError("EVIDENCE_CONTENT_UNAVAILABLE") from exc
 
     def _selected_procedure_steps(
         self,

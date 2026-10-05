@@ -23,6 +23,12 @@ from typing import Any, Literal, Protocol
 
 from ... import __version__
 from ...bounded_workers import BoundedWorkerBusyError, BoundedWorkerPool
+from ...code_bindings import (
+    CodeBindingError,
+    CodeBindingUnavailableError,
+    binding_refs_from_context,
+    capture_bindings,
+)
 from ...event_store import (
     AppendedEvent,
     EventCommand,
@@ -61,6 +67,7 @@ from .federated_retrieval import (
 from .models import (
     CapabilityState,
     CitationManifestEntry,
+    PreflightGuidance,
     RecordSummary,
     RetrievalData,
     TokenUsage,
@@ -85,7 +92,6 @@ from .pinned import (
 from .tasks import await_task_terminal
 from .tools import (
     HealthData,
-    PreflightGuidance,
     SessionBriefData,
     SessionBriefInput,
 )
@@ -516,6 +522,23 @@ def _record_state(row: sqlite3.Row) -> dict[str, Any]:
     }
 
 
+def _validate_informed_by(
+    connection: sqlite3.Connection,
+    workspace_id: str,
+    informed_by: tuple[str, ...],
+) -> None:
+    if not informed_by:
+        return
+    placeholders = ",".join("?" for _ in informed_by)
+    count = connection.execute(
+        "SELECT COUNT(*) FROM memory_records WHERE workspace_id=? "
+        f"AND record_id IN ({placeholders})",
+        (workspace_id, *informed_by),
+    ).fetchone()[0]
+    if count != len(informed_by):
+        raise RuntimeServiceError("INVALID_ARGUMENT")
+
+
 class ProjectionScheduler(Protocol):
     def __call__(self, database_path: Path) -> object: ...
 
@@ -642,25 +665,34 @@ class SQLiteMemoryEventWriter:
             else _datetime_us(command.happened_at)
         )
         context = dict(command.context)
+        if command.code_refs:
+            try:
+                bindings = capture_bindings(workspace, command.code_refs)
+            except CodeBindingUnavailableError as exc:
+                raise RuntimeServiceError("CAPABILITY_DEGRADED") from exc
+            except CodeBindingError as exc:
+                raise RuntimeServiceError("INVALID_ARGUMENT") from exc
+            context["code_bindings"] = [binding.to_json() for binding in bindings]
         if command.record_type == "procedure":
             steps = list(command.procedure_steps)
             if "steps" in context and context["steps"] != steps:
                 raise RuntimeServiceError("INVALID_ARGUMENT")
             context["steps"] = steps
-        request_hash = sha256_json(
-            {
-                "record_type": command.record_type,
-                "content": command.content,
-                "rationale": command.rationale,
-                "context": dict(command.context),
-                "tags": list(command.tags),
-                "relative_file_path": command.relative_file_path,
-                "happened_at_us": (
-                    None if command.happened_at is None else happened_at_us
-                ),
-                "procedure_steps": list(command.procedure_steps),
-            }
-        )
+        request_fields: dict[str, object] = {
+            "record_type": command.record_type,
+            "content": command.content,
+            "rationale": command.rationale,
+            "context": dict(command.context),
+            "tags": list(command.tags),
+            "relative_file_path": command.relative_file_path,
+            "happened_at_us": (None if command.happened_at is None else happened_at_us),
+            "procedure_steps": list(command.procedure_steps),
+        }
+        if command.informed_by:
+            request_fields["informed_by"] = sorted(command.informed_by)
+        if command.code_refs:
+            request_fields["code_refs"] = [list(ref) for ref in command.code_refs]
+        request_hash = sha256_json(request_fields)
         record_id = deterministic_id(
             "mem",
             "memory-store",
@@ -698,6 +730,8 @@ class SQLiteMemoryEventWriter:
             "record": record,
             "idempotency_request_hash": request_hash,
         }
+        if command.informed_by:
+            payload["provenance"] = {"informed_by": sorted(command.informed_by)}
         with self._storage_resolver.locked_active(workspace) as active:
             connection = _open_database(active.path, writable=True)
             try:
@@ -713,6 +747,11 @@ class SQLiteMemoryEventWriter:
                     request_hash=request_hash,
                 )
                 if existing is None:
+                    if record_id in command.informed_by:
+                        raise RuntimeServiceError("INVALID_ARGUMENT")
+                    _validate_informed_by(
+                        connection, workspace.workspace_id, command.informed_by
+                    )
                     event = EventStore(
                         connection, assume_transaction=True
                     ).append_and_project(
@@ -785,6 +824,10 @@ class SQLiteMemoryEventWriter:
         command: MemoryOutcomeCommand,
         cancelled: threading.Event,
     ) -> tuple[RecordedOutcome, Path, bool]:
+        if command.record_id in command.informed_by or (
+            command.rebind_code and command.worked is not True
+        ):
+            raise RuntimeServiceError("INVALID_ARGUMENT")
         recorded_at_us = self._now_us()
         if cancelled.is_set():
             raise _WorkerCancelledError()
@@ -793,16 +836,19 @@ class SQLiteMemoryEventWriter:
             if command.happened_at is None
             else _datetime_us(command.happened_at)
         )
-        request_hash = sha256_json(
-            {
-                "record_id": command.record_id,
-                "outcome_text": command.outcome_text,
-                "worked": command.worked,
-                "happened_at_us": (
-                    None if command.happened_at is None else happened_at_us
-                ),
-            }
-        )
+        request_fields: dict[str, object] = {
+            "record_id": command.record_id,
+            "outcome_text": command.outcome_text,
+            "worked": command.worked,
+            "happened_at_us": (None if command.happened_at is None else happened_at_us),
+        }
+        if command.informed_by:
+            request_fields["informed_by"] = sorted(command.informed_by)
+        if command.verification is not None:
+            request_fields["verification"] = dict(command.verification)
+        if command.rebind_code:
+            request_fields["rebind_code"] = True
+        request_hash = sha256_json(request_fields)
         correlation = _idempotency_correlation(
             workspace.workspace_id,
             "memory-record-outcome",
@@ -826,13 +872,35 @@ class SQLiteMemoryEventWriter:
                     request_hash=request_hash,
                 )
                 if existing is None:
+                    _validate_informed_by(
+                        connection, workspace.workspace_id, command.informed_by
+                    )
                     record = _record_state(row)
+                    if command.rebind_code:
+                        try:
+                            refs = binding_refs_from_context(record["context"])
+                            if not refs:
+                                raise CodeBindingError("record has no code bindings")
+                            bindings = capture_bindings(workspace, refs)
+                        except CodeBindingUnavailableError as exc:
+                            raise RuntimeServiceError("CAPABILITY_DEGRADED") from exc
+                        except CodeBindingError as exc:
+                            raise RuntimeServiceError("INVALID_ARGUMENT") from exc
+                        record["context"]["code_bindings"] = [
+                            binding.to_json() for binding in bindings
+                        ]
                     record["outcome"] = command.outcome_text
                     record["worked"] = command.worked
                     payload = {
                         "record": record,
                         "idempotency_request_hash": request_hash,
                     }
+                    if command.informed_by:
+                        payload["provenance"] = {
+                            "informed_by": sorted(command.informed_by)
+                        }
+                    if command.verification is not None:
+                        payload["verification"] = dict(command.verification)
                     event = EventStore(
                         connection, assume_transaction=True
                     ).append_and_project(
@@ -921,8 +989,16 @@ _RETRIEVAL_CONFIG_FIELDS = (
     "retrieval_graph_max_depth",
     "retrieval_rerank_candidate_limit",
     "retrieval_rerank_enabled",
+    "retrieval_reranker",
+    "retrieval_late_interaction_model",
     "retrieval_rrf_weights",
     "rrf_k",
+    "retrieval_utility_mode",
+    "retrieval_utility_weight",
+    "retrieval_utility_credit",
+    "retrieval_utility_candidate_limit",
+    "memory_validity_mode",
+    "retrieval_retention_mode",
 )
 
 
@@ -1116,7 +1192,7 @@ class Task8RecallService:
                     retrieve = getattr(entry.service, "retrieve", None)
                     if not callable(retrieve):
                         raise RuntimeServiceError("RETRIEVAL_UNAVAILABLE")
-                    value = retrieve(query)
+                    value = retrieve(query, workspace_root=workspace.root)
                     result = await value if inspect.isawaitable(value) else value
                     if not isinstance(result, RetrievalResult):
                         raise RuntimeServiceError("RETRIEVAL_FAILED")
@@ -1144,7 +1220,7 @@ class Task8RecallService:
             retrieve = getattr(entry.service, "retrieve_candidates", None)
             if not callable(retrieve):
                 raise RuntimeServiceError("RETRIEVAL_UNAVAILABLE")
-            value = retrieve(query)
+            value = retrieve(query, workspace_root=workspace.root)
             result = await value if inspect.isawaitable(value) else value
             if not isinstance(result, RetrievalCandidateResult):
                 raise RuntimeServiceError("RETRIEVAL_FAILED")
@@ -1248,7 +1324,19 @@ class Task8RecallService:
                         value = authorizer(selected)
                         if inspect.isawaitable(value):
                             await value
-                    hydrated = compose_federated_results(dict(pairs), query)
+                    hydrated = compose_federated_results(
+                        dict(pairs),
+                        query,
+                        label_applicability=(
+                            getattr(
+                                self._effective_config(), "memory_validity_mode", "off"
+                            )
+                            == "apply"
+                        ),
+                        retention_mode=getattr(
+                            self._effective_config(), "retrieval_retention_mode", "off"
+                        ),
+                    )
                 finally:
                     guard.release()
         except asyncio.TimeoutError as exc:
@@ -1356,6 +1444,14 @@ class Task8RecallService:
                         channels=tuple(sorted(selected.candidate.channels)),
                         status=selected.status,
                         evidence_refs=public_refs,
+                        applicability=selected.applicability,
+                        changed_bindings=selected.changed_bindings,
+                        utility=selected.utility,
+                        procedure_steps=selected.procedure_steps,
+                        code_bindings=selected.code_bindings,
+                        outcome=selected.outcome,
+                        outcome_failed=selected.outcome_failed,
+                        superseded_by_version_id=selected.superseded_by_version_id,
                     )
                 )
             connection.commit()
@@ -1488,6 +1584,9 @@ class Task8RecallService:
                         score=item.score,
                         status=item.status,
                         evidence_refs=public_refs,
+                        utility=item.utility,
+                        applicability=item.applicability,
+                        changed_bindings=list(item.changed_bindings),
                     )
                 )
 

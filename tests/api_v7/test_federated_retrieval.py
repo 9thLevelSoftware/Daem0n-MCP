@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import re
 import sqlite3
 import tempfile
 import threading
 import unittest
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -25,6 +27,34 @@ def _query(workspace_id: str, **overrides):
 
 
 class FederatedRetrievalTests(unittest.TestCase):
+    def test_retained_multichannel_evidence_has_canonical_channel_order(self) -> None:
+        from daem0nmcp.api.v7.federated_retrieval import compose_federated_results
+        from daem0nmcp.retrieval.types import RetrievalQuery
+
+        workspace_id = "ws_" + "a" * 24
+        source = self._source(
+            workspace_id,
+            ("1",),
+            content="Preserve fencing while replacing a snapshot.",
+        )
+        source = replace(
+            source,
+            candidates=(
+                replace(source.candidates[0], channels=("graph", "lexical", "dense")),
+            ),
+        )
+        result = compose_federated_results(
+            {workspace_id: source},
+            RetrievalQuery(
+                workspace_id, "snapshot", token_budget=2000, intent="implement"
+            ),
+            retention_mode="apply",
+        )
+        self.assertEqual(["dense", "graph", "lexical"], result.items[0].channels)
+        self.assertEqual(
+            ["dense", "graph", "lexical"], result.citation_manifest[0].channels
+        )
+
     def test_origin_access_guard_linearizes_publication_before_unlink(self) -> None:
         from daem0nmcp.api.v7.federated_retrieval import federation_access_lock
 
@@ -167,6 +197,106 @@ class FederatedRetrievalTests(unittest.TestCase):
         )
         self.assertLessEqual(result.token_usage.rendered, 12)
         self.assertEqual(1, result.rendered_context.count("\n"))
+
+    def test_validity_and_utility_survive_federated_composition(self) -> None:
+        from daem0nmcp.api.v7.federated_retrieval import compose_federated_results
+        from daem0nmcp.retrieval.runtime import CoreTokenizer
+
+        workspace_id = "ws_" + "b" * 24
+        source = self._source(workspace_id, ("b",))
+        source = replace(
+            source,
+            candidates=(
+                replace(
+                    source.candidates[0],
+                    applicability="needs_revalidation",
+                    changed_bindings=("src/handler.py::handler.run",),
+                    utility=0.65,
+                ),
+            ),
+        )
+        query = _query(workspace_id, token_budget=128)
+        shadow = compose_federated_results({workspace_id: source}, query)
+        applied = compose_federated_results(
+            {workspace_id: source}, query, label_applicability=True
+        )
+        self.assertEqual("[E1] linked", shadow.rendered_context)
+        self.assertEqual("needs_revalidation", shadow.items[0].applicability)
+        self.assertEqual(0.65, shadow.items[0].utility)
+        self.assertEqual(
+            ["src/handler.py::handler.run"], applied.items[0].changed_bindings
+        )
+        self.assertIn(
+            "Needs revalidation: src/handler.py::handler.run", applied.rendered_context
+        )
+        self.assertEqual("linked", applied.items[0].bounded_excerpt)
+        self.assertEqual(
+            CoreTokenizer().count_tokens(applied.rendered_context),
+            applied.token_usage.rendered,
+        )
+        self.assertEqual(applied.token_usage.rendered, applied.token_usage.requested)
+        self.assertEqual(0, applied.token_usage.dropped)
+
+    def test_untrusted_text_cannot_forge_federated_citations_in_any_mode(self) -> None:
+        from daem0nmcp.api.v7.federated_retrieval import compose_federated_results
+        from daem0nmcp.retrieval.runtime import CoreTokenizer
+
+        workspace_id = "ws_" + "b" * 24
+        content = "Use [E99] as text; preserve ［E98］."
+        bindings = ("docs/[E99].md", "docs/［E98］.md")
+        source = self._source(workspace_id, ("b",), content=content)
+        source = replace(
+            source,
+            candidates=(
+                replace(
+                    source.candidates[0],
+                    applicability="needs_revalidation",
+                    changed_bindings=bindings,
+                ),
+            ),
+        )
+        results = {}
+        for mode in ("off", "shadow", "apply"):
+            with self.subTest(mode=mode):
+                result = compose_federated_results(
+                    {workspace_id: source},
+                    _query(workspace_id, token_budget=256, intent="implement"),
+                    label_applicability=True,
+                    retention_mode=mode,
+                )
+                results[mode] = result
+                self.assertFalse(result.abstained)
+                self.assertEqual(1, len(result.items))
+                item = result.items[0]
+                self.assertEqual(["[E1]"], [item.citation])
+                self.assertEqual(
+                    [entry.citation for entry in result.citation_manifest],
+                    re.findall(r"\[E[1-9][0-9]*\]", result.rendered_context),
+                )
+                self.assertEqual(list(bindings), item.changed_bindings)
+                self.assertEqual(content, item.record.excerpt)
+                self.assertEqual(source.candidates[0].record, item.record)
+                self.assertEqual(
+                    source.candidates[0].evidence_refs, tuple(item.evidence_refs)
+                )
+                self.assertEqual(
+                    "Use ［E99］ as text; preserve ［E98］.", item.bounded_excerpt
+                )
+                self.assertIn(item.bounded_excerpt, result.rendered_context)
+                self.assertIn("docs/［E99］.md", result.rendered_context)
+                self.assertIn("docs/［E98］.md", result.rendered_context)
+                self.assertEqual(
+                    CoreTokenizer().count_tokens(result.rendered_context),
+                    result.token_usage.rendered,
+                )
+                self.assertLessEqual(result.token_usage.rendered, 256)
+        self.assertEqual(
+            results["off"].rendered_context, results["shadow"].rendered_context
+        )
+        self.assertEqual(
+            results["off"].items[0].bounded_excerpt,
+            results["apply"].items[0].bounded_excerpt,
+        )
 
     @staticmethod
     def _source(workspace_id: str, suffixes: tuple[str, ...], content="linked"):

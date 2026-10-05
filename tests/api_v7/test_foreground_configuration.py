@@ -23,3 +23,22 @@ def test_production_uses_environment_deadline(tmp_path, monkeypatch):
 def test_invalid_foreground_deadline_fails_configuration(value):
     with pytest.raises(ValidationError):
         Settings(sync_timeout_seconds=value, _env_file=None)
+
+
+def test_ergonomics_settings_defaults_and_environment(monkeypatch):
+    monkeypatch.delenv("DAEM0NMCP_TOOL_SURFACE", raising=False)
+    monkeypatch.delenv("DAEM0NMCP_COVENANT_MODE", raising=False)
+    settings = Settings(_env_file=None)
+    assert settings.tool_surface == "core"
+    assert settings.covenant_mode == "guided"
+    monkeypatch.setenv("DAEM0NMCP_TOOL_SURFACE", "full")
+    monkeypatch.setenv("DAEM0NMCP_COVENANT_MODE", "strict")
+    configured = Settings(_env_file=None)
+    assert configured.tool_surface == "full"
+    assert configured.covenant_mode == "strict"
+
+
+@pytest.mark.parametrize("field", ["tool_surface", "covenant_mode"])
+def test_invalid_ergonomics_setting_is_rejected(field):
+    with pytest.raises(ValidationError):
+        Settings(**{field: "unsupported"}, _env_file=None)

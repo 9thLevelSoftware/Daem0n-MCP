@@ -2,8 +2,10 @@
 description: Start the Daem0n v7 session for a registered workspace
 ---
 
-Call `daem0nmcp_session_brief(workspace_id="$ARGUMENTS")` immediately. The
-argument must be the configured opaque `workspace_id`, not a path.
+The first Daem0n call establishes the scoped session and briefs automatically
+in `meta.covenant.auto_brief`. For the full brief, call
+`daem0nmcp_session_brief(workspace_id="$ARGUMENTS")`.
+The argument must be the configured opaque `workspace_id`, not a path.
 
 After receiving the briefing results:
 1. Report the session status, active warnings, and recent activity summary

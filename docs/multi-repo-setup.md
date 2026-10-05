@@ -18,10 +18,10 @@ access policy:
 └── client/
 ```
 
-Start the session and query the shared record stream with the parent ID:
+The first call automatically briefs the parent workspace. Query its shared
+record stream; call `session_brief` only for the full brief:
 
 ```text
-session_brief(workspace_id="ws_000000000000000000000001")
 memory_recall(
     workspace_id="ws_000000000000000000000001",
     query="authentication across backend and client",
@@ -39,24 +39,23 @@ authorization, export, or archival:
 /workspace/client/          -> ws_000000000000000000000003
 ```
 
-`workspace_link` is protected. Preflight its exact arguments first:
+Use `daem0n_tools_search(query="link workspaces")` to discover `workspace_link`,
+then call it through the gateway:
 
 ```text
-memory_preflight(
+daem0n_tool_call(
     workspace_id="ws_000000000000000000000002",
-    target_tool="workspace_link",
-    target_arguments={
+    tool="workspace_link",
+    arguments={
         "linked_workspace_id": "ws_000000000000000000000003",
         "relationship": "same-project"
     }
 )
-workspace_link(
-    workspace_id="ws_000000000000000000000002",
-    linked_workspace_id="ws_000000000000000000000003",
-    relationship="same-project",
-    preflight_token="<token-from-memory_preflight>"
-)
 ```
+
+On `COUNSEL_REQUIRED`, review `error.counsel` and retry exactly `error.remedy`.
+`memory_preflight` remains optional advance planning. Each federated linked
+workspace still needs its own explicit `session_brief` before linked recall.
 
 Linked recall remains explicit: provide authorized `linked_workspace_ids` to
 `memory_recall`. The server resolves every ID before reading and does not infer
@@ -64,15 +63,14 @@ workspace scope from paths.
 
 ## Consolidating registered workspaces
 
-Consolidation appends canonical v7 events to the target workspace. It is a
-protected replay-safe write, so use the same exact arguments for preflight and
-reuse the idempotency key on retry:
+Consolidation appends canonical v7 events to the target workspace. Discover it
+with `daem0n_tools_search`, then make the protected replay-safe call directly:
 
 ```text
-memory_preflight(
+daem0n_tool_call(
     workspace_id="ws_000000000000000000000001",
-    target_tool="workspace_consolidate",
-    target_arguments={
+    tool="workspace_consolidate",
+    arguments={
         "source_workspace_ids": [
             "ws_000000000000000000000002",
             "ws_000000000000000000000003"
@@ -80,16 +78,13 @@ memory_preflight(
         "idempotency_key": "consolidate-product-2026-0001"
     }
 )
-workspace_consolidate(
-    workspace_id="ws_000000000000000000000001",
-    source_workspace_ids=[
-        "ws_000000000000000000000002",
-        "ws_000000000000000000000003"
-    ],
-    idempotency_key="consolidate-product-2026-0001",
-    preflight_token="<token-from-memory_preflight>"
-)
 ```
+
+On `COUNSEL_REQUIRED`, read `error.counsel`, then retry exactly `error.remedy`;
+reuse the idempotency key. Tokens remain exact-argument, single-use, and valid
+for 300 seconds. Defaults are guided/core. `DAEM0NMCP_COVENANT_MODE=strict`
+requires explicit briefing and preflight; `DAEM0NMCP_TOOL_SURFACE=full` lists
+all tools.
 
 Use `workspace_consolidate_and_archive_sources` only when source archival is
 intentional and separately authorized. Verify the target with `system_health`

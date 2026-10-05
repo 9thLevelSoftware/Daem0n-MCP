@@ -21,7 +21,7 @@
       "status": "pending"
     },
     {
-      "acceptance": "Enabled supported profile exercises a required preflight_token branch for active_context_add, asserts the requested documented result or side effect, and rejects an invalid branch.",
+      "acceptance": "Enabled supported profile exercises a present and omitted optional preflight_token branch for active_context_add, asserts the requested documented result or side effect, and rejects an invalid branch.",
       "entry_point": "daem0nmcp.api.v7.tools:TOOL_INPUT_MODELS['active_context_add']",
       "evidence": [],
       "id": "tool.active_context_add.argument.preflight_token",
@@ -81,7 +81,7 @@
       "status": "pending"
     },
     {
-      "acceptance": "Enabled supported profile exercises a required preflight_token branch for active_context_clear, asserts the requested documented result or side effect, and rejects an invalid branch.",
+      "acceptance": "Enabled supported profile exercises a present and omitted optional preflight_token branch for active_context_clear, asserts the requested documented result or side effect, and rejects an invalid branch.",
       "entry_point": "daem0nmcp.api.v7.tools:TOOL_INPUT_MODELS['active_context_clear']",
       "evidence": [],
       "id": "tool.active_context_clear.argument.preflight_token",
@@ -171,7 +171,7 @@
       "status": "pending"
     },
     {
-      "acceptance": "Enabled supported profile exercises a required preflight_token branch for active_context_remove, asserts the requested documented result or side effect, and rejects an invalid branch.",
+      "acceptance": "Enabled supported profile exercises a present and omitted optional preflight_token branch for active_context_remove, asserts the requested documented result or side effect, and rejects an invalid branch.",
       "entry_point": "daem0nmcp.api.v7.tools:TOOL_INPUT_MODELS['active_context_remove']",
       "evidence": [],
       "id": "tool.active_context_remove.argument.preflight_token",
@@ -491,7 +491,7 @@
       "status": "pending"
     },
     {
-      "acceptance": "Enabled supported profile exercises a required preflight_token branch for code_todos_scan_and_store, asserts the requested documented result or side effect, and rejects an invalid branch.",
+      "acceptance": "Enabled supported profile exercises a present and omitted optional preflight_token branch for code_todos_scan_and_store, asserts the requested documented result or side effect, and rejects an invalid branch.",
       "entry_point": "daem0nmcp.api.v7.tools:TOOL_INPUT_MODELS['code_todos_scan_and_store']",
       "evidence": [],
       "id": "tool.code_todos_scan_and_store.argument.preflight_token",
@@ -691,7 +691,7 @@
       "status": "pending"
     },
     {
-      "acceptance": "Enabled supported profile exercises a required preflight_token branch for community_rebuild, asserts the requested documented result or side effect, and rejects an invalid branch.",
+      "acceptance": "Enabled supported profile exercises a present and omitted optional preflight_token branch for community_rebuild, asserts the requested documented result or side effect, and rejects an invalid branch.",
       "entry_point": "daem0nmcp.api.v7.tools:TOOL_INPUT_MODELS['community_rebuild']",
       "evidence": [],
       "id": "tool.community_rebuild.argument.preflight_token",
@@ -831,7 +831,7 @@
       "status": "pending"
     },
     {
-      "acceptance": "Enabled supported profile exercises a required preflight_token branch for context_trigger_create, asserts the requested documented result or side effect, and rejects an invalid branch.",
+      "acceptance": "Enabled supported profile exercises a present and omitted optional preflight_token branch for context_trigger_create, asserts the requested documented result or side effect, and rejects an invalid branch.",
       "entry_point": "daem0nmcp.api.v7.tools:TOOL_INPUT_MODELS['context_trigger_create']",
       "evidence": [],
       "id": "tool.context_trigger_create.argument.preflight_token",
@@ -881,7 +881,7 @@
       "status": "pending"
     },
     {
-      "acceptance": "Enabled supported profile exercises a required preflight_token branch for context_trigger_delete, asserts the requested documented result or side effect, and rejects an invalid branch.",
+      "acceptance": "Enabled supported profile exercises a present and omitted optional preflight_token branch for context_trigger_delete, asserts the requested documented result or side effect, and rejects an invalid branch.",
       "entry_point": "daem0nmcp.api.v7.tools:TOOL_INPUT_MODELS['context_trigger_delete']",
       "evidence": [],
       "id": "tool.context_trigger_delete.argument.preflight_token",
@@ -1041,6 +1041,76 @@
       "status": "pending"
     },
     {
+      "acceptance": "Enabled supported profile completes production stdio and HTTP calls of daem0n_tool_call; assert its documented success result and side effect. Disabled-profile remediation is tracked separately.",
+      "entry_point": "daem0nmcp.api.v7.production:create_v7_server -> daem0nmcp.api.v7.gateway_operations:build_gateway_operations",
+      "evidence": [],
+      "id": "tool.daem0n_tool_call.execute",
+      "kind": "tool-execution",
+      "owner": "api/v7/production",
+      "package": "daem0nmcp.api.v7",
+      "status": "pending"
+    },
+    {
+      "acceptance": "Enabled supported profile exercises a present and omitted optional arguments branch for daem0n_tool_call, asserts the requested documented result or side effect, and rejects an invalid branch.",
+      "entry_point": "daem0nmcp.api.v7.tools:TOOL_INPUT_MODELS['daem0n_tool_call']",
+      "evidence": [],
+      "id": "tool.daem0n_tool_call.argument.arguments",
+      "kind": "tool-argument",
+      "owner": "api/v7/production",
+      "package": "daem0nmcp.api.v7.models",
+      "status": "pending"
+    },
+    {
+      "acceptance": "Enabled supported profile exercises a required tool branch for daem0n_tool_call, asserts the requested documented result or side effect, and rejects an invalid branch.",
+      "entry_point": "daem0nmcp.api.v7.tools:TOOL_INPUT_MODELS['daem0n_tool_call']",
+      "evidence": [],
+      "id": "tool.daem0n_tool_call.argument.tool",
+      "kind": "tool-argument",
+      "owner": "api/v7/production",
+      "package": "daem0nmcp.api.v7.models",
+      "status": "pending"
+    },
+    {
+      "acceptance": "Enabled supported profile exercises a required workspace_id branch for daem0n_tool_call, asserts the requested documented result or side effect, and rejects an invalid branch.",
+      "entry_point": "daem0nmcp.api.v7.tools:TOOL_INPUT_MODELS['daem0n_tool_call']",
+      "evidence": [],
+      "id": "tool.daem0n_tool_call.argument.workspace_id",
+      "kind": "tool-argument",
+      "owner": "api/v7/production",
+      "package": "daem0nmcp.api.v7.models",
+      "status": "pending"
+    },
+    {
+      "acceptance": "Enabled supported profile completes production stdio and HTTP calls of daem0n_tools_search; assert its documented success result and side effect. Disabled-profile remediation is tracked separately.",
+      "entry_point": "daem0nmcp.api.v7.production:create_v7_server -> daem0nmcp.api.v7.gateway_operations:build_gateway_operations",
+      "evidence": [],
+      "id": "tool.daem0n_tools_search.execute",
+      "kind": "tool-execution",
+      "owner": "api/v7/production",
+      "package": "daem0nmcp.api.v7",
+      "status": "pending"
+    },
+    {
+      "acceptance": "Enabled supported profile exercises a present and omitted optional limit branch for daem0n_tools_search, asserts the requested documented result or side effect, and rejects an invalid branch.",
+      "entry_point": "daem0nmcp.api.v7.tools:TOOL_INPUT_MODELS['daem0n_tools_search']",
+      "evidence": [],
+      "id": "tool.daem0n_tools_search.argument.limit",
+      "kind": "tool-argument",
+      "owner": "api/v7/production",
+      "package": "daem0nmcp.api.v7.models",
+      "status": "pending"
+    },
+    {
+      "acceptance": "Enabled supported profile exercises a required query branch for daem0n_tools_search, asserts the requested documented result or side effect, and rejects an invalid branch.",
+      "entry_point": "daem0nmcp.api.v7.tools:TOOL_INPUT_MODELS['daem0n_tools_search']",
+      "evidence": [],
+      "id": "tool.daem0n_tools_search.argument.query",
+      "kind": "tool-argument",
+      "owner": "api/v7/production",
+      "package": "daem0nmcp.api.v7.models",
+      "status": "pending"
+    },
+    {
       "acceptance": "Enabled supported profile completes production stdio and HTTP calls of decision_debate; assert its documented success result and side effect. Disabled-profile remediation is tracked separately.",
       "entry_point": "daem0nmcp.api.v7.production:create_v7_server -> daem0nmcp.api.v7.intelligence_operations:build_intelligence_operations",
       "evidence": [],
@@ -1091,7 +1161,7 @@
       "status": "pending"
     },
     {
-      "acceptance": "Enabled supported profile exercises a required preflight_token branch for decision_debate, asserts the requested documented result or side effect, and rejects an invalid branch.",
+      "acceptance": "Enabled supported profile exercises a present and omitted optional preflight_token branch for decision_debate, asserts the requested documented result or side effect, and rejects an invalid branch.",
       "entry_point": "daem0nmcp.api.v7.tools:TOOL_INPUT_MODELS['decision_debate']",
       "evidence": [],
       "id": "tool.decision_debate.argument.preflight_token",
@@ -1191,7 +1261,7 @@
       "status": "pending"
     },
     {
-      "acceptance": "Enabled supported profile exercises a required preflight_token branch for document_ingest_url, asserts the requested documented result or side effect, and rejects an invalid branch.",
+      "acceptance": "Enabled supported profile exercises a present and omitted optional preflight_token branch for document_ingest_url, asserts the requested documented result or side effect, and rejects an invalid branch.",
       "entry_point": "daem0nmcp.api.v7.tools:TOOL_INPUT_MODELS['document_ingest_url']",
       "evidence": [],
       "id": "tool.document_ingest_url.argument.preflight_token",
@@ -1261,7 +1331,7 @@
       "status": "pending"
     },
     {
-      "acceptance": "Enabled supported profile exercises a required preflight_token branch for dream_duplicates_purge, asserts the requested documented result or side effect, and rejects an invalid branch.",
+      "acceptance": "Enabled supported profile exercises a present and omitted optional preflight_token branch for dream_duplicates_purge, asserts the requested documented result or side effect, and rejects an invalid branch.",
       "entry_point": "daem0nmcp.api.v7.tools:TOOL_INPUT_MODELS['dream_duplicates_purge']",
       "evidence": [],
       "id": "tool.dream_duplicates_purge.argument.preflight_token",
@@ -1361,7 +1431,7 @@
       "status": "pending"
     },
     {
-      "acceptance": "Enabled supported profile exercises a required preflight_token branch for entity_backfill, asserts the requested documented result or side effect, and rejects an invalid branch.",
+      "acceptance": "Enabled supported profile exercises a present and omitted optional preflight_token branch for entity_backfill, asserts the requested documented result or side effect, and rejects an invalid branch.",
       "entry_point": "daem0nmcp.api.v7.tools:TOOL_INPUT_MODELS['entity_backfill']",
       "evidence": [],
       "id": "tool.entity_backfill.argument.preflight_token",
@@ -1661,7 +1731,7 @@
       "status": "pending"
     },
     {
-      "acceptance": "Enabled supported profile exercises a required preflight_token branch for memory_archive_set, asserts the requested documented result or side effect, and rejects an invalid branch.",
+      "acceptance": "Enabled supported profile exercises a present and omitted optional preflight_token branch for memory_archive_set, asserts the requested documented result or side effect, and rejects an invalid branch.",
       "entry_point": "daem0nmcp.api.v7.tools:TOOL_INPUT_MODELS['memory_archive_set']",
       "evidence": [],
       "id": "tool.memory_archive_set.argument.preflight_token",
@@ -1831,7 +1901,7 @@
       "status": "pending"
     },
     {
-      "acceptance": "Enabled supported profile exercises a required preflight_token branch for memory_capture_promote, asserts the requested documented result or side effect, and rejects an invalid branch.",
+      "acceptance": "Enabled supported profile exercises a present and omitted optional preflight_token branch for memory_capture_promote, asserts the requested documented result or side effect, and rejects an invalid branch.",
       "entry_point": "daem0nmcp.api.v7.tools:TOOL_INPUT_MODELS['memory_capture_promote']",
       "evidence": [],
       "id": "tool.memory_capture_promote.argument.preflight_token",
@@ -1961,7 +2031,7 @@
       "status": "pending"
     },
     {
-      "acceptance": "Enabled supported profile exercises a required preflight_token branch for memory_compact, asserts the requested documented result or side effect, and rejects an invalid branch.",
+      "acceptance": "Enabled supported profile exercises a present and omitted optional preflight_token branch for memory_compact, asserts the requested documented result or side effect, and rejects an invalid branch.",
       "entry_point": "daem0nmcp.api.v7.tools:TOOL_INPUT_MODELS['memory_compact']",
       "evidence": [],
       "id": "tool.memory_compact.argument.preflight_token",
@@ -2081,7 +2151,7 @@
       "status": "pending"
     },
     {
-      "acceptance": "Enabled supported profile exercises a required preflight_token branch for memory_duplicates_cleanup, asserts the requested documented result or side effect, and rejects an invalid branch.",
+      "acceptance": "Enabled supported profile exercises a present and omitted optional preflight_token branch for memory_duplicates_cleanup, asserts the requested documented result or side effect, and rejects an invalid branch.",
       "entry_point": "daem0nmcp.api.v7.tools:TOOL_INPUT_MODELS['memory_duplicates_cleanup']",
       "evidence": [],
       "id": "tool.memory_duplicates_cleanup.argument.preflight_token",
@@ -2181,7 +2251,7 @@
       "status": "pending"
     },
     {
-      "acceptance": "Enabled supported profile exercises a required preflight_token branch for memory_link, asserts the requested documented result or side effect, and rejects an invalid branch.",
+      "acceptance": "Enabled supported profile exercises a present and omitted optional preflight_token branch for memory_link, asserts the requested documented result or side effect, and rejects an invalid branch.",
       "entry_point": "daem0nmcp.api.v7.tools:TOOL_INPUT_MODELS['memory_link']",
       "evidence": [],
       "id": "tool.memory_link.argument.preflight_token",
@@ -2251,7 +2321,7 @@
       "status": "pending"
     },
     {
-      "acceptance": "Enabled supported profile exercises a required preflight_token branch for memory_pin_set, asserts the requested documented result or side effect, and rejects an invalid branch.",
+      "acceptance": "Enabled supported profile exercises a present and omitted optional preflight_token branch for memory_pin_set, asserts the requested documented result or side effect, and rejects an invalid branch.",
       "entry_point": "daem0nmcp.api.v7.tools:TOOL_INPUT_MODELS['memory_pin_set']",
       "evidence": [],
       "id": "tool.memory_pin_set.argument.preflight_token",
@@ -2371,7 +2441,7 @@
       "status": "pending"
     },
     {
-      "acceptance": "Enabled supported profile exercises a required preflight_token branch for memory_prune, asserts the requested documented result or side effect, and rejects an invalid branch.",
+      "acceptance": "Enabled supported profile exercises a present and omitted optional preflight_token branch for memory_prune, asserts the requested documented result or side effect, and rejects an invalid branch.",
       "entry_point": "daem0nmcp.api.v7.tools:TOOL_INPUT_MODELS['memory_prune']",
       "evidence": [],
       "id": "tool.memory_prune.argument.preflight_token",
@@ -2535,6 +2605,16 @@
       "entry_point": "daem0nmcp.api.v7.tools:TOOL_INPUT_MODELS['memory_recall']",
       "evidence": [],
       "id": "tool.memory_recall.argument.include_invalidated",
+      "kind": "tool-argument",
+      "owner": "api/v7/production",
+      "package": "daem0nmcp.api.v7.models",
+      "status": "pending"
+    },
+    {
+      "acceptance": "Enabled supported profile exercises a present and omitted optional intent branch for memory_recall, asserts the requested documented result or side effect, and rejects an invalid branch.",
+      "entry_point": "daem0nmcp.api.v7.tools:TOOL_INPUT_MODELS['memory_recall']",
+      "evidence": [],
+      "id": "tool.memory_recall.argument.intent",
       "kind": "tool-argument",
       "owner": "api/v7/production",
       "package": "daem0nmcp.api.v7.models",
@@ -2821,6 +2901,16 @@
       "status": "pending"
     },
     {
+      "acceptance": "Enabled supported profile exercises a present and omitted optional informed_by branch for memory_record_outcome, asserts the requested documented result or side effect, and rejects an invalid branch.",
+      "entry_point": "daem0nmcp.api.v7.tools:TOOL_INPUT_MODELS['memory_record_outcome']",
+      "evidence": [],
+      "id": "tool.memory_record_outcome.argument.informed_by",
+      "kind": "tool-argument",
+      "owner": "api/v7/production",
+      "package": "daem0nmcp.api.v7.models",
+      "status": "pending"
+    },
+    {
       "acceptance": "Enabled supported profile exercises a required outcome_text branch for memory_record_outcome, asserts the requested documented result or side effect, and rejects an invalid branch.",
       "entry_point": "daem0nmcp.api.v7.tools:TOOL_INPUT_MODELS['memory_record_outcome']",
       "evidence": [],
@@ -2831,10 +2921,30 @@
       "status": "pending"
     },
     {
+      "acceptance": "Enabled supported profile exercises a present and omitted optional rebind_code branch for memory_record_outcome, asserts the requested documented result or side effect, and rejects an invalid branch.",
+      "entry_point": "daem0nmcp.api.v7.tools:TOOL_INPUT_MODELS['memory_record_outcome']",
+      "evidence": [],
+      "id": "tool.memory_record_outcome.argument.rebind_code",
+      "kind": "tool-argument",
+      "owner": "api/v7/production",
+      "package": "daem0nmcp.api.v7.models",
+      "status": "pending"
+    },
+    {
       "acceptance": "Enabled supported profile exercises a required record_id branch for memory_record_outcome, asserts the requested documented result or side effect, and rejects an invalid branch.",
       "entry_point": "daem0nmcp.api.v7.tools:TOOL_INPUT_MODELS['memory_record_outcome']",
       "evidence": [],
       "id": "tool.memory_record_outcome.argument.record_id",
+      "kind": "tool-argument",
+      "owner": "api/v7/production",
+      "package": "daem0nmcp.api.v7.models",
+      "status": "pending"
+    },
+    {
+      "acceptance": "Enabled supported profile exercises a present and omitted optional verification branch for memory_record_outcome, asserts the requested documented result or side effect, and rejects an invalid branch.",
+      "entry_point": "daem0nmcp.api.v7.tools:TOOL_INPUT_MODELS['memory_record_outcome']",
+      "evidence": [],
+      "id": "tool.memory_record_outcome.argument.verification",
       "kind": "tool-argument",
       "owner": "api/v7/production",
       "package": "daem0nmcp.api.v7.models",
@@ -3001,6 +3111,16 @@
       "status": "pending"
     },
     {
+      "acceptance": "Enabled supported profile exercises a present and omitted optional code_refs branch for memory_store, asserts the requested documented result or side effect, and rejects an invalid branch.",
+      "entry_point": "daem0nmcp.api.v7.tools:TOOL_INPUT_MODELS['memory_store']",
+      "evidence": [],
+      "id": "tool.memory_store.argument.code_refs",
+      "kind": "tool-argument",
+      "owner": "api/v7/production",
+      "package": "daem0nmcp.api.v7.models",
+      "status": "pending"
+    },
+    {
       "acceptance": "Enabled supported profile exercises a required content branch for memory_store, asserts the requested documented result or side effect, and rejects an invalid branch.",
       "entry_point": "daem0nmcp.api.v7.tools:TOOL_INPUT_MODELS['memory_store']",
       "evidence": [],
@@ -3041,7 +3161,17 @@
       "status": "pending"
     },
     {
-      "acceptance": "Enabled supported profile exercises a required preflight_token branch for memory_store, asserts the requested documented result or side effect, and rejects an invalid branch.",
+      "acceptance": "Enabled supported profile exercises a present and omitted optional informed_by branch for memory_store, asserts the requested documented result or side effect, and rejects an invalid branch.",
+      "entry_point": "daem0nmcp.api.v7.tools:TOOL_INPUT_MODELS['memory_store']",
+      "evidence": [],
+      "id": "tool.memory_store.argument.informed_by",
+      "kind": "tool-argument",
+      "owner": "api/v7/production",
+      "package": "daem0nmcp.api.v7.models",
+      "status": "pending"
+    },
+    {
+      "acceptance": "Enabled supported profile exercises a present and omitted optional preflight_token branch for memory_store, asserts the requested documented result or side effect, and rejects an invalid branch.",
       "entry_point": "daem0nmcp.api.v7.tools:TOOL_INPUT_MODELS['memory_store']",
       "evidence": [],
       "id": "tool.memory_store.argument.preflight_token",
@@ -3131,7 +3261,7 @@
       "status": "pending"
     },
     {
-      "acceptance": "Enabled supported profile exercises a required preflight_token branch for memory_store_batch, asserts the requested documented result or side effect, and rejects an invalid branch.",
+      "acceptance": "Enabled supported profile exercises a present and omitted optional preflight_token branch for memory_store_batch, asserts the requested documented result or side effect, and rejects an invalid branch.",
       "entry_point": "daem0nmcp.api.v7.tools:TOOL_INPUT_MODELS['memory_store_batch']",
       "evidence": [],
       "id": "tool.memory_store_batch.argument.preflight_token",
@@ -3171,7 +3301,7 @@
       "status": "pending"
     },
     {
-      "acceptance": "Enabled supported profile exercises a required preflight_token branch for memory_unlink, asserts the requested documented result or side effect, and rejects an invalid branch.",
+      "acceptance": "Enabled supported profile exercises a present and omitted optional preflight_token branch for memory_unlink, asserts the requested documented result or side effect, and rejects an invalid branch.",
       "entry_point": "daem0nmcp.api.v7.tools:TOOL_INPUT_MODELS['memory_unlink']",
       "evidence": [],
       "id": "tool.memory_unlink.argument.preflight_token",
@@ -3441,7 +3571,7 @@
       "status": "pending"
     },
     {
-      "acceptance": "Enabled supported profile exercises a required preflight_token branch for rule_create, asserts the requested documented result or side effect, and rejects an invalid branch.",
+      "acceptance": "Enabled supported profile exercises a present and omitted optional preflight_token branch for rule_create, asserts the requested documented result or side effect, and rejects an invalid branch.",
       "entry_point": "daem0nmcp.api.v7.tools:TOOL_INPUT_MODELS['rule_create']",
       "evidence": [],
       "id": "tool.rule_create.argument.preflight_token",
@@ -3591,7 +3721,7 @@
       "status": "pending"
     },
     {
-      "acceptance": "Enabled supported profile exercises a required preflight_token branch for rule_update, asserts the requested documented result or side effect, and rejects an invalid branch.",
+      "acceptance": "Enabled supported profile exercises a present and omitted optional preflight_token branch for rule_update, asserts the requested documented result or side effect, and rejects an invalid branch.",
       "entry_point": "daem0nmcp.api.v7.tools:TOOL_INPUT_MODELS['rule_update']",
       "evidence": [],
       "id": "tool.rule_update.argument.preflight_token",
@@ -3641,7 +3771,7 @@
       "status": "pending"
     },
     {
-      "acceptance": "Enabled supported profile exercises a required preflight_token branch for sandbox_execute_python, asserts the requested documented result or side effect, and rejects an invalid branch.",
+      "acceptance": "Enabled supported profile exercises a present and omitted optional preflight_token branch for sandbox_execute_python, asserts the requested documented result or side effect, and rejects an invalid branch.",
       "entry_point": "daem0nmcp.api.v7.tools:TOOL_INPUT_MODELS['sandbox_execute_python']",
       "evidence": [],
       "id": "tool.sandbox_execute_python.argument.preflight_token",
@@ -3821,7 +3951,7 @@
       "status": "pending"
     },
     {
-      "acceptance": "Enabled supported profile exercises a required preflight_token branch for workspace_consolidate, asserts the requested documented result or side effect, and rejects an invalid branch.",
+      "acceptance": "Enabled supported profile exercises a present and omitted optional preflight_token branch for workspace_consolidate, asserts the requested documented result or side effect, and rejects an invalid branch.",
       "entry_point": "daem0nmcp.api.v7.tools:TOOL_INPUT_MODELS['workspace_consolidate']",
       "evidence": [],
       "id": "tool.workspace_consolidate.argument.preflight_token",
@@ -3881,7 +4011,7 @@
       "status": "pending"
     },
     {
-      "acceptance": "Enabled supported profile exercises a required preflight_token branch for workspace_consolidate_and_archive_sources, asserts the requested documented result or side effect, and rejects an invalid branch.",
+      "acceptance": "Enabled supported profile exercises a present and omitted optional preflight_token branch for workspace_consolidate_and_archive_sources, asserts the requested documented result or side effect, and rejects an invalid branch.",
       "entry_point": "daem0nmcp.api.v7.tools:TOOL_INPUT_MODELS['workspace_consolidate_and_archive_sources']",
       "evidence": [],
       "id": "tool.workspace_consolidate_and_archive_sources.argument.preflight_token",
@@ -4091,7 +4221,7 @@
       "status": "pending"
     },
     {
-      "acceptance": "Enabled supported profile exercises a required preflight_token branch for workspace_import, asserts the requested documented result or side effect, and rejects an invalid branch.",
+      "acceptance": "Enabled supported profile exercises a present and omitted optional preflight_token branch for workspace_import, asserts the requested documented result or side effect, and rejects an invalid branch.",
       "entry_point": "daem0nmcp.api.v7.tools:TOOL_INPUT_MODELS['workspace_import']",
       "evidence": [],
       "id": "tool.workspace_import.argument.preflight_token",
@@ -4141,7 +4271,7 @@
       "status": "pending"
     },
     {
-      "acceptance": "Enabled supported profile exercises a required preflight_token branch for workspace_link, asserts the requested documented result or side effect, and rejects an invalid branch.",
+      "acceptance": "Enabled supported profile exercises a present and omitted optional preflight_token branch for workspace_link, asserts the requested documented result or side effect, and rejects an invalid branch.",
       "entry_point": "daem0nmcp.api.v7.tools:TOOL_INPUT_MODELS['workspace_link']",
       "evidence": [],
       "id": "tool.workspace_link.argument.preflight_token",
@@ -4231,7 +4361,7 @@
       "status": "pending"
     },
     {
-      "acceptance": "Enabled supported profile exercises a required preflight_token branch for workspace_unlink, asserts the requested documented result or side effect, and rejects an invalid branch.",
+      "acceptance": "Enabled supported profile exercises a present and omitted optional preflight_token branch for workspace_unlink, asserts the requested documented result or side effect, and rejects an invalid branch.",
       "entry_point": "daem0nmcp.api.v7.tools:TOOL_INPUT_MODELS['workspace_unlink']",
       "evidence": [],
       "id": "tool.workspace_unlink.argument.preflight_token",
@@ -4595,6 +4725,16 @@
       "entry_point": "optional-dependency:graph",
       "evidence": [],
       "id": "profile.graph",
+      "kind": "dependency-profile",
+      "owner": "packaging",
+      "package": "pyproject.toml",
+      "status": "pending"
+    },
+    {
+      "acceptance": "Install profile late-interaction and exercise its advertised capability.",
+      "entry_point": "optional-dependency:late-interaction",
+      "evidence": [],
+      "id": "profile.late-interaction",
       "kind": "dependency-profile",
       "owner": "packaging",
       "package": "pyproject.toml",
@@ -5728,6 +5868,7 @@
       "apps",
       "dev",
       "graph",
+      "late-interaction",
       "local",
       "models-hosted",
       "models-local",
@@ -5754,11 +5895,11 @@
     "tests/test_legacy_vector_migration_guards.py"
   ],
   "observed_surface": {
-    "atomic_requirements": 572,
+    "atomic_requirements": 586,
     "cli_commands": 21,
-    "dependency_profiles": 10,
+    "dependency_profiles": 11,
     "hooks": 15,
-    "registered_tools": 75,
+    "registered_tools": 77,
     "resource_templates": 10
   },
   "release": "v7",

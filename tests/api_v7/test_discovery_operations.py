@@ -87,6 +87,46 @@ class DiscoveryOperationTests(unittest.IsolatedAsyncioTestCase):
         self.dependencies = DiscoveryOperationDependencies(**options)
         return build_discovery_operations(self.dependencies)
 
+    def _handler(self, tool_name: str, **changes: object):
+        from daem0nmcp.api.v7.application import (
+            V7ApplicationDependencies,
+            V7ToolRouter,
+        )
+        from daem0nmcp.api.v7.policy import V7_COVENANT_POLICY
+        from daem0nmcp.api.v7.responses import ResponseFactory
+        from daem0nmcp.api.v7.tools import build_argument_normalizer
+        from daem0nmcp.covenant import (
+            CapabilityAuthority,
+            CovenantGate,
+            CovenantStateStore,
+            InvocationScope,
+        )
+        from daem0nmcp.workspace import WorkspaceRegistry
+
+        gate = CovenantGate(
+            state_store=CovenantStateStore(clock=lambda: 1_000),
+            authority=CapabilityAuthority(
+                secret=b"d" * 32,
+                kid="discovery-test",
+                clock=lambda: 1_000,
+            ),
+            policy=V7_COVENANT_POLICY,
+            argument_normalizer=build_argument_normalizer(),
+        )
+        scope = InvocationScope("principal", "session", str(self.root))
+        gate.record_briefing(scope)
+        return V7ToolRouter(
+            V7ApplicationDependencies(
+                workspace_resolver=WorkspaceRegistry(
+                    [self.root], default_root=self.root
+                ),
+                covenant_gate=gate,
+                scope_provider=lambda: scope,
+                operations=self._operations(**changes),
+                response_factory=ResponseFactory(),
+            )
+        ).handler(tool_name)
+
     def _append_memory(
         self,
         connection: sqlite3.Connection,
@@ -202,16 +242,22 @@ class DiscoveryOperationTests(unittest.IsolatedAsyncioTestCase):
             )
         )
 
-    def _activate_graph(self) -> None:
+    def _activate_graph(self, *, content_prefix: str = "") -> None:
         from daem0nmcp.retrieval.specialized_projection import (
             SpecializedProjectionBuilder,
         )
 
         with closing(sqlite3.connect(self.database)) as connection:
             connection.execute("PRAGMA foreign_keys=ON")
-            first = self._append_memory(connection, "a", "First record.")
-            second = self._append_memory(connection, "b", "Second record.")
-            third = self._append_memory(connection, "c", "Third record.")
+            first = self._append_memory(
+                connection, "a", content_prefix + "First record."
+            )
+            second = self._append_memory(
+                connection, "b", content_prefix + "Second record."
+            )
+            third = self._append_memory(
+                connection, "c", content_prefix + "Third record."
+            )
             self._append_relationship(connection, first, second)
             self._append_record_ref(connection, second, third)
             SpecializedProjectionBuilder(connection, clock_us=lambda: 900).rebuild(
@@ -219,7 +265,7 @@ class DiscoveryOperationTests(unittest.IsolatedAsyncioTestCase):
             )
             connection.commit()
 
-    def _activate_discovery(self) -> dict[str, object]:
+    def _activate_discovery(self, *, content_prefix: str = "") -> dict[str, object]:
         from daem0nmcp.discovery_projection import (
             CodeEntityProjectionSeed,
             CommunityProjectionSeed,
@@ -228,7 +274,7 @@ class DiscoveryOperationTests(unittest.IsolatedAsyncioTestCase):
             EntityRecordSeed,
         )
 
-        self._activate_graph()
+        self._activate_graph(content_prefix=content_prefix)
         first = "mem_" + "a" * 64
         second = "mem_" + "b" * 64
         third = "mem_" + "c" * 64
@@ -1030,10 +1076,7 @@ class DiscoveryOperationTests(unittest.IsolatedAsyncioTestCase):
             )
         self.assertEqual("STALE_PROJECTION_ID", raised.exception.code)
 
-    async def test_memory_recall_entity_hydrates_exact_members_through_task8(
-        self,
-    ) -> None:
-        """Entity membership selects IDs; Task 8 authenticates the returned records."""
+    def _entity_retrieval_result(self, query, *, record_ids=None):
         from daem0nmcp.api.v7.models import (
             CitationManifestEntry,
             EvidenceItem,
@@ -1044,7 +1087,7 @@ class DiscoveryOperationTests(unittest.IsolatedAsyncioTestCase):
             TokenUsage,
         )
 
-        self._activate_discovery()
+        selected = sorted(query.record_ids) if record_ids is None else record_ids
         records: dict[str, RecordSummary] = {}
         with closing(sqlite3.connect(self.database)) as connection:
             connection.row_factory = sqlite3.Row
@@ -1070,6 +1113,65 @@ class DiscoveryOperationTests(unittest.IsolatedAsyncioTestCase):
                     ),
                 )
 
+        items = []
+        manifest = []
+        for index, record_id in enumerate(selected, 1):
+            record = records[record_id]
+            citation = f"[E{index}]"
+            ref = EvidenceRef(
+                record_id=record_id,
+                event_id="evt_" + ("a" if index == 1 else "b") * 64,
+                content_hash=record.content_hash,
+                provider="lexical",
+            )
+            items.append(
+                EvidenceItem(
+                    citation=citation,
+                    record=record,
+                    bounded_excerpt=record.excerpt,
+                    channels=["lexical"],
+                    score=1.0,
+                    status="current",
+                    evidence_refs=[ref],
+                )
+            )
+            manifest.append(
+                CitationManifestEntry(
+                    citation=citation,
+                    evidence_refs=[ref],
+                    channels=["lexical"],
+                )
+            )
+        return RetrievalData(
+            items=items,
+            rendered_context="\n".join(
+                f"{item.citation} {item.bounded_excerpt}" for item in items
+            ),
+            citation_manifest=manifest,
+            provider_diagnostics=[
+                ProviderDiagnostic(
+                    provider="lexical",
+                    status="ready",
+                    manifest_generation=1,
+                    elapsed_ms=0.0,
+                    returned_count=len(items),
+                )
+            ],
+            abstained=False,
+            token_usage=TokenUsage(
+                budget=query.token_budget,
+                requested=len(items),
+                selected=len(items),
+                rendered=0,
+                dropped=0,
+            ),
+        )
+
+    async def test_memory_recall_entity_hydrates_exact_members_through_task8(
+        self,
+    ) -> None:
+        """Entity membership selects IDs; Task 8 authenticates the returned records."""
+        self._activate_discovery()
         test_case = self
 
         class RecallService:
@@ -1080,57 +1182,7 @@ class DiscoveryOperationTests(unittest.IsolatedAsyncioTestCase):
                 test_case.assertEqual(test_case.workspace, workspace)
                 test_case.assertEqual(frozenset(), linked_workspace_ids)
                 self.queries.append(query)
-                items = []
-                manifest = []
-                for index, record_id in enumerate(sorted(query.record_ids), 1):
-                    record = records[record_id]
-                    citation = f"[E{index}]"
-                    ref = EvidenceRef(
-                        record_id=record_id,
-                        event_id="evt_" + ("a" if index == 1 else "b") * 64,
-                        content_hash=record.content_hash,
-                        provider="lexical",
-                    )
-                    items.append(
-                        EvidenceItem(
-                            citation=citation,
-                            record=record,
-                            bounded_excerpt=record.excerpt,
-                            channels=["lexical"],
-                            score=1.0,
-                            status="current",
-                            evidence_refs=[ref],
-                        )
-                    )
-                    manifest.append(
-                        CitationManifestEntry(
-                            citation=citation,
-                            evidence_refs=[ref],
-                            channels=["lexical"],
-                        )
-                    )
-                return RetrievalData(
-                    items=items,
-                    rendered_context="Authenticated entity records",
-                    citation_manifest=manifest,
-                    provider_diagnostics=[
-                        ProviderDiagnostic(
-                            provider="lexical",
-                            status="ready",
-                            manifest_generation=1,
-                            elapsed_ms=0.0,
-                            returned_count=len(items),
-                        )
-                    ],
-                    abstained=False,
-                    token_usage=TokenUsage(
-                        budget=query.token_budget,
-                        requested=len(items),
-                        selected=len(items),
-                        rendered=0,
-                        dropped=0,
-                    ),
-                )
+                return test_case._entity_retrieval_result(query)
 
         recall = RecallService()
         operation = self._operations(recall_service=recall)["memory_recall_entity"]
@@ -1162,11 +1214,387 @@ class DiscoveryOperationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(1, len(second.items))
         self.assertNotEqual(first.items[0].record_id, second.items[0].record_id)
 
+    async def test_sqlite_contention_is_retryable_through_router(self) -> None:
+        self._activate_discovery()
+        handler = self._handler("entity_list")
+        arguments = {"workspace_id": self.workspace.workspace_id}
+
+        with closing(sqlite3.connect(self.database)) as connection:
+            self.assertEqual(
+                "delete", connection.execute("PRAGMA journal_mode=DELETE").fetchone()[0]
+            )
+            connection.execute("BEGIN EXCLUSIVE")
+            try:
+                response = await handler(**arguments)
+            finally:
+                connection.rollback()
+
+        self.assertFalse(response.ok)
+        self.assertEqual("DATABASE_IN_USE", response.error.code)
+        self.assertTrue(response.error.retryable)
+        self.assertEqual(250, response.error.retry_after_ms)
+        self.assertIsNone(response.error.remedy)
+        self.assertNotIn(str(self.root), response.model_dump_json())
+        retried = await handler(**arguments)
+        self.assertTrue(retried.ok)
+        self.assertEqual(2, len(retried.data.items))
+
+    async def test_missing_tables_with_contention_words_are_not_retryable(self) -> None:
+        with closing(sqlite3.connect(self.database)) as connection:
+            connection.execute("DROP TABLE schema_version")
+            connection.commit()
+
+        handler = self._handler("entity_list")
+        for table in ("busy_records", "locked_cache", "ordinary_missing"):
+            with (
+                self.subTest(table=table),
+                closing(sqlite3.connect(self.database)) as connection,
+            ):
+                connection.execute(
+                    f"CREATE VIEW schema_version AS SELECT version FROM {table}"
+                )
+                connection.commit()
+                try:
+                    with self.assertRaises(sqlite3.OperationalError) as raised:
+                        connection.execute("SELECT version FROM schema_version")
+                    self.assertIn(table, str(raised.exception))
+                    code = getattr(raised.exception, "sqlite_errorcode", None)
+                    if code is not None:
+                        self.assertEqual(1, code)
+
+                    response = await handler(workspace_id=self.workspace.workspace_id)
+                    self.assertFalse(response.ok)
+                    self.assertEqual("CAPABILITY_DEGRADED", response.error.code)
+                    self.assertFalse(response.error.retryable)
+                    self.assertIsNone(response.error.retry_after_ms)
+                    self.assertIsNone(response.error.remedy)
+                finally:
+                    connection.execute("DROP VIEW schema_version")
+                    connection.commit()
+
+    def test_sqlite_contention_message_fallback_is_canonical_only(self) -> None:
+        from daem0nmcp.api.v7.discovery_operations import _translate_error
+
+        for message in (
+            "database is locked",
+            "database is busy",
+            "database table is locked",
+            "database schema is locked",
+            "database table is locked: memory_records",
+            "database schema is locked: main",
+            "DATABASE IS LOCKED",
+        ):
+            with self.subTest(message=message):
+                error = sqlite3.OperationalError(message)
+                self.assertIsNone(getattr(error, "sqlite_errorcode", None))
+                self.assertEqual("DATABASE_IN_USE", _translate_error(error).code)
+
+        for message in (
+            "no such table: busy_records",
+            "no such table: locked_cache",
+            "database is locked unexpectedly",
+            "busy",
+            "locked",
+        ):
+            with self.subTest(message=message):
+                self.assertEqual(
+                    "CAPABILITY_DEGRADED",
+                    _translate_error(sqlite3.OperationalError(message)).code,
+                )
+
+    def test_contention_translation_preserves_typed_and_stable_errors(self) -> None:
+        from daem0nmcp.api.v7.discovery_operations import (
+            DiscoveryOperationError,
+            _translate_error,
+        )
+
+        error = DiscoveryOperationError("NOT_FOUND")
+        self.assertIs(error, _translate_error(error))
+        classified = sqlite3.OperationalError("database is locked")
+        classified.code = "CAPABILITY_DEGRADED"
+        self.assertEqual("CAPABILITY_DEGRADED", _translate_error(classified).code)
+
+    async def test_nonbusy_sqlite_failure_is_not_retryable_through_router(self) -> None:
+        self._activate_discovery()
+        with closing(sqlite3.connect(self.database)) as connection:
+            connection.execute("DROP TABLE schema_version")
+            connection.commit()
+
+        response = await self._handler("entity_list")(
+            workspace_id=self.workspace.workspace_id
+        )
+        self.assertFalse(response.ok)
+        self.assertEqual("CAPABILITY_DEGRADED", response.error.code)
+        self.assertFalse(response.error.retryable)
+        self.assertIsNone(response.error.retry_after_ms)
+        self.assertIsNone(response.error.remedy)
+
+    async def test_sqlite_contention_during_lexical_catchup_is_retryable(self) -> None:
+        fixture = self._activate_discovery()
+        test_case = self
+        with closing(sqlite3.connect(self.database)) as connection:
+            self.assertEqual(
+                "delete", connection.execute("PRAGMA journal_mode=DELETE").fetchone()[0]
+            )
+
+            class RecallService:
+                contended = True
+
+                async def retrieve(self, workspace, query, linked_workspace_ids):
+                    result = test_case._entity_retrieval_result(
+                        query,
+                        record_ids=(
+                            sorted(query.record_ids)[:1] if self.contended else None
+                        ),
+                    )
+                    if self.contended:
+                        connection.execute("BEGIN EXCLUSIVE")
+                    return result
+
+            recall = RecallService()
+            handler = self._handler("memory_recall_entity", recall_service=recall)
+            arguments = {
+                "workspace_id": self.workspace.workspace_id,
+                "entity_name": "Authentication",
+            }
+            try:
+                response = await handler(**arguments)
+            finally:
+                connection.rollback()
+
+            self.assertFalse(response.ok)
+            self.assertEqual("DATABASE_IN_USE", response.error.code)
+            self.assertTrue(response.error.retryable)
+            self.assertEqual(250, response.error.retry_after_ms)
+            self.assertIsNone(response.error.remedy)
+
+            recall.contended = False
+            retried = await handler(**arguments)
+            self.assertTrue(retried.ok)
+            self.assertEqual(
+                set(fixture["records"][:2]),
+                {record.record_id for record in retried.data.items},
+            )
+
+    async def test_first_lexical_publication_after_real_retrieval_is_retryable(
+        self,
+    ) -> None:
+        from daem0nmcp.api.v7.runtime_services import Task8RecallService
+        from daem0nmcp.config import Settings
+        from daem0nmcp.retrieval.projections import LexicalProjectionBuilder
+
+        fixture = self._activate_discovery(content_prefix="Authentication ")
+        recall = Task8RecallService(
+            config=Settings(retrieval_rerank_enabled=False),
+            capability_statuses={},
+        )
+        self.addCleanup(recall.close)
+        test_case = self
+
+        class PublishAfterRealRecall:
+            published = False
+
+            async def retrieve(self, workspace, query, linked_workspace_ids):
+                result = await recall.retrieve(workspace, query, linked_workspace_ids)
+                if not self.published:
+                    test_case.assertFalse(result.items)
+                    with closing(sqlite3.connect(test_case.database)) as connection:
+                        connection.execute("PRAGMA foreign_keys=ON")
+                        LexicalProjectionBuilder(connection).rebuild(
+                            workspace.workspace_id
+                        )
+                        connection.commit()
+                    self.published = True
+                return result
+
+        handler = self._handler(
+            "memory_recall_entity", recall_service=PublishAfterRealRecall()
+        )
+        arguments = {
+            "workspace_id": self.workspace.workspace_id,
+            "entity_name": "Authentication",
+        }
+        response = await handler(**arguments)
+        self.assertFalse(response.ok)
+        self.assertEqual("DATABASE_IN_USE", response.error.code)
+        self.assertTrue(response.error.retryable)
+        self.assertEqual(250, response.error.retry_after_ms)
+        self.assertIsNone(response.error.remedy)
+
+        retried = await handler(**arguments)
+        self.assertTrue(retried.ok)
+        self.assertEqual(
+            set(fixture["records"][:2]),
+            {record.record_id for record in retried.data.items},
+        )
+
+    async def test_nonbusy_lexical_catchup_failure_is_not_retryable(self) -> None:
+        self._activate_discovery()
+        test_case = self
+
+        class RecallService:
+            async def retrieve(self, workspace, query, linked_workspace_ids):
+                result = test_case._entity_retrieval_result(
+                    query, record_ids=sorted(query.record_ids)[:1]
+                )
+                with closing(sqlite3.connect(test_case.database)) as connection:
+                    connection.execute("DROP TABLE background_jobs")
+                    connection.commit()
+                return result
+
+        response = await self._handler(
+            "memory_recall_entity", recall_service=RecallService()
+        )(
+            workspace_id=self.workspace.workspace_id,
+            entity_name="Authentication",
+        )
+        self.assertFalse(response.ok)
+        self.assertEqual("CAPABILITY_DEGRADED", response.error.code)
+        self.assertFalse(response.error.retryable)
+        self.assertIsNone(response.error.retry_after_ms)
+
+    async def test_graph_generation_advance_during_retrieval_is_retryable(self) -> None:
+        from daem0nmcp.discovery_projection import (
+            DiscoveryProjectionBuilder,
+            EntityProjectionSeed,
+            EntityRecordSeed,
+        )
+        from daem0nmcp.retrieval.specialized_projection import (
+            SpecializedProjectionBuilder,
+        )
+
+        fixture = self._activate_discovery()
+        test_case = self
+
+        class RecallService:
+            def __init__(self):
+                self.generations = []
+
+            async def retrieve(self, workspace, query, linked_workspace_ids):
+                result = test_case._entity_retrieval_result(query)
+                if not self.generations:
+                    with closing(sqlite3.connect(test_case.database)) as connection:
+                        connection.execute("PRAGMA foreign_keys=ON")
+                        previous = connection.execute(
+                            "SELECT generation FROM projection_manifests "
+                            "WHERE workspace_id=? AND projection_name='graph' "
+                            "AND status='active'",
+                            (workspace.workspace_id,),
+                        ).fetchone()[0]
+                        built = SpecializedProjectionBuilder(connection).rebuild(
+                            workspace.workspace_id,
+                            "graph",
+                            force=True,
+                            candidate_populator=lambda generation: (
+                                DiscoveryProjectionBuilder(connection).populate_graph(
+                                    workspace.workspace_id,
+                                    entities=(
+                                        EntityProjectionSeed(
+                                            name="Authentication",
+                                            entity_type="concept",
+                                            records=(
+                                                EntityRecordSeed(
+                                                    fixture["records"][0], 2
+                                                ),
+                                                EntityRecordSeed(
+                                                    fixture["records"][1], 1
+                                                ),
+                                            ),
+                                        ),
+                                    ),
+                                    communities=(),
+                                    generation=generation,
+                                )
+                            ),
+                        )
+                        self.generations = [previous, built.generation]
+                return result
+
+        recall = RecallService()
+        handler = self._handler("memory_recall_entity", recall_service=recall)
+        arguments = {
+            "workspace_id": self.workspace.workspace_id,
+            "entity_name": "Authentication",
+        }
+        response = await handler(**arguments)
+        self.assertFalse(response.ok)
+        self.assertGreater(recall.generations[1], recall.generations[0])
+        self.assertEqual("DATABASE_IN_USE", response.error.code)
+        self.assertTrue(response.error.retryable)
+        self.assertEqual(250, response.error.retry_after_ms)
+        self.assertIsNone(response.error.remedy)
+
+        retried = await handler(**arguments)
+        self.assertTrue(retried.ok)
+        self.assertEqual(
+            set(fixture["records"][:2]),
+            {record.record_id for record in retried.data.items},
+        )
+
+    async def test_invalid_graph_after_retrieval_is_not_retryable(self) -> None:
+        self._activate_discovery()
+        test_case = self
+
+        class RecallService:
+            async def retrieve(self, workspace, query, linked_workspace_ids):
+                result = test_case._entity_retrieval_result(query)
+                with closing(sqlite3.connect(test_case.database)) as connection:
+                    connection.execute(
+                        "UPDATE projection_manifests SET row_count=row_count+1 "
+                        "WHERE workspace_id=? AND projection_name='graph' "
+                        "AND status='active'",
+                        (workspace.workspace_id,),
+                    )
+                    connection.commit()
+                return result
+
+        response = await self._handler(
+            "memory_recall_entity", recall_service=RecallService()
+        )(
+            workspace_id=self.workspace.workspace_id,
+            entity_name="Authentication",
+        )
+        self.assertFalse(response.ok)
+        self.assertEqual("CAPABILITY_DEGRADED", response.error.code)
+        self.assertFalse(response.error.retryable)
+        self.assertIsNone(response.error.retry_after_ms)
+
+    async def test_invalid_entity_retrieval_is_not_retryable(self) -> None:
+        self._activate_discovery()
+        test_case = self
+
+        class RecallService:
+            failure = "duplicate"
+
+            async def retrieve(self, workspace, query, linked_workspace_ids):
+                if self.failure == "sqlite":
+                    with closing(sqlite3.connect(test_case.database)) as connection:
+                        connection.execute("SELECT * FROM nonexistent_retrieval_table")
+                if self.failure == "unknown":
+                    raise RuntimeError("unexpected retrieval failure")
+                selected = sorted(query.record_ids)
+                return test_case._entity_retrieval_result(
+                    query, record_ids=[*selected, selected[0]]
+                )
+
+        recall = RecallService()
+        handler = self._handler("memory_recall_entity", recall_service=recall)
+        for failure in ("duplicate", "sqlite", "unknown"):
+            with self.subTest(failure=failure):
+                recall.failure = failure
+                response = await handler(
+                    workspace_id=self.workspace.workspace_id,
+                    entity_name="Authentication",
+                )
+                self.assertFalse(response.ok)
+                self.assertEqual("CAPABILITY_DEGRADED", response.error.code)
+                self.assertFalse(response.error.retryable)
+                self.assertIsNone(response.error.retry_after_ms)
+
     async def test_memory_recall_entity_retries_only_a_pending_catch_up(
         self,
     ) -> None:
         """Only a projection that still owes the records is worth retrying."""
-        from daem0nmcp.api.v7.discovery_operations import DiscoveryOperationError
         from daem0nmcp.api.v7.models import (
             ProviderDiagnostic,
             RetrievalData,
@@ -1202,23 +1630,22 @@ class DiscoveryOperationTests(unittest.IsolatedAsyncioTestCase):
                     ),
                 )
 
-        operation = self._operations(recall_service=RecallService())[
-            "memory_recall_entity"
-        ]
-        request = _request(
-            "memory_recall_entity",
-            workspace_id=self.workspace.workspace_id,
-            entity_name="Authentication",
-        )
+        handler = self._handler("memory_recall_entity", recall_service=RecallService())
+        arguments = {
+            "workspace_id": self.workspace.workspace_id,
+            "entity_name": "Authentication",
+        }
 
-        async def code() -> str:
-            with self.assertRaises(DiscoveryOperationError) as raised:
-                await operation(workspace=self.workspace, request=request)
-            return raised.exception.code
+        async def code(*, retryable: bool = False) -> str:
+            response = await handler(**arguments)
+            self.assertFalse(response.ok)
+            self.assertEqual(retryable, response.error.retryable)
+            self.assertEqual(250 if retryable else None, response.error.retry_after_ms)
+            return response.error.code
 
         # The records are not in the lexical projection yet and its rebuild
         # job is queued: a retry can make progress.
-        self.assertEqual("DATABASE_IN_USE", await code())
+        self.assertEqual("DATABASE_IN_USE", await code(retryable=True))
 
         # The rebuild dead-lettered, so nothing will catch up on its own.
         with closing(sqlite3.connect(self.database)) as connection:

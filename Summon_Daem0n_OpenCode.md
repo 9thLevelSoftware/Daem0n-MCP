@@ -51,13 +51,7 @@ name.
 
 ## Run the v7 ritual
 
-Start the scoped session immediately:
-
-```text
-daem0nmcp_session_brief(
-    workspace_id="<opaque-workspace-id>"
-)
-```
+The first Daem0n call in a session briefs automatically; the compact brief is returned in `meta.covenant.auto_brief`. Call `session_brief` for the full brief.
 
 Recall bounded history when it is relevant:
 
@@ -69,25 +63,17 @@ daem0nmcp_memory_recall(
 )
 ```
 
-Before a protected call, preflight its exact effective arguments. For a durable
-decision:
+Call `memory_store` (or any protected tool) directly. If it returns `COUNSEL_REQUIRED`, read `error.counsel` (guidance and reasons), then retry exactly `error.remedy`. `memory_preflight` remains available for planning a change in advance.
 
-```text
-daem0nmcp_memory_preflight(
-    workspace_id="<opaque-workspace-id>",
-    target_tool="memory_store",
-    target_arguments={
-        "record_type": "decision",
-        "content": "Use signed session cookies",
-        "rationale": "Avoid shared server-side session state",
-        "idempotency_key": "decision-auth-cookie-0001"
-    },
-    description="Record the authentication decision"
-)
-```
+Use `daem0n_tools_search(query)`, then `daem0n_tool_call(workspace_id, tool, arguments)`.
 
-Respect all returned warnings, failed approaches, and `must_not` guidance. Use
-the returned token only with the exact protected request:
+Tokens remain exact-argument, single-use capabilities valid for 300 seconds,
+bound to workspace, principal, session, and tool. Defaults are guided covenant
+and core tool listing. Set `DAEM0NMCP_COVENANT_MODE=strict` for explicit
+`session_brief`, exact `memory_preflight`, and token-bearing writes;
+`DAEM0NMCP_TOOL_SURFACE=full` lists all tools.
+
+For a durable decision:
 
 ```text
 daem0nmcp_memory_store(
@@ -95,8 +81,7 @@ daem0nmcp_memory_store(
     record_type="decision",
     content="Use signed session cookies",
     rationale="Avoid shared server-side session state",
-    idempotency_key="decision-auth-cookie-0001",
-    preflight_token="<token-from-memory_preflight>"
+    idempotency_key="decision-auth-cookie-0001"
 )
 ```
 
@@ -150,6 +135,6 @@ The generated migration source of truth is
 [`docs/v6-to-v7-tools.json`](docs/v6-to-v7-tools.json). Use it whenever an old
 guide or prompt names a capability that moved or split in v7.
 
-The complete ritual is `session_brief`, bounded `memory_recall`, exact
-`memory_preflight`, replay-safe `memory_store`, and verified
-`memory_record_outcome`; use `system_health` when the ritual cannot proceed.
+The guided ritual is automatic briefing, bounded recall, direct replay-safe
+`memory_store` with challenge retries when needed, and verified
+`memory_record_outcome`; `memory_preflight` is optional advance planning.

@@ -37,7 +37,8 @@ def test_git_output_filters_unexpected_paths_even_with_scoped_pathspec(
 ):
     results = iter([b"nested/\n", b" M sibling/private.txt\0 M nested/inside.txt\0"])
     monkeypatch.setattr(
-        SQLiteResourceRepository, "_read_git_output_sync", lambda *_: next(results)
+        "daem0nmcp.api.v7.resource_repository.read_git_output_sync",
+        lambda *_: next(results),
     )
     workspace = WorkspaceRegistry([tmp_path], default_root=tmp_path).default
     assert SQLiteResourceRepository._read_git_changes_sync(workspace) == [

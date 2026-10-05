@@ -73,7 +73,13 @@ async def test_suggests_decisions_without_writing_memory(tmp_project):
     result = await analyse_and_remember(str(tmp_project), messages, state)
     assert "The hook wrote nothing" in result.message
     assert "ask Claude" in result.message
-    assert "mcp__daem0nmcp__memory_preflight" in result.message
+    assert "memory_preflight" not in result.message
+    assert "preflight_token=" not in result.message
+    assert "idempotency_key=" in result.message
+    assert (
+        "if COUNSEL_REQUIRED: review error.counsel, then retry error.remedy"
+        in result.message
+    )
     assert "mcp__daem0nmcp__memory_store" in result.message
 
     # The standalone hook must never mutate storage behind the MCP boundary.
@@ -97,6 +103,10 @@ async def test_anti_loop_prevents_spam(tmp_project):
     # First call produces output and mutates state
     r1 = await analyse_and_remember(str(tmp_project), messages, state)
     assert r1.message != ""
+    assert "call memory_store directly with a stable idempotency_key" in r1.message
+    assert "review error.counsel, then retry exactly error.remedy" in r1.message
+    assert "memory_preflight" not in r1.message
+    assert "preflight_token=" not in r1.message
 
     # Second call still produces output (count is now 1)
     r2 = await analyse_and_remember(str(tmp_project), messages, state)

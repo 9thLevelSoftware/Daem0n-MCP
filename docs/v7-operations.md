@@ -3,8 +3,9 @@
 This guide describes the current development surface. It is not a release
 certificate: the P0–P10 ledger remains pending in
 [the release inventory](release/v7/inventory.md). The source of truth for
-input and output shapes is the live MCP `tools/list` schema; the inventory is
-generated with `python scripts/v7_release_inventory.py --write`.
+input and output shapes is the MCP schema: use `daem0n_tools_search` for hidden
+tools, or set `DAEM0NMCP_TOOL_SURFACE=full` for a complete `tools/list`. The
+inventory is generated with `python scripts/v7_release_inventory.py --write`.
 
 ## Install and configure the server
 
@@ -107,20 +108,43 @@ strict JSON body limits, and origin policy as three HTTP middleware layers.
 
 The six pinned tools are a startup and diagnostics set, not the whole schema:
 `session_brief`, `memory_preflight`, `memory_recall`, `memory_store`,
-`memory_record_outcome`, and `system_health`. They belong to the full 75-tool
-registry shown below.
+`memory_record_outcome`, and `system_health`. They belong to the full 77-tool
+registry shown below. By default, nine tools are listed: these six,
+`edit_preflight`, `daem0n_tools_search`, and `daem0n_tool_call`. All registered
+tools remain callable; `DAEM0NMCP_TOOL_SURFACE=full` lists every tool.
 
-Start with the workspace identifier supplied by the operator as described above:
+The first gated call briefs automatically and returns the compact brief in
+`meta.covenant.auto_brief`. Call `session_brief` for a full or focused brief,
+using the workspace identifier supplied by the operator:
 
 ```text
 session_brief(workspace_id="ws_<opaque>", focus_areas=["authentication"])
 memory_recall(workspace_id="ws_<opaque>", query="authentication", limit=10)
 ```
 
-For a protected write, preflight matches the normalized target arguments
-exactly. Do not include `workspace_id` or `preflight_token` inside
-`target_arguments`; do include every other supplied argument, including the
-stable idempotency key.
+In the default guided mode, call a protected tool directly:
+
+```text
+memory_store(
+  workspace_id="ws_<opaque>",
+  record_type="decision",
+  content="Use signed session cookies",
+  rationale="Avoid server-side session state",
+  idempotency_key="decision-auth-cookie-0001"
+)
+```
+
+Benign calls proceed with inline counsel. If the response is
+`COUNSEL_REQUIRED`, read `error.counsel` and retry exactly `error.remedy`.
+Relevant risk and every destructive operation require this explicit retry.
+Discover other capabilities with `daem0n_tools_search(query)` and invoke them
+with `daem0n_tool_call(workspace_id, tool, arguments)`.
+
+`DAEM0NMCP_COVENANT_MODE=strict` restores explicit briefing and preflight.
+`memory_preflight` also remains available for advance planning in guided mode.
+Preflight matches the normalized target arguments exactly. Do not include
+`workspace_id` or `preflight_token` inside `target_arguments`; do include every
+other supplied argument, including the stable idempotency key:
 
 ```text
 memory_preflight(
@@ -151,6 +175,100 @@ idempotency key. For authorized federation, `memory_recall` accepts
 `linked_workspace_ids`; returned evidence remains attributed to its source
 workspace.
 
+Lexical recall first ranks records whose content or rationale satisfy the
+selected full-text expression, then tag-assisted matches. Content-tier ordering
+uses the existing content/rationale BM25 weights without a tag contribution;
+tag-assisted matches use ordinary weighted BM25. Record IDs break ties. Original
+weighted scores remain diagnostics, not a guarantee of rank order. Tags remain
+searchable, and the precision-first query ladder remains unchanged; no projection
+rebuild is required for this query-side ordering change.
+Direct and linked-workspace recall expose provider channels in canonical sorted
+order, including retained contexts, so equivalent evidence does not acquire
+different channel-array order after a server restart.
+
+Intent-aware context packing is staged with
+`DAEM0NMCP_RETRIEVAL_RETENTION_MODE=shadow` by default. Set it to `apply` to
+reserve evidence capacity for `implement` and `debug` requests. A query naming
+`src/http/router.ts`, `http/router.ts`, or `router.ts` can retain its bound
+evidence. Path and qualified-symbol queries preserve the supplied scope rather
+than promoting same-named files or symbols elsewhere. Bare names remain
+intentionally broader. This affects context selection, not stored-record
+retention or authorization.
+Query path tokens normalize Windows separators and repeated slashes. An explicit
+`./` remains workspace-root scoped: `./router.ts` does not match
+`src/http/router.ts`, while the bare `router.ts` may. These query-text aliases
+do not relax normalized POSIX path arguments or workspace containment.
+Explore requests retain baseline packing in every retention mode; shadow mode
+reuses that identical composition instead of packing the same evidence twice.
+Enabled retention reports `RETENTION_NOT_APPLICABLE` for explore rather than
+implying an alternate packing was applied. Other intents still compute their
+distinct shadow variant.
+Structured outcomes and each procedure step use the same source-aware excerpt
+limit as body text, including the reduced limit for stale evidence. Step counts
+and short facts remain unchanged; longer facts are prefix excerpts, not complete
+procedures. Full record views retain the original facts. No-intent and explore
+packing remain unchanged.
+
+Entity-backed recall can report retryable `DATABASE_IN_USE` while lexical
+evidence catches up, including when a newer generation publishes between
+retrieval and readiness inspection. Retry after the reported delay; a genuine
+indexed miss in the same generation remains a terminal capability failure.
+
+Repository code-binding checks validate current bounded source content rather
+than trusting file size and modification time. Parsed fingerprints are reused
+only when normalized source bytes match, so timestamp-preserving edits still
+produce `needs_revalidation`.
+
+Each recall shares successfully read files within its worker-local validation
+batch; the next recall reads them afresh. After exact byte verification, unchanged
+files share the cached byte object, avoiding repeated full-file comparisons
+inside that batch. The batch permits 32 MiB of raw source bytes plus one
+overflow-detection byte. Unread bindings beyond that budget are
+`unverifiable`, not asserted current or changed. Oversized files and environmental
+access failures are also `unverifiable`: inability to read does not prove a
+content change. Missing files, directory substitutions, and workspace escapes
+remain `needs_revalidation`. Parsed source caching holds at most 32 MiB of
+normalized bytes and 256 files; this is not a total-heap limit. The batch is not
+an atomic filesystem snapshot, a trusted test receipt, or proof that recorded
+guidance remains correct.
+Unchanged files also share one parsed symbol-span set per workspace root, rather
+than reparsing for every symbol. Qualified-identity and fingerprint caches remain
+root scoped, including package initializers; cached symbols still require an
+available parser. Edits replace the snapshot before fingerprints are reused.
+
+Citation-like strings stored inside evidence or binding filenames are displayed
+with neutralized brackets, not interpreted as manifest citations. Direct and
+linked-workspace recall apply the same presentation rule; canonical content and
+typed `changed_bindings` paths remain unchanged for follow-up operations.
+Public retrieval envelopes also require exactly one rendered marker per manifest
+entry in the same order. Missing, repeated, reordered or unbacked markers fail
+validation rather than becoming an apparently valid cited response.
+
+Symbol fingerprints include decorators owned by the parsed definition, including
+multiline Python decorators and TypeScript decorators separated by comments.
+Navigation spans and projection identities remain unchanged. Previously stored
+decorated-symbol fingerprints may require revalidation once after this change;
+review the guidance before recording a successful outcome with `rebind_code`.
+
+Symbol capture fails with retryable `CAPABILITY_DEGRADED` when the parser is
+unavailable, fails, returns unusable entities, or source access is temporarily
+unavailable; failed captures write no memory or outcome events. Parser failure
+can include syntactically invalid source. Repair the source or restore the
+capability/access before obtaining fresh counsel and retrying with the same
+idempotency key; an immediate retry cannot fix unchanged malformed source.
+Missing symbols, unsupported symbol-file extensions, and sources above the
+5 MiB raw-file limit remain `INVALID_ARGUMENT`.
+Fully qualified symbol identities take precedence. A short name is accepted only
+when it identifies one canonical symbol; ambiguous names are `INVALID_ARGUMENT`,
+not a binding to every same-named definition. If an existing short binding
+becomes ambiguous, recall reports `unverifiable` until it is rebound explicitly.
+Multiple definition spans belonging to the same qualified identity remain grouped.
+Each store or outcome rebind captures one fresh source view per resolved file,
+sharing it across that request's references. This prevents mixed versions of one
+file inside a binding set; the next capture reads afresh. Every reference still
+validates workspace containment. The existing 16-reference and 5 MiB raw-file
+limits remain; this is not an atomic snapshot of multiple files or Git HEAD.
+
 ## Resources and diagnostics
 
 The four bounded data resources require an authorized workspace session:
@@ -164,9 +282,10 @@ Six UI resources expose dashboard shells: `ui://daem0n/briefing`,
 `ui://daem0n/community`, `ui://daem0n/covenant`, `ui://daem0n/graph`,
 `ui://daem0n/search`, and `ui://daem0n/test`.
 
-A useful diagnostic walk-through is: call `session_brief`; read warnings and
-failures; call bounded `memory_recall`; use an exact preflight before a write;
-record its outcome; then call `system_health(workspace_id="ws_<opaque>")`.
+A useful diagnostic walk-through is: read the automatic brief (or request the
+full `session_brief`); read warnings and failures; call bounded `memory_recall`;
+call a protected write directly and follow any counsel challenge; record its
+outcome; then call `system_health(workspace_id="ws_<opaque>")`.
 `system_health` reports the enabled services and capability states. Missing
 profiles are remediation signals, not successful execution.
 
@@ -294,12 +413,12 @@ remind only:
 
 | Event (matcher) | Hook | What it does | Input | Reminds only |
 |-----------------|------|--------------|-------|--------------|
-| `SessionStart` | `session_start` | Adds a line to the model's context asking it to call `session_brief` with this workspace's `workspace_id` | `CLAUDE_PROJECT_DIR` env | Yes |
-| `PreToolUse` (`Edit\|Write\|NotebookEdit`) | `pre_edit` | Inside a Daem0n project, adds a one-line `additionalContext` reminder to call `memory_recall_file` for the file and `memory_preflight` for the change; silent elsewhere | stdin event | Yes |
+| `SessionStart` | `session_start` | Explains that the first gated call briefs automatically and `session_brief` returns the full brief | `CLAUDE_PROJECT_DIR` env | Yes |
+| `PreToolUse` (`Edit\|Write\|NotebookEdit`) | `pre_edit` | Inside a Daem0n project, adds a one-line `additionalContext` reminder to use `daem0n_tool_call` for `memory_recall_file`; silent elsewhere | stdin event | Yes |
 | `PreToolUse` (`Bash`) | `pre_bash` | Checks the command against Daem0n rules. Currently inert: it reads a `TOOL_INPUT` env var that Claude Code does not set | `TOOL_INPUT` env | Yes (always exits 0) |
 | `PostToolUse` (`mcp__.*__edit_preflight`) | `post_edit_preflight` | Edit-bridge plumbing: stages an `edit_preflight` receipt for a bridge edit request. Nothing in Claude Code creates those requests any more, so it is a no-op | stdin event | Yes |
 | `PostToolUse` (`Edit\|Write\|NotebookEdit`) | `post_edit` | Edit-bridge plumbing: reports a bridge-approved edit as a capture candidate. Only loads the bridge when the project is paired; a no-op in Claude Code today | stdin event | Yes |
-| `Stop`, `SubagentStop` | `stop` | When the transcript shows a finished task with no recorded outcome, shows you suggested `memory_preflight`/`memory_store`/`memory_record_outcome` calls to ask Claude for, as a `systemMessage`. Never writes memory | stdin event (`transcript_path`) | Yes |
+| `Stop`, `SubagentStop` | `stop` | When the transcript shows a finished task with no recorded outcome, suggests direct replay-safe `memory_store`/`memory_record_outcome` calls and counsel-challenge retry guidance as a `systemMessage`. Never writes memory | stdin event (`transcript_path`) | Yes |
 
 No hook blocks a tool call or keeps the agent running: every hook exits 0 and none
 returns a `permissionDecision` or `decision`.
@@ -448,6 +567,8 @@ come from `tools/list` and the generated release inventory.
 | `context_trigger_list` | rules | communion |
 | `context_triggers_match` | context | communion |
 | `covenant_status` | covenant | exempt |
+| `daem0n_tool_call` | system | exempt |
+| `daem0n_tools_search` | system | exempt |
 | `decision_debate` | cognitive | counsel |
 | `decision_simulate` | cognitive | communion |
 | `document_ingest_url` | external | counsel |

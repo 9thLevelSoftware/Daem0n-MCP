@@ -274,7 +274,12 @@ class RetrievalFixtureTests(unittest.TestCase):
         schema = importlib.util.module_from_spec(spec)
         assert spec is not None and spec.loader is not None
         spec.loader.exec_module(schema)
-        statements = next(row[2] for row in schema.MIGRATIONS if row[0] == 16)
+        statements = [
+            statement
+            for version, _description, migration in schema.MIGRATIONS
+            if version in {16, 33}
+            for statement in migration
+        ]
         connection = sqlite3.connect(":memory:")
         connection.row_factory = sqlite3.Row
         self.addCleanup(connection.close)

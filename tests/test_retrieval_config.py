@@ -31,6 +31,10 @@ class RetrievalSettingsTests(unittest.TestCase):
         self.assertEqual(
             25, getattr(settings, "retrieval_rerank_candidate_limit", None)
         )
+        self.assertEqual("embedding", settings.retrieval_reranker)
+        self.assertEqual(
+            "colbert-ir/colbertv2.0", settings.retrieval_late_interaction_model
+        )
         self.assertEqual(10.0, getattr(settings, "qdrant_timeout_seconds", None))
         self.assertEqual(
             "daem0nmcp", getattr(settings, "qdrant_collection_prefix", None)
@@ -58,6 +62,14 @@ class RetrievalSettingsTests(unittest.TestCase):
         for values in invalid:
             with self.subTest(values=values), self.assertRaises(ValueError):
                 Settings(_env_file=None, **values)
+
+    def test_reranker_selection_is_closed(self):
+        from daem0nmcp.config import Settings
+
+        settings = Settings(_env_file=None, retrieval_reranker="late_interaction")
+        self.assertEqual("late_interaction", settings.retrieval_reranker)
+        with self.assertRaises(ValueError):
+            Settings(_env_file=None, retrieval_reranker="unknown")
 
     def test_rrf_weights_and_collection_prefix_are_closed_and_bounded(self):
         from daem0nmcp.config import Settings

@@ -35,8 +35,8 @@ Use the opaque ID assigned to the configured project root:
 
 ```text
 mcp__daem0nmcp__system_health(workspace_id="<workspace_id>")
-mcp__daem0nmcp__session_brief(workspace_id="<workspace_id>")
 ```
+Call `session_brief` only when you want the full briefing.
 
 Do not send project paths, request headers, IP addresses, client information,
 or `_client_meta` as identity. The transport supplies identity and the server
@@ -61,11 +61,17 @@ The four bounded JSON resources are:
 
 ## 5. Explain the write protocol
 
-Before `memory_store` or another protected operation, call `memory_preflight`
-with that exact target and its exact arguments. Reuse those arguments with the
-returned token, include a stable `idempotency_key`, and retain the returned
-`record_id`. Later call `memory_record_outcome` with another stable
-idempotency key.
+The first Daem0n call in a session briefs automatically; the compact brief is returned in `meta.covenant.auto_brief`. Call `session_brief` for the full brief.
+
+Call `memory_store` (or any protected tool) directly. If it returns `COUNSEL_REQUIRED`, read `error.counsel` (guidance and reasons), then retry exactly `error.remedy`. `memory_preflight` remains available for planning a change in advance.
+
+Use `daem0n_tools_search(query)`, then `daem0n_tool_call(workspace_id, tool, arguments)`.
+
+Include a stable `idempotency_key`, retain `record_id`, and record verified
+results using `memory_record_outcome` with another stable key. Tokens remain
+exact-argument, single-use, and valid for 300 seconds. Defaults are guided/core;
+`DAEM0NMCP_COVENANT_MODE=strict` requires explicit briefing and preflight,
+and `DAEM0NMCP_TOOL_SURFACE=full` lists every registered tool.
 
 For migrations from v6, use the generated mapping at
 [`docs/v6-to-v7-tools.json`](../../../docs/v6-to-v7-tools.json). Do not invent

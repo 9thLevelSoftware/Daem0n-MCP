@@ -48,12 +48,11 @@ from ...trigger_security import (
 from ...workspace import Workspace, WorkspaceRegistry
 from .application import AdmittedRequest
 from .errors import STABLE_ERROR_CODE_SET
-from .models import MutationReceipt, Page, RecordSummary, RetrievalData
+from .models import MutationReceipt, Page, RecordSummary, RetrievalData, RuleView
 from .public_ids import (
     PublicObjectIdNotFound,
     PublicObjectIdRepository,
 )
-from .resources import RuleView
 from .runtime_services import WorkspaceStorageResolver
 from .tasks import await_task_terminal
 from .tools import RuleCheckData, TriggerMatch, TriggerMatchData, TriggerView

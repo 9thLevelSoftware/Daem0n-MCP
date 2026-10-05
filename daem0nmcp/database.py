@@ -462,6 +462,8 @@ class DatabaseManager:
                     "memory_events",
                     "memory_records",
                     "memory_fact_versions",
+                    "memory_provenance_edges",
+                    "memory_outcome_signals",
                     "memory_relationship_versions",
                     "projection_manifests",
                     "enrichment_decisions",

@@ -1395,6 +1395,84 @@ class RecordOutcomeView(Base):
     )
 
 
+class MemoryProvenanceEdge(Base):
+    __tablename__ = "memory_provenance_edges"
+
+    workspace_id = Column(String, nullable=False)
+    event_id = Column(
+        String(68),
+        ForeignKey("memory_events.event_id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    record_id = Column(
+        String(68),
+        ForeignKey("memory_records.record_id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    informed_by_record_id = Column(String(68), nullable=False)
+    edge_kind = Column(String, nullable=False)
+    recorded_at_us = Column(Integer, nullable=False)
+
+    __table_args__ = (
+        PrimaryKeyConstraint(
+            "workspace_id",
+            "event_id",
+            "informed_by_record_id",
+            name="pk_memory_provenance",
+        ),
+        CheckConstraint(
+            "substr(workspace_id,1,3)='ws_'", name="ck_provenance_workspace"
+        ),
+        CheckConstraint(
+            "length(informed_by_record_id)=68 "
+            "AND substr(informed_by_record_id,1,4)='mem_'",
+            name="ck_provenance_source",
+        ),
+        CheckConstraint("edge_kind IN ('store','outcome')", name="ck_provenance_kind"),
+        Index(
+            "idx_provenance_source",
+            "workspace_id",
+            "informed_by_record_id",
+            "edge_kind",
+            "recorded_at_us",
+        ),
+        Index("idx_provenance_record", "workspace_id", "record_id"),
+        {"sqlite_with_rowid": False},
+    )
+
+
+class MemoryOutcomeSignal(Base):
+    __tablename__ = "memory_outcome_signals"
+
+    workspace_id = Column(String, nullable=False)
+    event_id = Column(
+        String(68),
+        ForeignKey("memory_events.event_id", ondelete="RESTRICT"),
+        primary_key=True,
+        nullable=False,
+    )
+    record_id = Column(
+        String(68),
+        ForeignKey("memory_records.record_id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    reward = Column(Float, nullable=False)
+    weight = Column(Float, nullable=False)
+    recorded_at_us = Column(Integer, nullable=False)
+
+    __table_args__ = (
+        CheckConstraint(
+            "substr(workspace_id,1,3)='ws_'", name="ck_outcome_signal_workspace"
+        ),
+        CheckConstraint("reward IN (0.0,1.0)", name="ck_outcome_signal_reward"),
+        CheckConstraint("weight > 0 AND weight <= 1", name="ck_outcome_signal_weight"),
+        Index(
+            "idx_outcome_signals_record", "workspace_id", "record_id", "recorded_at_us"
+        ),
+        {"sqlite_with_rowid": False},
+    )
+
+
 class DenseProjectionRef(Base):
     __tablename__ = "dense_projection_refs"
 

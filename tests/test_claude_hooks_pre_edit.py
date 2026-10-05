@@ -78,10 +78,10 @@ def test_daem0n_project_exits_zero_with_reminder(tmp_path, project):
     output = json.loads(result.stdout)["hookSpecificOutput"]
     assert output["hookEventName"] == "PreToolUse"
     assert "permissionDecision" not in output
-    assert "memory_preflight" in output["additionalContext"]
+    assert "memory_preflight" not in output["additionalContext"]
     assert (
-        'memory_recall_file(relative_file_path="src/app.py")'
-        in output["additionalContext"]
+        'daem0n_tool_call(tool="memory_recall_file", '
+        'arguments={"relative_file_path": "src/app.py"})' in output["additionalContext"]
     )
     assert "\n" not in output["additionalContext"]
 
@@ -91,7 +91,7 @@ def test_subdirectory_cwd_uses_the_enclosing_project(tmp_path, project):
     sub.mkdir()
     result = _pre_edit(_write_event(sub, "app.py"), tmp_path)
     assert result.returncode == 0
-    assert 'relative_file_path="src/app.py"' in _context(result)
+    assert '"relative_file_path": "src/app.py"' in _context(result)
 
 
 def test_falls_back_to_claude_project_dir(tmp_path, project):
@@ -100,7 +100,7 @@ def test_falls_back_to_claude_project_dir(tmp_path, project):
     event = _write_event(elsewhere, str(project / "notes.md"))
     result = _pre_edit(event, tmp_path, env={"CLAUDE_PROJECT_DIR": str(project)})
     assert result.returncode == 0
-    assert 'relative_file_path="notes.md"' in _context(result)
+    assert '"relative_file_path": "notes.md"' in _context(result)
 
 
 def test_home_directory_global_state_is_not_a_project(tmp_path):
@@ -114,6 +114,8 @@ def test_path_outside_project_and_malformed_input_still_exit_zero(tmp_path, proj
     outside = _pre_edit(_write_event(project, str(tmp_path / "x.py")), tmp_path)
     assert outside.returncode == 0
     assert "relative_file_path" not in _context(outside)
+    assert 'daem0n_tool_call(tool="memory_recall_file")' in _context(outside)
+    assert "arguments=" not in _context(outside)
 
     garbage = _pre_edit("not json", tmp_path)
     assert garbage.returncode == 0
@@ -123,7 +125,7 @@ def test_path_outside_project_and_malformed_input_still_exit_zero(tmp_path, proj
 def test_file_name_is_json_escaped_in_the_reminder(tmp_path, project):
     result = _pre_edit(_write_event(project, 'a"b).py'), tmp_path)
     assert result.returncode == 0
-    assert 'relative_file_path="a\\"b).py"' in _context(result)
+    assert '"relative_file_path": "a\\"b).py"' in _context(result)
 
 
 @pytest.mark.parametrize(

@@ -40,7 +40,7 @@ class V7FactoryTests(unittest.TestCase):
         self.assertEqual(len(manifest.resources), 10)
 
         index = build_tool_search_index(manifest)
-        self.assertEqual(len(index), 75)
+        self.assertEqual(len(index), 77)
         self.assertEqual(index.search("store durable memory")[0].name, "memory_store")
         self.assertEqual(set(index.document_ids), set(V7_TOOL_LEVELS))
 

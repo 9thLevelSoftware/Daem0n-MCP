@@ -3,3 +3,5 @@ tests/fixtures/retrieval/events.jsonl text eol=crlf
 tests/fixtures/retrieval/qdrant_fake.py text eol=crlf
 tests/fixtures/retrieval/queries.jsonl text eol=crlf
 tests/fixtures/retrieval/records.jsonl text eol=crlf
+
+autoresearch.sh text eol=lf

@@ -22,7 +22,7 @@ from .models import (
     ActiveContextId,
     AwareDateTime,
     RecordSummary,
-    RuleId,
+    RuleView,
     UserText,
     UtcDateTime,
     WireModel,
@@ -50,12 +50,6 @@ _WORKSPACE_ID_ADAPTER = TypeAdapter(WorkspaceId)
 _UTC_DATETIME_ADAPTER = TypeAdapter(UtcDateTime)
 _ACCESS_FAILURE = object()
 
-# Rule text is user-authored and may mention paths.
-BoundedText = Annotated[
-    UserText,
-    StringConstraints(strict=True, min_length=1, max_length=2000),
-]
-
 
 class ResourceAccessError(RuntimeError):
     """The only caller-visible resource read failure.
@@ -69,20 +63,6 @@ class ResourceAccessError(RuntimeError):
 
     def __init__(self) -> None:
         super().__init__("Resource unavailable")
-
-
-class RuleView(WireModel):
-    """Bounded public representation of one workspace rule."""
-
-    rule_id: RuleId
-    trigger: BoundedText
-    must_do: list[BoundedText] = Field(default_factory=list, max_length=50)
-    must_not: list[BoundedText] = Field(default_factory=list, max_length=50)
-    ask_first: list[BoundedText] = Field(default_factory=list, max_length=50)
-    warnings: list[BoundedText] = Field(default_factory=list, max_length=50)
-    priority: Annotated[int, Field(strict=True, ge=-1000, le=1000)]
-    enabled: Annotated[bool, Field(strict=True)]
-    created_at: AwareDateTime
 
 
 class ActiveContextItem(WireModel):
@@ -503,7 +483,6 @@ __all__ = [
     "ResourceReader",
     "ResourceRow",
     "RuleResourceDocument",
-    "RuleView",
     "WARNING_RESOURCE_URI_TEMPLATE",
     "WarningResourceDocument",
     "WorkspaceResolver",

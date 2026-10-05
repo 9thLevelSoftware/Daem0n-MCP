@@ -1,9 +1,9 @@
 ---
-description: Request an exact Daem0n v7 preflight capability
+description: Plan a protected change in advance with Daem0n v7 counsel
 ---
 
-Parse `$ARGUMENTS` as the intended protected v7 tool and its arguments, then
-call:
+`memory_preflight` is optional advance planning in guided mode. Parse
+`$ARGUMENTS` as the intended protected v7 tool and its arguments, then call:
 
 ```text
 daem0nmcp_memory_preflight(

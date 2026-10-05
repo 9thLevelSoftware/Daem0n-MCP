@@ -124,6 +124,33 @@ def _run_root_hook(
 
 
 class ProtocolGoldenTests(unittest.TestCase):
+    def test_guided_contract_is_injected_into_active_clients(self) -> None:
+        sentences = (
+            "The first Daem0n call in a session briefs automatically; the compact "
+            "brief is returned in meta.covenant.auto_brief. Call session_brief "
+            "for the full brief.",
+            "Call memory_store (or any protected tool) directly. If it returns "
+            "COUNSEL_REQUIRED, read error.counsel (guidance and reasons), then "
+            "retry exactly error.remedy. memory_preflight remains available for "
+            "planning a change in advance.",
+            "Use daem0n_tools_search(query), then "
+            "daem0n_tool_call(workspace_id, tool, arguments).",
+        )
+        paths = (
+            ROOT / "AGENTS.md",
+            ROOT / "Summon_Daem0n.md",
+            ROOT / "Summon_Daem0n_OpenCode.md",
+            ROOT / ".opencode" / "plugins" / "daem0n.ts",
+            ROOT / ".claude" / "skills" / "daem0nmcp-protocol" / "SKILL.md",
+            ROOT / ".claude" / "skills" / "summon_daem0n" / "SKILL.md",
+            ROOT / ".claude" / "skills" / "openspec-daem0n-bridge" / "SKILL.md",
+        )
+        for path in paths:
+            text = _read(path).replace("`", "")
+            with self.subTest(path=path.relative_to(ROOT)):
+                for sentence in sentences:
+                    self.assertIn(sentence, text)
+
     def test_maintained_surfaces_have_no_executable_v6_rituals(self) -> None:
         offenders: list[str] = []
         for path in _all_protocol_files():
@@ -290,7 +317,12 @@ class HookFailClosedTests(unittest.IsolatedAsyncioTestCase):
                 r"workspace_id=[\"']ws_[a-f0-9]{24}[\"']",
             )
             self.assertIn("idempotency_key", result.message)
-            self.assertIn("preflight_token", result.message)
+            self.assertNotIn("preflight_token=", result.message)
+            self.assertNotIn("memory_preflight(", result.message)
+            self.assertIn(
+                "if COUNSEL_REQUIRED: review error.counsel, then retry error.remedy",
+                result.message,
+            )
             self.assertFalse((project / ".daem0nmcp" / "storage").exists())
 
     def test_pre_edit_reminds_without_blocking(self) -> None:
@@ -314,9 +346,10 @@ class HookFailClosedTests(unittest.IsolatedAsyncioTestCase):
             output = json.loads(reminder(event) or "{}")["hookSpecificOutput"]
 
             self.assertNotIn("permissionDecision", output)
-            self.assertIn("memory_preflight", output["additionalContext"])
+            self.assertNotIn("memory_preflight", output["additionalContext"])
             self.assertIn(
-                'memory_recall_file(relative_file_path="server.py")',
+                'daem0n_tool_call(tool="memory_recall_file", '
+                'arguments={"relative_file_path": "server.py"})',
                 output["additionalContext"],
             )
             self.assertFalse((project / ".daem0nmcp" / "storage").exists())

@@ -127,7 +127,7 @@ class CanonicalEventGoldenTests(unittest.TestCase):
                 canonical_json_bytes(value)
 
 
-def _migration_16_statements():
+def _event_projection_statements():
     path = (
         Path(__file__).resolve().parents[1] / "daem0nmcp" / "migrations" / "schema.py"
     )
@@ -135,7 +135,12 @@ def _migration_16_statements():
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    return next(item[2] for item in module.MIGRATIONS if item[0] == 16)
+    return [
+        statement
+        for version, _description, statements in module.MIGRATIONS
+        if version in {16, 33}
+        for statement in statements
+    ]
 
 
 class SQLiteEventStoreTests(unittest.TestCase):
@@ -147,7 +152,7 @@ class SQLiteEventStoreTests(unittest.TestCase):
         self.connection = sqlite3.connect(":memory:")
         self.connection.row_factory = sqlite3.Row
         self.connection.execute("PRAGMA foreign_keys=ON")
-        for statement in _migration_16_statements():
+        for statement in _event_projection_statements():
             self.connection.execute(statement)
         self.connection.commit()
 
@@ -182,6 +187,83 @@ class SQLiteEventStoreTests(unittest.TestCase):
             "source_model": None,
             "deleted_at_us": None,
         }
+
+    def test_established_source_provenance_does_not_create_learning_edges(self):
+        command_type, store_type = self._api()
+        store = store_type(self.connection)
+        run_id = "con_" + "a" * 64
+        commands = (
+            command_type(
+                workspace_id=self.workspace_id,
+                stream_id="mem_" + "a" * 64,
+                stream_kind="memory",
+                event_type="memory.created",
+                occurred_at_us=1,
+                recorded_at_us=1,
+                actor_type="import",
+                actor_id="workspace-consolidation",
+                correlation_id=run_id,
+                payload={
+                    "record": self._state(worked=True),
+                    "provenance": {
+                        "consolidation_run_id": run_id,
+                        "source_workspace_id": "ws_" + "b" * 24,
+                        "source_record_id": "mem_" + "b" * 64,
+                        "source_event_id": "evt_" + "c" * 64,
+                        "source_state_hash": "d" * 64,
+                    },
+                },
+            ),
+            command_type(
+                workspace_id=self.workspace_id,
+                stream_id="mem_" + "b" * 64,
+                stream_kind="memory",
+                event_type="memory.created",
+                occurred_at_us=2,
+                recorded_at_us=2,
+                actor_type="client",
+                payload={
+                    "record": self._state(),
+                    "semantic_namespace": "document-ingest-url",
+                    "provenance": {
+                        "url": "https://example.test/document",
+                        "content_hash": "a" * 64,
+                        "content_type": "text/plain",
+                        "topic": "source evidence",
+                        "chunk_size": 2000,
+                    },
+                },
+            ),
+        )
+        for command in commands:
+            store.append_and_project(command)
+        for table in ("memory_provenance_edges", "memory_outcome_signals"):
+            self.assertEqual(
+                0,
+                self.connection.execute(f"SELECT count(*) FROM {table}").fetchone()[0],
+            )
+        for command in commands:
+            invalid = replace(
+                command,
+                stream_id="mem_" + "e" * 64,
+                payload={
+                    **command.payload,
+                    "provenance": {
+                        **command.payload["provenance"],
+                        "informed_by": ["mem_" + "f" * 64],
+                    },
+                },
+            )
+            with self.assertRaisesRegex(ValueError, "memory provenance is invalid"):
+                store.append_and_project(invalid)
+        with self.assertRaisesRegex(ValueError, "memory provenance is invalid"):
+            store.append_and_project(
+                replace(
+                    commands[0],
+                    stream_id="mem_" + "f" * 64,
+                    actor_id="unknown-importer",
+                )
+            )
 
     def test_append_projects_contiguous_hash_chained_memory_state(self):
         """Two commands become immutable versions 1/2 and one current record."""
@@ -644,7 +726,7 @@ class SQLiteEventStoreTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as raw:
             path = Path(raw) / "events.db"
             setup = sqlite3.connect(path)
-            for statement in _migration_16_statements():
+            for statement in _event_projection_statements():
                 setup.execute(statement)
             setup.commit()
             setup.close()

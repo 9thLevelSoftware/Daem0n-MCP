@@ -10,8 +10,9 @@ from __future__ import annotations
 import asyncio
 import math
 import re
-from collections.abc import Iterable
-from dataclasses import dataclass, replace
+from collections.abc import Iterable, Mapping
+from dataclasses import dataclass, field, replace
+from pathlib import PurePosixPath
 from typing import Literal, Protocol
 
 from ..bounded_workers import BoundedWorkerBusyError, BoundedWorkerPool
@@ -22,6 +23,7 @@ from .types import (
     ContextPackage,
     EvidenceItem,
     FusedCandidate,
+    _finite_nonnegative,
     _legacy_metadata,
     _opaque,
 )
@@ -92,6 +94,13 @@ class SelectedEvidence:
     outcome: str | None = None
     outcome_failed: bool = False
     procedure_steps: tuple[str, ...] = ()
+    utility: float | None = None
+    code_bindings: tuple[tuple[str, str | None], ...] = ()
+    binding_context: Mapping[str, object] = field(default_factory=dict)
+    applicability: Literal["current", "needs_revalidation", "unverifiable"] | None = (
+        None
+    )
+    changed_bindings: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if not isinstance(self.candidate, FusedCandidate):
@@ -101,6 +110,22 @@ class SelectedEvidence:
             if not isinstance(value, str) or not value.strip():
                 raise ValueError(f"{field_name} must be a non-empty string")
         _legacy_metadata(self.rationale, self.tags, self.worked)
+        if self.utility is not None:
+            utility = _finite_nonnegative(self.utility, "utility")
+            if utility > 1:
+                raise ValueError("utility must be between 0 and 1")
+            object.__setattr__(self, "utility", utility)
+        if self.applicability not in {
+            None,
+            "current",
+            "needs_revalidation",
+            "unverifiable",
+        }:
+            raise ValueError("applicability is invalid")
+        if not isinstance(self.changed_bindings, tuple) or not all(
+            isinstance(binding, str) and binding for binding in self.changed_bindings
+        ):
+            raise ValueError("changed_bindings must contain non-empty strings")
         if self.status not in {"current", "superseded"}:
             raise ValueError("status is invalid")
         if (self.status == "superseded") != (self.superseded_by_version_id is not None):
@@ -127,6 +152,28 @@ class SelectedEvidence:
     @property
     def priority(self) -> bool:
         return self.category.casefold() == "warning" or self.outcome_failed
+
+
+@dataclass(frozen=True, slots=True)
+class RetentionPolicy:
+    intent: Literal["explore", "implement", "debug", "review"]
+    identifiers: frozenset[str]
+
+
+def query_identifiers(text: str) -> frozenset[str]:
+    identifiers: set[str] = set()
+    for token in re.split(r"[^\w./\\-]+", text):
+        token = token.replace("\\", "/")
+        if "/" in token and not token.endswith("/"):
+            rooted = token.startswith("./")
+            token = PurePosixPath(token).as_posix()
+            if rooted:
+                token = "./" + token
+        if any(character in token for character in "_./") or any(
+            character.isupper() for character in token[1:]
+        ):
+            identifiers.add(token)
+    return frozenset(identifiers)
 
 
 @dataclass(frozen=True, slots=True)
@@ -220,6 +267,8 @@ class EvidenceComposer:
         selected: Iterable[SelectedEvidence],
         *,
         token_budget: int,
+        retention: RetentionPolicy | None = None,
+        label_applicability: bool = False,
     ) -> CompositionResult:
         """Compose without letting an optional compressor block the event loop."""
 
@@ -233,7 +282,12 @@ class EvidenceComposer:
         try:
             return await asyncio.wait_for(
                 self._worker_pool.run(
-                    lambda: self.compose(sources, token_budget=token_budget)
+                    lambda: self.compose(
+                        sources,
+                        token_budget=token_budget,
+                        retention=retention,
+                        label_applicability=label_applicability,
+                    )
                 ),
                 timeout=primary_timeout,
             )
@@ -250,6 +304,8 @@ class EvidenceComposer:
                         lambda: fallback.compose(
                             sources,
                             token_budget=token_budget,
+                            retention=retention,
+                            label_applicability=label_applicability,
                         )
                     ),
                     timeout=_DETERMINISTIC_COMPOSE_TIMEOUT_SECONDS,
@@ -288,6 +344,8 @@ class EvidenceComposer:
         selected: Iterable[SelectedEvidence],
         *,
         token_budget: int,
+        retention: RetentionPolicy | None = None,
+        label_applicability: bool = False,
     ) -> CompositionResult:
         """Render only supplied post-policy evidence under *token_budget*."""
 
@@ -318,22 +376,39 @@ class EvidenceComposer:
                 f"[E{index}]",
                 source,
                 self._full_excerpt(source),
+                label_applicability=label_applicability,
             )
             for index, source in enumerate(ordered, 1)
         )
         requested_tokens = self._count(requested_text)
-        priority = [source for source in ordered if source.priority]
-        ordinary = [source for source in ordered if not source.priority]
+        priority = [source for source in ordered if self._priority(source, retention)]
+        ordinary = [
+            source for source in ordered if not self._priority(source, retention)
+        ]
+        fraction = (
+            {"explore": 0.15, "implement": 0.30, "debug": 0.35, "review": 0.20}[
+                retention.intent
+            ]
+            if retention is not None
+            else 0.15
+        )
         priority_reserve = min(
             token_budget,
-            max(128, math.ceil(token_budget * 0.15)),
+            max(128, math.ceil(token_budget * fraction)),
         )
 
         prepared: list[_PreparedItem] = []
         drop_reasons: list[str] = []
         deferred_priority: list[SelectedEvidence] = []
         for source in priority:
-            item = self._fit(source, prepared, priority_reserve, drop_reasons)
+            item = self._fit(
+                source,
+                prepared,
+                priority_reserve,
+                drop_reasons,
+                label_applicability,
+                retention,
+            )
             if item is None:
                 deferred_priority.append(source)
             else:
@@ -342,13 +417,27 @@ class EvidenceComposer:
         # The reservation is a floor, not a ceiling: unused total budget may
         # hold additional warnings before ordinary evidence is considered.
         for source in deferred_priority:
-            item = self._fit(source, prepared, token_budget, drop_reasons)
+            item = self._fit(
+                source,
+                prepared,
+                token_budget,
+                drop_reasons,
+                label_applicability,
+                retention,
+            )
             if item is not None:
                 prepared.append(item)
             else:
                 self._append_reason(drop_reasons, "TOKEN_BUDGET")
         for source in ordinary:
-            item = self._fit(source, prepared, token_budget, drop_reasons)
+            item = self._fit(
+                source,
+                prepared,
+                token_budget,
+                drop_reasons,
+                label_applicability,
+                retention,
+            )
             if item is not None:
                 prepared.append(item)
             else:
@@ -356,7 +445,7 @@ class EvidenceComposer:
 
         source_order = {id(source): index for index, source in enumerate(ordered)}
         prepared.sort(key=lambda item: source_order[id(item.source)])
-        prepared = self._resequence(prepared)
+        prepared = self._resequence(prepared, label_applicability, retention)
 
         text = "\n\n".join(item.block for item in prepared)
         rendered_tokens = self._count(text)
@@ -369,6 +458,7 @@ class EvidenceComposer:
             excerpt_start = cursor + item.block.index("\n") + 1
             excerpt_end = excerpt_start + len(item.excerpt)
             source = item.source
+            fact_limit = self._excerpt_limit(source, retention)
             relation_paths = self._relation_paths(source.candidate)
             evidence_item = EvidenceItem(
                 citation=item.marker,
@@ -384,16 +474,19 @@ class EvidenceComposer:
                 worked=source.worked,
                 superseded_by_version_id=source.superseded_by_version_id,
                 outcome=(
-                    self._bounded(source.outcome)
+                    self._bounded(source.outcome, fact_limit)
                     if source.outcome is not None
                     else None
                 ),
                 outcome_failed=source.outcome_failed,
                 procedure_steps=tuple(
-                    self._bounded(step) for step in source.procedure_steps
+                    self._bounded(step, fact_limit) for step in source.procedure_steps
                 ),
                 relation_path=relation_paths[0] if relation_paths else (),
                 relation_paths=relation_paths,
+                utility=source.utility,
+                applicability=source.applicability,
+                changed_bindings=source.changed_bindings,
             )
             items.append(evidence_item)
             citations.append(
@@ -420,13 +513,24 @@ class EvidenceComposer:
         )
         return CompositionResult(items=tuple(items), context=context)
 
-    def _resequence(self, prepared: list[_PreparedItem]) -> list[_PreparedItem]:
+    def _resequence(
+        self,
+        prepared: list[_PreparedItem],
+        label_applicability: bool = False,
+        retention: RetentionPolicy | None = None,
+    ) -> list[_PreparedItem]:
         """Assign contiguous markers after restoring caller-selected order."""
 
         resequenced: list[_PreparedItem] = []
         for index, item in enumerate(prepared, 1):
             marker = f"[E{index}]"
-            block = self._render_block(marker, item.source, item.excerpt)
+            block = self._render_block(
+                marker,
+                item.source,
+                item.excerpt,
+                label_applicability=label_applicability,
+                fact_limit=self._excerpt_limit(item.source, retention),
+            )
             resequenced.append(
                 replace(
                     item,
@@ -437,18 +541,63 @@ class EvidenceComposer:
             )
         return resequenced
 
+    @staticmethod
+    def _priority(source: SelectedEvidence, retention: RetentionPolicy | None) -> bool:
+        if source.priority:
+            return True
+        if retention is None or retention.intent not in {"implement", "debug"}:
+            return False
+        return bool(source.procedure_steps) or any(
+            relative == identifier.removeprefix("./")
+            or (not identifier.startswith("./") and relative.endswith("/" + identifier))
+            or (
+                qualified_name is not None
+                and (
+                    qualified_name == identifier
+                    or qualified_name.endswith("." + identifier)
+                )
+            )
+            for relative, qualified_name in source.code_bindings
+            for identifier in retention.identifiers
+        )
+
+    def _excerpt_limit(
+        self, source: SelectedEvidence, retention: RetentionPolicy | None
+    ) -> int:
+        if retention is None or retention.intent == "explore":
+            return self._max_excerpt_chars
+        if (
+            source.status == "superseded"
+            or source.applicability == "needs_revalidation"
+        ):
+            return min(300, self._max_excerpt_chars)
+        if retention.intent in {"implement", "debug"} and not self._priority(
+            source, retention
+        ):
+            return self._max_excerpt_chars // 2
+        return self._max_excerpt_chars
+
     def _fit(
         self,
         source: SelectedEvidence,
         prepared: list[_PreparedItem],
         budget: int,
         drop_reasons: list[str],
+        label_applicability: bool = False,
+        retention: RetentionPolicy | None = None,
     ) -> _PreparedItem | None:
         marker = f"[E{len(prepared) + 1}]"
         full_excerpt = self._full_excerpt(source)
-        excerpt = self._bounded(full_excerpt)
+        fact_limit = self._excerpt_limit(source, retention)
+        excerpt = self._bounded(full_excerpt, fact_limit)
         truncated = excerpt != full_excerpt
-        block = self._render_block(marker, source, excerpt)
+        block = self._render_block(
+            marker,
+            source,
+            excerpt,
+            label_applicability=label_applicability,
+            fact_limit=fact_limit,
+        )
         if self._combined_count(prepared, block) > budget:
             compressed = self._compress_excerpt(
                 source,
@@ -458,7 +607,13 @@ class EvidenceComposer:
                 drop_reasons=drop_reasons,
             )
             if compressed is not None:
-                compressed_block = self._render_block(marker, source, compressed)
+                compressed_block = self._render_block(
+                    marker,
+                    source,
+                    compressed,
+                    label_applicability=label_applicability,
+                    fact_limit=fact_limit,
+                )
                 if self._combined_count(prepared, compressed_block) <= budget:
                     excerpt = compressed
                     block = compressed_block
@@ -470,10 +625,18 @@ class EvidenceComposer:
                 excerpt,
                 prepared,
                 budget,
+                label_applicability,
+                fact_limit,
             )
             if excerpt is None:
                 return None
-            block = self._render_block(marker, source, excerpt)
+            block = self._render_block(
+                marker,
+                source,
+                excerpt,
+                label_applicability=label_applicability,
+                fact_limit=fact_limit,
+            )
             truncated = True
         if truncated:
             self._append_reason(drop_reasons, "ITEM_TRUNCATED")
@@ -541,6 +704,8 @@ class EvidenceComposer:
         excerpt: str,
         prepared: list[_PreparedItem],
         budget: int,
+        label_applicability: bool = False,
+        fact_limit: int | None = None,
     ) -> str | None:
         low = 1
         high = len(excerpt)
@@ -550,7 +715,13 @@ class EvidenceComposer:
             candidate = excerpt[:midpoint].rstrip()
             if not candidate:
                 candidate = excerpt[:1]
-            block = self._render_block(marker, source, candidate)
+            block = self._render_block(
+                marker,
+                source,
+                candidate,
+                label_applicability=label_applicability,
+                fact_limit=fact_limit,
+            )
             if self._combined_count(prepared, block) <= budget:
                 best = candidate
                 low = midpoint + 1
@@ -570,6 +741,9 @@ class EvidenceComposer:
         marker: str,
         source: SelectedEvidence,
         excerpt: str,
+        *,
+        label_applicability: bool = False,
+        fact_limit: int | None = None,
     ) -> str:
         channels = ",".join(sorted(source.candidate.channels))
         lines = [
@@ -579,13 +753,22 @@ class EvidenceComposer:
             ),
             excerpt,
         ]
+        if label_applicability and source.applicability == "needs_revalidation":
+            lines.append(
+                "Needs revalidation: "
+                + "; ".join(self._clean(path) for path in source.changed_bindings)
+            )
         if source.outcome is not None:
             outcome_label = "Failed outcome" if source.outcome_failed else "Outcome"
-            lines.append(f"{outcome_label}: {self._bounded(source.outcome)}")
+            lines.append(
+                f"{outcome_label}: {self._bounded(source.outcome, fact_limit)}"
+            )
         if source.procedure_steps:
             lines.append(
                 "Steps: "
-                + " | ".join(self._bounded(step) for step in source.procedure_steps)
+                + " | ".join(
+                    self._bounded(step, fact_limit) for step in source.procedure_steps
+                )
             )
         relation_paths = self._relation_paths(source.candidate)
         if relation_paths:
@@ -625,11 +808,12 @@ class EvidenceComposer:
             raise ValueError("tokenizer must return a non-negative integer")
         return value
 
-    def _bounded(self, value: str) -> str:
+    def _bounded(self, value: str, max_chars: int | None = None) -> str:
         cleaned = self._clean(value)
-        if len(cleaned) <= self._max_excerpt_chars:
+        limit = self._max_excerpt_chars if max_chars is None else max_chars
+        if len(cleaned) <= limit:
             return cleaned
-        return cleaned[: self._max_excerpt_chars].rstrip()
+        return cleaned[:limit].rstrip()
 
     @staticmethod
     def _clean(value: str) -> str:

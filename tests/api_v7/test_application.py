@@ -73,8 +73,7 @@ class V7ApplicationTests(unittest.IsolatedAsyncioTestCase):
         called: list[str] = []
 
         async def operation(*, workspace: Workspace, request: object) -> object:
-            from daem0nmcp.api.v7.models import Page
-            from daem0nmcp.api.v7.resources import RuleView
+            from daem0nmcp.api.v7.models import Page, RuleView
 
             called.append(workspace.workspace_id)
             del request

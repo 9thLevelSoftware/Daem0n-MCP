@@ -10,7 +10,7 @@ from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from types import MappingProxyType
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
 
 from pydantic import ValidationError
 
@@ -23,6 +23,7 @@ from ...covenant import (
 from ...event_store import AppendedEvent, EventStreamConflict
 from ...retrieval import RetrievalQuery
 from ...workspace import Workspace
+from .ceremony import ArgumentNormalizer, CovenantCeremony, PreflightService
 from .errors import (
     DATABASE_IN_USE_RETRY_AFTER_MS,
     MIGRATION_REQUIRED_MESSAGE,
@@ -32,6 +33,7 @@ from .models import (
     ApiResponse,
     ApiWarning,
     CapabilityState,
+    PreflightGuidance,
     RecordSummary,
     RetrievalData,
 )
@@ -54,7 +56,6 @@ from .tools import (
     MemoryStoreOutput,
     OutcomeData,
     PreflightData,
-    PreflightGuidance,
     SessionBriefData,
     SessionBriefInput,
     SessionBriefOutput,
@@ -238,30 +239,11 @@ class PinnedWorkspaceResolver(Protocol):
     def resolve(self, workspace_id: str) -> Workspace | Awaitable[Workspace]: ...
 
 
-class ArgumentNormalizer(Protocol):
-    def __call__(
-        self,
-        operation: str,
-        arguments: Mapping[str, Any] | None,
-        workspace: str,
-    ) -> dict[str, Any]: ...
-
-
 class BriefingService(Protocol):
     def assemble(
         self,
         workspace: Workspace,
         request: SessionBriefInput,
-    ) -> object | Awaitable[object]: ...
-
-
-class PreflightService(Protocol):
-    def guidance(
-        self,
-        workspace: Workspace,
-        target_tool: str,
-        normalized_arguments: Mapping[str, Any],
-        description: str | None,
     ) -> object | Awaitable[object]: ...
 
 
@@ -299,6 +281,7 @@ class PinnedDependencies:
     response_factory: ResponseFactory = field(default_factory=ResponseFactory)
     scope_provider: Callable[[], InvocationScope | None] = invocation_scope_var.get
     clock: Callable[[], datetime] = _utc_now
+    ceremony: CovenantCeremony | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -314,6 +297,8 @@ class MemoryStoreCommand:
     happened_at: datetime | None
     procedure_steps: tuple[str, ...]
     idempotency_key: str
+    informed_by: tuple[str, ...] = ()
+    code_refs: tuple[tuple[str, str | None], ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -334,6 +319,9 @@ class MemoryOutcomeCommand:
     worked: bool
     happened_at: datetime | None
     idempotency_key: str
+    informed_by: tuple[str, ...] = ()
+    verification: Mapping[str, object] | None = None
+    rebind_code: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -509,11 +497,25 @@ class PinnedHandlers:
             return failure
         assert scope is not None
         call_arguments = request.model_dump()
-        violation = self._dependencies.covenant_gate.authorize(
-            "memory_preflight",
-            call_arguments,
-            scope,
-        )
+        violation: Mapping[str, Any] | None
+        if self._dependencies.ceremony is None:
+            violation = self._dependencies.covenant_gate.authorize(
+                "memory_preflight",
+                call_arguments,
+                scope,
+            )
+        else:
+            outcome = await self._dependencies.ceremony.admit(
+                "memory_preflight",
+                call_arguments,
+                workspace,
+                scope,
+                preflight_token=None,
+                consume_capability=True,
+                counsel_mode="off",
+            )
+            response = response.with_covenant(outcome.notice)
+            violation = outcome.violation
         if violation is not None:
             code = violation.get("violation")
             if code == ErrorCode.COMMUNION_REQUIRED.value:
@@ -620,6 +622,7 @@ class PinnedHandlers:
         include_archived: bool = False,
         token_budget: int = 2400,
         rerank: bool = False,
+        intent: Literal["explore", "implement", "debug", "review"] | None = None,
     ) -> MemoryRecallOutput:
         payload: dict[str, object] = {
             "workspace_id": workspace_id,
@@ -635,6 +638,7 @@ class PinnedHandlers:
             "include_archived": include_archived,
             "token_budget": token_budget,
             "rerank": rerank,
+            "intent": intent,
         }
         if linked_workspace_ids is not None:
             payload["linked_workspace_ids"] = linked_workspace_ids
@@ -676,11 +680,25 @@ class PinnedHandlers:
             if failure is not None:
                 return failure
             assert scope is not None
-        violation = self._dependencies.covenant_gate.authorize(
-            "memory_recall",
-            effective,
-            scope,
-        )
+        violation: Mapping[str, Any] | None
+        if durable_execution or self._dependencies.ceremony is None:
+            violation = self._dependencies.covenant_gate.authorize(
+                "memory_recall",
+                effective,
+                scope,
+            )
+        else:
+            outcome = await self._dependencies.ceremony.admit(
+                "memory_recall",
+                effective,
+                workspace,
+                scope,
+                preflight_token=None,
+                consume_capability=True,
+                counsel_mode="off",
+            )
+            response = response.with_covenant(outcome.notice)
+            violation = outcome.violation
         if violation is not None:
             code = violation.get("violation")
             if code == ErrorCode.COMMUNION_REQUIRED.value:
@@ -727,6 +745,7 @@ class PinnedHandlers:
                 include_archived=request.include_archived,
                 token_budget=request.token_budget,
                 rerank=request.rerank,
+                intent=request.intent,
             )
             linked_ids = frozenset(request.linked_workspace_ids)
             if linked_ids:
@@ -799,8 +818,10 @@ class PinnedHandlers:
         relative_file_path: str | None = None,
         happened_at: datetime | None = None,
         procedure_steps: list[str] | None = None,
+        informed_by: list[str] | None = None,
+        code_refs: list[dict[str, object]] | None = None,
         idempotency_key: str,
-        preflight_token: str,
+        preflight_token: str | None = None,
     ) -> MemoryStoreOutput:
         payload: dict[str, object] = {
             "workspace_id": workspace_id,
@@ -818,6 +839,10 @@ class PinnedHandlers:
             payload["tags"] = tags
         if procedure_steps is not None:
             payload["procedure_steps"] = procedure_steps
+        if informed_by is not None:
+            payload["informed_by"] = informed_by
+        if code_refs is not None:
+            payload["code_refs"] = code_refs
         request = MemoryStoreInput.model_validate(payload)
         response = self._dependencies.response_factory.begin(request.workspace_id)
         workspace, failure = await self._resolve_workspace(
@@ -839,12 +864,37 @@ class PinnedHandlers:
                 exclude={"workspace_id", "preflight_token"},
             ),
         }
-        violation = self._dependencies.covenant_gate.authorize(
-            "memory_store",
-            request.model_dump(),
-            scope,
-            preflight_token=request.preflight_token,
-        )
+        violation: Mapping[str, Any] | None
+        if self._dependencies.ceremony is None:
+            violation = self._dependencies.covenant_gate.authorize(
+                "memory_store",
+                request.model_dump(),
+                scope,
+                preflight_token=request.preflight_token,
+            )
+        else:
+            outcome = await self._dependencies.ceremony.admit(
+                "memory_store",
+                request.model_dump(),
+                workspace,
+                scope,
+                preflight_token=request.preflight_token,
+                consume_capability=True,
+                counsel_mode="inline",
+            )
+            response = response.with_covenant(outcome.notice)
+            violation = outcome.violation
+            if outcome.challenge is not None:
+                return response.failure(
+                    ErrorCode.COUNSEL_REQUIRED,
+                    "Review error.counsel, then retry exactly error.remedy.",
+                    remedy_tool="memory_store",
+                    remedy_arguments={
+                        **request.model_dump(mode="json", exclude={"preflight_token"}),
+                        "preflight_token": outcome.challenge.preflight_token,
+                    },
+                    counsel=outcome.challenge,
+                )
         if violation is not None:
             code = violation.get("violation")
             try:
@@ -866,6 +916,9 @@ class PinnedHandlers:
             }:
                 remedy_tool = "memory_preflight"
                 remedy_arguments = preflight_remedy
+            elif stable_code is ErrorCode.COMMUNION_REQUIRED:
+                remedy_tool = "session_brief"
+                remedy_arguments = {"workspace_id": request.workspace_id}
             return response.failure(
                 stable_code,
                 "The preflight capability was rejected.",
@@ -882,6 +935,11 @@ class PinnedHandlers:
             happened_at=request.happened_at,
             procedure_steps=tuple(request.procedure_steps),
             idempotency_key=request.idempotency_key,
+            informed_by=tuple(request.informed_by),
+            code_refs=tuple(
+                (ref.relative_file_path, ref.qualified_name)
+                for ref in request.code_refs
+            ),
         )
         try:
             stored_value = self._dependencies.memory_event_writer.store(
@@ -915,8 +973,14 @@ class PinnedHandlers:
             )
         except Exception as exc:
             if getattr(exc, "code", None) == ErrorCode.DATABASE_IN_USE.value:
-                # authorize() already spent the token, so a retry needs a new
-                # one; the idempotency key keeps the retry replay-safe.
+                if self._dependencies.ceremony is not None:
+                    return response.failure(
+                        ErrorCode.DATABASE_IN_USE,
+                        "The workspace database is currently in use. Retry with "
+                        "the same idempotency_key.",
+                        retryable=True,
+                        retry_after_ms=DATABASE_IN_USE_RETRY_AFTER_MS,
+                    )
                 return response.failure(
                     ErrorCode.DATABASE_IN_USE,
                     "The workspace database is currently in use. Request a new "
@@ -938,18 +1002,24 @@ class PinnedHandlers:
         outcome_text: str,
         worked: bool,
         happened_at: datetime | None = None,
+        informed_by: list[str] | None = None,
+        verification: dict[str, object] | None = None,
+        rebind_code: bool = False,
         idempotency_key: str,
     ) -> MemoryRecordOutcomeOutput:
-        request = MemoryRecordOutcomeInput.model_validate(
-            {
-                "workspace_id": workspace_id,
-                "record_id": record_id,
-                "outcome_text": outcome_text,
-                "worked": worked,
-                "happened_at": happened_at,
-                "idempotency_key": idempotency_key,
-            }
-        )
+        payload: dict[str, object] = {
+            "workspace_id": workspace_id,
+            "record_id": record_id,
+            "outcome_text": outcome_text,
+            "worked": worked,
+            "happened_at": happened_at,
+            "verification": verification,
+            "rebind_code": rebind_code,
+            "idempotency_key": idempotency_key,
+        }
+        if informed_by is not None:
+            payload["informed_by"] = informed_by
+        request = MemoryRecordOutcomeInput.model_validate(payload)
         response = self._dependencies.response_factory.begin(request.workspace_id)
         workspace, failure = await self._resolve_workspace(
             request.workspace_id,
@@ -962,11 +1032,25 @@ class PinnedHandlers:
         if failure is not None:
             return failure
         assert scope is not None
-        violation = self._dependencies.covenant_gate.authorize(
-            "memory_record_outcome",
-            request.model_dump(),
-            scope,
-        )
+        violation: Mapping[str, Any] | None
+        if self._dependencies.ceremony is None:
+            violation = self._dependencies.covenant_gate.authorize(
+                "memory_record_outcome",
+                request.model_dump(),
+                scope,
+            )
+        else:
+            outcome = await self._dependencies.ceremony.admit(
+                "memory_record_outcome",
+                request.model_dump(),
+                workspace,
+                scope,
+                preflight_token=None,
+                consume_capability=True,
+                counsel_mode="off",
+            )
+            response = response.with_covenant(outcome.notice)
+            violation = outcome.violation
         if violation is not None:
             code = violation.get("violation")
             if code == ErrorCode.COMMUNION_REQUIRED.value:
@@ -983,6 +1067,13 @@ class PinnedHandlers:
             worked=request.worked,
             happened_at=request.happened_at,
             idempotency_key=request.idempotency_key,
+            informed_by=tuple(request.informed_by),
+            verification=(
+                request.verification.model_dump(exclude_none=True)
+                if request.verification is not None
+                else None
+            ),
+            rebind_code=request.rebind_code,
         )
         try:
             recorded_value = self._dependencies.memory_event_writer.record_outcome(
@@ -1103,7 +1194,6 @@ def build_pinned_handlers(
 
 
 __all__ = [
-    "ArgumentNormalizer",
     "BriefingService",
     "HealthService",
     "IdempotencyConflict",
@@ -1114,7 +1204,6 @@ __all__ = [
     "PinnedDependencies",
     "PinnedHandlers",
     "PinnedWorkspaceResolver",
-    "PreflightService",
     "RecallService",
     "RecordedOutcome",
     "StoredMemory",

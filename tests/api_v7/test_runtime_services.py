@@ -451,8 +451,9 @@ class RecallAdapterTests(
 
         class Service:
             @staticmethod
-            async def retrieve(query):
+            async def retrieve(query, *, workspace_root=None):
                 self.assertEqual(self.workspace.workspace_id, query.workspace_id)
+                self.assertEqual(self.workspace.root, workspace_root)
                 return expected
 
         opened: list[Path] = []
@@ -507,14 +508,21 @@ class RecallAdapterTests(
             def __init__(self):
                 self.closed = 0
 
-            async def retrieve(self, _query):
+            async def retrieve(self, _query, *, workspace_root=None):
                 return expected
 
             def close(self):
                 self.closed += 1
 
         resolver = Resolver()
-        config = SimpleNamespace(profile="first")
+        config = SimpleNamespace(
+            retrieval_utility_mode="shadow",
+            retrieval_utility_weight=0.1,
+            retrieval_utility_credit="trace",
+            retrieval_utility_candidate_limit=25,
+            memory_validity_mode="shadow",
+            retrieval_retention_mode="shadow",
+        )
         created: list[Service] = []
 
         def factory(_path):
@@ -539,14 +547,19 @@ class RecallAdapterTests(
             self.assertEqual(2, len(created))
             self.assertEqual(1, created[0].closed)
 
-            config.profile = "second"
+            config.retrieval_utility_mode = "apply"
             await adapter.retrieve(self.workspace, query, frozenset())
             self.assertEqual(3, len(created))
             self.assertEqual(1, created[1].closed)
+
+            config.retrieval_retention_mode = "apply"
+            await adapter.retrieve(self.workspace, query, frozenset())
+            self.assertEqual(4, len(created))
+            self.assertEqual(1, created[2].closed)
         finally:
             adapter.close()
 
-        self.assertEqual([1, 1, 1], [service.closed for service in created])
+        self.assertEqual([1, 1, 1, 1], [service.closed for service in created])
 
     async def test_default_hydration_capacity_admits_four_concurrent_recalls(
         self,
@@ -558,7 +571,7 @@ class RecallAdapterTests(
         expected = self._retrieval_result(stored)
 
         class Service:
-            async def retrieve(self, _query):
+            async def retrieve(self, _query, *, workspace_root=None):
                 return expected
 
         adapter = Task8RecallService(service_factory=lambda _path: Service())
@@ -598,7 +611,7 @@ class RecallAdapterTests(
         expected = self._retrieval_result(stored)
 
         class Service:
-            async def retrieve(self, _query):
+            async def retrieve(self, _query, *, workspace_root=None):
                 return expected
 
         adapter = Task8RecallService(
@@ -659,7 +672,7 @@ class RecallAdapterTests(
                 self.generation = generation
                 self.closed = 0
 
-            async def retrieve(self, _query):
+            async def retrieve(self, _query, *, workspace_root=None):
                 if self.generation == 1:
                     started.set()
                     await release.wait()
@@ -756,7 +769,7 @@ class RecallAdapterTests(
             def __init__(self, provider):
                 self.provider = provider
 
-            async def retrieve(self, _query):
+            async def retrieve(self, _query, *, workspace_root=None):
                 return expected
 
             def close(self):
@@ -808,7 +821,7 @@ class RecallAdapterTests(
 
         async def run(result):
             class Service:
-                async def retrieve(self, _query):
+                async def retrieve(self, _query, *, workspace_root=None):
                     return result
 
             adapter = Task8RecallService(
@@ -856,7 +869,7 @@ class RecallAdapterTests(
         from daem0nmcp.retrieval import ProviderDiagnostic, RetrievalResult
 
         class Service:
-            async def retrieve(self, _query):
+            async def retrieve(self, _query, *, workspace_root=None):
                 return RetrievalResult(
                     providers=(
                         ProviderDiagnostic(

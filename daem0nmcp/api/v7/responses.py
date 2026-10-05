@@ -8,7 +8,7 @@ import secrets
 import sys
 import traceback
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from typing import Any, TypeVar
 
@@ -20,6 +20,8 @@ from .models import (
     ApiResponse,
     ApiWarning,
     CapabilityState,
+    CounselChallenge,
+    CovenantNotice,
     ErrorRemedy,
     FieldError,
     ResponseMeta,
@@ -91,6 +93,10 @@ class ResponseContext:
     request_id: str
     started_at: datetime
     _clock: Callable[[], datetime]
+    covenant: CovenantNotice | None = None
+
+    def with_covenant(self, notice: CovenantNotice | None) -> ResponseContext:
+        return replace(self, covenant=notice)
 
     def _meta(
         self,
@@ -107,6 +113,7 @@ class ResponseContext:
             duration_ms=min(elapsed, 86_400_000),
             warnings=list(warnings),
             capability_states=list(capability_states),
+            covenant=self.covenant,
         )
 
     def success(
@@ -136,6 +143,7 @@ class ResponseContext:
         field_errors: Sequence[FieldError] = (),
         remedy_tool: str | None = None,
         remedy_arguments: Mapping[str, Any] | None = None,
+        counsel: CounselChallenge | None = None,
         warnings: Sequence[ApiWarning] = (),
         capability_states: Sequence[CapabilityState] = (),
     ) -> ApiResponse[Any]:
@@ -161,12 +169,34 @@ class ResponseContext:
                 retry_after_ms=retry_after_ms,
                 field_errors=list(field_errors),
                 remedy=remedy,
+                counsel=counsel,
                 correlation_id=self.request_id,
             ),
             meta=self._meta(
                 warnings=warnings,
                 capability_states=capability_states,
             ),
+        )
+
+    def relay_failure(
+        self,
+        error: ApiError,
+        *,
+        remedy: ErrorRemedy | None,
+        warnings: Sequence[ApiWarning] = (),
+        capability_states: Sequence[CapabilityState] = (),
+    ) -> ApiResponse[Any]:
+        return self.failure(
+            error.code,
+            error.message,
+            retryable=error.retryable,
+            retry_after_ms=error.retry_after_ms,
+            field_errors=error.field_errors,
+            remedy_tool=remedy.tool if remedy is not None else None,
+            remedy_arguments=remedy.arguments if remedy is not None else None,
+            counsel=error.counsel,
+            warnings=warnings,
+            capability_states=capability_states,
         )
 
     def internal_error(self, error: BaseException | None = None) -> ApiResponse[Any]:

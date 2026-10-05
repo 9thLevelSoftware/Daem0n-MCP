@@ -52,7 +52,11 @@ from daem0nmcp.api.v7.resources import (
     RuleResourceDocument,
     WarningResourceDocument,
 )
-from daem0nmcp.api.v7.tools import TOOL_DATA_MODELS, DiagnosticSummary
+from daem0nmcp.api.v7.tools import (
+    TOOL_DATA_MODELS,
+    TOOL_INPUT_MODELS,
+    DiagnosticSummary,
+)
 from daem0nmcp.config import Settings
 from daem0nmcp.covenant import CovenantLevel
 from daem0nmcp.storage_activation import resolve_active_database
@@ -71,6 +75,7 @@ CANARY = "canary7f3a9d1e"
 APPS_AVAILABLE = importlib.util.find_spec("tree_sitter_language_pack") is not None
 PROFILE_ENVIRONMENT = {
     "DAEM0NMCP_PROFILE": "core",
+    "DAEM0NMCP_TOOL_SURFACE": "full",
     "DAEM0NMCP_APPS_ENABLED": "true",
     "DAEM0NMCP_GRAPH_ENABLED": "true",
 }
@@ -246,7 +251,10 @@ async def _protected(invoke: Invoke, workspace_id: str, tool: str, arguments: di
 async def _target_call(invoke: Invoke, workspace_id: str, tool: str, arguments: dict):
     if _is_protected(tool):
         return await _protected(invoke, workspace_id, tool, arguments)
-    return await invoke(tool, {"workspace_id": workspace_id, **arguments})
+    target = dict(arguments)
+    if "workspace_id" in TOOL_INPUT_MODELS[tool].model_fields:
+        target["workspace_id"] = workspace_id
+    return await invoke(tool, target)
 
 
 async def _seed_workspace_a(invoke: Invoke, a: str, b: str) -> Seed:
@@ -379,6 +387,11 @@ def _sweep_arguments(seed: Seed) -> dict[str, dict[str, Any]]:
     cursor = seed.token("cursor")
     now = datetime.now(timezone.utc).isoformat()
     return {
+        "daem0n_tools_search": {"query": "memory versions"},
+        "daem0n_tool_call": {
+            "tool": "memory_versions_list",
+            "arguments": {"record_id": record},
+        },
         "active_context_add": {"record_id": record, "reason": "sweep"},
         "active_context_clear": {
             "selection_token": seed.token("active_context_selection")
@@ -544,6 +557,8 @@ OWN_VARIANTS: tuple[tuple[str, dict[str, Any]], ...] = (
 # without A's cursor or session (when there is one), then the target's own
 # arguments (OWN_VARIANTS).  B and the copied-storage C behave identically.
 EXPECTED: dict[str, tuple[str, ...]] = {
+    "daem0n_tools_search": ("ok",),
+    "daem0n_tool_call": ("NOT_FOUND",),
     "active_context_add": ("NOT_FOUND",),
     "active_context_clear": ("TOKEN_TAMPERED",),
     "active_context_list": (
@@ -842,6 +857,7 @@ async def test_workspace_isolation_and_path_leak_sweep(tmp_path, capsys):
             settings=Settings(
                 project_root=str(a_root),
                 workspace_roots=[str(root) for root in roots],
+                tool_surface="full",
                 dream_enabled=False,
             ),
             environ=PROFILE_ENVIRONMENT,
@@ -943,7 +959,10 @@ async def _jwt_pass(tmp_path, a_root, b_root, a, b, seed) -> None:
             a_root,
             "streamable-http",
             workspace_roots=(a_root, b_root),
-            environment_overrides=jwt_environment(issuer_url, policy_path),
+            environment_overrides={
+                **jwt_environment(issuer_url, policy_path),
+                "DAEM0NMCP_TOOL_SURFACE": "full",
+            },
             http_headers={"Authorization": "Bearer " + token()},
         ) as session:
             await succeed(session, "session_brief", {"workspace_id": a})
@@ -961,6 +980,24 @@ async def _jwt_pass(tmp_path, a_root, b_root, a, b, seed) -> None:
                 **_cross_arguments(seed.token("consolidation"), a),
             }
             for tool, arguments in sorted(targets.items()):
+                if "workspace_id" not in TOOL_INPUT_MODELS[tool].model_fields:
+                    assert tool == "daem0n_tools_search"
+                    result = await call(session, tool, arguments)
+                    assert result["ok"], result
+                    for value in _strings(result):
+                        assert CANARY not in value, (tool, value)
+                        for secret in (*seed.texts, *seed.ids.values(), a, b):
+                            assert secret not in value, (tool, secret, value)
+                    needles = {
+                        str(path).lower()
+                        for base in (a_root, b_root, Path.home())
+                        for path in (base, base.resolve())
+                    }
+                    needles |= {Path(n).as_posix().lower() for n in needles}
+                    assert not _host_path_leaks(
+                        _response_model(tool), result, needles
+                    ), (tool, result)
+                    continue
                 if _is_protected(tool):
                     arguments = {**arguments, "preflight_token": placeholder_token}
                 denied = await call(session, tool, {"workspace_id": b, **arguments})

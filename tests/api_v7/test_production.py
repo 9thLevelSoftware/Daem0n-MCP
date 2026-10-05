@@ -47,7 +47,7 @@ class ProductionCompositionTests(unittest.TestCase):
         )
 
         self.assertEqual(set(surface.handlers), set(V7_TOOL_LEVELS))
-        self.assertEqual(len(surface.manifest.tools), 75)
+        self.assertEqual(len(surface.manifest.tools), 77)
         self.assertEqual(len(surface.manifest.resources), 10)
         self.assertEqual(
             surface.workspace_resolver.default.root,
@@ -167,19 +167,27 @@ class ProductionCompositionTests(unittest.TestCase):
 
     def test_every_supported_operation_is_wired_not_placeholdered(self) -> None:
         from daem0nmcp.api.v7 import production
+        from daem0nmcp.api.v7.gateway_operations import GATEWAY_TOOL_NAMES
         from daem0nmcp.api.v7.pinned import PINNED_HANDLER_NAMES
         from daem0nmcp.api.v7.policy import V7_TOOL_LEVELS
 
         remaining_unimplemented: set[str] = set()
         expected = (
-            set(V7_TOOL_LEVELS) - set(PINNED_HANDLER_NAMES) - remaining_unimplemented
+            set(V7_TOOL_LEVELS)
+            - set(PINNED_HANDLER_NAMES)
+            - set(GATEWAY_TOOL_NAMES)
+            - remaining_unimplemented
         )
         observed: set[str] = set()
         original = production.build_v7_surface
 
         def capture(**kwargs):
             observed.update(kwargs["operations"])
-            return original(**kwargs)
+            surface = original(**kwargs)
+            self.assertEqual(
+                set(surface.handlers) & GATEWAY_TOOL_NAMES, set(GATEWAY_TOOL_NAMES)
+            )
+            return surface
 
         with patch(
             "daem0nmcp.api.v7.production.build_v7_surface",
@@ -364,13 +372,13 @@ class ProductionCompositionTests(unittest.TestCase):
         )
 
     def test_preflight_uses_one_snapshot_and_filters_failures_by_target(self) -> None:
-        from daem0nmcp.api.v7.models import RecordSummary
+        from daem0nmcp.api.v7.models import RecordSummary, RuleView
         from daem0nmcp.api.v7.production import _guidance_reader
         from daem0nmcp.api.v7.resource_repository import (
             ResourceRepositoryReaders,
             ResourceRepositorySnapshot,
         )
-        from daem0nmcp.api.v7.resources import ResourceRow, RuleView
+        from daem0nmcp.api.v7.resources import ResourceRow
         from daem0nmcp.workspace import Workspace
 
         now = datetime(2026, 1, 1, tzinfo=timezone.utc)

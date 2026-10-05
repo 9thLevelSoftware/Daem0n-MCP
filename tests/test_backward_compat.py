@@ -8,13 +8,17 @@ class TestDeprecatedToolsRemovedFromMCP:
 
     @pytest.mark.asyncio
     async def test_exact_v7_tools_exposed(self):
+        from daem0nmcp.api.v7.gateway_operations import CORE_LISTED_TOOLS
         from daem0nmcp.api.v7.policy import V7_TOOL_LEVELS
         from daem0nmcp.server import mcp
 
         tools = {t.name for t in await mcp.list_tools()}
-        assert tools == set(V7_TOOL_LEVELS)
-        assert len(tools) == 75
-        assert tools.isdisjoint(
+        assert tools == set(CORE_LISTED_TOOLS)
+        assert len(tools) == 9
+        registered = {(await mcp.get_tool(name)).name for name in V7_TOOL_LEVELS}
+        assert registered == set(V7_TOOL_LEVELS)
+        assert len(registered) == 77
+        assert registered.isdisjoint(
             {
                 "commune",
                 "consult",

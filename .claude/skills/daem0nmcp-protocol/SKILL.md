@@ -1,6 +1,6 @@
 ---
 name: daem0nmcp-protocol
-description: Enforce the Daem0n v7 scoped session, exact preflight, replay-safe memory, and outcome protocol
+description: Enforce the Daem0n v7 guided session, inline counsel, replay-safe memory, and outcome protocol
 ---
 
 # Daem0n v7 Protocol
@@ -24,13 +24,9 @@ Do not treat a substring or an older workflow name as a match.
 
 ## Required sequence
 
-1. Establish the authenticated workspace session:
+The first Daem0n call in a session briefs automatically; the compact brief is returned in `meta.covenant.auto_brief`. Call `session_brief` for the full brief.
 
-   ```text
-   mcp__daem0nmcp__session_brief(workspace_id="<workspace_id>")
-   ```
-
-2. Recall relevant context when needed:
+Recall relevant context when needed:
 
    ```text
    mcp__daem0nmcp__memory_recall(
@@ -40,33 +36,22 @@ Do not treat a substring or an older workflow name as a match.
    )
    ```
 
-3. Before a protected call, request a token bound to its exact arguments:
+Call `memory_store` (or any protected tool) directly. If it returns `COUNSEL_REQUIRED`, read `error.counsel` (guidance and reasons), then retry exactly `error.remedy`. `memory_preflight` remains available for planning a change in advance.
 
-   ```text
-   mcp__daem0nmcp__memory_preflight(
-       workspace_id="<workspace_id>",
-       target_tool="memory_store",
-       target_arguments={
-           "record_type": "decision",
-           "content": "Use append-only events",
-           "idempotency_key": "decision-events-0001"
-       }
-   )
-   ```
+Use `daem0n_tools_search(query)`, then `daem0n_tool_call(workspace_id, tool, arguments)`.
 
-4. Execute that exact request with the returned token:
+Store a durable decision directly:
 
    ```text
    mcp__daem0nmcp__memory_store(
        workspace_id="<workspace_id>",
        record_type="decision",
        content="Use append-only events",
-       idempotency_key="decision-events-0001",
-       preflight_token="<token-from-memory_preflight>"
+       idempotency_key="decision-events-0001"
    )
    ```
 
-5. After verification, record the outcome:
+After verification, record the outcome:
 
    ```text
    mcp__daem0nmcp__memory_record_outcome(
@@ -86,6 +71,11 @@ was lost.
 
 - A `preflight_token` authorizes only the exact workspace, tool, arguments,
   principal, and session for which it was issued.
+- Tokens are single-use and valid for 300 seconds.
+- Defaults are `DAEM0NMCP_COVENANT_MODE=guided` and `DAEM0NMCP_TOOL_SURFACE=core`.
+  Set `DAEM0NMCP_COVENANT_MODE=strict` for explicit `session_brief`, exact
+  `memory_preflight`, and token-bearing writes; `DAEM0NMCP_TOOL_SURFACE=full`
+  lists all registered tools.
 - Never infer identity from headers, network address, client information, or
   `_client_meta`.
 - Treat `must_not` guidance as a hard constraint.

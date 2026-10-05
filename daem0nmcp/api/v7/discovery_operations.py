@@ -49,7 +49,7 @@ from ...workspace import (
     validate_index_patterns,
 )
 from .application import AdmittedRequest
-from .errors import STABLE_ERROR_CODE_SET
+from .errors import STABLE_ERROR_CODE_SET, is_database_busy
 from .models import (
     CapabilityState,
     Page,
@@ -408,7 +408,7 @@ class _StrictTreeSitterProducer:
         return entities()
 
 
-def _default_code_indexer_factory() -> object:
+def default_code_indexer_factory() -> object:
     from ...code_indexer import LANGUAGE_CONFIG, TreeSitterIndexer
 
     return _StrictTreeSitterProducer(TreeSitterIndexer(), LANGUAGE_CONFIG)
@@ -425,7 +425,7 @@ class DiscoveryOperationDependencies:
     cursor_secret: bytes = field(default_factory=lambda: secrets.token_bytes(32))
     worker_pool: WorkerPool = field(default_factory=_default_worker_pool)
     recall_service: _RecallService | None = None
-    code_indexer_factory: Callable[[], object] = _default_code_indexer_factory
+    code_indexer_factory: Callable[[], object] = default_code_indexer_factory
     capability_statuses: Mapping[str, str] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -511,8 +511,8 @@ def _verify_database_connection(connection: sqlite3.Connection) -> None:
                 "SELECT name FROM sqlite_master WHERE type='table'"
             )
         }
-    except Exception:
-        raise DiscoveryOperationError("CAPABILITY_DEGRADED") from None
+    except Exception as error:
+        raise _translate_error(error) from None
     if not versions.issuperset(
         REQUIRED_V7_SCHEMA_VERSIONS
     ) or not _REQUIRED_TABLES.issubset(tables):
@@ -538,10 +538,10 @@ def _open_database(path: Path) -> sqlite3.Connection:
         if connection is not None:
             connection.close()
         raise
-    except Exception:
+    except Exception as error:
         if connection is not None:
             connection.close()
-        raise DiscoveryOperationError("CAPABILITY_DEGRADED") from None
+        raise _translate_error(error) from None
 
 
 def _open_writable_database(path: Path) -> sqlite3.Connection:
@@ -561,10 +561,10 @@ def _open_writable_database(path: Path) -> sqlite3.Connection:
         if connection is not None:
             connection.close()
         raise
-    except Exception:
+    except Exception as error:
         if connection is not None:
             connection.close()
-        raise DiscoveryOperationError("CAPABILITY_DEGRADED") from None
+        raise _translate_error(error) from None
 
 
 def _datetime_us(value: object) -> int:
@@ -710,6 +710,18 @@ def _translate_error(error: Exception) -> DiscoveryOperationError:
     code = getattr(error, "code", None)
     if isinstance(code, str) and code in STABLE_ERROR_CODE_SET:
         return DiscoveryOperationError(code)
+    if isinstance(error, sqlite3.OperationalError) and (
+        is_database_busy(error)
+        or (
+            not isinstance(getattr(error, "sqlite_errorcode", None), int)
+            and re.fullmatch(
+                r"database is busy|database (?:table|schema) is locked: .+",
+                str(error).casefold(),
+            )
+            is not None
+        )
+    ):
+        return DiscoveryOperationError("DATABASE_IN_USE")
     return DiscoveryOperationError("CAPABILITY_DEGRADED")
 
 
@@ -1923,6 +1935,7 @@ def _community_get_sync(
 @dataclass(frozen=True, slots=True)
 class _EntitySelection:
     generation: int
+    lexical_generation: int | None
     entity_id: str
     name: str
     record_ids: tuple[str, ...]
@@ -2013,8 +2026,19 @@ def _entity_selection_sync(
         ).fetchall()
         truncated = len(members) > request.limit
         selected = tuple(str(row[0]) for row in members[: request.limit])
+        lexical = connection.execute(
+            "SELECT generation FROM projection_manifests WHERE workspace_id=? "
+            "AND projection_name='lexical' AND status='active'",
+            (workspace.workspace_id,),
+        ).fetchone()
+        lexical_generation = lexical[0] if lexical is not None else None
+        if lexical_generation is not None and (
+            not isinstance(lexical_generation, int) or lexical_generation < 1
+        ):
+            raise DiscoveryOperationError("CAPABILITY_DEGRADED")
         return _EntitySelection(
             generation=manifest.generation,
+            lexical_generation=lexical_generation,
             entity_id=entity_id,
             name=str(rows[0]["name"]),
             record_ids=selected,
@@ -2040,13 +2064,14 @@ def _lexical_catchup_pending_sync(
     dependencies: DiscoveryOperationDependencies,
     workspace: Workspace,
     record_ids: tuple[str, ...],
+    lexical_generation: int | None,
 ) -> bool:
-    """Return whether the lexical projection still owes these records.
+    """Return whether an incomplete recall can progress on a retry.
 
-    True only when the records are absent from the active lexical generation
-    *and* a rebuild job is queued or running, i.e. a retry can actually make
-    progress. A dead-lettered rebuild, a permanently unavailable index, or a
-    record that simply does not match the entity name is not retryable.
+    Missing records require a queued or running rebuild. Records indexed by a
+    generation published after the selection snapshot also permit one retry.
+    Same-generation indexed misses, dead-lettered rebuilds and permanently
+    unavailable indexes remain terminal.
     """
 
     if not record_ids:
@@ -2060,6 +2085,12 @@ def _lexical_catchup_pending_sync(
         ).fetchone()
         indexed = 0
         if active is not None:
+            if (
+                not isinstance(active[0], int)
+                or active[0] < 1
+                or (lexical_generation is not None and active[0] < lexical_generation)
+            ):
+                raise DiscoveryOperationError("CAPABILITY_DEGRADED")
             placeholders = ",".join("?" for _ in record_ids)
             indexed = int(
                 connection.execute(
@@ -2069,7 +2100,7 @@ def _lexical_catchup_pending_sync(
                 ).fetchone()[0]
             )
         if indexed >= len(record_ids):
-            return False
+            return lexical_generation is None or active[0] > lexical_generation
         return (
             connection.execute(
                 "SELECT 1 FROM background_jobs WHERE workspace_id=? "
@@ -2082,7 +2113,10 @@ def _lexical_catchup_pending_sync(
 
     try:
         return bool(_read_snapshot(dependencies, workspace, reader))
-    except Exception:
+    except Exception as error:
+        translated = _translate_error(error)
+        if translated.code == "DATABASE_IN_USE":
+            raise translated from None
         return False
 
 
@@ -2094,7 +2128,11 @@ def _generation_is_current_sync(
     def reader(connection: sqlite3.Connection) -> None:
         manifest = _active_projection(connection, workspace.workspace_id, "graph")
         if manifest.generation != generation:
-            raise DiscoveryOperationError("CAPABILITY_DEGRADED")
+            raise DiscoveryOperationError(
+                "DATABASE_IN_USE"
+                if manifest.generation > generation
+                else "CAPABILITY_DEGRADED"
+            )
 
     _read_snapshot(dependencies, workspace, reader)
 
@@ -2138,12 +2176,17 @@ async def _memory_recall_entity(
                 for record_id in selection.record_ids
                 if record_id not in indexed
             )
-            # Only a projection that has genuinely not caught up yet is worth
-            # retrying. A permanently unavailable or dead-lettered lexical
-            # index stays a terminal CAPABILITY_DEGRADED.
+            # A pending rebuild or a lexical publication since selection can
+            # make an incomplete retrieval succeed on retry. An unchanged
+            # index or a dead-lettered rebuild remains terminal.
             pending = await _run_blocking(
                 dependencies,
-                lambda: _lexical_catchup_pending_sync(dependencies, workspace, missing),
+                lambda: _lexical_catchup_pending_sync(
+                    dependencies,
+                    workspace,
+                    missing,
+                    selection.lexical_generation,
+                ),
             )
             raise DiscoveryOperationError(
                 "DATABASE_IN_USE" if pending else "CAPABILITY_DEGRADED"

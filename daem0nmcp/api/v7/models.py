@@ -55,6 +55,7 @@ _WINDOWS_ABSOLUTE_PATH = re.compile(
 _POSIX_ABSOLUTE_PATH = re.compile(r"(?<![A-Za-z0-9:/])/(?!/)[A-Za-z0-9_.-]")
 _FILE_URI = re.compile(r"(?i)\bfile:(?://)?/")
 _CONTROL_CHAR = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+_CITATION_IN_TEXT = re.compile(r"\[E[1-9][0-9]*\]")
 
 
 def is_host_absolute_path(value: str) -> bool:
@@ -93,6 +94,24 @@ _RELATIVE_PATH = _Exempt("RelativePath")
 # alone or inside a list, set or dict, are exempt from the absolute-path rule in
 # both directions, so anything accepted on input can always be read back.
 UserText = Annotated[str, _USER_TEXT]
+
+BoundedText = Annotated[
+    UserText,
+    StringConstraints(strict=True, min_length=1, max_length=2000),
+]
+UserMediumText = Annotated[
+    UserText,
+    StringConstraints(strict=True, min_length=1, max_length=2000),
+]
+PreflightToken = Annotated[
+    str,
+    StringConstraints(
+        strict=True,
+        min_length=16,
+        max_length=8192,
+        pattern=r"^[A-Za-z0-9._~-]+$",
+    ),
+]
 
 
 def _carries(annotation: object, marker: _Exempt) -> bool:
@@ -510,6 +529,141 @@ class WireModel(BaseModel):
         return cls.model_validate(decoded, **kwargs)
 
 
+class RecordSummary(WireModel):
+    """The bounded public view of a stored record.
+
+    It is only ever built from storage, never parsed from a caller, so it
+    clips rows that predate v7's bounds -- v6 tags had no length, uniqueness
+    or count limit, and v6 content could be empty -- rather than denying every
+    read of a migrated workspace.  A v7-written record satisfies those three,
+    because every stored tag input is ``UniqueTags`` and content has its own
+    minimum.
+
+    The fourth clip is not a v6-only repair: a record's creation carries its
+    valid time, which a backdated or future ``happened_at`` legitimately puts
+    on either side of the transaction time it was written at, so the summary
+    shows the earlier of the two rather than refusing the record.
+
+    ``relative_file_path`` is a containment rule rather than a bound, so
+    it stays refused here; a stored value is normalized by
+    ``stored_relative_path`` where the row is read.
+    """
+
+    record_id: RecordId
+    record_type: RecordType
+    excerpt: Annotated[
+        UserText,
+        StringConstraints(strict=True, min_length=1, max_length=4000),
+    ]
+    tags: Annotated[list[Tag], AfterValidator(_unique_strings)] = Field(
+        default_factory=list,
+        max_length=32,
+    )
+    relative_file_path: RelativePath | None = None
+    current_status: RecordStatus
+    content_hash: ContentHash
+    created_at: AwareDateTime
+    updated_at: AwareDateTime
+
+    @model_validator(mode="before")
+    @classmethod
+    def clip_stored_record(cls, data: object) -> object:
+        if not isinstance(data, Mapping):
+            return data
+        values = dict(data)
+        tags = values.get("tags")
+        if isinstance(tags, (list, tuple)):
+            clipped: list[str] = []
+            for tag in tags:
+                if not isinstance(tag, str) or not tag:
+                    continue
+                tag = tag[:80]
+                if tag not in clipped:
+                    clipped.append(tag)
+            values["tags"] = clipped[:32]
+        excerpt = values.get("excerpt")
+        if isinstance(excerpt, str):
+            values["excerpt"] = excerpt[:4000] or MIGRATED_EMPTY_CONTENT
+        # A record's creation carries its valid time, which may be backdated
+        # or in the future relative to the transaction time it was written at,
+        # and v6 kept the two independently.  The summary shows the earlier of
+        # the two as the creation rather than refusing the record.
+        try:
+            created = parse_wire_datetime(values["created_at"])
+            updated = parse_wire_datetime(values["updated_at"])
+        except (KeyError, TypeError, ValueError):
+            return values
+        if updated < created:
+            values["created_at"] = updated
+        return values
+
+
+class RuleView(WireModel):
+    """Bounded public representation of one workspace rule."""
+
+    rule_id: RuleId
+    trigger: BoundedText
+    must_do: list[BoundedText] = Field(default_factory=list, max_length=50)
+    must_not: list[BoundedText] = Field(default_factory=list, max_length=50)
+    ask_first: list[BoundedText] = Field(default_factory=list, max_length=50)
+    warnings: list[BoundedText] = Field(default_factory=list, max_length=50)
+    priority: Annotated[int, Field(strict=True, ge=-1000, le=1000)]
+    enabled: Annotated[bool, Field(strict=True)]
+    created_at: AwareDateTime
+
+
+class PreflightGuidance(WireModel):
+    records: list[RecordSummary] = Field(default_factory=list, max_length=20)
+    rules: list[RuleView] = Field(default_factory=list, max_length=20)
+    must_do: list[UserMediumText] = Field(default_factory=list, max_length=50)
+    must_not: list[UserMediumText] = Field(default_factory=list, max_length=50)
+    ask_first: list[UserMediumText] = Field(default_factory=list, max_length=50)
+    warnings: list[UserMediumText] = Field(default_factory=list, max_length=50)
+
+
+CounselReason = Literal[
+    "DESTRUCTIVE_OPERATION",
+    "RULE_MUST_NOT",
+    "RULE_ASK_FIRST",
+    "RULE_WARNING",
+    "RELATED_FAILURE",
+    "RELATED_WARNING",
+    "TASK_ADMISSION",
+]
+
+
+class CovenantBrief(WireModel):
+    briefed_at: UtcDateTime
+    workspace_statistics: CountMap
+    warnings: list[RecordSummary] = Field(default_factory=list, max_length=5)
+    failed_records: list[RecordSummary] = Field(default_factory=list, max_length=5)
+    must_not: list[BoundedText] = Field(default_factory=list, max_length=20)
+    ask_first: list[BoundedText] = Field(default_factory=list, max_length=20)
+
+
+class InlineCounsel(WireModel):
+    target_tool: ToolName
+    must_do: list[BoundedText] = Field(default_factory=list, max_length=20)
+
+
+class CovenantNotice(WireModel):
+    auto_brief: CovenantBrief | None = None
+    counsel: InlineCounsel | None = None
+
+    @model_validator(mode="after")
+    def require_notice(self) -> CovenantNotice:
+        if self.auto_brief is None and self.counsel is None:
+            raise ValueError("a covenant notice requires a brief or counsel")
+        return self
+
+
+class CounselChallenge(WireModel):
+    guidance: PreflightGuidance
+    preflight_token: PreflightToken
+    expires_at: UtcDateTime
+    reasons: list[CounselReason] = Field(min_length=1, max_length=7)
+
+
 class ApiWarning(WireModel):
     code: UpperSnakeCode
     message: SanitizedMessage
@@ -548,6 +702,7 @@ class ApiError(WireModel):
     retry_after_ms: Annotated[int, Field(ge=0, le=86_400_000)] | None = None
     field_errors: list[FieldError] = Field(default_factory=list, max_length=50)
     remedy: ErrorRemedy | None = None
+    counsel: CounselChallenge | None = None
     correlation_id: RequestId
 
     @model_validator(mode="after")
@@ -558,8 +713,15 @@ class ApiError(WireModel):
             or self.retry_after_ms is not None
             or self.field_errors
             or self.remedy is not None
+            or self.counsel is not None
         ):
             raise ValueError("INTERNAL_ERROR cannot carry caller-visible diagnostics")
+        return self
+
+    @model_validator(mode="after")
+    def validate_counsel_code(self) -> ApiError:
+        if self.counsel is not None and self.code != ErrorCode.COUNSEL_REQUIRED:
+            raise ValueError("counsel requires COUNSEL_REQUIRED")
         return self
 
 
@@ -588,6 +750,7 @@ class ResponseMeta(WireModel):
         default_factory=list,
         max_length=64,
     )
+    covenant: CovenantNotice | None = None
 
 
 def _api_response_schema(schema: dict[str, Any]) -> None:
@@ -666,75 +829,6 @@ def stored_relative_path(value: object) -> str | None:
         return None
 
 
-class RecordSummary(WireModel):
-    """The bounded public view of a stored record.
-
-    It is only ever built from storage, never parsed from a caller, so it
-    clips rows that predate v7's bounds -- v6 tags had no length, uniqueness
-    or count limit, and v6 content could be empty -- rather than denying every
-    read of a migrated workspace.  A v7-written record satisfies those three,
-    because every stored tag input is ``UniqueTags`` and content has its own
-    minimum.
-
-    The fourth clip is not a v6-only repair: a record's creation carries its
-    valid time, which a backdated or future ``happened_at`` legitimately puts
-    on either side of the transaction time it was written at, so the summary
-    shows the earlier of the two rather than refusing the record.
-
-    ``relative_file_path`` is a containment rule rather than a bound, so
-    it stays refused here; a stored value is normalized by
-    ``stored_relative_path`` where the row is read.
-    """
-
-    record_id: RecordId
-    record_type: RecordType
-    excerpt: Annotated[
-        UserText,
-        StringConstraints(strict=True, min_length=1, max_length=4000),
-    ]
-    tags: Annotated[list[Tag], AfterValidator(_unique_strings)] = Field(
-        default_factory=list,
-        max_length=32,
-    )
-    relative_file_path: RelativePath | None = None
-    current_status: RecordStatus
-    content_hash: ContentHash
-    created_at: AwareDateTime
-    updated_at: AwareDateTime
-
-    @model_validator(mode="before")
-    @classmethod
-    def clip_stored_record(cls, data: object) -> object:
-        if not isinstance(data, Mapping):
-            return data
-        values = dict(data)
-        tags = values.get("tags")
-        if isinstance(tags, (list, tuple)):
-            clipped: list[str] = []
-            for tag in tags:
-                if not isinstance(tag, str) or not tag:
-                    continue
-                tag = tag[:80]
-                if tag not in clipped:
-                    clipped.append(tag)
-            values["tags"] = clipped[:32]
-        excerpt = values.get("excerpt")
-        if isinstance(excerpt, str):
-            values["excerpt"] = excerpt[:4000] or MIGRATED_EMPTY_CONTENT
-        # A record's creation carries its valid time, which may be backdated
-        # or in the future relative to the transaction time it was written at,
-        # and v6 kept the two independently.  The summary shows the earlier of
-        # the two as the creation rather than refusing the record.
-        try:
-            created = parse_wire_datetime(values["created_at"])
-            updated = parse_wire_datetime(values["updated_at"])
-        except (KeyError, TypeError, ValueError):
-            return values
-        if updated < created:
-            values["created_at"] = updated
-        return values
-
-
 class EvidenceRef(WireModel):
     origin_workspace_id: WorkspaceId | None = None
     record_id: RecordId
@@ -759,6 +853,13 @@ class EvidenceItem(WireModel):
     score: Annotated[float, Field(ge=0, allow_inf_nan=False)]
     status: EvidenceStatus
     evidence_refs: list[EvidenceRef] = Field(min_length=1, max_length=32)
+    utility: Annotated[float, Field(ge=0, le=1, allow_inf_nan=False)] | None = None
+    applicability: Literal["current", "needs_revalidation", "unverifiable"] | None = (
+        None
+    )
+    changed_bindings: list[
+        Annotated[str, StringConstraints(strict=True, min_length=1, max_length=1300)]
+    ] = Field(default_factory=list, max_length=16)
 
     @model_validator(mode="after")
     def validate_providers(self) -> EvidenceItem:
@@ -861,6 +962,8 @@ class RetrievalData(WireModel):
             set(item_citations)
         ):
             raise ValueError("selected evidence must match the citation manifest")
+        if manifest_citations != _CITATION_IN_TEXT.findall(self.rendered_context):
+            raise ValueError("rendered context must match the citation manifest")
         return self
 
 
@@ -892,6 +995,16 @@ class Preview(WireModel):
 
 
 __all__ = [
+    "BoundedText",
+    "CounselChallenge",
+    "CounselReason",
+    "CovenantBrief",
+    "CovenantNotice",
+    "InlineCounsel",
+    "PreflightGuidance",
+    "PreflightToken",
+    "RuleView",
+    "UserMediumText",
     "ActiveContextId",
     "ApiError",
     "ApiFieldError",

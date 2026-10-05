@@ -163,7 +163,7 @@ class V7CompositionTests(unittest.TestCase):
         )
         self.assertIsNot(first, second)
         self.assertEqual(len(first.middlewares), 1)
-        self.assertEqual(len(first.tools), 75)
+        self.assertEqual(len(first.tools), 77)
         self.assertEqual(len(first.resources), 10)
 
 

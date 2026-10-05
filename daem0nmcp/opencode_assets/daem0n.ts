@@ -3,7 +3,7 @@
  *
  * Mirrors the 5-hook discipline from Claude Code's hooks system:
  *   1. System prompt injection (covenant rules in every LLM call)
- *   2. Pre-edit enforcement (preflight token required)
+ *   2. Pre-edit reminders (gateway file recall)
  *   3. Pre-bash enforcement (must_not rule checking)
  *   4. Post-edit suggestions (informational, never blocks)
  *   5. Session lifecycle events (best-effort, never blocks)
@@ -21,24 +21,25 @@ import type { Plugin } from "@opencode-ai/plugin";
 const COVENANT_RULES_FULL = `<daem0n-covenant>
 ## The Daem0n v7 Covenant
 
-This project is bound to Daem0n for persistent AI memory. When daem0nmcp tools
-are available, use the exact workspace-scoped v7 tools. The core names are
-session_brief, memory_preflight, memory_recall, memory_store,
-memory_record_outcome, and system_health.
+This project is bound to Daem0n for persistent AI memory. Use exact workspace-scoped
+v7 tools: session_brief, memory_preflight, memory_recall, memory_store,
+memory_record_outcome, system_health, daem0n_tools_search, and daem0n_tool_call.
 
-### 1. SESSION START (Non-Negotiable)
-IMMEDIATELY call:
-daem0nmcp_session_brief(workspace_id="<workspace_id>")
+### 1. BRIEF
+The first Daem0n call in a session briefs automatically; the compact brief is returned in meta.covenant.auto_brief. Call session_brief for the full brief.
 
-Use daem0nmcp_memory_recall(workspace_id="<workspace_id>", query="...", limit=10)
-for relevant history. Before a protected operation call:
-daem0nmcp_memory_preflight(workspace_id="<workspace_id>", target_tool="<exact-tool>", target_arguments={<exact arguments>})
-Respect warnings, failed approaches, and must_not constraints. A preflight token
-is valid only for the exact workspace, principal, session, tool, and arguments.
+### 2. WRITE
+Call memory_store (or any protected tool) directly. If it returns COUNSEL_REQUIRED, read error.counsel (guidance and reasons), then retry exactly error.remedy. memory_preflight remains available for planning a change in advance.
+Use bounded memory_recall for relevant history. Respect warnings, failures and
+must_not constraints. Tokens remain exact-argument, single-use capabilities
+valid for 300 seconds, bound to workspace, principal, session, tool and arguments.
+Use a stable idempotency_key for memory_store and save its record_id.
 
-### 3. AFTER MAKING DECISIONS
-Call daem0nmcp_memory_store with the same target arguments, a stable
-idempotency_key, and the returned preflight_token. Save its record_id.
+### 3. OTHER CAPABILITIES
+Use daem0n_tools_search(query), then daem0n_tool_call(workspace_id, tool, arguments).
+Defaults: DAEM0NMCP_COVENANT_MODE=guided and DAEM0NMCP_TOOL_SURFACE=core.
+DAEM0NMCP_COVENANT_MODE=strict requires explicit session_brief, exact
+memory_preflight, and token-bearing writes; DAEM0NMCP_TOOL_SURFACE=full lists all tools.
 
 ### 4. AFTER IMPLEMENTATION
 Call: daem0nmcp_memory_record_outcome(workspace_id="<workspace_id>", record_id="<mem_id>", outcome_text="...", worked=true|false, idempotency_key="<stable-key>")
@@ -51,15 +52,16 @@ at /mcp. Migration mapping: docs/v6-to-v7-tools.json.
 </daem0n-covenant>`;
 
 const COVENANT_RULES_SIMPLIFIED = `<daem0n-covenant mode="simplified">
-## Memory Protocol (Required Steps)
+## Memory Protocol
 
-This project uses Daem0n for persistent AI memory. Follow these 4 steps:
-
-1. START: daem0nmcp_session_brief(workspace_id="<workspace_id>")
-2. RECALL: daem0nmcp_memory_recall(workspace_id="<workspace_id>", query="...", limit=10)
-3. PREFLIGHT: daem0nmcp_memory_preflight(workspace_id="<workspace_id>", target_tool="memory_store", target_arguments={<exact arguments>})
-4. STORE: daem0nmcp_memory_store(workspace_id="<workspace_id>", record_type="decision", content="...", idempotency_key="<stable-key>", preflight_token="<token>")
-5. OUTCOME: daem0nmcp_memory_record_outcome(workspace_id="<workspace_id>", record_id="<mem_id>", outcome_text="...", worked=true|false, idempotency_key="<stable-key>")
+The first Daem0n call in a session briefs automatically; the compact brief is returned in meta.covenant.auto_brief. Call session_brief for the full brief.
+Call memory_store (or any protected tool) directly. If it returns COUNSEL_REQUIRED, read error.counsel (guidance and reasons), then retry exactly error.remedy. memory_preflight remains available for planning a change in advance.
+Use daem0n_tools_search(query), then daem0n_tool_call(workspace_id, tool, arguments).
+RECALL: daem0nmcp_memory_recall(workspace_id="<workspace_id>", query="...", limit=10)
+STORE: daem0nmcp_memory_store(workspace_id="<workspace_id>", record_type="decision", content="...", idempotency_key="<stable-key>")
+OUTCOME: daem0nmcp_memory_record_outcome(workspace_id="<workspace_id>", record_id="<mem_id>", outcome_text="...", worked=true|false, idempotency_key="<stable-key>")
+Tokens remain exact-argument, single-use, and valid for 300 seconds.
+Strict ceremony: DAEM0NMCP_COVENANT_MODE=strict. Full listing: DAEM0NMCP_TOOL_SURFACE=full.
 
 Rules:
 - Never use paths as workspace selectors.

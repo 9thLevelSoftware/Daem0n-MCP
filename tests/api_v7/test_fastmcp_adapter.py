@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from typing import Annotated
 from unittest.mock import patch
 
-from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
+from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError
 
 from daem0nmcp import __version__
 from daem0nmcp.covenant import CovenantLevel
@@ -260,6 +260,39 @@ class FastMCPAdapterTests(unittest.TestCase):
                     TypeAdapter(adapter).json_schema(),
                     spec.input_schema,
                 )
+
+    def test_adapter_input_error_retains_validation_details(self) -> None:
+        from daem0nmcp.api.v7.fastmcp import _tool_adapter
+        from daem0nmcp.api.v7.gateway_operations import _ToolArgumentValidationError
+
+        adapter = _tool_adapter(
+            self._manifest(with_resource=False).tools[0],
+            tasks_enabled=False,
+            sync_timeout_seconds=5.0,
+        )
+        arguments = {"workspace_id": "workspace", "limit": 0}
+        with self.assertRaises(ValidationError) as original:
+            _Input.model_validate(arguments)
+        with self.assertRaises(ValidationError) as raised:
+            asyncio.run(adapter(**arguments))
+        self.assertIsInstance(raised.exception, _ToolArgumentValidationError)
+        self.assertEqual(original.exception.errors(), raised.exception.errors())
+
+    def test_adapter_output_error_is_not_an_input_error(self) -> None:
+        from daem0nmcp.api.v7.fastmcp import _tool_adapter
+        from daem0nmcp.api.v7.gateway_operations import _ToolArgumentValidationError
+
+        async def malformed_handler(**arguments):
+            return {"value": None}
+
+        adapter = _tool_adapter(
+            self._manifest(with_resource=False, handler=malformed_handler).tools[0],
+            tasks_enabled=False,
+            sync_timeout_seconds=5.0,
+        )
+        with self.assertRaises(ValidationError) as raised:
+            asyncio.run(adapter(workspace_id="workspace"))
+        self.assertNotIsInstance(raised.exception, _ToolArgumentValidationError)
 
     def test_framework_debug_logging_redacts_preflight_handles(self) -> None:
         from daem0nmcp.api.v7.fastmcp import build_fastmcp_server

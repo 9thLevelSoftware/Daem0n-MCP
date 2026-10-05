@@ -4,12 +4,17 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
 
 from ...covenant import CovenantGate
 from .application import V7ApplicationDependencies, V7ToolRouter
 from .factory import build_v7_manifest, combine_handler_maps
 from .fastmcp import build_fastmcp_server
+from .gateway_operations import (
+    CORE_LISTED_TOOLS,
+    GATEWAY_TOOL_NAMES,
+    build_gateway_operations,
+)
 from .middleware import (
     ResourceCommunionAuthorizer,
     TransportMode,
@@ -34,15 +39,19 @@ class V7Surface:
     resource_handlers: ResourceHandlers
     manifest: V7Manifest
     middleware: tuple[object, ...]
+    listed_tools: frozenset[str] | None
 
     def build_server(self, **options: Any) -> Any:
         """Create a fresh FastMCP instance from this immutable surface."""
 
         if "middleware" in options:
             raise ValueError("surface middleware cannot be replaced")
+        if "listed_tools" in options:
+            raise ValueError("surface listed tools cannot be replaced")
         return build_fastmcp_server(
             self.manifest,
             middleware=self.middleware,
+            listed_tools=self.listed_tools,
             **options,
         )
 
@@ -61,6 +70,7 @@ def build_v7_surface(
     session_id_factory: Callable[[], str] | None = None,
     allow_unauthenticated_loopback: bool = False,
     activity_callback: Callable[[Any, bool], None] | None = None,
+    tool_surface: Literal["core", "full"] = "full",
 ) -> V7Surface:
     """Compose one exact surface without importing legacy decorator modules."""
 
@@ -90,11 +100,13 @@ def build_v7_surface(
             scope_provider=pinned_dependencies.scope_provider,
             operations=operations,
             response_factory=pinned_dependencies.response_factory,
+            ceremony=pinned_dependencies.ceremony,
         )
     )
     handlers = combine_handler_maps(
         build_pinned_handlers(pinned_dependencies),
-        router.handlers(exclude=PINNED_HANDLER_NAMES),
+        router.handlers(exclude=PINNED_HANDLER_NAMES | GATEWAY_TOOL_NAMES),
+        build_gateway_operations(pinned_dependencies.response_factory),
     )
     resource_handlers = ResourceHandlers(
         ResourceDependencies(
@@ -127,6 +139,7 @@ def build_v7_surface(
         resource_handlers=resource_handlers,
         manifest=manifest,
         middleware=middleware,
+        listed_tools=CORE_LISTED_TOOLS if tool_surface == "core" else None,
     )
 
 

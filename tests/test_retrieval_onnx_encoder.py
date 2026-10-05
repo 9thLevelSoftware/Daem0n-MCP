@@ -132,7 +132,9 @@ class OnnxEncoderTests(unittest.TestCase):
             )
             onnx.save(
                 helper.make_model(
-                    graph, opset_imports=[helper.make_operatorsetid("", 18)]
+                    graph,
+                    opset_imports=[helper.make_operatorsetid("", 18)],
+                    ir_version=8,
                 ),
                 root / "onnx" / "model_quantized.onnx",
             )
@@ -158,7 +160,9 @@ class OnnxEncoderTests(unittest.TestCase):
             )
             onnx.save(
                 helper.make_model(
-                    token_graph, opset_imports=[helper.make_operatorsetid("", 18)]
+                    token_graph,
+                    opset_imports=[helper.make_operatorsetid("", 18)],
+                    ir_version=8,
                 ),
                 root / "onnx" / "model_quantized.onnx",
             )
