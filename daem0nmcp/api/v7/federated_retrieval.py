@@ -413,7 +413,7 @@ def _compose_retained(
             citation=evidence.citation,
             record=original.record,
             bounded_excerpt=evidence.excerpt,
-            channels=list(evidence.channels),
+            channels=sorted(evidence.channels),
             score=evidence.score,
             status=evidence.status,
             evidence_refs=list(original.evidence_refs),

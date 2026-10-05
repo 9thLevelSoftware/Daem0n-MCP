@@ -180,6 +180,9 @@ selected full-text expression, then tag-assisted matches. Ordinary BM25 and
 record-ID tie-breaking still order each group. Tags remain searchable, and the
 existing precision-first query ladder remains unchanged; no projection rebuild
 is required for this query-side ordering change.
+Direct and linked-workspace recall expose provider channels in canonical sorted
+order, including retained contexts, so equivalent evidence does not acquire
+different channel-array order after a server restart.
 
 Intent-aware context packing is staged with
 `DAEM0NMCP_RETRIEVAL_RETENTION_MODE=shadow` by default. Set it to `apply` to

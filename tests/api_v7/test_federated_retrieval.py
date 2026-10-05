@@ -27,6 +27,34 @@ def _query(workspace_id: str, **overrides):
 
 
 class FederatedRetrievalTests(unittest.TestCase):
+    def test_retained_multichannel_evidence_has_canonical_channel_order(self) -> None:
+        from daem0nmcp.api.v7.federated_retrieval import compose_federated_results
+        from daem0nmcp.retrieval.types import RetrievalQuery
+
+        workspace_id = "ws_" + "a" * 24
+        source = self._source(
+            workspace_id,
+            ("1",),
+            content="Preserve fencing while replacing a snapshot.",
+        )
+        source = replace(
+            source,
+            candidates=(
+                replace(source.candidates[0], channels=("graph", "lexical", "dense")),
+            ),
+        )
+        result = compose_federated_results(
+            {workspace_id: source},
+            RetrievalQuery(
+                workspace_id, "snapshot", token_budget=2000, intent="implement"
+            ),
+            retention_mode="apply",
+        )
+        self.assertEqual(["dense", "graph", "lexical"], result.items[0].channels)
+        self.assertEqual(
+            ["dense", "graph", "lexical"], result.citation_manifest[0].channels
+        )
+
     def test_origin_access_guard_linearizes_publication_before_unlink(self) -> None:
         from daem0nmcp.api.v7.federated_retrieval import federation_access_lock
 
