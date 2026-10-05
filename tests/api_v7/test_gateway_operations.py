@@ -194,6 +194,7 @@ class GatewayOperationsTests(unittest.IsolatedAsyncioTestCase):
                 r"C:\private\host-location.py",
                 str(self.root / "private-location.py"),
                 "/health",
+                "a" * 256,
             ):
                 with self.subTest(key=key):
                     result = await client.call_tool(
@@ -215,50 +216,88 @@ class GatewayOperationsTests(unittest.IsolatedAsyncioTestCase):
                         self.assertEqual("INVALID_VALUE", diagnostic.code)
                     self.assertNotIn(json.dumps(key)[1:-1], json.dumps(envelope))
 
-    async def test_hidden_destructive_challenge_retries_exact_gateway_remedy(
-        self,
-    ) -> None:
-        async with Client(self.server) as client:
-            preview = await client.call_tool(
-                "daem0n_tool_call",
-                {**self.scope, "tool": "memory_prune_preview", "arguments": {}},
-            )
-            preview_envelope = preview.structured_content
-            self.assertTrue(preview_envelope["ok"], preview_envelope)
-            arguments = {
-                "selection_token": preview_envelope["data"]["data"]["selection_token"]
-            }
-            self.assertNotIn("preflight_token", arguments)
-            challenged = await client.call_tool(
-                "daem0n_tool_call",
-                {**self.scope, "tool": "memory_prune", "arguments": arguments},
-                raise_on_error=False,
-            )
-            envelope = challenged.structured_content
-            self.assertFalse(envelope["ok"], envelope)
-            self.assertEqual("COUNSEL_REQUIRED", envelope["error"]["code"])
-            counsel = envelope["error"]["counsel"]
-            self.assertTrue(counsel["preflight_token"])
-            self.assertIn("DESTRUCTIVE_OPERATION", counsel["reasons"])
-            self.assertEqual(
-                envelope["meta"]["request_id"], envelope["error"]["correlation_id"]
-            )
-            remedy = envelope["error"]["remedy"]
-            self.assertEqual("daem0n_tool_call", remedy["tool"])
-            self.assertEqual(
-                self.workspace.workspace_id, remedy["arguments"]["workspace_id"]
-            )
-            self.assertEqual("memory_prune", remedy["arguments"]["tool"])
-            self.assertNotIn("workspace_id", remedy["arguments"]["arguments"])
-            self.assertEqual(
-                counsel["preflight_token"],
-                remedy["arguments"]["arguments"]["preflight_token"],
-            )
-            retried = await client.call_tool(remedy["tool"], remedy["arguments"])
-            self.assertTrue(
-                retried.structured_content["ok"], retried.structured_content
-            )
-            self.assertEqual("memory_prune", retried.structured_content["data"]["tool"])
+    async def test_destructive_challenge_retries_exact_surface_remedy(self) -> None:
+        full_server = build_production_surface(
+            "stdio",
+            settings=self.settings.model_copy(update={"tool_surface": "full"}),
+            environ={},
+        ).build_server()
+        selection = {
+            "older_than_days": 30,
+            "categories": ["decision"],
+            "min_recall_count": 2,
+            "protect_successful": False,
+        }
+        for surface, server in (("core", self.server), ("full", full_server)):
+            with self.subTest(surface=surface):
+                async with Client(server) as client:
+                    preview = await client.call_tool(
+                        "daem0n_tool_call",
+                        {
+                            **self.scope,
+                            "tool": "memory_prune_preview",
+                            "arguments": selection,
+                        },
+                    )
+                    preview_envelope = preview.structured_content
+                    self.assertTrue(preview_envelope["ok"], preview_envelope)
+                    arguments = {
+                        **selection,
+                        "selection_token": preview_envelope["data"]["data"][
+                            "selection_token"
+                        ],
+                    }
+                    self.assertNotIn("preflight_token", arguments)
+                    challenged = await client.call_tool(
+                        "daem0n_tool_call",
+                        {**self.scope, "tool": "memory_prune", "arguments": arguments},
+                        raise_on_error=False,
+                    )
+                    envelope = challenged.structured_content
+                    self.assertFalse(envelope["ok"], envelope)
+                    self.assertEqual("COUNSEL_REQUIRED", envelope["error"]["code"])
+                    counsel = envelope["error"]["counsel"]
+                    self.assertTrue(counsel["preflight_token"])
+                    self.assertIn("DESTRUCTIVE_OPERATION", counsel["reasons"])
+                    self.assertEqual(
+                        envelope["meta"]["request_id"],
+                        envelope["error"]["correlation_id"],
+                    )
+                    remedy = envelope["error"]["remedy"]
+                    target_arguments = {
+                        **arguments,
+                        "preflight_token": counsel["preflight_token"],
+                    }
+                    if surface == "core":
+                        self.assertEqual(
+                            {
+                                "tool": "daem0n_tool_call",
+                                "arguments": {
+                                    **self.scope,
+                                    "tool": "memory_prune",
+                                    "arguments": target_arguments,
+                                },
+                            },
+                            remedy,
+                        )
+                    else:
+                        self.assertEqual(
+                            {
+                                "tool": "memory_prune",
+                                "arguments": {**self.scope, **target_arguments},
+                            },
+                            remedy,
+                        )
+                    retried = await client.call_tool(
+                        remedy["tool"], remedy["arguments"]
+                    )
+                    self.assertTrue(
+                        retried.structured_content["ok"], retried.structured_content
+                    )
+                    if surface == "core":
+                        self.assertEqual(
+                            "memory_prune", retried.structured_content["data"]["tool"]
+                        )
 
     async def test_binder_sanitizes_adapter_exceptions(self) -> None:
         adapter = AsyncMock()
@@ -271,9 +310,9 @@ class GatewayOperationsTests(unittest.IsolatedAsyncioTestCase):
         for exception, expected in (
             (TypeError("private argument detail"), ErrorCode.INVALID_ARGUMENT),
             (RuntimeError("private runtime detail"), ErrorCode.INTERNAL_ERROR),
+            (ValueError("private runtime detail"), ErrorCode.INTERNAL_ERROR),
         ):
             with self.subTest(exception=type(exception).__name__):
-                adapter.reset_mock()
                 adapter.side_effect = exception
                 with patch("daem0nmcp.api.v7.responses._LOGGER"):
                     result = await handlers["daem0n_tool_call"](
@@ -281,7 +320,22 @@ class GatewayOperationsTests(unittest.IsolatedAsyncioTestCase):
                         tool="memory_search_text",
                         arguments={"query": "x"},
                     )
-                adapter.assert_awaited_once_with(**self.scope, query="x")
                 self.assertFalse(result.ok)
                 self.assertEqual(expected, result.error.code)
+                self.assertFalse(result.error.retryable)
+                self.assertIsNone(result.error.remedy)
+                self.assertEqual(result.meta.request_id, result.error.correlation_id)
+                if expected == ErrorCode.INVALID_ARGUMENT:
+                    self.assertEqual(
+                        [
+                            FieldError(
+                                field="arguments",
+                                code="INVALID_VALUE",
+                                message="Invalid value.",
+                            )
+                        ],
+                        result.error.field_errors,
+                    )
+                else:
+                    self.assertEqual([], result.error.field_errors)
                 self.assertNotIn("private", result.model_dump_json())

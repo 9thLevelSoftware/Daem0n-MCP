@@ -3,8 +3,9 @@
 This guide describes the current development surface. It is not a release
 certificate: the P0–P10 ledger remains pending in
 [the release inventory](release/v7/inventory.md). The source of truth for
-input and output shapes is the live MCP `tools/list` schema; the inventory is
-generated with `python scripts/v7_release_inventory.py --write`.
+input and output shapes is the MCP schema: use `daem0n_tools_search` for hidden
+tools, or set `DAEM0NMCP_TOOL_SURFACE=full` for a complete `tools/list`. The
+inventory is generated with `python scripts/v7_release_inventory.py --write`.
 
 ## Install and configure the server
 
@@ -107,20 +108,43 @@ strict JSON body limits, and origin policy as three HTTP middleware layers.
 
 The six pinned tools are a startup and diagnostics set, not the whole schema:
 `session_brief`, `memory_preflight`, `memory_recall`, `memory_store`,
-`memory_record_outcome`, and `system_health`. They belong to the full 75-tool
-registry shown below.
+`memory_record_outcome`, and `system_health`. They belong to the full 77-tool
+registry shown below. By default, nine tools are listed: these six,
+`edit_preflight`, `daem0n_tools_search`, and `daem0n_tool_call`. All registered
+tools remain callable; `DAEM0NMCP_TOOL_SURFACE=full` lists every tool.
 
-Start with the workspace identifier supplied by the operator as described above:
+The first gated call briefs automatically and returns the compact brief in
+`meta.covenant.auto_brief`. Call `session_brief` for a full or focused brief,
+using the workspace identifier supplied by the operator:
 
 ```text
 session_brief(workspace_id="ws_<opaque>", focus_areas=["authentication"])
 memory_recall(workspace_id="ws_<opaque>", query="authentication", limit=10)
 ```
 
-For a protected write, preflight matches the normalized target arguments
-exactly. Do not include `workspace_id` or `preflight_token` inside
-`target_arguments`; do include every other supplied argument, including the
-stable idempotency key.
+In the default guided mode, call a protected tool directly:
+
+```text
+memory_store(
+  workspace_id="ws_<opaque>",
+  record_type="decision",
+  content="Use signed session cookies",
+  rationale="Avoid server-side session state",
+  idempotency_key="decision-auth-cookie-0001"
+)
+```
+
+Benign calls proceed with inline counsel. If the response is
+`COUNSEL_REQUIRED`, read `error.counsel` and retry exactly `error.remedy`.
+Relevant risk and every destructive operation require this explicit retry.
+Discover other capabilities with `daem0n_tools_search(query)` and invoke them
+with `daem0n_tool_call(workspace_id, tool, arguments)`.
+
+`DAEM0NMCP_COVENANT_MODE=strict` restores explicit briefing and preflight.
+`memory_preflight` also remains available for advance planning in guided mode.
+Preflight matches the normalized target arguments exactly. Do not include
+`workspace_id` or `preflight_token` inside `target_arguments`; do include every
+other supplied argument, including the stable idempotency key:
 
 ```text
 memory_preflight(
@@ -164,9 +188,10 @@ Six UI resources expose dashboard shells: `ui://daem0n/briefing`,
 `ui://daem0n/community`, `ui://daem0n/covenant`, `ui://daem0n/graph`,
 `ui://daem0n/search`, and `ui://daem0n/test`.
 
-A useful diagnostic walk-through is: call `session_brief`; read warnings and
-failures; call bounded `memory_recall`; use an exact preflight before a write;
-record its outcome; then call `system_health(workspace_id="ws_<opaque>")`.
+A useful diagnostic walk-through is: read the automatic brief (or request the
+full `session_brief`); read warnings and failures; call bounded `memory_recall`;
+call a protected write directly and follow any counsel challenge; record its
+outcome; then call `system_health(workspace_id="ws_<opaque>")`.
 `system_health` reports the enabled services and capability states. Missing
 profiles are remediation signals, not successful execution.
 
@@ -294,12 +319,12 @@ remind only:
 
 | Event (matcher) | Hook | What it does | Input | Reminds only |
 |-----------------|------|--------------|-------|--------------|
-| `SessionStart` | `session_start` | Adds a line to the model's context asking it to call `session_brief` with this workspace's `workspace_id` | `CLAUDE_PROJECT_DIR` env | Yes |
-| `PreToolUse` (`Edit\|Write\|NotebookEdit`) | `pre_edit` | Inside a Daem0n project, adds a one-line `additionalContext` reminder to call `memory_recall_file` for the file and `memory_preflight` for the change; silent elsewhere | stdin event | Yes |
+| `SessionStart` | `session_start` | Explains that the first gated call briefs automatically and `session_brief` returns the full brief | `CLAUDE_PROJECT_DIR` env | Yes |
+| `PreToolUse` (`Edit\|Write\|NotebookEdit`) | `pre_edit` | Inside a Daem0n project, adds a one-line `additionalContext` reminder to use `daem0n_tool_call` for `memory_recall_file`; silent elsewhere | stdin event | Yes |
 | `PreToolUse` (`Bash`) | `pre_bash` | Checks the command against Daem0n rules. Currently inert: it reads a `TOOL_INPUT` env var that Claude Code does not set | `TOOL_INPUT` env | Yes (always exits 0) |
 | `PostToolUse` (`mcp__.*__edit_preflight`) | `post_edit_preflight` | Edit-bridge plumbing: stages an `edit_preflight` receipt for a bridge edit request. Nothing in Claude Code creates those requests any more, so it is a no-op | stdin event | Yes |
 | `PostToolUse` (`Edit\|Write\|NotebookEdit`) | `post_edit` | Edit-bridge plumbing: reports a bridge-approved edit as a capture candidate. Only loads the bridge when the project is paired; a no-op in Claude Code today | stdin event | Yes |
-| `Stop`, `SubagentStop` | `stop` | When the transcript shows a finished task with no recorded outcome, shows you suggested `memory_preflight`/`memory_store`/`memory_record_outcome` calls to ask Claude for, as a `systemMessage`. Never writes memory | stdin event (`transcript_path`) | Yes |
+| `Stop`, `SubagentStop` | `stop` | When the transcript shows a finished task with no recorded outcome, suggests direct replay-safe `memory_store`/`memory_record_outcome` calls and counsel-challenge retry guidance as a `systemMessage`. Never writes memory | stdin event (`transcript_path`) | Yes |
 
 No hook blocks a tool call or keeps the agent running: every hook exits 0 and none
 returns a `permissionDecision` or `decision`.
@@ -448,6 +473,8 @@ come from `tools/list` and the generated release inventory.
 | `context_trigger_list` | rules | communion |
 | `context_triggers_match` | context | communion |
 | `covenant_status` | covenant | exempt |
+| `daem0n_tool_call` | system | exempt |
+| `daem0n_tools_search` | system | exempt |
 | `decision_debate` | cognitive | counsel |
 | `decision_simulate` | cognitive | communion |
 | `document_ingest_url` | external | counsel |

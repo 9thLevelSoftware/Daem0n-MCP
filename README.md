@@ -1230,8 +1230,13 @@ The release-frozen retrieval corpus and its digest remain unchanged.
 
 `bash autoresearch.sh` runs the same offline lexical workload with 24 topics,
 seed 20261004 and a fixed event clock, emitting `METRIC coding_memory_ndcg`
-(higher is better) plus ranking, retention, validity and token metrics. It
-uses the project virtual environment and excludes wall-clock latency.
+(higher is better) plus ranking, retention, validity and token metrics. A fresh
+offline MCP workspace also reports `listed_tool_count`, `guided_write_calls`,
+`strict_explicit_write_calls` and `destructive_challenge_calls`. The strict
+workload separately verifies rejection of an unbriefed direct write before
+measuring the explicit briefing/preflight/write flow; destructive call counts
+exclude the selection preview. It uses the project virtual environment and
+excludes wall-clock latency.
 
 ## Support
 

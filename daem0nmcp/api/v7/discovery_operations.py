@@ -511,8 +511,8 @@ def _verify_database_connection(connection: sqlite3.Connection) -> None:
                 "SELECT name FROM sqlite_master WHERE type='table'"
             )
         }
-    except Exception:
-        raise DiscoveryOperationError("CAPABILITY_DEGRADED") from None
+    except Exception as error:
+        raise _translate_error(error) from None
     if not versions.issuperset(
         REQUIRED_V7_SCHEMA_VERSIONS
     ) or not _REQUIRED_TABLES.issubset(tables):
@@ -538,10 +538,10 @@ def _open_database(path: Path) -> sqlite3.Connection:
         if connection is not None:
             connection.close()
         raise
-    except Exception:
+    except Exception as error:
         if connection is not None:
             connection.close()
-        raise DiscoveryOperationError("CAPABILITY_DEGRADED") from None
+        raise _translate_error(error) from None
 
 
 def _open_writable_database(path: Path) -> sqlite3.Connection:
@@ -561,10 +561,10 @@ def _open_writable_database(path: Path) -> sqlite3.Connection:
         if connection is not None:
             connection.close()
         raise
-    except Exception:
+    except Exception as error:
         if connection is not None:
             connection.close()
-        raise DiscoveryOperationError("CAPABILITY_DEGRADED") from None
+        raise _translate_error(error) from None
 
 
 def _datetime_us(value: object) -> int:
@@ -710,6 +710,10 @@ def _translate_error(error: Exception) -> DiscoveryOperationError:
     code = getattr(error, "code", None)
     if isinstance(code, str) and code in STABLE_ERROR_CODE_SET:
         return DiscoveryOperationError(code)
+    if isinstance(error, sqlite3.OperationalError) and any(
+        word in str(error).casefold() for word in ("busy", "locked")
+    ):
+        return DiscoveryOperationError("DATABASE_IN_USE")
     return DiscoveryOperationError("CAPABILITY_DEGRADED")
 
 
@@ -2082,7 +2086,10 @@ def _lexical_catchup_pending_sync(
 
     try:
         return bool(_read_snapshot(dependencies, workspace, reader))
-    except Exception:
+    except Exception as error:
+        translated = _translate_error(error)
+        if translated.code == "DATABASE_IN_USE":
+            raise translated from None
         return False
 
 
@@ -2094,7 +2101,11 @@ def _generation_is_current_sync(
     def reader(connection: sqlite3.Connection) -> None:
         manifest = _active_projection(connection, workspace.workspace_id, "graph")
         if manifest.generation != generation:
-            raise DiscoveryOperationError("CAPABILITY_DEGRADED")
+            raise DiscoveryOperationError(
+                "DATABASE_IN_USE"
+                if manifest.generation > generation
+                else "CAPABILITY_DEGRADED"
+            )
 
     _read_snapshot(dependencies, workspace, reader)
 
