@@ -166,12 +166,6 @@ def query_identifiers(text: str) -> frozenset[str]:
             character.isupper() for character in token[1:]
         ):
             identifiers.add(token)
-            if "." in token or "/" in token:
-                segment = token.rsplit("/", 1)[-1]
-                if segment:
-                    identifiers.add(segment)
-                    if "." in segment:
-                        identifiers.add(segment.rsplit(".", 1)[-1])
     return frozenset(identifiers)
 
 
@@ -542,12 +536,17 @@ class EvidenceComposer:
         if retention is None or retention.intent not in {"implement", "debug"}:
             return False
         return bool(source.procedure_steps) or any(
-            relative.rsplit("/", 1)[-1] in retention.identifiers
+            relative == identifier
+            or relative.endswith("/" + identifier)
             or (
                 qualified_name is not None
-                and qualified_name.rsplit(".", 1)[-1] in retention.identifiers
+                and (
+                    qualified_name == identifier
+                    or qualified_name.endswith("." + identifier)
+                )
             )
             for relative, qualified_name in source.code_bindings
+            for identifier in retention.identifiers
         )
 
     def _excerpt_limit(

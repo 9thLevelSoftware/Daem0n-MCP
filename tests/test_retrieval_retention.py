@@ -55,10 +55,15 @@ class RetentionComposerTests(unittest.TestCase):
         )
         cases = (
             ("src/http/router.ts", True),
+            ("http/router.ts", True),
             ("router.ts", True),
             ("pkg.Router.apply_routes", True),
+            ("Router.apply_routes", True),
             ("apply_routes", True),
             ("src/http/other.ts", False),
+            ("src/admin/router.ts", False),
+            ("admin/router.ts", False),
+            ("other.Router.apply_routes", False),
             ("unrelated.Symbol", False),
             ("src/", False),
         )

@@ -178,9 +178,11 @@ workspace.
 Intent-aware context packing is staged with
 `DAEM0NMCP_RETRIEVAL_RETENTION_MODE=shadow` by default. Set it to `apply` to
 reserve evidence capacity for `implement` and `debug` requests. A query naming
-`src/http/router.ts` retains the same filename affinity as `router.ts`; qualified
-symbols also retain their final name. Unrelated paths do not gain that priority.
-This affects context selection, not stored-record retention or authorization.
+`src/http/router.ts`, `http/router.ts`, or `router.ts` can retain its bound
+evidence. Path and qualified-symbol queries preserve the supplied scope rather
+than promoting same-named files or symbols elsewhere. Bare names remain
+intentionally broader. This affects context selection, not stored-record
+retention or authorization.
 
 Repository code-binding checks validate current bounded source content rather
 than trusting file size and modification time. Parsed fingerprints are reused
