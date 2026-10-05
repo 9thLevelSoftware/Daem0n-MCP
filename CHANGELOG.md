@@ -34,6 +34,7 @@
 - Discovery contention detection uses SQLite BUSY/LOCKED codes with a narrow code-less fallback, avoiding retryable errors for unrelated failures mentioning “busy” or “locked”.
 - Explore recall now labels enabled retention `RETENTION_NOT_APPLICABLE`, preserving its baseline evidence and token usage rather than implying alternate packing.
 - Schema 33 upgrades recover missing derived learning parents from complete validated canonical replay before strict backfill, preserving transactional rollback and fail-closed authority validation. Malformed record payloads surface the schema-upgrade error contract instead of raw key/type exceptions.
+- Entity recall preserves retryable lexical catchup when a generation publishes between retrieval and readiness inspection, avoiding terminal capability errors for evidence that becomes available immediately after the query. Same-generation indexed misses remain terminal.
 - Local dense projection cleanup closes staging collection persistence before deleting it, preventing leaked SQLite handles on failed or cancelled builds.
 - Claude Code hooks remind instead of block. `pre_edit` adds a one-line gateway file-recall reminder; `stop` suggests direct replay-safe memory calls with counsel-challenge retry guidance. Neither hook writes memory, denies an edit, or keeps the agent running.
 - OpenCode edits are no longer gated either: the OpenCode plugin runs the same `pre_edit` hook, which now always allows the edit. The plugin does not yet show the reminder; that rework comes with the edit-bridge removal.

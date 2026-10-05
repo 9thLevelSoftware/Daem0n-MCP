@@ -209,6 +209,11 @@ and short facts remain unchanged; longer facts are prefix excerpts, not complete
 procedures. Full record views retain the original facts. No-intent and explore
 packing remain unchanged.
 
+Entity-backed recall can report retryable `DATABASE_IN_USE` while lexical
+evidence catches up, including when a newer generation publishes between
+retrieval and readiness inspection. Retry after the reported delay; a genuine
+indexed miss in the same generation remains a terminal capability failure.
+
 Repository code-binding checks validate current bounded source content rather
 than trusting file size and modification time. Parsed fingerprints are reused
 only when normalized source bytes match, so timestamp-preserving edits still

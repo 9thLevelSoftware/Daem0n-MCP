@@ -242,16 +242,22 @@ class DiscoveryOperationTests(unittest.IsolatedAsyncioTestCase):
             )
         )
 
-    def _activate_graph(self) -> None:
+    def _activate_graph(self, *, content_prefix: str = "") -> None:
         from daem0nmcp.retrieval.specialized_projection import (
             SpecializedProjectionBuilder,
         )
 
         with closing(sqlite3.connect(self.database)) as connection:
             connection.execute("PRAGMA foreign_keys=ON")
-            first = self._append_memory(connection, "a", "First record.")
-            second = self._append_memory(connection, "b", "Second record.")
-            third = self._append_memory(connection, "c", "Third record.")
+            first = self._append_memory(
+                connection, "a", content_prefix + "First record."
+            )
+            second = self._append_memory(
+                connection, "b", content_prefix + "Second record."
+            )
+            third = self._append_memory(
+                connection, "c", content_prefix + "Third record."
+            )
             self._append_relationship(connection, first, second)
             self._append_record_ref(connection, second, third)
             SpecializedProjectionBuilder(connection, clock_us=lambda: 900).rebuild(
@@ -259,7 +265,7 @@ class DiscoveryOperationTests(unittest.IsolatedAsyncioTestCase):
             )
             connection.commit()
 
-    def _activate_discovery(self) -> dict[str, object]:
+    def _activate_discovery(self, *, content_prefix: str = "") -> dict[str, object]:
         from daem0nmcp.discovery_projection import (
             CodeEntityProjectionSeed,
             CommunityProjectionSeed,
@@ -268,7 +274,7 @@ class DiscoveryOperationTests(unittest.IsolatedAsyncioTestCase):
             EntityRecordSeed,
         )
 
-        self._activate_graph()
+        self._activate_graph(content_prefix=content_prefix)
         first = "mem_" + "a" * 64
         second = "mem_" + "b" * 64
         third = "mem_" + "c" * 64
@@ -1369,6 +1375,58 @@ class DiscoveryOperationTests(unittest.IsolatedAsyncioTestCase):
                 set(fixture["records"][:2]),
                 {record.record_id for record in retried.data.items},
             )
+
+    async def test_first_lexical_publication_after_real_retrieval_is_retryable(
+        self,
+    ) -> None:
+        from daem0nmcp.api.v7.runtime_services import Task8RecallService
+        from daem0nmcp.config import Settings
+        from daem0nmcp.retrieval.projections import LexicalProjectionBuilder
+
+        fixture = self._activate_discovery(content_prefix="Authentication ")
+        recall = Task8RecallService(
+            config=Settings(retrieval_rerank_enabled=False),
+            capability_statuses={},
+        )
+        self.addCleanup(recall.close)
+        test_case = self
+
+        class PublishAfterRealRecall:
+            published = False
+
+            async def retrieve(self, workspace, query, linked_workspace_ids):
+                result = await recall.retrieve(workspace, query, linked_workspace_ids)
+                if not self.published:
+                    test_case.assertFalse(result.items)
+                    with closing(sqlite3.connect(test_case.database)) as connection:
+                        connection.execute("PRAGMA foreign_keys=ON")
+                        LexicalProjectionBuilder(connection).rebuild(
+                            workspace.workspace_id
+                        )
+                        connection.commit()
+                    self.published = True
+                return result
+
+        handler = self._handler(
+            "memory_recall_entity", recall_service=PublishAfterRealRecall()
+        )
+        arguments = {
+            "workspace_id": self.workspace.workspace_id,
+            "entity_name": "Authentication",
+        }
+        response = await handler(**arguments)
+        self.assertFalse(response.ok)
+        self.assertEqual("DATABASE_IN_USE", response.error.code)
+        self.assertTrue(response.error.retryable)
+        self.assertEqual(250, response.error.retry_after_ms)
+        self.assertIsNone(response.error.remedy)
+
+        retried = await handler(**arguments)
+        self.assertTrue(retried.ok)
+        self.assertEqual(
+            set(fixture["records"][:2]),
+            {record.record_id for record in retried.data.items},
+        )
 
     async def test_nonbusy_lexical_catchup_failure_is_not_retryable(self) -> None:
         self._activate_discovery()
