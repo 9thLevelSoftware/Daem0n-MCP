@@ -132,10 +132,21 @@ def binding_refs_from_context(
     )
 
 
+@dataclass(frozen=True, slots=True)
+class _SymbolSpan:
+    qualified_name: object
+    name: object
+    navigation_start: object
+    start: object
+    end: object
+
+
 @dataclass(slots=True)
 class _FileSnapshot:
     source: bytes
-    fingerprints: dict[str | None, str] = field(default_factory=dict)
+    fingerprints: dict[tuple[Path, str | None], str] = field(default_factory=dict)
+    symbols: dict[Path, tuple[_SymbolSpan, ...]] = field(default_factory=dict)
+    line_offsets: tuple[int, ...] | None = None
 
 
 @dataclass(slots=True)
@@ -191,7 +202,23 @@ def _read_source(path: Path, batch: _ReadBatch | None = None) -> bytes:
     return source.replace(b"\r\n", b"\n")
 
 
-def _fingerprint(path: Path, root: Path, source: bytes, name: str | None) -> str:
+def _line_offsets(source: bytes) -> tuple[int, ...]:
+    offsets = [0]
+    start = 0
+    while (end := source.find(b"\n", start)) != -1:
+        start = end + 1
+        offsets.append(start)
+    return tuple(offsets)
+
+
+def _fingerprint(
+    path: Path,
+    root: Path,
+    source: bytes,
+    name: str | None,
+    *,
+    snapshot: _FileSnapshot | None = None,
+) -> str:
     if name is None:
         return hashlib.sha256(source).hexdigest()
     from .api.v7.discovery_operations import default_code_indexer_factory
@@ -203,24 +230,40 @@ def _fingerprint(path: Path, root: Path, source: bytes, name: str | None) -> str
         supported = producer.get_supported_extensions()
         if path.suffix.lower() not in supported:
             raise CodeBindingReferenceError("bound symbol extension is unsupported")
-        entities = producer.index_source_strict(path, root, source)
-        lines = source.split(b"\n")
+        entities = snapshot.symbols.get(root) if snapshot is not None else None
+        if entities is None:
+            spans = []
+            for entity in producer.index_source_strict(path, root, source):
+                if not isinstance(entity, Mapping):
+                    raise CodeBindingUnavailableError(
+                        "code parser returned invalid entities"
+                    )
+                navigation_start = entity.get("line_start")
+                spans.append(
+                    _SymbolSpan(
+                        entity.get("qualified_name"),
+                        entity.get("name"),
+                        navigation_start,
+                        entity.get("binding_line_start", navigation_start),
+                        entity.get("line_end"),
+                    )
+                )
+            entities = tuple(spans)
+        offsets = snapshot.line_offsets if snapshot is not None else None
+        if offsets is None:
+            offsets = _line_offsets(source)
         exact = []
         aliases = []
         for entity in entities:
-            if not isinstance(entity, Mapping):
-                raise CodeBindingUnavailableError(
-                    "code parser returned invalid entities"
-                )
-            if entity.get("qualified_name") == name:
+            if entity.qualified_name == name:
                 exact.append(entity)
-            elif entity.get("name") == name:
+            elif entity.name == name:
                 aliases.append(entity)
         selected = exact or aliases
         if not exact and aliases:
             identities = set()
             for entity in aliases:
-                identity = entity.get("qualified_name")
+                identity = entity.qualified_name
                 if not isinstance(identity, str) or not identity.strip():
                     raise CodeBindingUnavailableError(
                         "code parser returned no usable symbol identity"
@@ -230,8 +273,8 @@ def _fingerprint(path: Path, root: Path, source: bytes, name: str | None) -> str
                 raise CodeBindingReferenceError("bound symbol reference is ambiguous")
         chunks = []
         for entity in selected:
-            navigation_start, end = entity.get("line_start"), entity.get("line_end")
-            start = entity.get("binding_line_start", navigation_start)
+            navigation_start, end = entity.navigation_start, entity.end
+            start = entity.start
             if (
                 not isinstance(start, int)
                 or isinstance(start, bool)
@@ -239,19 +282,24 @@ def _fingerprint(path: Path, root: Path, source: bytes, name: str | None) -> str
                 or isinstance(navigation_start, bool)
                 or not isinstance(end, int)
                 or isinstance(end, bool)
-                or not 1 <= start <= navigation_start <= end <= len(lines)
+                or not 1 <= start <= navigation_start <= end <= len(offsets)
             ):
                 raise CodeBindingUnavailableError(
                     "code parser returned invalid line bounds"
                 )
-            chunks.append(b"\n".join(lines[start - 1 : end]))
+            stop = offsets[end] - 1 if end < len(offsets) else len(source)
+            chunks.append(source[offsets[start - 1] : stop])
     except _UnverifiableBindingError:
         raise
     except Exception as exc:
         raise CodeBindingUnavailableError("code parser failed") from exc
     if not chunks:
         raise CodeBindingError("bound symbol is missing")
-    return hashlib.sha256(b"\n".join(chunks)).hexdigest()
+    fingerprint = hashlib.sha256(b"\n".join(chunks)).hexdigest()
+    if snapshot is not None:
+        snapshot.symbols[root] = entities
+        snapshot.line_offsets = offsets
+    return fingerprint
 
 
 def capture_bindings(
@@ -361,10 +409,8 @@ class BindingEvaluator:
             ):
                 _, evicted = self._cache.popitem(last=False)
                 self._cached_source_bytes -= len(evicted.source)
-            if (
-                binding.qualified_name is not None
-                and binding.qualified_name in snapshot.fingerprints
-            ):
+            key = (root, binding.qualified_name)
+            if binding.qualified_name is not None and key in snapshot.fingerprints:
                 from .api.v7.discovery_operations import default_code_indexer_factory
 
                 try:
@@ -374,11 +420,15 @@ class BindingEvaluator:
                     raise
                 except Exception as exc:
                     raise CodeBindingUnavailableError("code parser failed") from exc
-            if binding.qualified_name not in snapshot.fingerprints:
-                snapshot.fingerprints[binding.qualified_name] = _fingerprint(
-                    path, root, snapshot.source, binding.qualified_name
+            if key not in snapshot.fingerprints:
+                snapshot.fingerprints[key] = _fingerprint(
+                    path,
+                    root,
+                    snapshot.source,
+                    binding.qualified_name,
+                    snapshot=snapshot,
                 )
-            return snapshot.fingerprints[binding.qualified_name]
+            return snapshot.fingerprints[key]
 
     def evaluate(
         self, root: Path, context: Mapping[str, object]

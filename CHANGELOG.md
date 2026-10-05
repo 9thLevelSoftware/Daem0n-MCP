@@ -28,6 +28,7 @@
 - Public retrieval envelopes enforce exact ordered citation-marker parity with their manifests, rejecting missing, repeated, reordered and unbacked citations instead of accepting forged rendered context.
 - Intent-aware context packing applies source-specific excerpt limits consistently to structured outcomes and each procedure step, preventing long stale facts from bypassing body limits while preserving step counts and no-intent/explore behavior.
 - Unchanged binding sources reuse cache-owned bytes within each recall batch after exact verification, avoiding repeated full-file comparisons without skipping subsequent-recall reads or path checks.
+- Binding validation shares parsed symbol spans and line offsets across symbols in an unchanged file, retaining exact fingerprints and parser-availability checks. Root-scoped caches prevent package-initializer qualifications leaking between nested workspaces.
 - Local dense projection cleanup closes staging collection persistence before deleting it, preventing leaked SQLite handles on failed or cancelled builds.
 - Claude Code hooks remind instead of block. `pre_edit` adds a one-line gateway file-recall reminder; `stop` suggests direct replay-safe memory calls with counsel-challenge retry guidance. Neither hook writes memory, denies an edit, or keeps the agent running.
 - OpenCode edits are no longer gated either: the OpenCode plugin runs the same `pre_edit` hook, which now always allows the edit. The plugin does not yet show the reminder; that rework comes with the edit-bridge removal.

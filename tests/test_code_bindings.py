@@ -194,6 +194,78 @@ def test_exact_identity_takes_precedence_over_short_name_match(workspace):
     )
 
 
+@pytest.mark.parametrize("nested_first", [False, True])
+def test_symbol_snapshots_isolate_nested_workspace_identities(workspace, nested_first):
+    require_parser()
+    nested_root = workspace.root / "sub"
+    nested_root.mkdir()
+    nested = WorkspaceRegistry([nested_root], default_root=nested_root).default
+    path = nested_root / "__init__.py"
+    original = (
+        "@route('original')\ndef handler():\n    return 1\n\n"
+        "def sibling():\n    return 2\n"
+    )
+    path.write_text(original, encoding="utf-8")
+    parent_bound = context_for(workspace, [("sub/__init__.py", "sub.handler")])
+    nested_bound = context_for(nested, [("__init__.py", "handler")])
+    parent_sibling = context_for(workspace, [("sub/__init__.py", "sub.sibling")])
+    nested_sibling = context_for(nested, [("__init__.py", "sibling")])
+    assert (
+        parent_bound["code_bindings"][0]["fingerprint"]
+        == nested_bound["code_bindings"][0]["fingerprint"]
+    )
+    evaluations = [
+        (workspace.root, parent_bound, parent_sibling),
+        (nested.root, nested_bound, nested_sibling),
+    ]
+    if nested_first:
+        evaluations.reverse()
+    evaluator = BindingEvaluator()
+    with evaluator.read_batch():
+        for root, bound, sibling in evaluations:
+            assert evaluator.evaluate(root, bound).applicability == "current"
+            assert evaluator.evaluate(root, sibling).applicability == "current"
+        wrong_root_identity = {
+            "code_bindings": [
+                {
+                    **parent_bound["code_bindings"][0],
+                    "relative_file_path": "__init__.py",
+                }
+            ]
+        }
+        result = evaluator.evaluate(nested.root, wrong_root_identity)
+        assert result.applicability == "needs_revalidation"
+        assert result.changed == ("__init__.py::sub.handler",)
+        for root, bound, sibling in evaluations:
+            assert evaluator.evaluate(root, bound).applicability == "current"
+            assert evaluator.evaluate(root, sibling).applicability == "current"
+    edit(path, original.replace("return 2", "return 3"))
+    with evaluator.read_batch():
+        for root, bound, sibling in evaluations:
+            assert evaluator.evaluate(root, bound).applicability == "current"
+            result = evaluator.evaluate(root, sibling)
+            assert result.applicability == "needs_revalidation"
+            binding = sibling["code_bindings"][0]
+            assert result.changed == (
+                f"{binding['relative_file_path']}::{binding['qualified_name']}",
+            )
+    edit(path, original.replace("@route('original')", "@route('changed')"))
+    with evaluator.read_batch():
+        for root, bound, sibling in evaluations:
+            result = evaluator.evaluate(root, bound)
+            assert result.applicability == "needs_revalidation"
+            binding = bound["code_bindings"][0]
+            assert result.changed == (
+                f"{binding['relative_file_path']}::{binding['qualified_name']}",
+            )
+            assert evaluator.evaluate(root, sibling).applicability == "current"
+    edit(path, original)
+    with evaluator.read_batch():
+        for root, bound, sibling in evaluations:
+            assert evaluator.evaluate(root, bound).applicability == "current"
+            assert evaluator.evaluate(root, sibling).applicability == "current"
+
+
 @pytest.mark.parametrize("identity", [None, "", "   ", 12])
 def test_alias_without_usable_parser_identity_is_unverifiable(
     workspace, monkeypatch, identity
@@ -611,8 +683,12 @@ def test_definite_filesystem_mutation_remains_changed(
 def test_unavailable_parser_is_unverifiable(workspace, monkeypatch):
     require_parser()
     path = workspace.root / "sample.py"
-    path.write_text("def target():\n    return 1\n", encoding="utf-8")
+    path.write_text(
+        "def target():\n    return 1\n\ndef sibling():\n    return 2\n",
+        encoding="utf-8",
+    )
     context = context_for(workspace, [("sample.py", "sample.target")])
+    sibling = context_for(workspace, [("sample.py", "sample.sibling")])
     evaluator = BindingEvaluator()
     assert evaluator.evaluate(workspace.root, context).applicability == "current"
     monkeypatch.setattr(
@@ -620,9 +696,10 @@ def test_unavailable_parser_is_unverifiable(workspace, monkeypatch):
         "default_code_indexer_factory",
         lambda: SimpleNamespace(available=False),
     )
-    result = evaluator.evaluate(workspace.root, context)
-    assert result.applicability == "unverifiable"
-    assert result.changed == ()
+    for bound in (context, sibling):
+        result = evaluator.evaluate(workspace.root, bound)
+        assert result.applicability == "unverifiable"
+        assert result.changed == ()
     with pytest.raises(CodeBindingError):
         capture_bindings(workspace, [("sample.py", "sample.target")])
 

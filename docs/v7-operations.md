@@ -224,6 +224,10 @@ remain `needs_revalidation`. Parsed source caching holds at most 32 MiB of
 normalized bytes and 256 files; this is not a total-heap limit. The batch is not
 an atomic filesystem snapshot, a trusted test receipt, or proof that recorded
 guidance remains correct.
+Unchanged files also share one parsed symbol-span set per workspace root, rather
+than reparsing for every symbol. Qualified-identity and fingerprint caches remain
+root scoped, including package initializers; cached symbols still require an
+available parser. Edits replace the snapshot before fingerprints are reused.
 
 Citation-like strings stored inside evidence or binding filenames are displayed
 with neutralized brackets, not interpreted as manifest citations. Direct and
