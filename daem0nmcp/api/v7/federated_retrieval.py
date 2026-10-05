@@ -9,11 +9,21 @@ from collections.abc import Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass, replace
 from pathlib import Path
+from time import perf_counter_ns
 from typing import Literal
 
 from ...event_store import sha256_json
+from ...retrieval.composer import (
+    EvidenceComposer,
+    RetentionPolicy,
+    SelectedEvidence,
+    query_identifiers,
+)
 from ...retrieval.runtime import CoreTokenizer
-from ...retrieval.types import RetrievalQuery
+from ...retrieval.types import (
+    EvidenceRef as InternalEvidenceRef,
+)
+from ...retrieval.types import FusedCandidate, RetrievalQuery
 from ...storage_activation import DatabaseFileLock
 from .models import (
     CitationManifestEntry,
@@ -136,8 +146,18 @@ class FederatedCandidate:
     record: RecordSummary
     content: str
     channels: tuple[str, ...]
-    status: str
+    status: Literal["current", "superseded"]
     evidence_refs: tuple[EvidenceRef, ...]
+    applicability: Literal["current", "needs_revalidation", "unverifiable"] | None = (
+        None
+    )
+    changed_bindings: tuple[str, ...] = ()
+    utility: float | None = None
+    procedure_steps: tuple[str, ...] = ()
+    code_bindings: tuple[tuple[str, str | None], ...] = ()
+    outcome: str | None = None
+    outcome_failed: bool = False
+    superseded_by_version_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -290,13 +310,14 @@ def _fit_excerpt(
     prior_lines: Sequence[str],
     token_budget: int,
     tokenizer: CoreTokenizer,
+    applicability_label: str = "",
 ) -> tuple[str, int] | None:
     normalized = " ".join(content.split())[:8000].strip()
     if not normalized:
         return None
 
     def rendered(prefix: str) -> tuple[str, int]:
-        line = f"{citation} {prefix}"
+        line = f"{citation} {prefix}" + applicability_label
         text = "\n".join((*prior_lines, line))
         return line, tokenizer.count_tokens(text)
 
@@ -321,26 +342,191 @@ def _fit_excerpt(
     return fitted
 
 
+def _compose_retained(
+    ranked: Sequence[tuple[float, str, str, FederatedCandidate]],
+    query: RetrievalQuery,
+    retention: RetentionPolicy,
+    label_applicability: bool,
+) -> RetrievalData:
+    composer = EvidenceComposer(tokenizer=CoreTokenizer())
+    sources = []
+    originals = {}
+    highest = ranked[0][0] if ranked else 1.0
+    for index, (score, _workspace_id, _record_id, item) in enumerate(ranked, 1):
+        refs = tuple(
+            InternalEvidenceRef(
+                record_id=ref.record_id,
+                event_id=ref.event_id,
+                content_hash=ref.content_hash,
+                version_id=ref.version_id,
+                relation_path=tuple(ref.relation_path),
+                provider=ref.provider,
+            )
+            for ref in item.evidence_refs
+        )
+        candidate = FusedCandidate(
+            evidence=refs[0],
+            evidence_refs=refs,
+            score=score / highest,
+            channels=frozenset(item.channels),
+            channel_ranks=tuple((channel, index) for channel in sorted(item.channels)),
+            manifest_generations=tuple(
+                (channel, None) for channel in sorted(item.channels)
+            ),
+        )
+        source = SelectedEvidence(
+            candidate=candidate,
+            content=item.content,
+            category=item.record.record_type,
+            status=item.status,
+            superseded_by_version_id=item.superseded_by_version_id,
+            procedure_steps=item.procedure_steps,
+            code_bindings=item.code_bindings,
+            outcome=item.outcome,
+            outcome_failed=item.outcome_failed,
+            utility=item.utility,
+            applicability=item.applicability,
+            changed_bindings=item.changed_bindings,
+        )
+        sources.append(source)
+        originals[id(source)] = item
+    ordered = sorted(
+        sources, key=lambda source: not composer._priority(source, retention)
+    )[: query.limit]
+    retained_ids = {id(source) for source in ordered}
+    sources = [source for source in sources if id(source) in retained_ids]
+    composition = composer.compose(
+        sources,
+        token_budget=query.token_budget,
+        retention=retention,
+        label_applicability=label_applicability,
+    )
+    by_ref: dict[InternalEvidenceRef, list[FederatedCandidate]] = {}
+    for source in sources:
+        by_ref.setdefault(source.candidate.evidence, []).append(originals[id(source)])
+    items = []
+    manifest = []
+    for evidence in composition.items:
+        original = by_ref[evidence.evidence_refs[0]].pop(0)
+        evidence_item = EvidenceItem(
+            citation=evidence.citation,
+            record=original.record,
+            bounded_excerpt=evidence.excerpt,
+            channels=list(evidence.channels),
+            score=evidence.score,
+            status=evidence.status,
+            evidence_refs=list(original.evidence_refs),
+            utility=evidence.utility,
+            applicability=evidence.applicability,
+            changed_bindings=list(evidence.changed_bindings),
+        )
+        items.append(evidence_item)
+        manifest.append(
+            CitationManifestEntry(
+                citation=evidence_item.citation,
+                evidence_refs=evidence_item.evidence_refs,
+                channels=evidence_item.channels,
+            )
+        )
+    context = composition.context
+    return RetrievalData(
+        items=items,
+        rendered_context=context.text,
+        citation_manifest=manifest,
+        abstained=not items,
+        abstention_reason=None if items else "NO_POLICY_VALID_EVIDENCE",
+        token_usage=TokenUsage(
+            budget=query.token_budget,
+            requested=min(1_000_000, context.requested_tokens),
+            selected=context.selected_tokens,
+            rendered=context.rendered_tokens,
+            dropped=min(1_000_000, context.dropped_tokens),
+        ),
+    )
+
+
 def compose_federated_results(
-    results: Mapping[str, FederatedSourceResult], query: RetrievalQuery
+    results: Mapping[str, FederatedSourceResult],
+    query: RetrievalQuery,
+    *,
+    label_applicability: bool = False,
+    retention_mode: Literal["off", "shadow", "apply"] = "off",
 ) -> RetrievalData:
     """Fuse all authenticated candidates and compose the context exactly once."""
 
     ranked: list[tuple[float, str, str, FederatedCandidate]] = []
     for workspace_id in sorted(results):
-        result = results[workspace_id]
-        for rank, item in enumerate(result.candidates, 1):
+        source_result = results[workspace_id]
+        for rank, item in enumerate(source_result.candidates, 1):
             ranked.append(
                 (1.0 / (60.0 + rank), workspace_id, item.record.record_id, item)
             )
     ranked.sort(key=lambda value: (-value[0], value[1], value[2]))
+    if query.intent is not None and retention_mode != "off":
+        started = perf_counter_ns()
+        retention_failed = False
+        try:
+            retained = (
+                compose_federated_results(
+                    results, query, label_applicability=label_applicability
+                )
+                if query.intent == "explore"
+                else _compose_retained(
+                    ranked,
+                    query,
+                    RetentionPolicy(query.intent, query_identifiers(query.text)),
+                    label_applicability,
+                )
+            )
+        except Exception:
+            if retention_mode == "apply":
+                raise
+            retention_failed = True
+            retained = None
+        result = (
+            retained
+            if retention_mode == "apply" and retained is not None
+            else compose_federated_results(
+                results, query, label_applicability=label_applicability
+            )
+        )
+        return result.model_copy(
+            update={
+                "provider_diagnostics": [
+                    *_merged_diagnostics(results),
+                    ProviderDiagnostic(
+                        provider="retention",
+                        status="degraded" if retention_failed else "ready",
+                        manifest_generation=None,
+                        elapsed_ms=(perf_counter_ns() - started) / 1_000_000,
+                        reason=(
+                            "RETENTION_FAILED"
+                            if retention_failed
+                            else "RETENTION_APPLIED"
+                            if retention_mode == "apply"
+                            else "RETENTION_SHADOW"
+                        ),
+                        returned_count=len(retained.items)
+                        if retained is not None
+                        else 0,
+                    ),
+                ],
+            }
+        )
     tokenizer = CoreTokenizer()
     selected: list[EvidenceItem] = []
     manifest: list[CitationManifestEntry] = []
     lines: list[str] = []
     rendered_tokens = 0
+
+    def applicability_label(item: FederatedCandidate) -> str:
+        if label_applicability and item.applicability == "needs_revalidation":
+            return "\nNeeds revalidation: " + "; ".join(item.changed_bindings)
+        return ""
+
     requested_lines = [
         f"[E{index}] {' '.join(item.content.split())[:8000].strip()}"
+        + applicability_label(item)
         for index, (_score, _workspace, _record, item) in enumerate(ranked, 1)
     ]
     requested = min(1_000_000, tokenizer.count_tokens("\n".join(requested_lines)))
@@ -363,11 +549,12 @@ def compose_federated_results(
             prior_lines=lines,
             token_budget=max(0, query.token_budget - reserved_tokens),
             tokenizer=tokenizer,
+            applicability_label=applicability_label(item),
         )
         if fitted is None:
             continue
         line, rendered_tokens = fitted
-        excerpt = line[len(citation) + 1 :]
+        excerpt = line[len(citation) + 1 :].split("\n", 1)[0]
         copied = EvidenceItem.model_validate(
             {
                 "citation": citation,
@@ -377,6 +564,9 @@ def compose_federated_results(
                 "score": score / highest,
                 "status": item.status,
                 "evidence_refs": list(item.evidence_refs),
+                "applicability": item.applicability,
+                "changed_bindings": list(item.changed_bindings),
+                "utility": item.utility,
             }
         )
         selected.append(copied)

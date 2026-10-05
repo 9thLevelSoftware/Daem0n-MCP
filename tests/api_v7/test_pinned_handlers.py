@@ -88,6 +88,8 @@ class _PreflightService:
             "relative_file_path": None,
             "happened_at": None,
             "procedure_steps": [],
+            "informed_by": [],
+            "code_refs": [],
             "idempotency_key": "decision-0001",
         }
         if (
@@ -166,6 +168,7 @@ class _RecallService:
             or query.candidate_limit != 21
             or query.categories != frozenset({"decision"})
             or query.tags != frozenset({"release"})
+            or query.intent != "implement"
             or linked_workspace_ids != frozenset()
         ):
             raise AssertionError("recall request was not normalized exactly")
@@ -200,6 +203,8 @@ class _MemoryEventWriter:
             "happened_at": NOW,
             "procedure_steps": (),
             "idempotency_key": "decision-1001",
+            "informed_by": ("mem_" + "3" * 64,),
+            "code_refs": (("src/runtime.py", "Runtime.start"),),
         }
         actual = {name: getattr(command, name) for name in expected}
         if (
@@ -268,6 +273,9 @@ class _OutcomeEventWriter:
             "worked": True,
             "happened_at": NOW,
             "idempotency_key": "outcome-1001",
+            "informed_by": ("mem_" + "3" * 64,),
+            "verification": {"kind": "test", "exit_code": 0},
+            "rebind_code": False,
         }
         actual = {name: getattr(command, name) for name in expected}
         if (
@@ -675,6 +683,7 @@ class PinnedHandlerTests(unittest.TestCase):
                     "include_archived": False,
                     "token_budget": 2400,
                     "rerank": False,
+                    "intent": None,
                 },
             ),
             (
@@ -829,6 +838,7 @@ class PinnedHandlerTests(unittest.TestCase):
                     "include_archived": False,
                     "token_budget": 2400,
                     "rerank": False,
+                    "intent": None,
                 },
             ),
             (
@@ -1290,6 +1300,7 @@ class PinnedHandlerTests(unittest.TestCase):
                     include_archived=False,
                     token_budget=512,
                     rerank=False,
+                    intent="implement",
                 )
             )
         except (AssertionError, NotImplementedError):
@@ -1582,6 +1593,13 @@ class PinnedHandlerTests(unittest.TestCase):
             "relative_file_path": "daem0nmcp/event_store.py",
             "happened_at": NOW,
             "procedure_steps": [],
+            "informed_by": ["mem_" + "3" * 64],
+            "code_refs": [
+                {
+                    "relative_file_path": "src/runtime.py",
+                    "qualified_name": "Runtime.start",
+                }
+            ],
             "idempotency_key": "decision-1001",
         }
         token = gate.issue_preflight(scope, "memory_store", target)
@@ -1764,6 +1782,8 @@ class PinnedHandlerTests(unittest.TestCase):
             outcome_text="The rollout stayed healthy.",
             worked=True,
             happened_at=NOW,
+            informed_by=["mem_" + "3" * 64],
+            verification={"kind": "test", "exit_code": 0},
             idempotency_key="outcome-1001",
         )
 

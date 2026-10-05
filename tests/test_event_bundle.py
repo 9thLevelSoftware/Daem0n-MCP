@@ -10,7 +10,7 @@ import unittest
 from pathlib import Path
 
 
-def _migration_16_statements():
+def _event_schema_statements():
     path = (
         Path(__file__).resolve().parents[1] / "daem0nmcp" / "migrations" / "schema.py"
     )
@@ -18,7 +18,12 @@ def _migration_16_statements():
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    return next(item[2] for item in module.MIGRATIONS if item[0] == 16)
+    return [
+        statement
+        for version, _description, statements in module.MIGRATIONS
+        if version in {16, 33}
+        for statement in statements
+    ]
 
 
 class EventBundleTests(unittest.TestCase):
@@ -28,7 +33,7 @@ class EventBundleTests(unittest.TestCase):
         connection = sqlite3.connect(":memory:")
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA foreign_keys=ON")
-        for statement in _migration_16_statements():
+        for statement in _event_schema_statements():
             connection.execute(statement)
         connection.commit()
         return connection

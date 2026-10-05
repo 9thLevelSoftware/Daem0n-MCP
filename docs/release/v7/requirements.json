@@ -2541,6 +2541,16 @@
       "status": "pending"
     },
     {
+      "acceptance": "Enabled supported profile exercises a present and omitted optional intent branch for memory_recall, asserts the requested documented result or side effect, and rejects an invalid branch.",
+      "entry_point": "daem0nmcp.api.v7.tools:TOOL_INPUT_MODELS['memory_recall']",
+      "evidence": [],
+      "id": "tool.memory_recall.argument.intent",
+      "kind": "tool-argument",
+      "owner": "api/v7/production",
+      "package": "daem0nmcp.api.v7.models",
+      "status": "pending"
+    },
+    {
       "acceptance": "Enabled supported profile exercises a present and omitted optional limit branch for memory_recall, asserts the requested documented result or side effect, and rejects an invalid branch.",
       "entry_point": "daem0nmcp.api.v7.tools:TOOL_INPUT_MODELS['memory_recall']",
       "evidence": [],
@@ -2821,6 +2831,16 @@
       "status": "pending"
     },
     {
+      "acceptance": "Enabled supported profile exercises a present and omitted optional informed_by branch for memory_record_outcome, asserts the requested documented result or side effect, and rejects an invalid branch.",
+      "entry_point": "daem0nmcp.api.v7.tools:TOOL_INPUT_MODELS['memory_record_outcome']",
+      "evidence": [],
+      "id": "tool.memory_record_outcome.argument.informed_by",
+      "kind": "tool-argument",
+      "owner": "api/v7/production",
+      "package": "daem0nmcp.api.v7.models",
+      "status": "pending"
+    },
+    {
       "acceptance": "Enabled supported profile exercises a required outcome_text branch for memory_record_outcome, asserts the requested documented result or side effect, and rejects an invalid branch.",
       "entry_point": "daem0nmcp.api.v7.tools:TOOL_INPUT_MODELS['memory_record_outcome']",
       "evidence": [],
@@ -2831,10 +2851,30 @@
       "status": "pending"
     },
     {
+      "acceptance": "Enabled supported profile exercises a present and omitted optional rebind_code branch for memory_record_outcome, asserts the requested documented result or side effect, and rejects an invalid branch.",
+      "entry_point": "daem0nmcp.api.v7.tools:TOOL_INPUT_MODELS['memory_record_outcome']",
+      "evidence": [],
+      "id": "tool.memory_record_outcome.argument.rebind_code",
+      "kind": "tool-argument",
+      "owner": "api/v7/production",
+      "package": "daem0nmcp.api.v7.models",
+      "status": "pending"
+    },
+    {
       "acceptance": "Enabled supported profile exercises a required record_id branch for memory_record_outcome, asserts the requested documented result or side effect, and rejects an invalid branch.",
       "entry_point": "daem0nmcp.api.v7.tools:TOOL_INPUT_MODELS['memory_record_outcome']",
       "evidence": [],
       "id": "tool.memory_record_outcome.argument.record_id",
+      "kind": "tool-argument",
+      "owner": "api/v7/production",
+      "package": "daem0nmcp.api.v7.models",
+      "status": "pending"
+    },
+    {
+      "acceptance": "Enabled supported profile exercises a present and omitted optional verification branch for memory_record_outcome, asserts the requested documented result or side effect, and rejects an invalid branch.",
+      "entry_point": "daem0nmcp.api.v7.tools:TOOL_INPUT_MODELS['memory_record_outcome']",
+      "evidence": [],
+      "id": "tool.memory_record_outcome.argument.verification",
       "kind": "tool-argument",
       "owner": "api/v7/production",
       "package": "daem0nmcp.api.v7.models",
@@ -3001,6 +3041,16 @@
       "status": "pending"
     },
     {
+      "acceptance": "Enabled supported profile exercises a present and omitted optional code_refs branch for memory_store, asserts the requested documented result or side effect, and rejects an invalid branch.",
+      "entry_point": "daem0nmcp.api.v7.tools:TOOL_INPUT_MODELS['memory_store']",
+      "evidence": [],
+      "id": "tool.memory_store.argument.code_refs",
+      "kind": "tool-argument",
+      "owner": "api/v7/production",
+      "package": "daem0nmcp.api.v7.models",
+      "status": "pending"
+    },
+    {
       "acceptance": "Enabled supported profile exercises a required content branch for memory_store, asserts the requested documented result or side effect, and rejects an invalid branch.",
       "entry_point": "daem0nmcp.api.v7.tools:TOOL_INPUT_MODELS['memory_store']",
       "evidence": [],
@@ -3035,6 +3085,16 @@
       "entry_point": "daem0nmcp.api.v7.tools:TOOL_INPUT_MODELS['memory_store']",
       "evidence": [],
       "id": "tool.memory_store.argument.idempotency_key",
+      "kind": "tool-argument",
+      "owner": "api/v7/production",
+      "package": "daem0nmcp.api.v7.models",
+      "status": "pending"
+    },
+    {
+      "acceptance": "Enabled supported profile exercises a present and omitted optional informed_by branch for memory_store, asserts the requested documented result or side effect, and rejects an invalid branch.",
+      "entry_point": "daem0nmcp.api.v7.tools:TOOL_INPUT_MODELS['memory_store']",
+      "evidence": [],
+      "id": "tool.memory_store.argument.informed_by",
       "kind": "tool-argument",
       "owner": "api/v7/production",
       "package": "daem0nmcp.api.v7.models",
@@ -4601,6 +4661,16 @@
       "status": "pending"
     },
     {
+      "acceptance": "Install profile late-interaction and exercise its advertised capability.",
+      "entry_point": "optional-dependency:late-interaction",
+      "evidence": [],
+      "id": "profile.late-interaction",
+      "kind": "dependency-profile",
+      "owner": "packaging",
+      "package": "pyproject.toml",
+      "status": "pending"
+    },
+    {
       "acceptance": "Install profile local and exercise its advertised capability.",
       "entry_point": "optional-dependency:local",
       "evidence": [],
@@ -5728,6 +5798,7 @@
       "apps",
       "dev",
       "graph",
+      "late-interaction",
       "local",
       "models-hosted",
       "models-local",
@@ -5754,9 +5825,9 @@
     "tests/test_legacy_vector_migration_guards.py"
   ],
   "observed_surface": {
-    "atomic_requirements": 572,
+    "atomic_requirements": 579,
     "cli_commands": 21,
-    "dependency_profiles": 10,
+    "dependency_profiles": 11,
     "hooks": 15,
     "registered_tools": 75,
     "resource_templates": 10

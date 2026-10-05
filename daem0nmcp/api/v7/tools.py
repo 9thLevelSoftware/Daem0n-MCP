@@ -60,6 +60,7 @@ from .models import (
     VersionId,
     WireModel,
     WorkspaceId,
+    _unique_strings,
     contains_absolute_filesystem_path,
 )
 from .policy import V7_TOOL_LEVELS, V7ArgumentNormalizer
@@ -96,12 +97,15 @@ RecordVisibility = Literal["workspace", "private", "shared"]
 
 
 def _record_visibility(context: dict[str, object]) -> dict[str, object]:
+    if "code_bindings" in context:
+        raise ValueError("context.code_bindings is server-managed")
     if context.get("visibility", "workspace") not in get_args(RecordVisibility):
         raise ValueError("context.visibility must be workspace, private or shared")
     return context
 
 
 RecordContext = Annotated[ContextJsonObject, AfterValidator(_record_visibility)]
+InformedByRecordIds = Annotated[list[RecordId], AfterValidator(_unique_strings)]
 IdempotencyKey = Annotated[
     str,
     StringConstraints(
@@ -1099,12 +1103,34 @@ class MemoryRecallInput(WireModel):
     include_archived: bool = False
     token_budget: Annotated[int, Field(ge=256, le=16_000)] = 2400
     rerank: bool = False
+    intent: Literal["explore", "implement", "debug", "review"] | None = None
 
     @model_validator(mode="after")
     def validate_candidate_limit(self) -> MemoryRecallInput:
         if self.candidate_limit < self.limit:
             raise ValueError("candidate_limit cannot be smaller than limit")
         return self
+
+
+class OutcomeVerification(WireModel):
+    kind: Literal["test", "command", "review", "self_report"]
+    command: UserMediumText | None = None
+    exit_code: Annotated[int, Field(ge=-2_147_483_648, le=2_147_483_647)] | None = None
+
+    @model_validator(mode="after")
+    def validate_command_evidence(self) -> OutcomeVerification:
+        if self.kind in {"review", "self_report"} and (
+            self.command is not None or self.exit_code is not None
+        ):
+            raise ValueError(
+                "review and self_report verification cannot carry command evidence"
+            )
+        return self
+
+
+class CodeRef(WireModel):
+    relative_file_path: RelativePath
+    qualified_name: UserNameText | None = None
 
 
 class MemoryStoreInput(WireModel):
@@ -1123,6 +1149,8 @@ class MemoryStoreInput(WireModel):
     relative_file_path: RelativePath | None = None
     happened_at: AwareDateTime | None = None
     procedure_steps: list[UserMediumText] = Field(default_factory=list, max_length=100)
+    informed_by: InformedByRecordIds = Field(default_factory=list, max_length=32)
+    code_refs: list[CodeRef] = Field(default_factory=list, max_length=16)
     idempotency_key: IdempotencyKey
     preflight_token: PreflightToken
 
@@ -1169,6 +1197,9 @@ class MemoryRecordOutcomeInput(WireModel):
     ]
     worked: bool
     happened_at: AwareDateTime | None = None
+    informed_by: InformedByRecordIds = Field(default_factory=list, max_length=32)
+    verification: OutcomeVerification | None = None
+    rebind_code: bool = False
     idempotency_key: IdempotencyKey
 
 
@@ -2308,11 +2339,13 @@ def build_tool_specs(
 __all__ = [
     "ActiveContextPage",
     "CodeImpactAnalyzeInput",
+    "CodeRef",
     "DecisionDebateInput",
     "DreamingStatus",
     "DreamingStrategyStatus",
     "EntityEvolutionTraceInput",
     "HealthData",
+    "InformedByRecordIds",
     "MemoryPreflightInput",
     "MemoryPreflightOutput",
     "MemoryRecallEntityInput",
@@ -2324,6 +2357,7 @@ __all__ = [
     "MemoryStoreInput",
     "MemoryStoreOutput",
     "OutcomeData",
+    "OutcomeVerification",
     "PreflightData",
     "PROTECTED_TOOL_NAMES",
     "ProtectedToolName",

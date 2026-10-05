@@ -307,6 +307,20 @@ class TestCapabilityRegistry(unittest.TestCase):
         self.assertEqual(capability["status"], "disabled")
         self.assertEqual(capability["remediation"]["action"], "upgrade_python")
 
+    def test_late_interaction_requires_supported_python(self):
+        from daem0nmcp.capabilities import CapabilityRegistry
+
+        with patch("daem0nmcp.capabilities.sys.version_info", (3, 10, 21)):
+            for environ, status in (
+                ({}, "disabled"),
+                ({"DAEM0NMCP_LATE_INTERACTION_ENABLED": "true"}, "degraded"),
+            ):
+                capability = CapabilityRegistry(
+                    environ=environ, module_available=lambda _: True
+                ).get("late-interaction")
+                self.assertEqual(status, capability["status"])
+                self.assertEqual("upgrade_python", capability["remediation"]["action"])
+
     def test_invalid_enablement_value_is_failed_with_structured_remediation(self):
         """An invalid profile setting is a configuration failure, not a missing extra."""
         from daem0nmcp.capabilities import CapabilityRegistry
@@ -349,6 +363,7 @@ class TestCapabilityRegistry(unittest.TestCase):
         from daem0nmcp.capabilities import PROFILES, CapabilityRegistry
 
         expected = {
+            "late-interaction": {"fastembed", "numpy"},
             "graph": {
                 "networkx",
                 "python-igraph",
@@ -380,7 +395,8 @@ class TestCapabilityRegistry(unittest.TestCase):
                 ),
             )
 
-            self.assertEqual(registry.get(profile_name)["status"], "ready")
+            with patch("daem0nmcp.capabilities.sys.version_info", (3, 11, 0)):
+                self.assertEqual(registry.get(profile_name)["status"], "ready")
             self.assertEqual(set(probes), modules)
 
 

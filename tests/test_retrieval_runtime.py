@@ -26,7 +26,7 @@ def _apply_retrieval_schema(connection: sqlite3.Connection) -> None:
         "CREATE TABLE schema_version(version INTEGER PRIMARY KEY, applied_at TEXT)"
     )
     for version, _description, statements in MIGRATIONS:
-        if version < 16 or version > 18:
+        if version not in (16, 17, 18, 33):
             continue
         for statement in statements:
             connection.execute(statement)
@@ -98,6 +98,14 @@ def _settings() -> SimpleNamespace:
         retrieval_graph_max_depth=2,
         retrieval_rerank_candidate_limit=25,
         retrieval_rerank_enabled=False,
+        retrieval_reranker="embedding",
+        retrieval_late_interaction_model="colbert-ir/colbertv2.0",
+        retrieval_utility_mode="shadow",
+        retrieval_utility_weight=0.1,
+        retrieval_utility_credit="trace",
+        retrieval_utility_candidate_limit=25,
+        memory_validity_mode="shadow",
+        retrieval_retention_mode="shadow",
         retrieval_rrf_weights={
             "lexical": 1.0,
             "dense": 1.0,
@@ -155,6 +163,15 @@ class RetrievalRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.first_id, result.items[0].evidence_refs[0].record_id)
         self.assertEqual("lexical", result.providers[0].provider)
         self.assertIn("durable runtime baseline", result.context.text)
+        self.assertEqual(
+            ("utility", "ready", "UTILITY_SHADOW_SAME", 0),
+            (
+                result.providers[-1].provider,
+                result.providers[-1].status,
+                result.providers[-1].reason,
+                result.providers[-1].returned_count,
+            ),
+        )
 
     async def test_new_write_is_recalled_from_stale_active_lexical_delta(self):
         from daem0nmcp.retrieval.runtime import create_retrieval_service
@@ -216,6 +233,38 @@ class RetrievalRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("dense", service._providers)
         self.assertNotIn("graph", service._providers)
         embedding_encoder.assert_not_called()
+
+    async def test_missing_late_interaction_reports_unavailable_without_fallback(self):
+        from daem0nmcp.retrieval.runtime import create_retrieval_service
+        from daem0nmcp.retrieval.types import RetrievalQuery
+
+        config = _settings()
+        config.retrieval_rerank_enabled = True
+        config.retrieval_reranker = "late_interaction"
+        service = create_retrieval_service(
+            self.path,
+            config=config,
+            capability_statuses={
+                "local": "disabled",
+                "models-local": "disabled",
+                "graph": "disabled",
+                "late-interaction": "disabled",
+            },
+        )
+        self.services.append(service)
+        result = await service.retrieve(
+            RetrievalQuery(
+                workspace_id=WORKSPACE_ID,
+                text="durable runtime",
+                rerank=True,
+            )
+        )
+        self.assertIsNone(service._reranker)
+        diagnostic = next(
+            item for item in result.providers if item.provider == "reranker"
+        )
+        self.assertEqual("unavailable", diagnostic.status)
+        self.assertEqual("RERANKER_UNAVAILABLE", diagnostic.reason)
 
     async def test_durable_lexical_job_is_drained_off_loop_and_refreshes_search(self):
         connection = sqlite3.connect(self.path)

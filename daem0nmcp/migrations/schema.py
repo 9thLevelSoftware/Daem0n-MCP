@@ -2598,6 +2598,61 @@ MIGRATIONS: list[tuple[int, str, list[str]]] = [
             """,
         ],
     ),
+    (
+        33,
+        "Persist memory provenance and outcome evidence",
+        [
+            """
+            CREATE TABLE IF NOT EXISTS memory_provenance_edges (
+                workspace_id TEXT NOT NULL
+                    CONSTRAINT ck_provenance_workspace CHECK(
+                        substr(workspace_id,1,3)='ws_'
+                    ),
+                event_id TEXT NOT NULL REFERENCES memory_events(event_id)
+                    ON DELETE RESTRICT,
+                record_id TEXT NOT NULL REFERENCES memory_records(record_id)
+                    ON DELETE RESTRICT,
+                informed_by_record_id TEXT NOT NULL
+                    CONSTRAINT ck_provenance_source CHECK(
+                        length(informed_by_record_id)=68
+                        AND substr(informed_by_record_id,1,4)='mem_'
+                    ),
+                edge_kind TEXT NOT NULL
+                    CONSTRAINT ck_provenance_kind CHECK(
+                        edge_kind IN ('store','outcome')
+                    ),
+                recorded_at_us INTEGER NOT NULL,
+                CONSTRAINT pk_memory_provenance PRIMARY KEY(
+                    workspace_id,event_id,informed_by_record_id
+                )
+            ) WITHOUT ROWID
+            """,
+            "CREATE INDEX IF NOT EXISTS idx_provenance_source "
+            "ON memory_provenance_edges(workspace_id,informed_by_record_id,"
+            "edge_kind,recorded_at_us)",
+            "CREATE INDEX IF NOT EXISTS idx_provenance_record "
+            "ON memory_provenance_edges(workspace_id,record_id)",
+            """
+            CREATE TABLE IF NOT EXISTS memory_outcome_signals (
+                workspace_id TEXT NOT NULL
+                    CONSTRAINT ck_outcome_signal_workspace CHECK(
+                        substr(workspace_id,1,3)='ws_'
+                    ),
+                event_id TEXT NOT NULL PRIMARY KEY REFERENCES memory_events(event_id)
+                    ON DELETE RESTRICT,
+                record_id TEXT NOT NULL REFERENCES memory_records(record_id)
+                    ON DELETE RESTRICT,
+                reward REAL NOT NULL
+                    CONSTRAINT ck_outcome_signal_reward CHECK(reward IN (0.0,1.0)),
+                weight REAL NOT NULL
+                    CONSTRAINT ck_outcome_signal_weight CHECK(weight > 0 AND weight <= 1),
+                recorded_at_us INTEGER NOT NULL
+            ) WITHOUT ROWID
+            """,
+            "CREATE INDEX IF NOT EXISTS idx_outcome_signals_record "
+            "ON memory_outcome_signals(workspace_id,record_id,recorded_at_us)",
+        ],
+    ),
 ]
 
 if MIGRATIONS[-1][0] != CURRENT_SCHEMA_VERSION:  # pragma: no cover - import guard
@@ -3206,6 +3261,34 @@ def _has_retained_public_rows(connection: sqlite3.Connection) -> bool:
     return False
 
 
+def _backfill_memory_learning_evidence(connection: sqlite3.Connection) -> None:
+    from daem0nmcp.event_store import EventCommand, EventStore, parse_canonical_json
+
+    store = EventStore(connection, assume_transaction=True)
+    for row in connection.execute(
+        "SELECT event_id,workspace_id,stream_id,event_type,occurred_at_us,"
+        "recorded_at_us,actor_type,payload_json,actor_id,correlation_id "
+        "FROM memory_events "
+        "WHERE stream_kind='memory' "
+        "AND event_type IN ('memory.created','memory.outcome_recorded') "
+        "ORDER BY recorded_at_us,event_id"
+    ):
+        payload = parse_canonical_json(row[7])
+        command = EventCommand(
+            workspace_id=row[1],
+            stream_id=row[2],
+            stream_kind="memory",
+            event_type=row[3],
+            occurred_at_us=row[4],
+            recorded_at_us=row[5],
+            actor_type=row[6],
+            actor_id=row[8],
+            correlation_id=row[9],
+            payload=payload,
+        )
+        store._project_provenance(command, payload, row[0])
+
+
 def run_migrations(
     db_path: str,
     *,
@@ -3293,6 +3376,8 @@ def run_migrations(
                     backfill_retained_public_object_ids(conn, workspace_id)
                 if version >= 21 and workspace_id is not None:
                     backfill_retained_governance(conn, workspace_id)
+                if version == 33:
+                    _backfill_memory_learning_evidence(conn)
 
                 # Record migration
                 conn.execute(

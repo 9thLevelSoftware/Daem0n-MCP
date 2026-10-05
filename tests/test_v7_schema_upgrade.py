@@ -222,6 +222,209 @@ def test_dry_run_and_apply_upgrade_retained_v7_without_changing_source(tmp_path:
     assert source.read_bytes() == source_bytes
 
 
+def test_upgrade_backfills_native_outcomes_without_inventing_legacy_evidence(
+    tmp_path: Path,
+):
+    import hashlib
+
+    from daem0nmcp.event_store import (
+        canonical_json_bytes,
+        deterministic_id,
+        export_event_bundle,
+        import_event_bundle,
+        sha256_json,
+    )
+
+    storage, source, registry = _fixture(tmp_path, maximum_version=32)
+    workspace_id = registry.default.workspace_id
+    expected_signals = []
+    with sqlite3.connect(source) as connection:
+        store = EventStore(connection)
+        with mock.patch.object(EventStore, "_project_provenance"):
+            for timestamp, worked in enumerate((True, False, None), start=20):
+                state = _state()
+                state.update(worked=worked, outcome="historical outcome")
+                appended = store.append_and_project(
+                    EventCommand(
+                        workspace_id=workspace_id,
+                        stream_id=MEMORY_ID,
+                        stream_kind="memory",
+                        event_type="memory.outcome_recorded",
+                        occurred_at_us=timestamp,
+                        recorded_at_us=timestamp,
+                        actor_type="user",
+                        payload={"record": state},
+                    )
+                )
+                if worked is not None:
+                    expected_signals.append(
+                        (
+                            workspace_id,
+                            appended.event_id,
+                            MEMORY_ID,
+                            float(worked),
+                            0.5,
+                            timestamp,
+                        )
+                    )
+            run_id = "con_" + "a" * 64
+            store.append_and_project(
+                EventCommand(
+                    workspace_id=workspace_id,
+                    stream_id="mem_" + "3" * 64,
+                    stream_kind="memory",
+                    event_type="memory.created",
+                    occurred_at_us=25,
+                    recorded_at_us=25,
+                    actor_type="import",
+                    actor_id="workspace-consolidation",
+                    correlation_id=run_id,
+                    payload={
+                        "record": _state("historical consolidation"),
+                        "provenance": {
+                            "consolidation_run_id": run_id,
+                            "source_workspace_id": "ws_" + "b" * 24,
+                            "source_record_id": "mem_" + "b" * 64,
+                            "source_event_id": "evt_" + "c" * 64,
+                            "source_state_hash": "d" * 64,
+                        },
+                    },
+                )
+            )
+            store.append_and_project(
+                EventCommand(
+                    workspace_id=workspace_id,
+                    stream_id="mem_" + "4" * 64,
+                    stream_kind="memory",
+                    event_type="memory.created",
+                    occurred_at_us=26,
+                    recorded_at_us=26,
+                    actor_type="client",
+                    payload={
+                        "record": _state("historical document"),
+                        "semantic_namespace": "document-ingest-url",
+                        "provenance": {
+                            "url": "https://example.test/document",
+                            "content_hash": "a" * 64,
+                        },
+                    },
+                )
+            )
+        connection.execute(
+            "CREATE TABLE memories (id INTEGER PRIMARY KEY,category TEXT,"
+            "content TEXT,outcome TEXT,worked INTEGER)"
+        )
+        connection.execute(
+            "INSERT INTO memories VALUES (7,'decision',"
+            "'imported historical decision','legacy success',1)"
+        )
+        connection.row_factory = sqlite3.Row
+        retained = connection.execute("SELECT * FROM memories WHERE id=7").fetchone()
+        legacy = migration_v7_module._lossless_row(retained, "memories")
+        legacy_state = migration_v7_module._memory_state(retained)
+        legacy_run_id = "mig_" + "e" * 64
+        legacy_record_id = deterministic_id(
+            "mem", "memory", workspace_id, "legacy", "memories", "7"
+        )
+        connection.execute(
+            "INSERT INTO v7_migration_runs (migration_run_id,workspace_id,"
+            "source_db_sha256,source_schema_version,source_format_version,"
+            "target_format_version,status,snapshot_name,candidate_name,"
+            "source_inventory_json,created_at_us,updated_at_us) "
+            "VALUES (?,?,?,15,6,7,'active','source.snapshot.db',"
+            "'legacy.candidate.db',?,30,30)",
+            (
+                legacy_run_id,
+                workspace_id,
+                "e" * 64,
+                canonical_json_bytes(
+                    {"tables": {"memories": 1, "facts": 0, "memory_relationships": 0}}
+                ).decode("utf-8"),
+            ),
+        )
+        source_hash = sha256_json(legacy)
+        empty_hash = hashlib.sha256(b"").hexdigest()
+        for table in ("memories", "facts", "memory_relationships"):
+            imported = int(table == "memories")
+            connection.execute(
+                "INSERT INTO v7_migration_checkpoints VALUES (?,?,?,?,?,1,30)",
+                (
+                    legacy_run_id,
+                    table,
+                    "7" if imported else None,
+                    imported,
+                    sha256_json([empty_hash, source_hash]) if imported else empty_hash,
+                ),
+            )
+        legacy_event = store.append_and_project(
+            EventCommand(
+                workspace_id=workspace_id,
+                stream_id=legacy_record_id,
+                stream_kind="memory",
+                event_type="legacy.memory_state_imported",
+                occurred_at_us=30,
+                recorded_at_us=30,
+                actor_type="migration",
+                correlation_id=legacy_run_id,
+                payload={"legacy": legacy, "record": legacy_state},
+            )
+        )
+        connection.execute(
+            "INSERT INTO legacy_id_map VALUES (?,?,?,?,?,?,?,?)",
+            (
+                legacy_run_id,
+                "memories",
+                "7",
+                workspace_id,
+                "memory",
+                legacy_record_id,
+                source_hash,
+                legacy_event.event_id,
+            ),
+        )
+    authority = _authority_rows(source)
+
+    MigrationV7Service(registry).apply(tmp_path)
+    active = resolve_active_database(storage)
+    assert _authority_rows(active.path) == authority
+    with sqlite3.connect(active.path) as connection:
+        signals = connection.execute(
+            "SELECT workspace_id,event_id,record_id,reward,weight,recorded_at_us "
+            "FROM memory_outcome_signals ORDER BY recorded_at_us,event_id"
+        ).fetchall()
+        assert signals == expected_signals
+        assert connection.execute(
+            "SELECT COUNT(*) FROM memory_provenance_edges"
+        ).fetchone() == (0,)
+        bundle = export_event_bundle(connection, workspace_id)
+
+    with sqlite3.connect(":memory:") as replay:
+        replay.execute("PRAGMA foreign_keys=ON")
+        for version, _description, statements in MIGRATIONS:
+            if version in REQUIRED_V7_SCHEMA_VERSIONS:
+                for statement in statements:
+                    replay.execute(statement)
+        import_event_bundle(replay, bundle, workspace_id)
+        assert (
+            replay.execute(
+                "SELECT workspace_id,event_id,record_id,reward,weight,recorded_at_us "
+                "FROM memory_outcome_signals ORDER BY recorded_at_us,event_id"
+            ).fetchall()
+            == signals
+        )
+        assert replay.execute(
+            "SELECT COUNT(*) FROM memory_provenance_edges"
+        ).fetchone() == (0,)
+
+
+def test_pointerless_schema_32_retains_canonical_v7_recognition(tmp_path: Path):
+    from daem0nmcp.storage_activation import has_canonical_v7_state
+
+    storage, database, _registry = _fixture(tmp_path, maximum_version=32)
+    (storage / "active-db.json").unlink()
+    assert has_canonical_v7_state(database)
+
+
 def test_upgrade_from_earliest_supported_v7_schema(tmp_path: Path):
     earliest = min(REQUIRED_V7_SCHEMA_VERSIONS)
     storage, source, registry = _fixture(

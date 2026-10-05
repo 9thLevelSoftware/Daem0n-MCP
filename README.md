@@ -39,13 +39,13 @@ pip install .
 
 After v7 is published, `pip install daem0nmcp` will install the small core.
 Add only the feature profiles the deployment needs: `tasks`, `local`, `graph`,
-`apps`, `models-local`, `models-hosted`, `agency-e2b`, or `observability`.
+`apps`, `models-local`, `late-interaction`, `models-hosted`, `agency-e2b`, or `observability`.
 For example, `pip install "daem0nmcp[apps,graph]"`. The development and
 compatibility profiles (`dev` and `tracing`) are not required by a normal MCP
-server. `models-local` is optional and requires Python 3.11 or newer. Its
-secure ONNX runtime dependency has no CPython 3.10 wheel. On Python 3.10, the
-resolver omits this profile's dependencies and the runtime reports the
-Python-version remediation while core installation remains supported.
+server. `models-local` and `late-interaction` are optional and require Python
+3.11 or newer. Their secure ONNX runtime dependency has no CPython 3.10 wheel.
+On Python 3.10, the resolver omits these profiles' dependencies and the runtime
+reports Python-version remediation while core installation remains supported.
 
 The server owns workspace registration. Set `DAEM0NMCP_PROJECT_ROOT` to the
 default workspace and, when needed, `DAEM0NMCP_WORKSPACE_ROOTS` to the allowed
@@ -1063,6 +1063,70 @@ python -m daem0nmcp.cli index
 
 Supports Python, TypeScript, JavaScript, Go, Rust, Java, C, C++, C#, Ruby, PHP via tree-sitter.
 
+## Outcome-informed memory
+
+`memory_store.informed_by` and `memory_record_outcome.informed_by` accept up to
+32 existing record IDs in the same workspace. They record explicit provenance;
+recall remains read-only. Outcomes may include
+`verification={"kind": "test", "command": "pytest", "exit_code": 0}`; verification
+is caller-reported evidence, not a command executed by the server.
+
+Utility ranking defaults to **shadow**: it reports estimates and diagnostics
+without changing retrieval order. Opt in with:
+
+```bash
+DAEM0NMCP_RETRIEVAL_UTILITY_MODE=apply
+DAEM0NMCP_RETRIEVAL_UTILITY_CREDIT=trace
+```
+
+`single_step` uses immediate outcome credit; `trace` also propagates bounded,
+discounted credit through explicit provenance. The default ranking weight is
+0.1. Set `DAEM0NMCP_RETRIEVAL_UTILITY_MODE=off` to disable computation. Failed
+decisions remain warnings rather than being demoted by their own failures.
+
+### Bind guidance to repository code
+
+`memory_store.code_refs` accepts up to 16
+`{"relative_file_path": "src/x.py", "qualified_name": "f"}` references.
+Omit `qualified_name` to bind the whole file. Qualified names select a specific
+symbol; a bare name binds every matching declaration in that file. Fingerprints
+ignore CRLF/LF differences, and symbol bindings ignore edits to sibling symbols.
+The server manages `context.code_bindings`; callers cannot set it themselves.
+
+Recall reports `applicability` (`current`, `needs_revalidation`, or
+`unverifiable`) and `changed_bindings`. Parser unavailability is not proof that
+code changed. The default validity mode is `shadow`; set
+`DAEM0NMCP_MEMORY_VALIDITY_MODE=apply` to include revalidation labels in context,
+or `off` to skip checks. After checking changed code, record a successful
+outcome with `rebind_code=true` to refresh existing bindings.
+
+### Keep task-specific evidence under a context budget
+
+`memory_recall` accepts an optional `intent`: `explore`, `implement`, `debug`,
+or `review`. Implement/debug retention reserves room for procedures and matching
+code bindings, with shorter ordinary excerpts; review also bounds stale guidance.
+The default `DAEM0NMCP_RETRIEVAL_RETENTION_MODE=shadow` computes retention diagnostics
+without changing context or ranking. Set it to `apply` to change evidence packing,
+or `off` to skip computation. Without an intent, context packing is unchanged.
+These settings also apply to linked-workspace recall.
+
+### Optional ColBERT reranking
+
+Install `pip install "daem0nmcp[late-interaction]"` and set:
+
+```bash
+DAEM0NMCP_RETRIEVAL_RERANK_ENABLED=true
+DAEM0NMCP_RETRIEVAL_RERANKER=late_interaction
+```
+
+Request `memory_recall(..., rerank=true)`. The default model is
+`colbert-ir/colbertv2.0`, configured by
+`DAEM0NMCP_RETRIEVAL_LATE_INTERACTION_MODEL`. It loads lazily and may download
+weights on first use; warm the model before measuring latency. Cold downloads
+can exceed the provider timeout (`DAEM0NMCP_QDRANT_TIMEOUT_SECONDS`) and report
+`RERANKER_FAILED` while preserving the original order. An unavailable profile
+reports `RERANKER_UNAVAILABLE`; it never silently substitutes embedding reranking.
+
 ## Troubleshooting
 
 ### MCP Tools Not Available in Claude Session
@@ -1137,6 +1201,29 @@ python -m daem0nmcp.server
 # Run HTTP server (Windows)
 python start_server.py --port 9876
 ```
+
+### Graded coding-memory evaluation
+
+```bash
+python -m benchmarks.coding_memory_eval --mode lexical_only --topics 24 --seed 20261004 --output coding-eval.json
+# Optional real-provider comparison (install local, models-local, graph and late-interaction):
+python -m benchmarks.coding_memory_eval --mode fully_enabled --topics 24 --seed 20261004 --output coding-eval-full.json
+```
+
+This isolated synthetic workload exercises outcome reuse, multi-hop provenance,
+symbol/file validity and budgeted procedure retention through the production
+writer and recall service. The lexical mode requires no model downloads.
+Insertion order and event times are fixed; latency measurements are wall-clock
+and excluded from deterministic comparisons. The fixture uses an exclusively
+created deterministic temporary directory; concurrent identical runs fail
+closed rather than sharing storage.
+
+Reports expose all arm settings. Utility weight is **0.2 in the evaluation**
+(the product default stays 0.1). Retention distractors are same-category
+background procedure drafts with task tags: this prevents category diversity
+from automatically rescuing the actionable procedure and tests actual packing
+under a 256-token budget. These synthetic gains are not a competitor comparison.
+The release-frozen retrieval corpus and its digest remain unchanged.
 
 ## Support
 

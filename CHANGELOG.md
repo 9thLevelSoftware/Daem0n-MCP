@@ -5,8 +5,13 @@
 ### Added
 - Reproducible v7 core foundation with opt-in dependency profiles and lazy capability reporting.
 - `uninstall-claude-hooks` strips the pairing env keys from the project's `.claude/settings.local.json` (the project is `--project-path` or the current directory, and only a project the installer paired is touched); `--remove-credentials` also deletes its local edit-bridge credential and socket directories.
+- Schema 33 projects explicit `informed_by` memory provenance and verification-weighted outcomes. Existing native outcomes are backfilled during upgrade; legacy imports do not invent learning signals. `memory_store` and `memory_record_outcome` accept the new evidence fields without changing idempotency hashes for unchanged requests.
+- Shadow-first utility ranking with immediate or discounted provenance credit, repository code-binding validity and successful-outcome rebinding, and intent-aware evidence retention across direct and linked-workspace recall.
+- Optional Python 3.11+ `late-interaction` profile for lazy ColBERT/MaxSim reranking. Missing profiles report unavailable instead of falling back to embedding reranking.
+- Graded coding-memory evaluation with deterministic lexical fixtures and optional real-provider arms, reporting ranking quality, validity, retained procedure facts, tokens and latency without changing the frozen retrieval benchmark.
 
 ### Changed
+- Local dense projection cleanup closes staging collection persistence before deleting it, preventing leaked SQLite handles on failed or cancelled builds.
 - Claude Code hooks remind instead of block. `pre_edit` adds a one-line `memory_recall_file`/`memory_preflight` reminder to the model's context and never denies an edit; `stop` reads its stdin event, shows suggestions as a `systemMessage` and never keeps the agent running.
 - OpenCode edits are no longer gated either: the OpenCode plugin runs the same `pre_edit` hook, which now always allows the edit. The plugin does not yet show the reminder; that rework comes with the edit-bridge removal.
 - `install-claude-hooks` and `uninstall-claude-hooks` refuse to touch a `~/.claude/settings.json` that is not valid JSON, instead of replacing it.

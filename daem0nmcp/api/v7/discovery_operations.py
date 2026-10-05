@@ -408,7 +408,7 @@ class _StrictTreeSitterProducer:
         return entities()
 
 
-def _default_code_indexer_factory() -> object:
+def default_code_indexer_factory() -> object:
     from ...code_indexer import LANGUAGE_CONFIG, TreeSitterIndexer
 
     return _StrictTreeSitterProducer(TreeSitterIndexer(), LANGUAGE_CONFIG)
@@ -425,7 +425,7 @@ class DiscoveryOperationDependencies:
     cursor_secret: bytes = field(default_factory=lambda: secrets.token_bytes(32))
     worker_pool: WorkerPool = field(default_factory=_default_worker_pool)
     recall_service: _RecallService | None = None
-    code_indexer_factory: Callable[[], object] = _default_code_indexer_factory
+    code_indexer_factory: Callable[[], object] = default_code_indexer_factory
     capability_statuses: Mapping[str, str] = field(default_factory=dict)
 
     def __post_init__(self) -> None:

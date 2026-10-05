@@ -66,6 +66,7 @@ from daem0nmcp.event_store import (
     GovernanceEventCommand,
     GovernanceEventStore,
 )
+from daem0nmcp.retrieval.projections import LexicalProjectionBuilder
 from daem0nmcp.retrieval.runtime import await_projection_job_drains
 from daem0nmcp.retrieval.specialized_projection import SpecializedProjectionBuilder
 from daem0nmcp.storage_activation import resolve_active_database
@@ -148,6 +149,16 @@ def test_user_text_input_fields_accept_paths(text):
         )
     )
     assert validated.content == text
+
+
+@pytest.mark.parametrize("text", [NEUTRAL, *PATH_CONTENT, *SEEDS])
+def test_code_ref_qualified_name_accepts_paths(text):
+    request = MemoryStoreInput.model_validate(
+        _store_input(
+            code_refs=[{"relative_file_path": "src/owned.py", "qualified_name": text}]
+        )
+    )
+    assert request.code_refs[0].qualified_name == text
 
 
 def test_server_generated_fields_reject_host_paths():
@@ -468,6 +479,7 @@ def _insert_rows(root: Path, workspace_id: str, texts: tuple[str, ...]) -> list[
                 )
             )
         connection.commit()
+        LexicalProjectionBuilder(connection).rebuild(workspace_id)
         SpecializedProjectionBuilder(connection).rebuild(workspace_id, "graph")
         DiscoveryProjectionBuilder(connection).populate_graph(
             workspace_id,
@@ -489,13 +501,14 @@ def _insert_rows(root: Path, workspace_id: str, texts: tuple[str, ...]) -> list[
                 ),
             ),
         )
-        # The graph rebuild queued by the events above just ran here; retire
-        # it so a later drain cannot swap the inserted entities for a new
-        # generation mid-test.
+        # Both projections are complete before reads start. Retire their queued
+        # rebuilds so lexical catch-up cannot race entity recall, or replace the
+        # graph generation containing the explicitly inserted entities.
         connection.execute(
             "UPDATE background_jobs SET status='succeeded',updated_at_us=?,"
             "finished_at_us=? WHERE workspace_id=? AND status='queued' "
-            "AND idempotency_key='active-projection:graph'",
+            "AND idempotency_key IN "
+            "('active-projection:graph','active-projection:lexical')",
             (_now_us(), _now_us(), workspace_id),
         )
         connection.commit()
@@ -603,7 +616,12 @@ ROUND_TRIPPED = frozenset({"workspace_import"})
 # The ingest URL is fetched before the topic is read, and tests have no
 # network, so every call stops at the URL.  The topic's input type is
 # covered by test_ingest_topic_accepts_paths.
-FETCH_FIRST = frozenset({"document_ingest_url.topic"})
+# CodeRef.qualified_name selects an existing symbol after its local file is
+# fetched; arbitrary text seeds do not necessarily name a symbol in that file.
+# Its wire path policy is covered by test_code_ref_qualified_name_accepts_paths.
+FETCH_FIRST = frozenset(
+    {"document_ingest_url.topic", "memory_store.code_refs.0.qualified_name"}
+)
 
 
 def _mentions_str(annotation: object) -> bool:
@@ -690,6 +708,8 @@ def _seeded(tool: str, base: dict[str, Any], path: tuple, kind: object, text: st
     )
     if name == "procedure_steps":
         target["record_type"] = "procedure"
+    if (tool, path) == ("memory_record_outcome", ("verification", "command")):
+        target["kind"] = "command"
     if (tool, path) == ("memory_preflight", ("target_arguments",)):
         # Seed the target tool's own argument, not the envelope.
         target["target_tool"] = "memory_store"
@@ -701,6 +721,26 @@ def _seeded(tool: str, base: dict[str, Any], path: tuple, kind: object, text: st
         return arguments
     target[name] = _seed_value(kind, text)
     return arguments
+
+
+@pytest.mark.parametrize("text", [NEUTRAL, *SEEDS])
+def test_nested_verification_command_seed_keeps_required_evidence_kind(text):
+    arguments = _seeded(
+        "memory_record_outcome",
+        {
+            "workspace_id": WS,
+            "record_id": "mem_" + "1" * 64,
+            "outcome_text": "Verified the change.",
+            "worked": True,
+            "idempotency_key": "path-evidence-0001",
+        },
+        ("verification", "command"),
+        "str",
+        text,
+    )
+    request = TOOL_INPUT_MODELS["memory_record_outcome"].model_validate(arguments)
+    assert request.verification.kind == "command"
+    assert request.verification.command == text
 
 
 def _fresh_keys(arguments: dict[str, Any], label: str) -> dict[str, Any]:
@@ -875,6 +915,9 @@ async def test_every_free_text_field_accepts_paths_and_every_read_survives(tmp_p
         writes["workspace_link"] = {"linked_workspace_id": b}
         for tool, arguments in sorted(writes.items()):
             seeded += await _seed_free_text(invoke, a, tool, arguments)
+
+    # Finish admitted writer drains before installing the manual projections.
+    await await_projection_job_drains()
 
     # Rows as a migrated v6 database or a pre-fix write left them.
     record_ids = _insert_rows(a_root, a, SEEDS)

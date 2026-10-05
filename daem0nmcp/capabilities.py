@@ -59,6 +59,7 @@ PROFILES = {
     "models-local": CapabilityProfile(
         "models-local", ("sentence-transformers", "onnxruntime", "numpy", "llmlingua")
     ),
+    "late-interaction": CapabilityProfile("late-interaction", ("fastembed", "numpy")),
     "models-hosted": CapabilityProfile("models-hosted", ("tiktoken",)),
     "agency-e2b": CapabilityProfile("agency-e2b", ("e2b-code-interpreter",)),
     "observability": CapabilityProfile(
@@ -121,7 +122,7 @@ class CapabilityRegistry:
             return self._disabled(profile)
         # An unset variable means "on when installed": a profile that cannot run
         # is simply off, while an explicit request for it is degraded.
-        if name == "models-local" and sys.version_info < (3, 11):
+        if name in {"models-local", "late-interaction"} and sys.version_info < (3, 11):
             capability = self._python_version_unavailable(profile)
             if configured == "auto":
                 capability["status"] = "disabled"

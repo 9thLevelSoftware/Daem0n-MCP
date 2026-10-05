@@ -165,6 +165,7 @@ class RetrievalQuery:
     include_archived: bool = False
     token_budget: int = 2400
     rerank: bool = False
+    intent: Literal["explore", "implement", "debug", "review"] | None = None
 
     def __post_init__(self) -> None:
         _opaque(self.workspace_id, _WORKSPACE_ID, "workspace_id")
@@ -185,6 +186,8 @@ class RetrievalQuery:
         )
         _aware_datetime(self.as_of_valid_time, "as_of_valid_time")
         _aware_datetime(self.as_of_transaction_time, "as_of_transaction_time")
+        if self.intent not in {None, "explore", "implement", "debug", "review"}:
+            raise ValueError("intent is invalid")
         _string_filter(self.categories, "categories")
         _string_filter(self.tags, "tags")
         _string_filter(self.record_ids, "record_ids", pattern=_RECORD_ID)
@@ -486,6 +489,11 @@ class EvidenceItem:
     procedure_steps: tuple[str, ...] = ()
     relation_path: tuple[str, ...] = ()
     relation_paths: tuple[tuple[str, ...], ...] = ()
+    utility: float | None = None
+    applicability: Literal["current", "needs_revalidation", "unverifiable"] | None = (
+        None
+    )
+    changed_bindings: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if (
@@ -500,6 +508,22 @@ class EvidenceItem:
         if self.status not in {"current", "superseded"}:
             raise ValueError("evidence status is invalid")
         object.__setattr__(self, "score", _finite_nonnegative(self.score, "score"))
+        if self.utility is not None:
+            utility = _finite_nonnegative(self.utility, "utility")
+            if utility > 1:
+                raise ValueError("utility must be between 0 and 1")
+            object.__setattr__(self, "utility", utility)
+        if self.applicability not in {
+            None,
+            "current",
+            "needs_revalidation",
+            "unverifiable",
+        }:
+            raise ValueError("applicability is invalid")
+        if not isinstance(self.changed_bindings, tuple) or not all(
+            isinstance(binding, str) and binding for binding in self.changed_bindings
+        ):
+            raise ValueError("changed_bindings must contain non-empty strings")
         if not isinstance(self.channels, frozenset) or not self.channels:
             raise ValueError("channels must be a non-empty frozenset")
         for channel in self.channels:

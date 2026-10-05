@@ -71,7 +71,7 @@ class ProjectionGenerationGrowthTests(unittest.IsolatedAsyncioTestCase):
         # seeding rebuilds fast on slow CI disks.
         self.connection.execute("PRAGMA synchronous=OFF")
         for version, _description, statements in MIGRATIONS:
-            if 16 <= version <= 18:
+            if version in (16, 17, 18, 33):
                 for statement in statements:
                     self.connection.execute(statement)
         self.connection.commit()

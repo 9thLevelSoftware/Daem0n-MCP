@@ -759,6 +759,13 @@ class EvidenceItem(WireModel):
     score: Annotated[float, Field(ge=0, allow_inf_nan=False)]
     status: EvidenceStatus
     evidence_refs: list[EvidenceRef] = Field(min_length=1, max_length=32)
+    utility: Annotated[float, Field(ge=0, le=1, allow_inf_nan=False)] | None = None
+    applicability: Literal["current", "needs_revalidation", "unverifiable"] | None = (
+        None
+    )
+    changed_bindings: list[
+        Annotated[str, StringConstraints(strict=True, min_length=1, max_length=1300)]
+    ] = Field(default_factory=list, max_length=16)
 
     @model_validator(mode="after")
     def validate_providers(self) -> EvidenceItem:

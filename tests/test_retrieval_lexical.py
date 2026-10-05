@@ -170,6 +170,7 @@ class LexicalProjectionTests(unittest.IsolatedAsyncioTestCase):
         _apply_migration(self.connection, 16)
         _apply_migration(self.connection, 17)
         _apply_migration(self.connection, 18)
+        _apply_migration(self.connection, 33)
         self.connection.commit()
 
     def tearDown(self) -> None:
@@ -1136,7 +1137,7 @@ class LexicalProjectionTests(unittest.IsolatedAsyncioTestCase):
             try:
                 first.execute("PRAGMA foreign_keys=ON")
                 second.execute("PRAGMA foreign_keys=ON")
-                for version in (16, 17, 18):
+                for version in (16, 17, 18, 33):
                     _apply_migration(first, version)
                 first.commit()
                 EventStore(first).append_and_project(

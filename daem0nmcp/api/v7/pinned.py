@@ -10,7 +10,7 @@ from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from types import MappingProxyType
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
 
 from pydantic import ValidationError
 
@@ -314,6 +314,8 @@ class MemoryStoreCommand:
     happened_at: datetime | None
     procedure_steps: tuple[str, ...]
     idempotency_key: str
+    informed_by: tuple[str, ...] = ()
+    code_refs: tuple[tuple[str, str | None], ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -334,6 +336,9 @@ class MemoryOutcomeCommand:
     worked: bool
     happened_at: datetime | None
     idempotency_key: str
+    informed_by: tuple[str, ...] = ()
+    verification: Mapping[str, object] | None = None
+    rebind_code: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -620,6 +625,7 @@ class PinnedHandlers:
         include_archived: bool = False,
         token_budget: int = 2400,
         rerank: bool = False,
+        intent: Literal["explore", "implement", "debug", "review"] | None = None,
     ) -> MemoryRecallOutput:
         payload: dict[str, object] = {
             "workspace_id": workspace_id,
@@ -635,6 +641,7 @@ class PinnedHandlers:
             "include_archived": include_archived,
             "token_budget": token_budget,
             "rerank": rerank,
+            "intent": intent,
         }
         if linked_workspace_ids is not None:
             payload["linked_workspace_ids"] = linked_workspace_ids
@@ -727,6 +734,7 @@ class PinnedHandlers:
                 include_archived=request.include_archived,
                 token_budget=request.token_budget,
                 rerank=request.rerank,
+                intent=request.intent,
             )
             linked_ids = frozenset(request.linked_workspace_ids)
             if linked_ids:
@@ -799,6 +807,8 @@ class PinnedHandlers:
         relative_file_path: str | None = None,
         happened_at: datetime | None = None,
         procedure_steps: list[str] | None = None,
+        informed_by: list[str] | None = None,
+        code_refs: list[dict[str, object]] | None = None,
         idempotency_key: str,
         preflight_token: str,
     ) -> MemoryStoreOutput:
@@ -818,6 +828,10 @@ class PinnedHandlers:
             payload["tags"] = tags
         if procedure_steps is not None:
             payload["procedure_steps"] = procedure_steps
+        if informed_by is not None:
+            payload["informed_by"] = informed_by
+        if code_refs is not None:
+            payload["code_refs"] = code_refs
         request = MemoryStoreInput.model_validate(payload)
         response = self._dependencies.response_factory.begin(request.workspace_id)
         workspace, failure = await self._resolve_workspace(
@@ -882,6 +896,11 @@ class PinnedHandlers:
             happened_at=request.happened_at,
             procedure_steps=tuple(request.procedure_steps),
             idempotency_key=request.idempotency_key,
+            informed_by=tuple(request.informed_by),
+            code_refs=tuple(
+                (ref.relative_file_path, ref.qualified_name)
+                for ref in request.code_refs
+            ),
         )
         try:
             stored_value = self._dependencies.memory_event_writer.store(
@@ -938,18 +957,24 @@ class PinnedHandlers:
         outcome_text: str,
         worked: bool,
         happened_at: datetime | None = None,
+        informed_by: list[str] | None = None,
+        verification: dict[str, object] | None = None,
+        rebind_code: bool = False,
         idempotency_key: str,
     ) -> MemoryRecordOutcomeOutput:
-        request = MemoryRecordOutcomeInput.model_validate(
-            {
-                "workspace_id": workspace_id,
-                "record_id": record_id,
-                "outcome_text": outcome_text,
-                "worked": worked,
-                "happened_at": happened_at,
-                "idempotency_key": idempotency_key,
-            }
-        )
+        payload: dict[str, object] = {
+            "workspace_id": workspace_id,
+            "record_id": record_id,
+            "outcome_text": outcome_text,
+            "worked": worked,
+            "happened_at": happened_at,
+            "verification": verification,
+            "rebind_code": rebind_code,
+            "idempotency_key": idempotency_key,
+        }
+        if informed_by is not None:
+            payload["informed_by"] = informed_by
+        request = MemoryRecordOutcomeInput.model_validate(payload)
         response = self._dependencies.response_factory.begin(request.workspace_id)
         workspace, failure = await self._resolve_workspace(
             request.workspace_id,
@@ -983,6 +1008,13 @@ class PinnedHandlers:
             worked=request.worked,
             happened_at=request.happened_at,
             idempotency_key=request.idempotency_key,
+            informed_by=tuple(request.informed_by),
+            verification=(
+                request.verification.model_dump(exclude_none=True)
+                if request.verification is not None
+                else None
+            ),
+            rebind_code=request.rebind_code,
         )
         try:
             recorded_value = self._dependencies.memory_event_writer.record_outcome(

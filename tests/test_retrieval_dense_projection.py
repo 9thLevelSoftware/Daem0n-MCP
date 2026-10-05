@@ -7,6 +7,7 @@ import copy
 import hashlib
 import importlib.util
 import json
+import shutil
 import sqlite3
 import tempfile
 import threading
@@ -208,7 +209,7 @@ class DenseProjectionTests(unittest.TestCase):
         self.addCleanup(self.connection.close)
         self.connection.row_factory = sqlite3.Row
         self.connection.execute("PRAGMA foreign_keys=ON")
-        for version in (16, 17, 18, 31, 32):
+        for version in (16, 17, 18, 31, 32, 33):
             _apply_migration(self.connection, version)
         self.connection.commit()
         self.client = FakeQdrantClient()
@@ -622,6 +623,123 @@ class DenseProjectionTests(unittest.TestCase):
             self.assertTrue(builder.active_is_current(WORKSPACE_ID))
         finally:
             client.close()
+
+    def _assert_failed_local_staging_releases_files(self, *, cancelled: bool) -> None:
+        from daem0nmcp.retrieval.dense_projection import (
+            DenseProjectionBuilder,
+            DenseProjectionBuildError,
+        )
+
+        cancellation = threading.Event()
+
+        class InterruptedEncoder(DeterministicEncoder):
+            def encode(self, text: str) -> list[float]:
+                if cancelled:
+                    cancellation.set()
+                    return super().encode(text)
+                raise RuntimeError("encoding failed after staging collection creation")
+
+        self._append("a", "prior active local evidence")
+        qdrant_path = self.database_path.parent / "local-qdrant"
+        builder = DenseProjectionBuilder(
+            self.connection,
+            provider_key="local",
+            model_id="deterministic-test-model",
+            dimension=3,
+            encoder=self.encoder,
+            qdrant_path=qdrant_path,
+            cancelled=cancellation.is_set,
+        )
+        self.addCleanup(builder.close)
+        try:
+            active = builder.rebuild(WORKSPACE_ID)
+            self._append("b", "new evidence interrupts staging")
+            builder.encoder = InterruptedEncoder()
+            with self.assertRaises(DenseProjectionBuildError) as raised:
+                builder.rebuild(WORKSPACE_ID)
+            self.assertEqual(
+                "PROJECTION_CANCELLED" if cancelled else "DENSE_BUILD_FAILED",
+                raised.exception.code,
+            )
+            client = builder.client
+            self.assertEqual(
+                [active.collection_name],
+                [item.name for item in client.get_collections().collections],
+            )
+            self.assertEqual(
+                1,
+                client.count(collection_name=active.collection_name, exact=True).count,
+            )
+        finally:
+            builder.close()
+        shutil.rmtree(qdrant_path)
+        self.assertFalse(qdrant_path.exists())
+
+    @unittest.skipUnless(
+        importlib.util.find_spec("qdrant_client"),
+        "optional local Qdrant is unavailable",
+    )
+    def test_failed_local_staging_allows_immediate_directory_cleanup(self):
+        self._assert_failed_local_staging_releases_files(cancelled=False)
+
+    @unittest.skipUnless(
+        importlib.util.find_spec("qdrant_client"),
+        "optional local Qdrant is unavailable",
+    )
+    def test_cancelled_local_staging_allows_immediate_directory_cleanup(self):
+        self._assert_failed_local_staging_releases_files(cancelled=True)
+
+    @unittest.skipUnless(
+        importlib.util.find_spec("qdrant_client"),
+        "optional local Qdrant is unavailable",
+    )
+    def test_replacing_local_orphan_staging_discards_its_persisted_points(self):
+        from qdrant_client import QdrantClient, models
+
+        from daem0nmcp.retrieval.dense_projection import DenseProjectionBuilder
+
+        self._append("c", "canonical retry evidence")
+        qdrant_path = self.database_path.parent / "orphan-qdrant"
+        client = QdrantClient(path=str(qdrant_path))
+        self.addCleanup(client.close)
+        builder = DenseProjectionBuilder(
+            self.connection,
+            provider_key="local",
+            model_id="deterministic-test-model",
+            dimension=3,
+            encoder=self.encoder,
+            client=client,
+        )
+        try:
+            staging = builder.rebuild(WORKSPACE_ID, dry_run=True).collection_name
+            client.create_collection(
+                staging,
+                vectors_config=models.VectorParams(
+                    size=3, distance=models.Distance.COSINE
+                ),
+            )
+            client.upsert(
+                staging,
+                points=[
+                    models.PointStruct(
+                        id="00000000-0000-0000-0000-000000000001",
+                        vector=[1.0, 0.0, 0.0],
+                    )
+                ],
+                wait=True,
+            )
+            result = builder.rebuild(WORKSPACE_ID)
+            self.assertEqual("active", result.status)
+            self.assertEqual(1, result.row_count)
+            self.assertEqual(
+                1,
+                client.count(collection_name=result.collection_name, exact=True).count,
+            )
+        finally:
+            builder.close()
+            client.close()
+        shutil.rmtree(qdrant_path)
+        self.assertFalse(qdrant_path.exists())
 
     def test_cosine_rounding_does_not_admit_corrupt_or_malformed_vectors(self):
         from daem0nmcp.retrieval.vector_validation import cosine_vectors_match
@@ -2012,7 +2130,7 @@ def test_gc_reconciliation_fairly_converges_across_bounded_restart_slices() -> N
         path = Path(temporary) / "fair-gc.sqlite3"
         connection = sqlite3.connect(path)
         connection.execute("PRAGMA foreign_keys=ON")
-        for version in (16, 17, 18, 31, 32):
+        for version in (16, 17, 18, 31, 32, 33):
             _apply_migration(connection, version)
         for workspace_number in range(17):
             workspace_id = f"ws_{workspace_number:024x}"

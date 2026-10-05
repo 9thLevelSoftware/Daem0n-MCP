@@ -128,13 +128,22 @@ class AsyncComposer:
     def compose(self, selected, *, token_budget):
         raise AssertionError("RetrievalService must not compose on the event loop")
 
-    async def compose_async(self, selected, *, token_budget):
+    async def compose_async(
+        self, selected, *, token_budget, retention=None, label_applicability=False
+    ):
         self.async_calls += 1
-        return self.delegate.compose(selected, token_budget=token_budget)
+        return self.delegate.compose(
+            selected,
+            token_budget=token_budget,
+            retention=retention,
+            label_applicability=label_applicability,
+        )
 
 
 class UnavailableComposer:
-    async def compose_async(self, selected, *, token_budget):
+    async def compose_async(
+        self, selected, *, token_budget, retention=None, label_applicability=False
+    ):
         from daem0nmcp.retrieval.composer import CompositionResult
         from daem0nmcp.retrieval.types import ContextPackage
 
@@ -154,7 +163,9 @@ class UnavailableComposer:
 
 
 class ForbiddenComposer:
-    async def compose_async(self, selected, *, token_budget):
+    async def compose_async(
+        self, selected, *, token_budget, retention=None, label_applicability=False
+    ):
         raise AssertionError("candidate retrieval must not compose context")
 
 
@@ -162,10 +173,17 @@ class ProvenanceTamperingComposer:
     def __init__(self):
         self.delegate = AsyncComposer()
 
-    async def compose_async(self, selected, *, token_budget):
+    async def compose_async(
+        self, selected, *, token_budget, retention=None, label_applicability=False
+    ):
         from daem0nmcp.retrieval.composer import CompositionResult
 
-        result = await self.delegate.compose_async(selected, token_budget=token_budget)
+        result = await self.delegate.compose_async(
+            selected,
+            token_budget=token_budget,
+            retention=retention,
+            label_applicability=label_applicability,
+        )
         return CompositionResult(
             items=(replace(result.items[0], score=999.0),),
             context=result.context,
@@ -176,10 +194,17 @@ class OutcomeFlagTamperingComposer:
     def __init__(self):
         self.delegate = AsyncComposer()
 
-    async def compose_async(self, selected, *, token_budget):
+    async def compose_async(
+        self, selected, *, token_budget, retention=None, label_applicability=False
+    ):
         from daem0nmcp.retrieval.composer import CompositionResult
 
-        result = await self.delegate.compose_async(selected, token_budget=token_budget)
+        result = await self.delegate.compose_async(
+            selected,
+            token_budget=token_budget,
+            retention=retention,
+            label_applicability=label_applicability,
+        )
         return CompositionResult(
             items=(replace(result.items[0], outcome_failed=True),),
             context=result.context,
@@ -190,10 +215,17 @@ class StructuredFieldTamperingComposer:
     def __init__(self):
         self.delegate = AsyncComposer()
 
-    async def compose_async(self, selected, *, token_budget):
+    async def compose_async(
+        self, selected, *, token_budget, retention=None, label_applicability=False
+    ):
         from daem0nmcp.retrieval.composer import CompositionResult
 
-        result = await self.delegate.compose_async(selected, token_budget=token_budget)
+        result = await self.delegate.compose_async(
+            selected,
+            token_budget=token_budget,
+            retention=retention,
+            label_applicability=label_applicability,
+        )
         return CompositionResult(
             items=(
                 replace(
@@ -210,10 +242,17 @@ class LegacyMetadataTamperingComposer:
     def __init__(self):
         self.delegate = AsyncComposer()
 
-    async def compose_async(self, selected, *, token_budget):
+    async def compose_async(
+        self, selected, *, token_budget, retention=None, label_applicability=False
+    ):
         from daem0nmcp.retrieval.composer import CompositionResult
 
-        result = await self.delegate.compose_async(selected, token_budget=token_budget)
+        result = await self.delegate.compose_async(
+            selected,
+            token_budget=token_budget,
+            retention=retention,
+            label_applicability=label_applicability,
+        )
         return CompositionResult(
             items=(
                 replace(
@@ -231,18 +270,32 @@ class BudgetTamperingComposer:
     def __init__(self):
         self.delegate = AsyncComposer()
 
-    async def compose_async(self, selected, *, token_budget):
-        return await self.delegate.compose_async(selected, token_budget=1000)
+    async def compose_async(
+        self, selected, *, token_budget, retention=None, label_applicability=False
+    ):
+        return await self.delegate.compose_async(
+            selected,
+            token_budget=1000,
+            retention=retention,
+            label_applicability=label_applicability,
+        )
 
 
 class ExcerptTamperingComposer:
     def __init__(self):
         self.delegate = AsyncComposer()
 
-    async def compose_async(self, selected, *, token_budget):
+    async def compose_async(
+        self, selected, *, token_budget, retention=None, label_applicability=False
+    ):
         from daem0nmcp.retrieval.composer import CompositionResult
 
-        result = await self.delegate.compose_async(selected, token_budget=token_budget)
+        result = await self.delegate.compose_async(
+            selected,
+            token_budget=token_budget,
+            retention=retention,
+            label_applicability=label_applicability,
+        )
         return CompositionResult(
             items=(
                 replace(
@@ -259,10 +312,17 @@ class OrderTamperingComposer:
     def __init__(self):
         self.delegate = AsyncComposer()
 
-    async def compose_async(self, selected, *, token_budget):
+    async def compose_async(
+        self, selected, *, token_budget, retention=None, label_applicability=False
+    ):
         from daem0nmcp.retrieval.composer import CompositionResult
 
-        result = await self.delegate.compose_async(selected, token_budget=token_budget)
+        result = await self.delegate.compose_async(
+            selected,
+            token_budget=token_budget,
+            retention=retention,
+            label_applicability=label_applicability,
+        )
         return CompositionResult(
             items=tuple(reversed(result.items)),
             context=replace(

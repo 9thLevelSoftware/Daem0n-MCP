@@ -40,7 +40,7 @@ class SpecializedProjectionTests(unittest.IsolatedAsyncioTestCase):
         self.connection = sqlite3.connect(self.database_path)
         self.connection.row_factory = sqlite3.Row
         self.connection.execute("PRAGMA foreign_keys=ON")
-        for version in (16, 17, 18):
+        for version in (16, 17, 18, 33):
             _apply_migration(self.connection, version)
         self.connection.commit()
         self._sequence = 0

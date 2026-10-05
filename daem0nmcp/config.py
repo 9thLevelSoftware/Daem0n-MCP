@@ -10,6 +10,7 @@ import re
 import shutil
 from collections.abc import Mapping
 from pathlib import Path
+from typing import Literal
 
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -112,6 +113,14 @@ class Settings(BaseSettings):
     retrieval_graph_max_branching: int = Field(default=50, ge=1, le=100)
     retrieval_rerank_enabled: bool = False
     retrieval_rerank_candidate_limit: int = Field(default=25, ge=1, le=1000)
+    retrieval_reranker: Literal["embedding", "late_interaction"] = "embedding"
+    retrieval_late_interaction_model: str = "colbert-ir/colbertv2.0"
+    retrieval_utility_mode: Literal["off", "shadow", "apply"] = "shadow"
+    retrieval_utility_weight: float = Field(default=0.1, ge=0.0, le=1.0)
+    retrieval_utility_credit: Literal["single_step", "trace"] = "trace"
+    retrieval_utility_candidate_limit: int = Field(default=25, ge=1, le=200)
+    memory_validity_mode: Literal["off", "shadow", "apply"] = "shadow"
+    retrieval_retention_mode: Literal["off", "shadow", "apply"] = "shadow"
 
     # File Watcher (Phase 1: Proactive Layer)
     watcher_enabled: bool = False  # Enable file watcher daemon

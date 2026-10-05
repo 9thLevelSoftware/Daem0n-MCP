@@ -799,6 +799,160 @@ class EventStore:
             """,
             values,
         )
+        if command.event_type in {"memory.created", "memory.outcome_recorded"}:
+            self._project_provenance(command, payload, event_id)
+
+    @staticmethod
+    def _is_source_provenance(
+        command: EventCommand, payload: dict[str, Any], provenance: dict[str, Any]
+    ) -> bool:
+        if command.event_type != "memory.created":
+            return False
+        if (
+            command.actor_type == "import"
+            and command.actor_id == "workspace-consolidation"
+            and set(provenance)
+            == {
+                "consolidation_run_id",
+                "source_workspace_id",
+                "source_record_id",
+                "source_event_id",
+                "source_state_hash",
+            }
+            and all(isinstance(value, str) for value in provenance.values())
+        ):
+            return (
+                provenance["consolidation_run_id"] == command.correlation_id
+                and re.fullmatch(r"con_[0-9a-f]{64}", command.correlation_id or "")
+                is not None
+                and re.fullmatch(r"ws_[0-9a-f]{24}", provenance["source_workspace_id"])
+                is not None
+                and re.fullmatch(r"mem_[0-9a-f]{64}", provenance["source_record_id"])
+                is not None
+                and re.fullmatch(r"evt_[0-9a-f]{64}", provenance["source_event_id"])
+                is not None
+                and _SHA256_RE.fullmatch(provenance["source_state_hash"]) is not None
+            )
+        if (
+            command.actor_type == "client"
+            and payload.get("semantic_namespace") == "document-ingest-url"
+            and {"url", "content_hash"}.issubset(provenance)
+            and set(provenance)
+            <= {"url", "content_hash", "content_type", "topic", "chunk_size"}
+        ):
+            return (
+                isinstance(provenance["url"], str)
+                and provenance["url"].startswith("https://")
+                and isinstance(provenance["content_hash"], str)
+                and _SHA256_RE.fullmatch(provenance["content_hash"]) is not None
+                and all(
+                    name not in provenance or isinstance(provenance[name], str)
+                    for name in ("content_type", "topic")
+                )
+                and (
+                    "chunk_size" not in provenance
+                    or (
+                        _plain_int(provenance["chunk_size"])
+                        and 256 <= provenance["chunk_size"] <= 16_000
+                    )
+                )
+            )
+        return False
+
+    def _project_provenance(
+        self,
+        command: EventCommand,
+        payload: dict[str, Any],
+        event_id: str,
+    ) -> None:
+        informed_by: list[str] = []
+        if "provenance" in payload:
+            provenance = payload["provenance"]
+            if not isinstance(provenance, dict):
+                raise ValueError("memory provenance is invalid")
+            if not self._is_source_provenance(command, payload, provenance):
+                if set(provenance) != {"informed_by"}:
+                    raise ValueError("memory provenance is invalid")
+                sources = provenance["informed_by"]
+                if (
+                    not isinstance(sources, list)
+                    or not 1 <= len(sources) <= 32
+                    or any(
+                        not isinstance(source, str)
+                        or re.fullmatch(r"mem_[0-9a-f]{64}", source) is None
+                        or source == command.stream_id
+                        for source in sources
+                    )
+                    or len(set(sources)) != len(sources)
+                ):
+                    raise ValueError("memory provenance is invalid")
+                informed_by = sources
+
+        verification = payload.get("verification")
+        if "verification" in payload:
+            if (
+                not isinstance(verification, dict)
+                or not {"kind", "command", "exit_code"}.issuperset(verification)
+                or not isinstance(verification.get("kind"), str)
+                or verification.get("kind")
+                not in {"test", "command", "review", "self_report"}
+            ):
+                raise ValueError("memory verification is invalid")
+            evidence_command = verification.get("command")
+            exit_code = verification.get("exit_code")
+            if (
+                (evidence_command is not None and not isinstance(evidence_command, str))
+                or (
+                    exit_code is not None
+                    and (
+                        not _plain_int(exit_code)
+                        or not -2_147_483_648 <= exit_code <= 2_147_483_647
+                    )
+                )
+                or (
+                    verification["kind"] in {"review", "self_report"}
+                    and (evidence_command is not None or exit_code is not None)
+                )
+            ):
+                raise ValueError("memory verification is invalid")
+
+        edge_kind = "store" if command.event_type == "memory.created" else "outcome"
+        for source in informed_by:
+            self.connection.execute(
+                """
+                INSERT INTO memory_provenance_edges (
+                    workspace_id, event_id, record_id, informed_by_record_id,
+                    edge_kind, recorded_at_us
+                ) VALUES (?,?,?,?,?,?)
+                """,
+                (
+                    command.workspace_id,
+                    event_id,
+                    command.stream_id,
+                    source,
+                    edge_kind,
+                    command.recorded_at_us,
+                ),
+            )
+        worked = payload["record"].get("worked")
+        if command.event_type == "memory.outcome_recorded" and isinstance(worked, bool):
+            from .retrieval.utility import verification_weight
+
+            self.connection.execute(
+                """
+                INSERT INTO memory_outcome_signals (
+                    workspace_id, event_id, record_id, reward, weight, recorded_at_us
+                ) VALUES (?,?,?,?,?,?)
+                """,
+                (
+                    command.workspace_id,
+                    event_id,
+                    command.stream_id,
+                    1.0 if worked else 0.0,
+                    verification_weight(worked, verification),
+                    command.recorded_at_us,
+                ),
+            )
 
     def _project_fact(self, command, payload, event_id, stream_version) -> None:
         fact = payload.get("fact")

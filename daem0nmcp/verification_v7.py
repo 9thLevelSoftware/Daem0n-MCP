@@ -50,6 +50,8 @@ from .storage_activation import (
 _DERIVED_TABLES = (
     "memory_records",
     "memory_fact_versions",
+    "memory_provenance_edges",
+    "memory_outcome_signals",
     "memory_relationship_versions",
     "governance_rules",
     "governance_context_triggers",
@@ -68,6 +70,8 @@ _REQUIRED_TABLES = frozenset(
         "legacy_id_map",
         "memory_events",
         "memory_fact_versions",
+        "memory_provenance_edges",
+        "memory_outcome_signals",
         "memory_records",
         "memory_relationship_versions",
         "projection_manifests",

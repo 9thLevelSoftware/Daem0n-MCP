@@ -6,6 +6,7 @@ import sqlite3
 import tempfile
 import threading
 import unittest
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -167,6 +168,45 @@ class FederatedRetrievalTests(unittest.TestCase):
         )
         self.assertLessEqual(result.token_usage.rendered, 12)
         self.assertEqual(1, result.rendered_context.count("\n"))
+
+    def test_validity_and_utility_survive_federated_composition(self) -> None:
+        from daem0nmcp.api.v7.federated_retrieval import compose_federated_results
+        from daem0nmcp.retrieval.runtime import CoreTokenizer
+
+        workspace_id = "ws_" + "b" * 24
+        source = self._source(workspace_id, ("b",))
+        source = replace(
+            source,
+            candidates=(
+                replace(
+                    source.candidates[0],
+                    applicability="needs_revalidation",
+                    changed_bindings=("src/handler.py::handler.run",),
+                    utility=0.65,
+                ),
+            ),
+        )
+        query = _query(workspace_id, token_budget=128)
+        shadow = compose_federated_results({workspace_id: source}, query)
+        applied = compose_federated_results(
+            {workspace_id: source}, query, label_applicability=True
+        )
+        self.assertEqual("[E1] linked", shadow.rendered_context)
+        self.assertEqual("needs_revalidation", shadow.items[0].applicability)
+        self.assertEqual(0.65, shadow.items[0].utility)
+        self.assertEqual(
+            ["src/handler.py::handler.run"], applied.items[0].changed_bindings
+        )
+        self.assertIn(
+            "Needs revalidation: src/handler.py::handler.run", applied.rendered_context
+        )
+        self.assertEqual("linked", applied.items[0].bounded_excerpt)
+        self.assertEqual(
+            CoreTokenizer().count_tokens(applied.rendered_context),
+            applied.token_usage.rendered,
+        )
+        self.assertEqual(applied.token_usage.rendered, applied.token_usage.requested)
+        self.assertEqual(0, applied.token_usage.dropped)
 
     @staticmethod
     def _source(workspace_id: str, suffixes: tuple[str, ...], content="linked"):

@@ -42,6 +42,8 @@ _V7_FORMAT_TABLES = frozenset(
         "memory_events",
         "memory_records",
         "memory_fact_versions",
+        "memory_provenance_edges",
+        "memory_outcome_signals",
         "memory_relationship_versions",
         "projection_manifests",
         "enrichment_decisions",
@@ -276,7 +278,7 @@ def has_canonical_v7_state(database_path: str | os.PathLike[str]) -> bool:
                     "SELECT name FROM sqlite_master WHERE type='table'"
                 )
             }
-            if "schema_version" not in tables or not tables >= _V7_FORMAT_TABLES:
+            if "schema_version" not in tables:
                 return False
             version = int(
                 connection.execute(
@@ -284,6 +286,14 @@ def has_canonical_v7_state(database_path: str | os.PathLike[str]) -> bool:
                 ).fetchone()[0]
             )
             if version < _V7_FORMAT_MIN_SCHEMA_VERSION:
+                return False
+            required_tables = _V7_FORMAT_TABLES
+            if version < 33:
+                required_tables = required_tables - {
+                    "memory_provenance_edges",
+                    "memory_outcome_signals",
+                }
+            if not tables >= required_tables:
                 return False
             return any(
                 connection.execute(f'SELECT 1 FROM "{table}" LIMIT 1').fetchone()
