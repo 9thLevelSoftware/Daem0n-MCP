@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import gc
 import hashlib
 import importlib.util
 import json
+import os
 import shutil
 import sqlite3
 import tempfile
@@ -740,6 +742,75 @@ class DenseProjectionTests(unittest.TestCase):
             client.close()
         shutil.rmtree(qdrant_path)
         self.assertFalse(qdrant_path.exists())
+
+    @unittest.skipUnless(os.name == "nt", "native Windows storage ownership")
+    @unittest.skipUnless(
+        importlib.util.find_spec("qdrant_client"),
+        "optional local Qdrant is unavailable",
+    )
+    def test_retired_local_generation_releases_storage_without_cyclic_gc(self):
+        from qdrant_client import QdrantClient
+
+        from daem0nmcp.retrieval.dense_generation_gc import (
+            DenseGenerationGarbageCollector,
+        )
+        from daem0nmcp.retrieval.dense_projection import DenseProjectionBuilder
+
+        qdrant_path = self.database_path.parent / "retired-local-qdrant"
+        client = QdrantClient(path=str(qdrant_path))
+        builder = DenseProjectionBuilder(
+            self.connection,
+            provider_key="local",
+            model_id="deterministic-test-model",
+            dimension=3,
+            encoder=self.encoder,
+            client=client,
+            collection_prefix="test-dense",
+            clock_us=lambda: 500,
+        )
+        gc_was_enabled = gc.isenabled()
+        gc.disable()
+        try:
+            generations = []
+            for index, suffix in enumerate(("a", "b", "c"), start=1):
+                self._append(suffix, f"native generation {index}")
+                generations.append(builder.rebuild(WORKSPACE_ID))
+
+            result = DenseGenerationGarbageCollector(
+                self.connection,
+                client=client,
+                clock_us=lambda: 501,
+                token_factory=lambda: "native-windows-gc-claim",
+            ).run_slice(max_generations=2)
+            self.assertEqual(
+                [(1, "succeeded")],
+                [(item.generation, item.status) for item in result],
+            )
+            retired = generations[0].collection_name
+            self.assertFalse(client.collection_exists(retired))
+            self.assertFalse((qdrant_path / "collection" / retired).exists())
+            self.assertEqual(
+                [(2, "ready"), (3, "active")],
+                [
+                    tuple(row)
+                    for row in self.connection.execute(
+                        "SELECT generation,status FROM projection_manifests "
+                        "WHERE projection_name='dense' ORDER BY generation"
+                    )
+                ],
+            )
+            for generation in generations[1:]:
+                self.assertTrue(client.collection_exists(generation.collection_name))
+            builder.close()
+            client.close()
+            released_path = qdrant_path.with_name("released-local-qdrant")
+            qdrant_path.rename(released_path)
+            shutil.rmtree(released_path)
+        finally:
+            builder.close()
+            client.close()
+            if gc_was_enabled:
+                gc.enable()
 
     def test_cosine_rounding_does_not_admit_corrupt_or_malformed_vectors(self):
         from daem0nmcp.retrieval.vector_validation import cosine_vectors_match

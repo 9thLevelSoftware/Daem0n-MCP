@@ -25,6 +25,7 @@ from .providers import (
     dense_builder_contract,
     dense_manifest_details,
     qdrant_collection_exists,
+    qdrant_delete_collection,
 )
 from .vector_validation import (
     VECTOR_ATTESTATION_FORMAT,
@@ -727,7 +728,7 @@ class DenseProjectionBuilder:
         try:
             client = self._get_client()
             if self._collection_exists(client, collection_name):
-                self._delete_collection(client, collection_name)
+                qdrant_delete_collection(client, collection_name)
         except Exception:
             pass
 
@@ -1119,22 +1120,6 @@ class DenseProjectionBuilder:
     def _collection_exists(client: object, collection_name: str) -> bool:
         return qdrant_collection_exists(client, collection_name)
 
-    @staticmethod
-    def _delete_collection(client: object, collection_name: str) -> None:
-        if type(client).__module__.startswith("qdrant_client"):
-            from qdrant_client import QdrantClient
-            from qdrant_client.local.qdrant_local import QdrantLocal
-
-            if isinstance(client, QdrantClient) and isinstance(
-                client._client, QdrantLocal
-            ):
-                collection = client._client.collections.get(collection_name)
-                if collection is not None:
-                    # Local deletion drops the collection without closing SQLite;
-                    # client.close() cannot reach that persistence afterward.
-                    collection.close()
-        client.delete_collection(collection_name)
-
     def _qdrant_vector_config(self, client: object) -> object:
         models = self._models_for_client(client)
         if models is None:
@@ -1183,7 +1168,7 @@ class DenseProjectionBuilder:
         exists = self._collection_exists(client, collection_name)
         self._check_cancelled()
         if exists:
-            self._delete_collection(client, collection_name)
+            qdrant_delete_collection(client, collection_name)
             self._check_cancelled()
         client.create_collection(
             collection_name=collection_name,

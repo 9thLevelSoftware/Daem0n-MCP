@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import gc
 import hashlib
 import json
+import os
+import shutil
 import sqlite3
 import threading
 from datetime import timedelta
@@ -877,6 +880,143 @@ def test_vector_provider_checkpoint_cleans_candidate_after_cancellation(
     assert client.deleted
     assert client.closed
     assert backend.collections == {}
+
+
+@pytest.mark.skipif(os.name != "nt", reason="native Windows storage ownership")
+@pytest.mark.parametrize(
+    "cleanup",
+    ("discard", "cancelled", "promote", "promote_existing", "promotion_cancelled"),
+)
+def test_local_vector_candidate_cleanup_releases_storage_without_cyclic_gc(
+    tmp_path: Path, cleanup: str
+):
+    qdrant = pytest.importorskip("qdrant_client")
+    from daem0nmcp.api.v7.portable_projections import activate_vector_candidate
+
+    fixture = _fixture(tmp_path / "target")
+    vectors = tmp_path / "vectors.jsonl"
+    vectors.write_bytes(b"")
+    prepared = PreparedImport(
+        session_id="ipt_" + "4" * 64,
+        database_path=tmp_path / "events.db",
+        manifest={
+            "event_count": 0,
+            "event_root_hash": hashlib.sha256().hexdigest(),
+            "vectors": _vector_metadata("portable-model"),
+        },
+        legacy_path=None,
+        vectors_path=vectors,
+        page_count=1,
+    )
+    config = _config()
+    config.qdrant_url = None
+    config.qdrant_api_key = None
+    config.qdrant_path = fixture.storage / "qdrant"
+    connection = sqlite3.connect(fixture.database)
+    candidate = None
+    checkpoints = 0
+
+    def cancel_staging() -> None:
+        nonlocal checkpoints
+        checkpoints += 1
+        if checkpoints == 4:
+            raise PortableTransferError("CANCELLED")
+
+    gc_was_enabled = gc.isenabled()
+    gc.disable()
+    try:
+        if cleanup == "cancelled":
+            with pytest.raises(PortableTransferError, match="CANCELLED"):
+                prepare_vector_candidate(
+                    prepared,
+                    connection,
+                    WORKSPACE_ID,
+                    config,
+                    local_capability_ready=True,
+                    checkpoint=cancel_staging,
+                )
+            assert not list((config.qdrant_path / "collection").iterdir())
+        else:
+            candidate, diagnostic = prepare_vector_candidate(
+                prepared,
+                connection,
+                WORKSPACE_ID,
+                config,
+                local_capability_ready=True,
+            )
+            assert candidate is not None
+            assert diagnostic is None
+            temporary_collection = candidate.collection_name
+            if cleanup == "discard":
+                candidate.discard(connection, WORKSPACE_ID)
+            else:
+                final_collection = str(
+                    dense_manifest_details(
+                        workspace_id=WORKSPACE_ID,
+                        provider_key=candidate.provider_key,
+                        generation=candidate.generation,
+                        model_id=candidate.model_id,
+                        dimension=candidate.dimension,
+                        collection_prefix=candidate.collection_prefix,
+                    )["collection_name"]
+                )
+                if cleanup == "promote_existing":
+                    candidate.client.create_collection(
+                        collection_name=final_collection,
+                        vectors_config=qdrant.models.VectorParams(
+                            size=3, distance=qdrant.models.Distance.COSINE
+                        ),
+                    )
+                if cleanup == "promotion_cancelled":
+                    final_seen = False
+
+                    def cancel_promotion() -> None:
+                        nonlocal final_seen
+                        if candidate.client.collection_exists(final_collection):
+                            if final_seen:
+                                raise PortableTransferError("CANCELLED")
+                            final_seen = True
+
+                    with pytest.raises(PortableTransferError, match="CANCELLED"):
+                        activate_vector_candidate(
+                            candidate,
+                            connection,
+                            WORKSPACE_ID,
+                            now_us=500,
+                            checkpoint=cancel_promotion,
+                        )
+                    assert not candidate.client.collection_exists(final_collection)
+                    assert not (
+                        config.qdrant_path / "collection" / final_collection
+                    ).exists()
+                    candidate.discard(connection, WORKSPACE_ID)
+                else:
+                    activate_vector_candidate(
+                        candidate, connection, WORKSPACE_ID, now_us=500
+                    )
+                    connection.commit()
+                    assert candidate.client.collection_exists(final_collection)
+                    assert not candidate.client.collection_exists(temporary_collection)
+                    manifests = connection.execute(
+                        "SELECT generation,status,row_count FROM projection_manifests "
+                        "WHERE workspace_id=? AND projection_name='dense'",
+                        (WORKSPACE_ID,),
+                    ).fetchall()
+                    assert manifests == [(1, "active", 0)]
+                    candidate.close()
+            assert not (
+                config.qdrant_path / "collection" / temporary_collection
+            ).exists()
+        connection.close()
+        released_storage = fixture.storage.with_name("released-storage")
+        fixture.storage.rename(released_storage)
+        shutil.rmtree(released_storage)
+    finally:
+        if candidate is not None:
+            candidate.close()
+        connection.close()
+        if gc_was_enabled:
+            gc.enable()
 
 
 def _point_field(point: object, name: str):

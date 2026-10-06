@@ -48,6 +48,7 @@ from ...retrieval.providers import (
     create_qdrant_client,
     dense_manifest_details,
     dense_query_encoder_matches_contract,
+    qdrant_delete_collection,
 )
 from ...retrieval.vector_validation import (
     VECTOR_ATTESTATION_FORMAT,
@@ -1811,7 +1812,7 @@ class VectorCandidate:
             if connection is not None:
                 active = _active_vector_collection(connection, self.collection_name)
             if active is None:
-                self.client.delete_collection(self.collection_name)
+                qdrant_delete_collection(self.client, self.collection_name)
                 if (
                     connection is not None
                     and self.session_id is not None
@@ -1867,7 +1868,7 @@ def _reclaim_stale_vector_artifacts(
         if active is not None:
             continue
         if client.collection_exists(str(artifact_name)):
-            client.delete_collection(str(artifact_name))
+            qdrant_delete_collection(client, str(artifact_name))
         if checkpoint is not None:
             checkpoint()
         connection.execute(
@@ -2322,7 +2323,7 @@ def prepare_vector_candidate(
                     and _active_vector_collection(connection, collection_name) is None
                 ):
                     if client.collection_exists(collection_name):
-                        client.delete_collection(collection_name)
+                        qdrant_delete_collection(client, collection_name)
                     # A failed or unacknowledged deletion must leave its durable
                     # recovery record intact for the next finalization owner.
                     if (
@@ -2417,7 +2418,7 @@ def activate_vector_candidate(
         except PortableTransferError as exc:
             candidate.collection_name = temporary_collection
             raise PortableTransferError("VECTOR_REBUILD_REQUIRED") from exc
-        candidate.client.delete_collection(temporary_collection)
+        qdrant_delete_collection(candidate.client, temporary_collection)
     else:
         if checkpoint is not None:
             checkpoint()
@@ -2458,7 +2459,7 @@ def activate_vector_candidate(
                         checkpoint()
                 if promotion_offset is None:
                     break
-            candidate.client.delete_collection(temporary_collection)
+            qdrant_delete_collection(candidate.client, temporary_collection)
             candidate.collection_name = final_collection
         if (
             candidate.session_id is not None
@@ -2479,7 +2480,7 @@ def activate_vector_candidate(
     except Exception:
         if not final_exists:
             with suppress(Exception):
-                candidate.client.delete_collection(final_collection)
+                qdrant_delete_collection(candidate.client, final_collection)
         raise
     connection.execute(
         "CREATE TEMP TABLE IF NOT EXISTS portable_vector_refs("

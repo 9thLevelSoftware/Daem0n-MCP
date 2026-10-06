@@ -25,6 +25,7 @@ from qdrant_client.models import (
 )
 
 from .config import settings
+from .retrieval.providers import qdrant_delete_collection
 
 logger = logging.getLogger(__name__)
 
@@ -68,7 +69,7 @@ class QdrantVectorStore:
                         f"Collection {coll_name} has dimension {existing_dim}, "
                         f"expected {self.EMBEDDING_DIMENSION}. Recreating collection."
                     )
-                    self.client.delete_collection(coll_name)
+                    qdrant_delete_collection(self.client, coll_name)
                     collections.remove(coll_name)
 
             if coll_name not in collections:
