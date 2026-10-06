@@ -498,6 +498,22 @@ def create_qdrant_client(
     return factory(path=path)
 
 
+def qdrant_delete_collection(client: object, collection_name: str) -> None:
+    """Release owned local persistence before removing a provider collection."""
+
+    if type(client).__module__.startswith("qdrant_client"):
+        from qdrant_client import QdrantClient
+        from qdrant_client.local.qdrant_local import QdrantLocal
+
+        if isinstance(client, QdrantClient) and isinstance(client._client, QdrantLocal):
+            collection = client._client.collections.get(collection_name)
+            if collection is not None:
+                # Local deletion drops the collection without closing SQLite;
+                # client.close() cannot reach that persistence afterward.
+                collection.close()
+    client.delete_collection(collection_name)
+
+
 def qdrant_collection_exists(client: object, collection_name: str) -> bool:
     """Check collection presence across the supported Qdrant client range."""
 
@@ -1463,4 +1479,5 @@ __all__ = [
     "dense_manifest_details",
     "dense_point_id",
     "qdrant_collection_exists",
+    "qdrant_delete_collection",
 ]

@@ -1,5 +1,8 @@
 """Tests for the vector embeddings module."""
 
+import gc
+import os
+import shutil
 from importlib.util import find_spec
 from unittest.mock import MagicMock, patch
 
@@ -180,3 +183,52 @@ class TestGetDimension:
         from daem0nmcp.vectors import get_dimension
 
         assert get_dimension() == settings.embedding_dimension
+
+
+@pytest.mark.skipif(os.name != "nt", reason="native Windows storage ownership")
+def test_local_dimension_replacement_releases_storage_without_cyclic_gc(tmp_path):
+    qdrant = pytest.importorskip("qdrant_client")
+    from daem0nmcp.qdrant_store import QdrantVectorStore
+
+    class ReconfiguredStore(QdrantVectorStore):
+        EMBEDDING_DIMENSION = 2
+
+    storage = tmp_path / "qdrant"
+    seed = qdrant.QdrantClient(path=str(storage))
+    store = None
+    gc_was_enabled = gc.isenabled()
+    gc.disable()
+    try:
+        collections = (
+            QdrantVectorStore.COLLECTION_MEMORIES,
+            QdrantVectorStore.COLLECTION_CODE,
+        )
+        for collection_name in collections:
+            seed.create_collection(
+                collection_name=collection_name,
+                vectors_config=qdrant.models.VectorParams(
+                    size=3, distance=qdrant.models.Distance.COSINE
+                ),
+            )
+            seed.upsert(
+                collection_name=collection_name,
+                points=[qdrant.models.PointStruct(id=1, vector=[1.0, 0.0, 0.0])],
+                wait=True,
+            )
+        seed.close()
+        store = ReconfiguredStore(path=str(storage))
+        for collection_name in collections:
+            info = store.client.get_collection(collection_name)
+            assert info.config.params.vectors.size == 2
+            count = store.client.count(collection_name=collection_name, exact=True)
+            assert count.count == 0
+        store.close()
+        released_storage = storage.with_name("released-qdrant")
+        storage.rename(released_storage)
+        shutil.rmtree(released_storage)
+    finally:
+        if store is not None:
+            store.close()
+        seed.close()
+        if gc_was_enabled:
+            gc.enable()

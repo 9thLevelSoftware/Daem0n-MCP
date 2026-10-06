@@ -9,9 +9,12 @@ import sqlite3
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from typing import Protocol, cast
 
-from .providers import dense_manifest_details, qdrant_collection_exists
+from .providers import (
+    dense_manifest_details,
+    qdrant_collection_exists,
+    qdrant_delete_collection,
+)
 
 _WORKSPACE_ID = re.compile(r"^ws_[0-9a-f]{24}$")
 _OWNER_ID = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
@@ -32,10 +35,6 @@ class DenseGenerationLifecycleError(RuntimeError):
     def __init__(self, code: str) -> None:
         self.code = code
         super().__init__(code)
-
-
-class _DenseCollectionClient(Protocol):
-    def delete_collection(self, collection_name: str) -> object: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -522,7 +521,7 @@ class DenseGenerationGarbageCollector:
         ):
             raise ValueError("claim_owner is invalid")
         self.connection = connection
-        self.client = cast(_DenseCollectionClient, client)
+        self.client = client
         self._clock_us = clock_us
         self._claim_owner = claim_owner
         self._token_factory = token_factory or (lambda: secrets.token_hex(24))
@@ -706,7 +705,7 @@ class DenseGenerationGarbageCollector:
                     claim, "DENSE_GENERATION_GC_CANCELLED", consume=False
                 )
             if exists:
-                self.client.delete_collection(claim.collection_name)
+                qdrant_delete_collection(self.client, claim.collection_name)
             if self._cancelled():
                 return self._record_failure(
                     claim, "DENSE_GENERATION_GC_CANCELLED", consume=False
