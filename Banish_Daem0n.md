@@ -436,7 +436,7 @@ Report to the summoner:
 > - Grimoire: **Preserved** for re-summoning
 >
 > To re-summon the Daem0n later:
-> - Claude Code (Unix/macOS): `claude mcp add daem0nmcp --scope user -- <python_path> -m daem0nmcp.server`
+> - Claude Code (Unix/macOS): `claude mcp add daem0nmcp --scope user -- <python_path> -c "import sys; sys.path = [p for p in sys.path if p]; import runpy; runpy.run_module('daem0nmcp.server', run_name='__main__', alter_sys=True)"`
 > - Claude Code (Windows): Re-add the mcpServers entry and light the Altar
 > - OpenCode: Run `python -m daem0nmcp.cli install-opencode` to regenerate opencode.json
 >

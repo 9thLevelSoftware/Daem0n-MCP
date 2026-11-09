@@ -9,10 +9,32 @@ import json
 import os
 import sys
 import threading
+from itertools import pairwise
 from pathlib import Path
 from typing import Any, NoReturn
 
 MAX_HOOK_INPUT_BYTES = 256 * 1024
+
+REINSTALL_NOTICE = (
+    "Daem0n: these Claude Code hooks were installed by an older version whose "
+    "launch command also imports from the project a session is opened in. "
+    "Run python -m daem0nmcp.cli install-claude-hooks once to rewrite them."
+)
+
+
+def started_by_module_switch() -> bool:
+    """Whether an older hook command (``python -m``) started this process.
+
+    That form leaves the working directory first on ``sys.path``; the
+    installer now writes one that does not, so settings written before it
+    need one re-run of ``install-claude-hooks``.
+    """
+    if sys.flags.isolated or getattr(sys.flags, "safe_path", False):
+        return False
+    return any(
+        flag == "-m" and module.startswith("daem0nmcp.claude_hooks.")
+        for flag, module in pairwise(sys.orig_argv)
+    )
 
 
 def read_hook_event() -> dict[str, Any]:

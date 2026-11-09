@@ -9,11 +9,13 @@ from pathlib import Path
 
 import pytest
 
+from daem0nmcp.claude_hooks.install import module_launch_args
 from daem0nmcp.edit_bridge_transport import provision_bridge_credential
 from daem0nmcp.opencode_install import (
     COMMAND_TEMPLATES,
     PLUGIN_TEMPLATE,
     install_opencode,
+    render_plugin,
     select_opencode_interface,
 )
 
@@ -57,10 +59,12 @@ def test_install_creates_plugin_file(tmp_path):
     environment = config["mcp"]["daem0nmcp"]["environment"]
     assert config["mcp"]["daem0nmcp"]["command"] == [
         sys.executable,
-        "-m",
-        "daem0nmcp",
+        *module_launch_args("daem0nmcp"),
     ]
-    assert environment["DAEM0NMCP_PYTHON_EXECUTABLE"] == sys.executable
+    # The hook interpreter is fixed in the plugin, never read from this file.
+    assert "DAEM0NMCP_PYTHON_EXECUTABLE" not in environment
+    assert content == render_plugin(sys.executable)
+    assert content != PLUGIN_TEMPLATE
     credential = Path(environment["DAEM0NMCP_EDIT_BRIDGE_CREDENTIAL_FILE"])
     assert credential.is_file()
     secret = json.loads(credential.read_text(encoding="utf-8"))["secret"]
@@ -103,6 +107,7 @@ def test_install_remote_pairing_passes_only_protected_host_paths(tmp_path, monke
         "DAEM0NMCP_EDIT_BRIDGE_REMOTE_URL",
         "DAEM0NMCP_EDIT_BRIDGE_CA_FILE",
         "DAEM0NMCP_EDIT_BRIDGE_ORIGIN",
+        "DAEM0NMCP_PYTHON_EXECUTABLE",
     ):
         assert name not in environment
     assert "DAEM0NMCP_EDIT_BRIDGE_MODE" not in config["mcp"]["daem0nmcp"]["environment"]
@@ -129,6 +134,87 @@ def test_install_plugin_idempotent(tmp_path):
 
     assert "[exists] .opencode/plugins/daem0n.ts" in msg2
     assert plugin.read_text(encoding="utf-8") == content_after_first
+    assert "[outdated]" not in msg2
+    assert "server command" not in msg2
+
+
+def test_reinstall_upgrades_an_older_server_command_and_flags_an_older_plugin(
+    tmp_path,
+):
+    """Files from an older install are kept; only their ``-m`` launches are not."""
+    older_plugin = (
+        "const mod = `daem0nmcp.claude_hooks.${module}`;\n"
+        'child = Bun.spawn([python, "-m", mod], { cwd: directory });\n'
+    )
+    plugin = tmp_path / ".opencode" / "plugins" / "daem0n.ts"
+    plugin.parent.mkdir(parents=True)
+    plugin.write_text(older_plugin, encoding="utf-8")
+    config_path = tmp_path / "opencode.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "theme": "mine",
+                "mcp": {
+                    "other": {"type": "remote", "url": "https://example.test/mcp"},
+                    "daem0nmcp": {
+                        "type": "local",
+                        "command": ["/opt/python", "-m", "daem0nmcp"],
+                    },
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    ok, dry_run = install_opencode(str(tmp_path), dry_run=True)
+    assert ok, dry_run
+    assert "[update] opencode.json Daem0n server command" in dry_run
+    assert json.loads(config_path.read_text(encoding="utf-8"))["mcp"]["daem0nmcp"][
+        "command"
+    ] == ["/opt/python", "-m", "daem0nmcp"]
+
+    ok, msg = install_opencode(
+        str(tmp_path), bridge_config_root=tmp_path / "host-config"
+    )
+
+    assert ok, msg
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    assert config["theme"] == "mine"
+    assert config["mcp"]["other"] == {
+        "type": "remote",
+        "url": "https://example.test/mcp",
+    }
+    assert config["mcp"]["daem0nmcp"]["command"] == [
+        "/opt/python",
+        *module_launch_args("daem0nmcp"),
+    ]
+    assert "[update] opencode.json Daem0n server command" in msg
+    assert plugin.read_text(encoding="utf-8") == older_plugin
+    assert "[outdated] .opencode/plugins/daem0n.ts" in msg
+    assert "--force" in msg
+
+    ok, again = install_opencode(
+        str(tmp_path), bridge_config_root=tmp_path / "host-config"
+    )
+    assert ok, again
+    assert "server command" not in again
+
+
+def test_reinstall_leaves_a_custom_server_command_alone(tmp_path):
+    config_path = tmp_path / "opencode.json"
+    original = {
+        "mcp": {"daem0nmcp": {"type": "local", "command": ["uvx", "daem0nmcp"]}}
+    }
+    config_path.write_text(json.dumps(original), encoding="utf-8")
+
+    ok, msg = install_opencode(
+        str(tmp_path), bridge_config_root=tmp_path / "host-config"
+    )
+
+    assert ok, msg
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    assert config["mcp"]["daem0nmcp"]["command"] == ["uvx", "daem0nmcp"]
+    assert "server command" not in msg
 
 
 def test_install_plugin_force_overwrites(tmp_path):
@@ -148,7 +234,7 @@ def test_install_plugin_force_overwrites(tmp_path):
     assert "[overwrite] .opencode/plugins/daem0n.ts" in msg2
 
     restored = plugin.read_text(encoding="utf-8")
-    assert restored == PLUGIN_TEMPLATE
+    assert restored == render_plugin(sys.executable)
 
 
 def test_install_dry_run_no_plugin_file(tmp_path):

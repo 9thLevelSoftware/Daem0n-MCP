@@ -15,6 +15,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from .claude_hooks.install import module_launch_args
 from .edit_host import BridgeInstallation, provision_client_bridge_installation
 
 
@@ -34,7 +35,8 @@ OPENCODE_JSON_TEMPLATE: dict[str, Any] = {
     "mcp": {
         "daem0nmcp": {
             "type": "local",
-            "command": ["python", "-m", "daem0nmcp"],
+            # Not "-m": OpenCode starts the server inside the opened project.
+            "command": ["python", *module_launch_args("daem0nmcp")],
             "enabled": True,
             "environment": {"PYTHONUNBUFFERED": "1"},
         }
@@ -52,6 +54,47 @@ COMMAND_TEMPLATES = {
     for command in _ASSETS.joinpath("commands").iterdir()
     if command.name.endswith(".md")
 }
+
+_PLUGIN_PYTHON_LINE = 'const PYTHON_EXECUTABLE = "python";'
+
+
+def render_plugin(python: str) -> str:
+    """Return the plugin source with *python* as the interpreter for its hooks.
+
+    The interpreter is fixed here, at install time: a value the plugin read
+    from the project at run time would let any opened repository choose the
+    program its hooks execute.
+    """
+    if PLUGIN_TEMPLATE.count(_PLUGIN_PYTHON_LINE) != 1:
+        raise ValueError("the packaged plugin has no interpreter line")
+    return PLUGIN_TEMPLATE.replace(
+        _PLUGIN_PYTHON_LINE, f"const PYTHON_EXECUTABLE = {json.dumps(python)};"
+    )
+
+
+def _plugin_is_outdated(path: Path) -> bool:
+    """Whether an installed plugin still starts its hooks with ``python -m``."""
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, ValueError):
+        return False
+    return "daem0nmcp.claude_hooks" in text and '"-m"' in text
+
+
+def _upgrade_server_command(path: Path, dry_run: bool) -> bool:
+    """Rewrite the ``-m`` server command older installers wrote; True if it was."""
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+        server = value["mcp"]["daem0nmcp"]
+        interpreter, flag, module = server["command"]
+        if flag != "-m" or module not in {"daem0nmcp", "daem0nmcp.server"}:
+            return False
+        if not dry_run:
+            server["command"] = [interpreter, *module_launch_args(module)]
+            path.write_text(json.dumps(value, indent=2) + "\n", encoding="utf-8")
+        return True
+    except (OSError, ValueError, KeyError, TypeError):
+        return False
 
 
 def detect_clients(project_path: Path) -> dict[str, Any]:
@@ -143,15 +186,13 @@ def _configured_template(
     template = copy.deepcopy(OPENCODE_JSON_TEMPLATE)
     template["mcp"]["daem0nmcp"]["command"] = [
         sys.executable,
-        "-m",
-        "daem0nmcp",
+        *module_launch_args("daem0nmcp"),
     ]
     if installation is not None:
         installation_environment = installation.environment()
         if installation_environment.get("DAEM0NMCP_EDIT_BRIDGE_MODE") != "remote-https":
             environment = template["mcp"]["daem0nmcp"]["environment"]
             environment.update(installation_environment)
-            environment["DAEM0NMCP_PYTHON_EXECUTABLE"] = sys.executable
     return template
 
 
@@ -175,16 +216,6 @@ def _configure_existing_daem0n(
         if not isinstance(environment, dict):
             return False
         environment.update(installation_environment)
-        command = server.get("command")
-        executable = (
-            command[0]
-            if isinstance(command, list)
-            and command
-            and isinstance(command[0], str)
-            and command[0]
-            else sys.executable
-        )
-        environment["DAEM0NMCP_PYTHON_EXECUTABLE"] = executable
         path.write_text(json.dumps(value, indent=2) + "\n", encoding="utf-8")
         return True
     except (KeyError, TypeError, OSError, json.JSONDecodeError):
@@ -295,6 +326,10 @@ def install_opencode(
         json_path = root / "opencode.json"
         status = _ensure_file(json_path, json_content, dry_run, force, root)
         lines.append(f"  {status} opencode.json")
+        if status == "[exists]" and _upgrade_server_command(json_path, dry_run):
+            lines.append(
+                '  [update] opencode.json Daem0n server command (was "python -m")'
+            )
         if (
             installation is not None
             and status == "[exists]"
@@ -310,7 +345,6 @@ def install_opencode(
             == "remote-https"
         ):
             host_environment = installation.environment()
-            host_environment["DAEM0NMCP_PYTHON_EXECUTABLE"] = sys.executable
             host_path = opencode_root / "daem0n-host.json"
             if not dry_run:
                 host_path.write_text(
@@ -321,8 +355,15 @@ def install_opencode(
 
         # -- Ensure plugin file ------------------------------------------
         plugin_path = opencode_root / "plugins" / "daem0n.ts"
-        status = _ensure_file(plugin_path, PLUGIN_TEMPLATE, dry_run, force, root)
+        status = _ensure_file(
+            plugin_path, render_plugin(sys.executable), dry_run, force, root
+        )
         lines.append(f"  {status} .opencode/plugins/daem0n.ts")
+        if status == "[exists]" and _plugin_is_outdated(plugin_path):
+            lines.append(
+                '  [outdated] .opencode/plugins/daem0n.ts starts hooks with "python'
+                ' -m"; delete it and re-run, or re-run with --force'
+            )
 
         # -- Ensure slash-command files ----------------------------------
         for name, content in sorted(COMMAND_TEMPLATES.items()):

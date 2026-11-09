@@ -25,13 +25,22 @@ retired tool name.
 
 Daem0n v7 supports stdio and Streamable HTTP.
 
-For a user-scoped stdio connection:
+For a user-scoped stdio connection, install the package, print the full path of
+that interpreter, and register it in place of `<PYTHON_PATH>`:
 
 ```bash
 python -m pip install -e "/path/to/Daem0n-MCP"
-claude mcp add daem0nmcp --scope user -- python -m daem0nmcp.server
+python -c "import sys; print(sys.executable)"
+claude mcp add daem0nmcp --scope user -- <PYTHON_PATH> -c "import sys; sys.path = [p for p in sys.path if p]; import runpy; runpy.run_module('daem0nmcp.server', run_name='__main__', alter_sys=True)"
 claude mcp list
 ```
+
+Register exactly that command, not `<PYTHON_PATH> -m daem0nmcp.server`. Claude
+Code starts a user-scoped server inside whatever project is open, and `-m` puts
+that directory first on `sys.path`, so a repository containing its own
+`daem0nmcp/` directory would run instead of the installed server. The command
+above runs the same module after dropping the working directory from the import
+path.
 
 For Streamable HTTP, start the launcher and point the Claude MCP configuration
 at its single MCP endpoint:
@@ -178,6 +187,11 @@ bridge: an owner-only credential under `~/.daem0nmcp/edit-bridges/<authority>/`
 and bridge path env keys in `<project>/.claude/settings.local.json`. The old
 `hooks/daem0n_*.py` scripts are deprecated stubs; re-run `install-claude-hooks`
 if your settings still point at them.
+
+Re-run the installer after upgrading as well. Earlier versions wrote hook
+commands of the form `"<python>" -m daem0nmcp.claude_hooks.<hook>`, which import
+a `daem0nmcp/` directory from any project a session is opened in; the installer
+replaces them with a form that does not.
 
 ## 10. Migration reference
 

@@ -7,13 +7,19 @@ establish communion for an invocation scope.
 
 from __future__ import annotations
 
+import json
 import sqlite3
 import sys
 from pathlib import Path
 
 from ..storage_activation import PointerValidationError, resolve_active_database
 from ..workspace import WorkspaceRegistry
-from ._client import get_project_path, succeed
+from ._client import (
+    REINSTALL_NOTICE,
+    get_project_path,
+    started_by_module_switch,
+    succeed,
+)
 
 _BUSY_TIMEOUT_MS = 2000
 
@@ -103,13 +109,27 @@ def main() -> None:
     if project_path is None:
         sys.exit(0)
     workspace_id = _workspace_id(project_path)
-    succeed(
+    message = (
         "[Daem0n] IMPORTANT: The first Daem0n call establishes this invocation's "
         "v7 session and brief automatically (meta.covenant.auto_brief). "
         f'Use workspace_id="{workspace_id}". Call '
         f'mcp__daem0nmcp__session_brief(workspace_id="{workspace_id}") '
         "for the full brief."
     )
+    if started_by_module_switch():
+        # JSON output lets the notice reach the user, not only the model.
+        succeed(
+            json.dumps(
+                {
+                    "systemMessage": REINSTALL_NOTICE,
+                    "hookSpecificOutput": {
+                        "hookEventName": "SessionStart",
+                        "additionalContext": message,
+                    },
+                }
+            )
+        )
+    succeed(message)
 
 
 if __name__ == "__main__":

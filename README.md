@@ -77,6 +77,12 @@ Start the stdio server with `python -m daem0nmcp.server`, or use
 9876` for loopback HTTP. A remote HTTP deployment requires configured transport
 authentication and security policy; it is not a redirect-based setup.
 
+`python -m` resolves `daem0nmcp` from the current directory first, so type these
+commands (and the `python -m daem0nmcp.cli` ones) from a directory you trust.
+Commands that a host launches for you inside a project never use `-m`: the
+installers and the [registration command](#linux--macos-stdio-transport) drop
+the current directory from the import path first.
+
 The complete setup, exact preflight examples, migrations, native client
 installers, diagnostics, and all **75** registered v7 tools are in
 [the v7 operations guide](docs/v7-operations.md). The release ledger remains
@@ -345,10 +351,18 @@ python ~/Daem0n-MCP/start_server.py --port 9876
 python3 -c "import sys; print(sys.executable)"
 
 # Register with Claude Code (replace <PYTHON_PATH>)
-claude mcp add daem0nmcp --scope user -- <PYTHON_PATH> -m daem0nmcp.server
+claude mcp add daem0nmcp --scope user -- <PYTHON_PATH> -c "import sys; sys.path = [p for p in sys.path if p]; import runpy; runpy.run_module('daem0nmcp.server', run_name='__main__', alter_sys=True)"
 
 # Restart Claude Code
 ```
+
+Do not register `<PYTHON_PATH> -m daem0nmcp.server` at user scope. Claude Code
+starts a user-scoped server inside whatever project you open, and `python -m`
+puts that directory first on `sys.path`, so a repository that contains its own
+`daem0nmcp/` directory would run in place of the installed server. The command
+above runs the same module after dropping the working directory from the import
+path; it works on Python 3.10 and newer and with `--user`, virtualenv and
+editable installs. Use the full interpreter path rather than a bare `python`.
 
 ### Windows (HTTP transport required)
 
@@ -380,6 +394,11 @@ Or use `start_daem0nmcp_server.bat`
 |--------|-----------|-------------|----------|
 | `python -m daem0nmcp.server` | `stdio` | n/a | Local process channel |
 | `python start_server.py` | Streamable HTTP at `/mcp` | 9876 | Windows HTTP, remote access |
+
+`python -m daem0nmcp.server` is for a terminal you started yourself. When an MCP
+host launches the stdio server for you, register the command from
+[Linux / macOS](#linux--macos-stdio-transport) instead: hosts start it inside
+whatever project is open.
 
 For OpenCode setup, see the [OpenCode Integration](#opencode-integration) section below, or run `python -m daem0nmcp.cli install-opencode` for automated setup.
 
@@ -618,12 +637,20 @@ python -m daem0nmcp.cli install-claude-hooks
 ```
 
 This writes six hook entries to the user-level `~/.claude/settings.json`, so
-they run in every project; each runs `"<python>" -m daem0nmcp.claude_hooks.<hook>`
+they run in every project; each runs `daem0nmcp.claude_hooks.<hook>`
 with the interpreter you installed from. A hook only acts inside a Daem0n
 project: the session directory, `CLAUDE_PROJECT_DIR`, or one of their parent
 directories contains `.daem0nmcp/` (your home directory does not count, since
 Daem0n keeps its own state in `~/.daem0nmcp/`). Other hooks in that file are kept, and any old
 `hooks/daem0n_*.py` entries are removed.
+
+Each command is `"<python>" -c "<bootstrap>"`: the bootstrap drops the working
+directory from `sys.path` and then runs the hook module, so a repository that
+contains its own `daem0nmcp/` directory cannot replace the installed hooks the
+way it could with `python -m`. Commands written by an earlier version keep the
+`-m` form until you re-run `install-claude-hooks`, which replaces them and
+reports how many it replaced; until then the `SessionStart` hook shows a
+one-line reminder inside every Daem0n project.
 
 | Event (matcher) | Hook | What it does | Input | Reminds only |
 |-----------------|------|--------------|-------|--------------|
@@ -677,7 +704,7 @@ Create `opencode.json` at your project root:
   "mcp": {
     "daem0nmcp": {
       "type": "local",
-      "command": ["python", "-m", "daem0nmcp"],
+      "command": ["python", "-c", "import sys; sys.path = [p for p in sys.path if p]; import runpy; runpy.run_module('daem0nmcp', run_name='__main__', alter_sys=True)"],
       "enabled": true,
       "environment": {
         "PYTHONUNBUFFERED": "1"
@@ -686,6 +713,12 @@ Create `opencode.json` at your project root:
   }
 }
 ```
+
+The command is the cwd-free equivalent of `python -m daem0nmcp`: OpenCode starts
+the server inside the opened project, and `-m` would import a `daem0nmcp/`
+directory found there. `install-opencode` writes the same command with the full
+path of the interpreter it ran under, and fixes that interpreter in the plugin
+it installs; the plugin never reads an interpreter from `opencode.json`.
 
 For Windows (where HTTP transport is required), use:
 
@@ -1028,6 +1061,15 @@ python -m daem0nmcp.cli rebuild-projection --projection dense --workspace-id <wo
 python -m daem0nmcp.cli install-claude-hooks
 ```
 
+Re-run this after upgrading. It replaces the hook commands earlier versions
+wrote, including the `python -m` form that imports a `daem0nmcp/` directory
+from any project you open. If you registered the stdio server at user scope as
+`<PYTHON_PATH> -m daem0nmcp.server`, remove it with
+`claude mcp remove daem0nmcp --scope user` and register the command under
+[Installation by Platform](#installation-by-platform) instead. In repositories
+where you ran `install-hooks`, re-run it as well: the git pre-commit hook it
+wrote used `python -m` too.
+
 ### 4. Restart Claude Code
 
 After updating, restart Claude Code to load the new MCP tools.
@@ -1039,6 +1081,9 @@ python -m daem0nmcp.cli install-opencode --force
 ```
 
 This regenerates `opencode.json` and the plugin to match the latest version.
+Without `--force` the installer keeps existing files: it still rewrites a
+`python -m` server command in `opencode.json`, and reports a plugin that starts
+its hooks with `python -m` as outdated.
 
 ### 5. Migrations
 

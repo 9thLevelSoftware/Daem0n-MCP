@@ -7,6 +7,7 @@ hook scripts. Also handles uninstallation and legacy hook replacement.
 
 import argparse
 import json
+import re
 import shutil
 import sys
 from pathlib import Path
@@ -17,6 +18,19 @@ from ..edit_host import (
     provision_client_bridge_installation,
 )
 from ..protected_files import reject_linked_ancestry
+
+# Hosts start hooks and the MCP server inside whatever project is open, and
+# ``python -m`` puts that directory first on ``sys.path``: a project shipping
+# its own ``daem0nmcp`` package would run instead of the installed one.  This
+# runs the module the same way after dropping that entry.  ``-P`` needs Python
+# 3.11, and ``-I`` would also hide ``--user`` and ``PYTHONPATH`` installs.
+_LAUNCH_CODE = (
+    "import sys; sys.path = [p for p in sys.path if p]; "
+    "import runpy; runpy.run_module('{module}', run_name='__main__', alter_sys=True)"
+)
+_MODULE_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*")
+# What installers before that form wrote; kept only to report its replacement.
+_MODULE_SWITCH_COMMAND = re.compile(r"\s-m\s+daem0nmcp\.claude_hooks\.")
 
 # Env keys only pairing writes into <project>/.claude/settings.local.json.
 # Pairing always writes the credential key, so it marks a paired project.
@@ -86,11 +100,35 @@ def _is_daem0n_entry(entry: dict) -> bool:
     return False
 
 
+def module_launch_args(module: str) -> list[str]:
+    """Return interpreter arguments that run *module* like ``-m``, minus the cwd."""
+    if not _MODULE_NAME.fullmatch(module):
+        raise ValueError(f"not a module name: {module!r}")
+    return ["-c", _LAUNCH_CODE.format(module=module)]
+
+
+def _module_switch_commands(entry: object) -> int:
+    """Count *entry*'s commands in the ``python -m`` form older installers wrote."""
+    hooks = entry.get("hooks") if isinstance(entry, dict) else None
+    return sum(
+        isinstance(hook, dict)
+        and isinstance(hook.get("command"), str)
+        and _MODULE_SWITCH_COMMAND.search(hook["command"]) is not None
+        for hook in (hooks if isinstance(hooks, list) else [])
+    )
+
+
 def _build_hook_definitions() -> dict[str, Any]:
     """Build the hook definitions using the current Python interpreter."""
     python = sys.executable
     # Quote the path for safety (spaces in Windows paths)
     q = f'"{python}"'
+
+    def command(hook: str) -> str:
+        flag, code = module_launch_args(f"daem0nmcp.claude_hooks.{hook}")
+        # The code holds no double quote, ``$``, backtick or backslash, so
+        # plain double quotes are enough for sh, bash and cmd.exe alike.
+        return f'{q} {flag} "{code}"'
 
     return {
         "hooks": {
@@ -100,7 +138,7 @@ def _build_hook_definitions() -> dict[str, Any]:
                     "hooks": [
                         {
                             "type": "command",
-                            "command": f"{q} -m daem0nmcp.claude_hooks.pre_edit",
+                            "command": command("pre_edit"),
                         }
                     ],
                 },
@@ -109,7 +147,7 @@ def _build_hook_definitions() -> dict[str, Any]:
                     "hooks": [
                         {
                             "type": "command",
-                            "command": f"{q} -m daem0nmcp.claude_hooks.pre_bash",
+                            "command": command("pre_bash"),
                         }
                     ],
                 },
@@ -120,7 +158,7 @@ def _build_hook_definitions() -> dict[str, Any]:
                     "hooks": [
                         {
                             "type": "command",
-                            "command": f"{q} -m daem0nmcp.claude_hooks.post_edit_preflight",
+                            "command": command("post_edit_preflight"),
                         }
                     ],
                 },
@@ -129,7 +167,7 @@ def _build_hook_definitions() -> dict[str, Any]:
                     "hooks": [
                         {
                             "type": "command",
-                            "command": f"{q} -m daem0nmcp.claude_hooks.post_edit",
+                            "command": command("post_edit"),
                         }
                     ],
                 },
@@ -140,7 +178,7 @@ def _build_hook_definitions() -> dict[str, Any]:
                     "hooks": [
                         {
                             "type": "command",
-                            "command": f"{q} -m daem0nmcp.claude_hooks.stop",
+                            "command": command("stop"),
                         }
                     ],
                 },
@@ -151,7 +189,7 @@ def _build_hook_definitions() -> dict[str, Any]:
                     "hooks": [
                         {
                             "type": "command",
-                            "command": f"{q} -m daem0nmcp.claude_hooks.stop",
+                            "command": command("stop"),
                         }
                     ],
                 },
@@ -162,7 +200,7 @@ def _build_hook_definitions() -> dict[str, Any]:
                     "hooks": [
                         {
                             "type": "command",
-                            "command": f"{q} -m daem0nmcp.claude_hooks.session_start",
+                            "command": command("session_start"),
                         }
                     ],
                 },
@@ -232,6 +270,11 @@ def install_claude_hooks(
             return False, f"Edit bridge pairing failed: {exc}"
 
     hooks_section = settings.setdefault("hooks", {})
+    replaced = sum(
+        _module_switch_commands(entry)
+        for entries in hooks_section.values()
+        for entry in entries
+    )
 
     # First remove all Daem0n / legacy entries from every event. This cleans up
     # deprecated events (e.g. older SessionStart installs) on upgrade.
@@ -260,6 +303,12 @@ def install_claude_hooks(
 
     events = ", ".join(sorted(new_defs["hooks"]))
     message = f"Installed Daem0n hooks for: {events}\nSettings: {_settings_path()}"
+    if replaced:
+        message += (
+            f"\nReplaced {replaced} older hook command{'s' if replaced != 1 else ''}"
+            ' that ran "python -m", which also imports from the project a'
+            " session is opened in."
+        )
     if installation is not None:
         state = "created" if installation.created else "reused"
         message += (

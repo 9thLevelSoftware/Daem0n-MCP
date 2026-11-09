@@ -3,6 +3,7 @@
 import json
 import sys
 from io import BytesIO, TextIOWrapper
+from types import SimpleNamespace
 
 import pytest
 
@@ -12,6 +13,7 @@ from daem0nmcp.claude_hooks._client import (
     get_project_path,
     read_hook_event,
     run_hook_safely,
+    started_by_module_switch,
     succeed,
 )
 
@@ -148,3 +150,42 @@ class TestRunHookSafely:
         # Should not raise (no sys.exit call inside ok())
         run_hook_safely(ok)
         assert results == ["done"]
+
+
+class TestStartedByModuleSwitch:
+    """Only an older ``python -m`` hook command leaves the cwd importable."""
+
+    HOOK = "daem0nmcp.claude_hooks.session_start"
+
+    @pytest.mark.parametrize(
+        ("arguments", "expected"),
+        [
+            (["-m", HOOK], True),
+            (["-X", "utf8", "-m", HOOK], True),
+            (["-c", f"import runpy; runpy.run_module('{HOOK}')"], False),
+            (["-m", "pytest", "-k", HOOK], False),
+            (["-m", "daem0nmcp.cli", "install-claude-hooks"], False),
+        ],
+    )
+    def test_recognises_only_the_older_hook_command(
+        self, monkeypatch, arguments, expected
+    ):
+        monkeypatch.setattr(sys, "orig_argv", [sys.executable, *arguments])
+        monkeypatch.setattr(sys, "flags", SimpleNamespace(isolated=0, safe_path=False))
+
+        assert started_by_module_switch() is expected
+
+    @pytest.mark.parametrize(
+        "flags",
+        [
+            {"isolated": 1},  # Python 3.10 has no safe_path flag
+            {"isolated": 0, "safe_path": True},
+        ],
+    )
+    def test_module_switch_that_skips_the_working_directory_is_fine(
+        self, monkeypatch, flags
+    ):
+        monkeypatch.setattr(sys, "orig_argv", [sys.executable, "-m", self.HOOK])
+        monkeypatch.setattr(sys, "flags", SimpleNamespace(**flags))
+
+        assert started_by_module_switch() is False
