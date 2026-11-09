@@ -42,6 +42,20 @@ class FreshDatabaseRequiredError(RuntimeError):
         super().__init__(self.code)
 
 
+class SchemaUpgradeRequiredError(RuntimeError):
+    """An active format-7 store is on an older schema than this build serves."""
+
+    code = "MIGRATION_REQUIRED"
+
+    def __init__(self, schema_version: int) -> None:
+        super().__init__(
+            f"{self.code}: this workspace's v7 database is at schema "
+            f"{schema_version} and this build needs {CURRENT_SCHEMA_VERSION}. "
+            "Stop the server, then run: python -m daem0nmcp.cli "
+            "--project-path <project root> migrate-v7 --apply"
+        )
+
+
 class DatabaseManager:
     """
     Manages the SQLite database connection.
@@ -237,6 +251,21 @@ class DatabaseManager:
         # for an ordinary v6 database within this manager lifetime.
         is_new_db = self._fresh_at_construction and not self.db_path.exists()
         previous_schema_version = self._schema_version() if self.db_path.exists() else 0
+
+        # An active format-7 store on an older schema is upgraded only by
+        # `migrate-v7 --apply`, which works on a verified copy, retains the
+        # source and a snapshot, and repairs what the additive ledger alone
+        # cannot.  Applying the ledger here would rewrite, without a backup,
+        # the very database a rollback returns to, so the start is refused
+        # before anything is written.
+        if (
+            not is_new_db
+            and self._active_database is not None
+            and self._active_database.pointer is not None
+            and self.format_version == 7
+            and previous_schema_version < CURRENT_SCHEMA_VERSION
+        ):
+            raise SchemaUpgradeRequiredError(previous_schema_version)
 
         # Run migrations first for existing databases (sync operation)
         # This happens BEFORE we create the async engine to avoid lock conflicts

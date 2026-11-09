@@ -312,6 +312,13 @@ one generation. The source database and a SQLite snapshot remain in
 rewritten in place. Running `migrate-v7 --apply` again recovers a stopped run or
 reports `already_active` when the active schema is current.
 
+Opening a format 7 database never upgrades its schema as a side effect. After
+a Daem0nMCP upgrade that raises the schema version, `system_health` reports
+`STORAGE_SCHEMA_OUTDATED`, and the legacy CLI commands (`status`, `check`,
+`briefing`, `pre-commit`, `remember`, `record-outcome`, `index`, `watch`) and
+Python helpers stop with `MIGRATION_REQUIRED`, naming this command, before
+they write anything to the database.
+
 Keep enough free space for the retained source, snapshot, and candidate shown by
 the dry-run inventory. `FUTURE_V7_SCHEMA`, `UNSUPPORTED_V7_SCHEMA`, and
 `SCHEMA_UPGRADE_AUTHORITY_INVALID` require operator inspection or a newer

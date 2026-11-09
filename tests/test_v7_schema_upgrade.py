@@ -223,6 +223,20 @@ def _schema_versions(path: Path) -> set[int]:
         }
 
 
+def _start_manager(storage: Path) -> tuple[int, int]:
+    """Open the store the way every legacy command and hook does."""
+
+    async def start() -> tuple[int, int]:
+        manager = DatabaseManager(str(storage))
+        try:
+            await manager.init_db()
+            return manager.format_version, manager.active_generation
+        finally:
+            await manager.close()
+
+    return asyncio.run(start())
+
+
 def _rewrite_schema_object(
     database: Path,
     *,
@@ -831,6 +845,76 @@ def test_fresh_database_manager_schema_is_immediately_current(tmp_path: Path):
 
     assert result.action == "already_active"
     assert result.validation["source_schema_version"] == CURRENT_SCHEMA_VERSION
+
+
+def test_manager_start_leaves_an_older_v7_schema_to_migrate_v7(tmp_path: Path):
+    storage, source, registry = _fixture(
+        tmp_path, maximum_version=CURRENT_SCHEMA_VERSION - 1
+    )
+    source_bytes = source.read_bytes()
+    pointer_bytes = (storage / "active-db.json").read_bytes()
+
+    with pytest.raises(RuntimeError) as raised:
+        _start_manager(storage)
+
+    assert getattr(raised.value, "code", None) == "MIGRATION_REQUIRED"
+    assert "migrate-v7 --apply" in str(raised.value)
+    assert str(tmp_path) not in str(raised.value)
+    assert source.read_bytes() == source_bytes
+    assert (storage / "active-db.json").read_bytes() == pointer_bytes
+    assert not (storage / "migrations").exists()
+
+    MigrationV7Service(registry).apply(tmp_path)
+
+    assert _start_manager(storage) == (7, 2)
+    assert source.read_bytes() == source_bytes
+
+
+def test_manager_start_does_not_attempt_the_learning_backfill_in_place(
+    tmp_path: Path,
+):
+    storage, source, registry, _expected = _orphaned_learning_fixture(tmp_path)
+    source_bytes = source.read_bytes()
+
+    with pytest.raises(RuntimeError) as raised:
+        _start_manager(storage)
+
+    assert getattr(raised.value, "code", None) == "MIGRATION_REQUIRED"
+    assert source.read_bytes() == source_bytes
+
+    MigrationV7Service(registry).apply(tmp_path)
+
+    assert _start_manager(storage) == (7, 2)
+
+
+def test_actual_cli_status_does_not_upgrade_an_older_v7_schema(tmp_path: Path):
+    storage, source, _registry = _fixture(
+        tmp_path, maximum_version=CURRENT_SCHEMA_VERSION - 1
+    )
+    source_bytes = source.read_bytes()
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "daem0nmcp.cli",
+            "--json",
+            "--project-path",
+            str(tmp_path),
+            "status",
+        ],
+        cwd=Path(__file__).resolve().parents[1],
+        text=True,
+        capture_output=True,
+        timeout=300,
+        check=False,
+    )
+
+    assert result.returncode == 1, result.stdout + result.stderr
+    error = json.loads(result.stdout)["error"]
+    assert error.startswith("MIGRATION_REQUIRED")
+    assert "migrate-v7 --apply" in error
+    assert source.read_bytes() == source_bytes
+    assert resolve_active_database(storage).generation == 1
 
 
 def test_semantic_physical_contract_accepts_historical_orm_spellings(

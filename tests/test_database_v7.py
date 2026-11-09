@@ -434,6 +434,107 @@ class DatabaseManagerDependencyIntegrationTests(unittest.IsolatedAsyncioTestCase
             )
             await manager.close()
 
+    async def test_reopening_a_current_v7_store_changes_neither_schema_nor_pointer(
+        self,
+    ):
+        from daem0nmcp.database import DatabaseManager
+
+        def ledger(path: Path) -> list[int]:
+            connection = sqlite3.connect(path)
+            try:
+                return [
+                    int(row[0])
+                    for row in connection.execute(
+                        "SELECT version FROM schema_version ORDER BY version"
+                    )
+                ]
+            finally:
+                connection.close()
+
+        with tempfile.TemporaryDirectory() as raw:
+            storage = Path(raw)
+            first = DatabaseManager(raw)
+            try:
+                await first.init_db()
+            finally:
+                await first.close()
+            pointer = (storage / "active-db.json").read_bytes()
+            versions = ledger(storage / "daem0nmcp.db")
+            self.assertEqual(CURRENT_SCHEMA_VERSION, versions[-1])
+
+            reopened = DatabaseManager(raw)
+            try:
+                await reopened.init_db()
+                self.assertEqual(7, reopened.format_version)
+                self.assertEqual(1, reopened.active_generation)
+            finally:
+                await reopened.close()
+
+            self.assertEqual(pointer, (storage / "active-db.json").read_bytes())
+            self.assertEqual(versions, ledger(storage / "daem0nmcp.db"))
+
+    async def test_unpublished_fresh_database_is_finished_on_the_next_start(self):
+        """A crash before pointer publication leaves a store the next start adopts."""
+        import daem0nmcp.database as database_module
+        import daem0nmcp.migrations as migrations_module
+        from daem0nmcp.database import DatabaseManager
+        from daem0nmcp.storage_activation import resolve_active_database
+
+        real_run_migrations = migrations_module.run_migrations
+
+        def stop_inside_the_ledger(db_path, **kwargs):
+            real_run_migrations(db_path, **{**kwargs, "maximum_version": 20})
+            raise OSError("stopped inside the migration ledger")
+
+        interruptions = {
+            "before_pointer": (
+                mock.patch.object(
+                    database_module,
+                    "write_active_pointer",
+                    side_effect=OSError("stopped before the pointer"),
+                ),
+                CURRENT_SCHEMA_VERSION,
+            ),
+            "inside_ledger": (
+                mock.patch.object(
+                    migrations_module, "run_migrations", stop_inside_the_ledger
+                ),
+                20,
+            ),
+        }
+        for name, (interruption, reached) in interruptions.items():
+            with self.subTest(interruption=name), tempfile.TemporaryDirectory() as raw:
+                storage = Path(raw)
+                interrupted = DatabaseManager(raw)
+                try:
+                    with interruption, self.assertRaises(OSError):
+                        await interrupted.init_db()
+                    self.assertEqual(reached, interrupted._schema_version())
+                finally:
+                    await interrupted.close()
+                self.assertFalse((storage / "active-db.json").exists())
+
+                recovered = DatabaseManager(raw)
+                try:
+                    self.assertFalse(recovered.fresh_at_construction)
+                    await recovered.init_db()
+                    self.assertEqual(7, recovered.format_version)
+                    self.assertEqual(1, recovered.active_generation)
+                    recovered._validate_database(format_version=7)
+                finally:
+                    await recovered.close()
+
+                resolved = resolve_active_database(raw)
+                self.assertEqual(
+                    (7, 1, "daem0nmcp.db", None),
+                    (
+                        resolved.format_version,
+                        resolved.generation,
+                        resolved.relative_path,
+                        resolved.migration_run_id,
+                    ),
+                )
+
     async def test_invalid_pointer_fails_before_engine_construction(self):
         from daem0nmcp.database import DatabaseManager
         from daem0nmcp.storage_activation import PointerValidationError
