@@ -279,8 +279,10 @@ def _tool_adapter(
         name: parameter.annotation for name, parameter in signature.parameters.items()
     }
     invoke.__annotations__["return"] = signature.return_annotation
+    # ``TypeAdapter`` builds a call schema for a callable at runtime, but newer
+    # Pydantic releases annotate its argument as a type form only.
     callable_schema = _titled_callable_schema(
-        TypeAdapter(invoke).core_schema,
+        TypeAdapter(cast(Any, invoke)).core_schema,
         title=spec.input_schema["title"],
     )
 
