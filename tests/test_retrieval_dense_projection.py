@@ -596,7 +596,12 @@ class DenseProjectionTests(unittest.TestCase):
             client_factory=lambda **_kwargs: owned_client,
             own_encoder=True,
         )
-        self.assertIs(owned_client, owned._get_client())
+        # The builder holds a shared handle onto the client its factory made.
+        owned._get_client().create_collection(
+            collection_name="owned", vectors_config=None
+        )
+        self.assertIn("owned", owned_client.collections)
+        self.assertEqual(0, owned_client.close_count)
         owned.close()
         owned.close()
         self.assertEqual(1, owned_encoder.close_count)

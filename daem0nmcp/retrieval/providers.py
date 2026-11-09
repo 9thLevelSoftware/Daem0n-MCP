@@ -13,9 +13,12 @@ import sqlite3
 import threading
 import uuid
 from collections.abc import Callable, Mapping
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import suppress
 from datetime import datetime, timezone
+from time import monotonic as _monotonic
 from time import perf_counter_ns
+from typing import Any
 
 from ..bounded_workers import BoundedWorkerBusyError, BoundedWorkerPool
 from .lexical_config import (
@@ -459,6 +462,213 @@ def _default_qdrant_client_factory(**kwargs: object) -> object:
     return QdrantClient(**kwargs)
 
 
+class QdrantStorageLockedError(RuntimeError):
+    """The local storage folder is held by a client this process cannot share.
+
+    That is normally another process; the holder decides when it is released.
+    """
+
+    code = "DENSE_STORAGE_LOCKED"
+
+    def __init__(self) -> None:
+        super().__init__(self.code)
+
+
+_LOCAL_CLIENT_UNOPENED = object()
+_LOCAL_LOCK_RETRY_INITIAL_SECONDS = 1.0
+_LOCAL_LOCK_RETRY_MAX_SECONDS = 30.0
+_LOCAL_CLIENTS_LOCK = threading.Lock()
+_LOCAL_CLIENTS: dict[tuple[str, object], _LocalClientOwner] = {}
+# Consecutive lock failures and the earliest next attempt, per folder.  An
+# embedded open loads every collection before it discovers the lock, so a
+# folder held by another process is probed with backoff, not on every call.
+_LOCAL_LOCK_RETRIES: dict[tuple[str, object], tuple[int, float]] = {}
+
+
+def _is_local_storage_lock_error(error: BaseException) -> bool:
+    if not isinstance(error, RuntimeError):
+        return False
+    cause = error.__context__
+    if cause is not None and type(cause).__module__.partition(".")[0] == "portalocker":
+        return True
+    return "already accessed by another instance" in str(error)
+
+
+class _LocalClientOwner:
+    """The one embedded client of a storage folder and the thread that owns it.
+
+    Embedded Qdrant locks its folder against every other client, including one
+    in the same process, keeps thread-affine SQLite handles and is not safe for
+    concurrent calls.  Every user of a folder therefore shares this client, and
+    every call, the open and the close included, runs on one worker thread.
+    """
+
+    def __init__(self, key: tuple[str, object]) -> None:
+        self.key = key
+        self.state_lock = threading.Lock()
+        self.client: object = _LOCAL_CLIENT_UNOPENED
+        self.references = 0
+        self.retired = False
+        self._thread_id: int | None = None
+        self._executor = ThreadPoolExecutor(
+            max_workers=1,
+            thread_name_prefix="daem0nmcp-qdrant-local",
+        )
+
+    def run(self, function: Callable[..., Any], *arguments: object) -> Any:
+        if threading.get_ident() == self._thread_id:
+            return function(*arguments)
+        try:
+            work = self._executor.submit(self._run_owned, function, arguments)
+        except RuntimeError:
+            # No worker can start during interpreter shutdown.
+            return function(*arguments)
+        return work.result()
+
+    def _run_owned(
+        self, function: Callable[..., Any], arguments: tuple[object, ...]
+    ) -> Any:
+        self._thread_id = threading.get_ident()
+        return function(*arguments)
+
+    def open(self, path: str, factory: Callable[..., object]) -> None:
+        """Create the client; the caller holds ``state_lock``."""
+
+        now = _monotonic()
+        with _LOCAL_CLIENTS_LOCK:
+            failures, retry_at = _LOCAL_LOCK_RETRIES.get(self.key, (0, now))
+        if now < retry_at:
+            raise QdrantStorageLockedError()
+        try:
+            self.client = self.run(lambda: factory(path=path))
+        except Exception as error:
+            if not _is_local_storage_lock_error(error):
+                raise
+            delay = min(
+                _LOCAL_LOCK_RETRY_INITIAL_SECONDS * 2 ** min(failures, 16),
+                _LOCAL_LOCK_RETRY_MAX_SECONDS,
+            )
+            with _LOCAL_CLIENTS_LOCK:
+                _LOCAL_LOCK_RETRIES[self.key] = (failures + 1, _monotonic() + delay)
+            raise QdrantStorageLockedError() from error
+        with _LOCAL_CLIENTS_LOCK:
+            _LOCAL_LOCK_RETRIES.pop(self.key, None)
+
+    def close_client(self) -> None:
+        """Close and drop the client on its own thread, finalizer included."""
+
+        client, self.client = self.client, _LOCAL_CLIENT_UNOPENED
+        close = getattr(client, "close", None)
+        if callable(close):
+            close()
+
+    def retire(self) -> None:
+        """Leave the registry; the caller holds ``state_lock``."""
+
+        self.retired = True
+        with _LOCAL_CLIENTS_LOCK:
+            if _LOCAL_CLIENTS.get(self.key) is self:
+                del _LOCAL_CLIENTS[self.key]
+        self._executor.shutdown(wait=False)
+
+
+class _SharedLocalClient:
+    """One user's reference to the embedded client of a storage folder.
+
+    Attribute access and calls forward to the shared client.  ``close`` only
+    releases this reference; the client itself closes with its last user.
+    """
+
+    __slots__ = ("_shared_closed", "_shared_lock", "_shared_owner")
+
+    def __init__(self, owner: _LocalClientOwner) -> None:
+        object.__setattr__(self, "_shared_owner", owner)
+        object.__setattr__(self, "_shared_lock", threading.Lock())
+        object.__setattr__(self, "_shared_closed", False)
+
+    def _shared_client(self) -> object:
+        if self._shared_closed:
+            raise RuntimeError("Qdrant client is closed")
+        return self._shared_owner.client
+
+    def _shared_call(
+        self, name: str, arguments: tuple[object, ...], options: dict[str, object]
+    ) -> object:
+        return getattr(self._shared_client(), name)(*arguments, **options)
+
+    def _shared_apply(self, function: Callable[..., Any], *arguments: object) -> Any:
+        """Run ``function(client, *arguments)`` as one step on the owning thread."""
+
+        return self._shared_owner.run(
+            lambda: function(self._shared_client(), *arguments)
+        )
+
+    def __getattr__(self, name: str) -> Any:
+        if name.startswith("__") and name.endswith("__"):
+            raise AttributeError(name)
+        value = getattr(self._shared_client(), name)
+        if not callable(value):
+            return value
+
+        def call(*arguments: object, **options: object) -> object:
+            return self._shared_owner.run(self._shared_call, name, arguments, options)
+
+        return call
+
+    def __setattr__(self, name: str, value: object) -> None:
+        setattr(self._shared_client(), name, value)
+
+    def close(self) -> None:
+        with self._shared_lock:
+            if self._shared_closed:
+                return
+            object.__setattr__(self, "_shared_closed", True)
+        owner = self._shared_owner
+        with owner.state_lock:
+            owner.references -= 1
+            if owner.references:
+                return
+            try:
+                # Queued behind any call still running on the owner.
+                owner.run(owner.close_client)
+            finally:
+                owner.retire()
+
+
+def _share_local_client(path: str, factory: Callable[..., object]) -> object:
+    try:
+        hash(factory)
+        factory_key: object = factory
+    except TypeError:
+        factory_key = id(factory)
+    key = (os.path.normcase(os.path.realpath(path)), factory_key)
+    while True:
+        with _LOCAL_CLIENTS_LOCK:
+            owner = _LOCAL_CLIENTS.get(key)
+            if owner is None:
+                owner = _LOCAL_CLIENTS[key] = _LocalClientOwner(key)
+        with owner.state_lock:
+            if owner.retired:
+                # Its last user closed it while this caller waited.
+                continue
+            if owner.client is _LOCAL_CLIENT_UNOPENED:
+                try:
+                    owner.open(path, factory)
+                except BaseException:
+                    owner.retire()
+                    raise
+            owner.references += 1
+            return _SharedLocalClient(owner)
+
+
+def qdrant_client_type(client: object) -> type:
+    """Return the concrete client class, seeing through a shared local handle."""
+
+    if isinstance(client, _SharedLocalClient):
+        return type(client._shared_client())
+    return type(client)
+
+
 def create_qdrant_client(
     *,
     qdrant_url: str | None,
@@ -467,7 +677,13 @@ def create_qdrant_client(
     timeout_seconds: float,
     client_factory: Callable[..., object] | None = None,
 ) -> object:
-    """Construct a remote or local client without importing Qdrant eagerly."""
+    """Construct a remote client, or share the one client of a local folder.
+
+    Local callers receive a handle onto a single client per folder and
+    factory; closing the handle releases one reference.  A folder held by
+    any other client, normally another process, raises
+    ``QdrantStorageLockedError``.
+    """
 
     if isinstance(timeout_seconds, bool) or not isinstance(
         timeout_seconds, (int, float)
@@ -495,12 +711,15 @@ def create_qdrant_client(
     except TypeError as exc:
         raise ValueError("qdrant_path must be path-like") from exc
     _nonempty_string(path, "qdrant_path", maximum=4096)
-    return factory(path=path)
+    return _share_local_client(path, factory)
 
 
 def qdrant_delete_collection(client: object, collection_name: str) -> None:
     """Release owned local persistence before removing a provider collection."""
 
+    if isinstance(client, _SharedLocalClient):
+        client._shared_apply(qdrant_delete_collection, collection_name)
+        return
     if type(client).__module__.startswith("qdrant_client"):
         from qdrant_client import QdrantClient
         from qdrant_client.local.qdrant_local import QdrantLocal
@@ -1126,6 +1345,13 @@ class DenseProvider:
             if points is None or isinstance(points, (str, bytes, Mapping)):
                 raise TypeError("invalid Qdrant response")
             iterator = iter(points)
+        except QdrantStorageLockedError as error:
+            return self._result(
+                started,
+                status="degraded",
+                reason=error.code,
+                generation=generation,
+            )
         except Exception:
             return self._result(
                 started,
@@ -1471,6 +1697,7 @@ __all__ = [
     "DENSE_BUILDER_VERSION",
     "DenseProvider",
     "LexicalProvider",
+    "QdrantStorageLockedError",
     "build_dense_point_payload",
     "create_qdrant_client",
     "dense_builder_contract",
@@ -1478,6 +1705,7 @@ __all__ = [
     "dense_query_encoder_matches_contract",
     "dense_manifest_details",
     "dense_point_id",
+    "qdrant_client_type",
     "qdrant_collection_exists",
     "qdrant_delete_collection",
 ]

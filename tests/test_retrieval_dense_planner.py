@@ -1147,7 +1147,9 @@ class DenseProviderTests(unittest.IsolatedAsyncioTestCase):
                 timeout_seconds=99.0,
                 client_factory=factory,
             )
-            self.assertEqual("client", local)
+            # Local folders hand out a shared handle onto the factory's client.
+            self.assertEqual("CLIENT", local.upper())
+            local.close()
 
         self.assertEqual(
             [

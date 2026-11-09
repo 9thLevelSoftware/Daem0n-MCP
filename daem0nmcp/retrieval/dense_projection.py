@@ -20,10 +20,12 @@ from ..event_store import canonical_json_bytes, deterministic_id, sha256_json
 from .dense_generation_gc import enqueue_inactive_generation_gc
 from .providers import (
     DENSE_BUILDER_VERSION,
+    QdrantStorageLockedError,
     build_dense_point_payload,
     create_qdrant_client,
     dense_builder_contract,
     dense_manifest_details,
+    qdrant_client_type,
     qdrant_collection_exists,
     qdrant_delete_collection,
 )
@@ -276,6 +278,9 @@ class DenseProjectionBuilder:
         )
         staging_reserved = False
         try:
+            if not dry_run and capability_ready:
+                # Fail before staging anything when the provider is unreachable.
+                self._get_client()
             if (
                 not dry_run
                 and active is not None
@@ -1074,13 +1079,18 @@ class DenseProjectionBuilder:
                     "DENSE_UNAVAILABLE", "dense projection capability is unavailable"
                 )
             if self.client is None:
-                self.client = create_qdrant_client(
-                    qdrant_url=self._qdrant_url,
-                    qdrant_api_key=self._qdrant_api_key,
-                    qdrant_path=self._qdrant_path,
-                    timeout_seconds=self._timeout_seconds,
-                    client_factory=self._client_factory,
-                )
+                try:
+                    self.client = create_qdrant_client(
+                        qdrant_url=self._qdrant_url,
+                        qdrant_api_key=self._qdrant_api_key,
+                        qdrant_path=self._qdrant_path,
+                        timeout_seconds=self._timeout_seconds,
+                        client_factory=self._client_factory,
+                    )
+                except QdrantStorageLockedError as exc:
+                    raise DenseProjectionBuildError(
+                        exc.code, "dense storage is held by another process"
+                    ) from exc
             if not self._client_contract_ready(self.client):
                 raise DenseProjectionBuildError(
                     "DENSE_UNAVAILABLE", "dense projection capability is unavailable"
@@ -1105,7 +1115,7 @@ class DenseProjectionBuilder:
     def _models_for_client(self, client: object) -> object | None:
         if self._qdrant_models is not None:
             return self._qdrant_models
-        module_name = type(client).__module__
+        module_name = qdrant_client_type(client).__module__
         if not module_name.startswith("qdrant_client"):
             return None
         try:

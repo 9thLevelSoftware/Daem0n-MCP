@@ -103,6 +103,22 @@ def _profile_ready(statuses: Mapping[str, str], name: str) -> bool:
     return statuses.get(name) == "ready"
 
 
+def _defer_due_dense_gc(connection: sqlite3.Connection, error_code: str) -> None:
+    """Keep due cleanup durable and give the scheduler a bounded retry deadline."""
+
+    deferred_at_us = time.time_ns() // 1_000
+    retry_at_us = deferred_at_us + int(_PROJECTION_RETRY_MAX_SECONDS * 1_000_000)
+    connection.execute(
+        "UPDATE dense_generation_gc_jobs SET status='queued',"
+        "available_at_us=?,claim_owner=NULL,claim_token=NULL,"
+        "claim_expires_at_us=NULL,last_error_code=?,updated_at_us=? WHERE "
+        "(status='queued' AND available_at_us<=?) OR "
+        "(status='running' AND claim_expires_at_us<=?)",
+        (retry_at_us, error_code, deferred_at_us, deferred_at_us, deferred_at_us),
+    )
+    connection.commit()
+
+
 def _dense_gc_schema_available(connection: sqlite3.Connection) -> bool:
     return (
         connection.execute(
@@ -657,34 +673,28 @@ def _drain_projection_jobs_sync(
             get_client = getattr(dense_builder, "_get_client", None)
             if not callable(get_client):
                 raise RuntimeError("dense projection provider is unavailable")
-            DenseGenerationGarbageCollector(
-                connection,
-                client=get_client(),
-                cancelled=(
-                    cancellation_event.is_set
-                    if cancellation_event is not None
-                    else None
-                ),
-            ).run_slice(max_generations=max_jobs)
+            try:
+                client = get_client()
+            except Exception as exc:
+                if getattr(exc, "code", None) != "DENSE_STORAGE_LOCKED":
+                    raise
+                # Another process holds the local folder; cleanup waits for it.
+                _defer_due_dense_gc(connection, "DENSE_GENERATION_GC_STORAGE_LOCKED")
+            else:
+                DenseGenerationGarbageCollector(
+                    connection,
+                    client=client,
+                    cancelled=(
+                        cancellation_event.is_set
+                        if cancellation_event is not None
+                        else None
+                    ),
+                ).run_slice(max_generations=max_jobs)
         elif include_optional and gc_due is not None:
             # The configured profile cannot currently construct the provider.
             # Preserve the durable job and give the scheduler a bounded retry
             # deadline instead of spinning on an immediately-due row.
-            deferred_at_us = time.time_ns() // 1_000
-            retry_at_us = deferred_at_us + int(
-                _PROJECTION_RETRY_MAX_SECONDS * 1_000_000
-            )
-            connection.execute(
-                "UPDATE dense_generation_gc_jobs SET status='queued',"
-                "available_at_us=?,claim_owner=NULL,claim_token=NULL,"
-                "claim_expires_at_us=NULL,"
-                "last_error_code='DENSE_GENERATION_GC_CAPABILITY_DISABLED',"
-                "updated_at_us=? WHERE "
-                "(status='queued' AND available_at_us<=?) OR "
-                "(status='running' AND claim_expires_at_us<=?)",
-                (retry_at_us, deferred_at_us, deferred_at_us, deferred_at_us),
-            )
-            connection.commit()
+            _defer_due_dense_gc(connection, "DENSE_GENERATION_GC_CAPABILITY_DISABLED")
         return tuple(runs)
     finally:
         close = getattr(builders, "close", None)

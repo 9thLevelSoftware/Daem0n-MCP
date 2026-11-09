@@ -208,6 +208,40 @@ class RetrievalProjectionJobTests(unittest.TestCase):
         self.assertEqual(("queued", 0, None, None), tuple(row[:4]))
         self.assertEqual({"code": "PROJECTION_CANCELLED"}, json.loads(row[4]))
 
+    def test_storage_held_elsewhere_defers_without_consuming_retry_attempt(self):
+        from daem0nmcp.retrieval.dense_projection import DenseProjectionBuildError
+
+        self._queue_job()
+        self.connection.execute("UPDATE background_jobs SET max_attempts=2")
+        self.connection.commit()
+        held = [True]
+
+        def build(_workspace_id):
+            if held[0]:
+                raise DenseProjectionBuildError(
+                    "DENSE_STORAGE_LOCKED", "must not expose the folder path"
+                )
+
+        for _ in range(4):
+            result = self._runner({"lexical": build}, deferral_delay_us=7).run_once()
+            self.assertEqual(
+                ("queued", "DENSE_STORAGE_LOCKED"), (result.status, result.reason)
+            )
+            row = self.connection.execute(
+                "SELECT status,attempts,available_at_us,lease_owner,last_error_json "
+                "FROM background_jobs"
+            ).fetchone()
+            self.assertEqual(("queued", 0, self._clock + 7, None), tuple(row[:4]))
+            self.assertEqual({"code": "DENSE_STORAGE_LOCKED"}, json.loads(row[4]))
+            self.assertNotIn("folder path", row[4])
+            self.assertIsNone(self._runner({"lexical": build}).run_once())
+            self._clock += 7
+
+        held[0] = False
+        self.assertEqual(
+            "succeeded", self._runner({"lexical": build}).run_once().status
+        )
+
     def test_unavailable_optional_projection_dead_letters_without_retrying(self):
         from daem0nmcp.retrieval.dense_projection import DenseProjectionBuildError
 

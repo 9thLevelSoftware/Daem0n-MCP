@@ -22,6 +22,9 @@ _PROJECTIONS = frozenset(
 _WORKER = re.compile(r"^[A-Za-z0-9._:-]{1,64}$")
 _LEASE_TOKEN = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
 _ERROR_CODE = re.compile(r"^[A-Z][A-Z0-9_]{1,63}$")
+# A resource held outside this process blocks the build without making it
+# wrong; these wait for the holder instead of spending the retry budget.
+_DEFERRED_FAILURE_CODES = frozenset({"DENSE_STORAGE_LOCKED"})
 _HEARTBEAT_BUSY_TIMEOUT_MS = 100
 _HEARTBEAT_SHUTDOWN_GRACE_SECONDS = 1.5
 
@@ -92,6 +95,7 @@ class ProjectionJobRunner:
         heartbeat_interval_us: int | None = None,
         heartbeat_connection_factory: (Callable[[], sqlite3.Connection] | None) = None,
         retry_delay_us: int = 1_000_000,
+        deferral_delay_us: int = 5_000_000,
         cancelled: Callable[[], bool] | None = None,
     ) -> None:
         if not isinstance(connection, sqlite3.Connection):
@@ -108,6 +112,7 @@ class ProjectionJobRunner:
         for value, field_name in (
             (lease_duration_us, "lease_duration_us"),
             (retry_delay_us, "retry_delay_us"),
+            (deferral_delay_us, "deferral_delay_us"),
         ):
             if isinstance(value, bool) or not isinstance(value, int) or value < 1:
                 raise ValueError(f"{field_name} must be a positive integer")
@@ -140,6 +145,7 @@ class ProjectionJobRunner:
         self._heartbeat_connection_factory = heartbeat_connection_factory
         self._heartbeat_database_path = database_path
         self._retry_delay_us = retry_delay_us
+        self._deferral_delay_us = deferral_delay_us
         if cancelled is not None and not callable(cancelled):
             raise ValueError("cancelled must be callable")
         self._cancelled = cancelled or (lambda: False)
@@ -178,6 +184,8 @@ class ProjectionJobRunner:
         if failed:
             if failure_code == "PROJECTION_CANCELLED":
                 return self._record_cancelled(claim, projections)
+            if failure_code in _DEFERRED_FAILURE_CODES:
+                return self._record_deferred(claim, projections, failure_code)
             return self._record_failure(claim, projections, failure_code)
         return self._record_success(claim, projections)
 
@@ -525,10 +533,29 @@ class ProjectionJobRunner:
     ) -> ProjectionJobRun:
         """Release shutdown-cancelled work without consuming its retry budget."""
 
-        now = self._now()
-        last_error = canonical_json_bytes({"code": "PROJECTION_CANCELLED"}).decode(
-            "utf-8"
+        return self._release_unconsumed(claim, projections, "PROJECTION_CANCELLED", 0)
+
+    def _record_deferred(
+        self,
+        claim: _ClaimedJob,
+        projections: tuple[str, ...],
+        failure_code: str,
+    ) -> ProjectionJobRun:
+        """Requeue work blocked by an external holder, retry budget intact."""
+
+        return self._release_unconsumed(
+            claim, projections, failure_code, self._deferral_delay_us
         )
+
+    def _release_unconsumed(
+        self,
+        claim: _ClaimedJob,
+        projections: tuple[str, ...],
+        failure_code: str,
+        delay_us: int,
+    ) -> ProjectionJobRun:
+        now = self._now()
+        last_error = canonical_json_bytes({"code": failure_code}).decode("utf-8")
         self.connection.execute("BEGIN IMMEDIATE")
         try:
             current = self.connection.execute(
@@ -552,7 +579,7 @@ class ProjectionJobRunner:
                     last_error_json=?,result_json=NULL,updated_at_us=?,finished_at_us=NULL
                 WHERE job_id=? AND lease_token=?
                 """,
-                (now, last_error, now, claim.job_id, claim.lease_token),
+                (now + delay_us, last_error, now, claim.job_id, claim.lease_token),
             ).rowcount
             if changed != 1:
                 raise ProjectionJobError("PROJECTION_JOB_LEASE_LOST")
@@ -565,7 +592,7 @@ class ProjectionJobRunner:
             claim.workspace_id,
             projections,
             "queued",
-            "PROJECTION_CANCELLED",
+            failure_code,
         )
 
     def _now(self) -> int:
