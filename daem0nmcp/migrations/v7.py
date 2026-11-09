@@ -39,9 +39,12 @@ from ..event_store import (
 )
 from ..schema_version import CURRENT_SCHEMA_VERSION, REQUIRED_V7_SCHEMA_VERSIONS
 from ..storage_activation import (
+    DEFAULT_DATABASE_NAME,
     ActiveDatabasePointer,
     DatabaseFileLock,
+    PointerValidationError,
     resolve_active_database,
+    validate_pointer,
     write_active_pointer,
 )
 from ..workspace import (
@@ -644,6 +647,78 @@ def _partial_candidates(root: Path | None) -> list[Path]:
             ) from exc
         candidates.append(candidate)
     return candidates
+
+
+def _published_candidates(storage: Path) -> list[Path]:
+    """Every well-formed run's published candidate, never following a link."""
+
+    root = _validated_migration_root(storage, create=False)
+    if root is None:
+        return []
+    candidates: list[Path] = []
+    for run_dir in sorted(root.iterdir(), key=lambda path: path.name):
+        candidate = run_dir / "candidate.db"
+        if (
+            re.fullmatch(r"mig_[0-9a-f]{64}", run_dir.name)
+            and not _is_link_or_reparse(run_dir)
+            and not _is_link_or_reparse(candidate)
+            and candidate.is_file()
+        ):
+            candidates.append(candidate)
+    return candidates
+
+
+def _recorded_predecessor_pointer(
+    storage: Path, predecessor_db: str | None, inventory: dict[str, Any]
+) -> ActiveDatabasePointer:
+    """Rebuild the pointer a format-7 run replaced, proven by its digest.
+
+    Every reader validates a format-7 pointer against the database it names,
+    so returning to a format-7 predecessor means republishing the pointer that
+    predecessor had.  A schema upgrade records each field of it; a `verify-v7`
+    repair omits ``previous_db``, which is then the one retained database whose
+    name reproduces the recorded digest.
+    """
+
+    recorded = inventory.get("active_pointer")
+    if (
+        not isinstance(recorded, dict)
+        or predecessor_db is None
+        or recorded.get("active_db") != predecessor_db
+    ):
+        raise MigrationV7Error(
+            "ROLLBACK_STATE_INVALID", "run did not record its predecessor's pointer"
+        )
+    run_id = recorded.get("migration_run_id")
+    previous_names: list[Any]
+    if "previous_db" in recorded:
+        previous_names = [recorded["previous_db"]]
+    elif run_id is None:
+        previous_names = [None]
+    else:
+        previous_names = [DEFAULT_DATABASE_NAME] + [
+            candidate.relative_to(storage).as_posix()
+            for candidate in _published_candidates(storage)
+        ]
+    for previous_db in previous_names:
+        try:
+            pointer = validate_pointer(
+                ActiveDatabasePointer(
+                    format_version=TARGET_FORMAT_VERSION,
+                    generation=recorded["generation"],
+                    active_db=predecessor_db,
+                    previous_db=previous_db,
+                    migration_run_id=run_id,
+                )
+            )
+        except (KeyError, PointerValidationError):
+            continue
+        digest = hashlib.sha256(canonical_json_bytes(asdict(pointer))).hexdigest()
+        if digest == recorded.get("sha256"):
+            return pointer
+    raise MigrationV7Error(
+        "ROLLBACK_STATE_INVALID", "predecessor's pointer cannot be reproduced"
+    )
 
 
 def _sqlite_backup(source: Path, destination: Path) -> None:
@@ -1618,6 +1693,9 @@ class MigrationV7Service:
             if resolved.format_version == TARGET_FORMAT_VERSION:
                 from .v7_schema_upgrade import V7SchemaUpgradeService
 
+                resolved = self._repair_rollback_pointer(
+                    storage, workspace.workspace_id, resolved
+                )
                 try:
                     upgrade = V7SchemaUpgradeService(
                         fault_injector=self._fault_injector,
@@ -3338,6 +3416,93 @@ class MigrationV7Service:
         finally:
             connection.close()
 
+    def _repair_rollback_pointer(self, storage: Path, workspace_id: str, resolved):
+        """Replace a rollback pointer written by an earlier build.
+
+        Earlier builds rolled a format-7 run back by pointing at the
+        predecessor while still naming the run and its candidate.  No reader
+        accepts that pointer, so the predecessor's own one is republished; a
+        run built over such a pointer recorded it, hence the repetition.
+        """
+
+        repaired: set[str] = set()
+        while resolved.format_version == TARGET_FORMAT_VERSION:
+            run_id = resolved.migration_run_id
+            if (
+                run_id is None
+                or run_id in repaired
+                or resolved.previous_db != f"migrations/v7/{run_id}/candidate.db"
+            ):
+                break
+            status, source_format, inventory, _validation = self._load_published_run(
+                storage.joinpath("migrations", "v7", run_id, "candidate.db"),
+                run_id,
+                workspace_id,
+                error_code="ROLLBACK_STATE_INVALID",
+            )
+            if source_format != TARGET_FORMAT_VERSION or status not in {
+                "active",
+                "rolled_back",
+            }:
+                break
+            write_active_pointer(
+                storage,
+                _recorded_predecessor_pointer(
+                    storage, resolved.relative_path, inventory
+                ),
+            )
+            repaired.add(run_id)
+            resolved = resolve_active_database(storage)
+        return resolved
+
+    def _runs_rolled_back_to(
+        self, storage: Path, workspace_id: str, resolved
+    ) -> list[str]:
+        """Format-7 runs that were left for the pointer active now, oldest first.
+
+        Rolling a format-7 run back republishes its predecessor's pointer,
+        which names neither the run nor its candidate.  The run recorded that
+        pointer's digest when it was built, and is recognized by it.  A run
+        still marked active does not own the pointer either, so its metadata
+        is completed here: the pointer is the durable boundary.
+        """
+
+        if resolved.pointer_bytes is None:
+            return []
+        digest = hashlib.sha256(resolved.pointer_bytes).hexdigest()
+        found: list[tuple[int, str]] = []
+        for candidate in _published_candidates(storage):
+            run_id = candidate.parent.name
+            if candidate.relative_to(storage).as_posix() == resolved.relative_path:
+                continue
+            try:
+                connection = _readonly_connection(candidate)
+                try:
+                    row = connection.execute(
+                        "SELECT workspace_id,source_format_version,status,"
+                        "source_inventory_json,updated_at_us FROM v7_migration_runs "
+                        "WHERE migration_run_id=?",
+                        (run_id,),
+                    ).fetchone()
+                finally:
+                    connection.close()
+                if (
+                    row is None
+                    or row[0] != workspace_id
+                    or int(row[1]) != TARGET_FORMAT_VERSION
+                    or row[2] not in {"active", "rolled_back"}
+                    or json.loads(row[3])["active_pointer"]["sha256"] != digest
+                ):
+                    continue
+                updated_at_us = int(row[4])
+            except (OSError, sqlite3.Error, KeyError, TypeError, ValueError):
+                continue
+            if row[2] == "active":
+                self._mark_candidate_rolled_back(candidate, run_id)
+                updated_at_us = self._clock_us()
+            found.append((updated_at_us, run_id))
+        return [run_id for _updated_at_us, run_id in sorted(found)]
+
     def rollback(
         self,
         selector: str | os.PathLike[str] | None = None,
@@ -3354,19 +3519,28 @@ class MigrationV7Service:
             if resolved.format_version == TARGET_FORMAT_VERSION:
                 from .v7_schema_upgrade import V7SchemaUpgradeService
 
-                upgrade_service = V7SchemaUpgradeService(
+                V7SchemaUpgradeService(
                     fault_injector=self._fault_injector,
                     clock_us=self._clock_us,
-                )
-                recovered_rollback = upgrade_service.prepare_rollback(
+                ).prepare_rollback(storage, workspace.workspace_id, resolved)
+                resolved = self._repair_rollback_pointer(
                     storage, workspace.workspace_id, resolved
                 )
-                if recovered_rollback is not None:
-                    if (
-                        requested is None
-                        or requested == recovered_rollback.migration_run_id
-                    ):
-                        return recovered_rollback
+                restored = self._runs_rolled_back_to(
+                    storage, workspace.workspace_id, resolved
+                )
+                if restored and (requested is None or requested in restored):
+                    return MigrationResult(
+                        status="already_rolled_back",
+                        action="already_rolled_back",
+                        workspace_id=workspace.workspace_id,
+                        source_format=TARGET_FORMAT_VERSION,
+                        migration_run_id=requested or restored[-1],
+                        active_generation=resolved.generation,
+                    )
+                # Naming the run the restored pointer belongs to unwinds one
+                # step further; "latest" never does that by repetition.
+                if restored and requested != resolved.migration_run_id:
                     raise MigrationV7Error(
                         "ROLLBACK_NOT_ACTIVE", "migration run is not active"
                     )
@@ -3428,7 +3602,7 @@ class MigrationV7Service:
                     "ROLLBACK_UNAVAILABLE", "active database has no predecessor"
                 )
             current_relative = resolved.relative_path
-            _status, source_format, _inventory, _validation = self._load_published_run(
+            _status, source_format, inventory, _validation = self._load_published_run(
                 resolved.path,
                 run_id,
                 workspace.workspace_id,
@@ -3442,23 +3616,38 @@ class MigrationV7Service:
                     f"unreachable; they stay in {current_relative}. Re-run with "
                     "--discard-v7-writes to roll back anyway",
                 )
-            pointer = ActiveDatabasePointer(
-                format_version=source_format,
-                generation=resolved.generation + 1,
-                active_db=resolved.previous_db,
-                previous_db=current_relative,
-                migration_run_id=run_id,
-            )
+            if source_format == TARGET_FORMAT_VERSION:
+                # The predecessor is itself an active format-7 database.  A
+                # pointer that still named this run would be refused by every
+                # reader, because the predecessor holds no record of the run.
+                pointer = _recorded_predecessor_pointer(
+                    storage, resolved.previous_db, inventory
+                )
+            else:
+                pointer = ActiveDatabasePointer(
+                    format_version=source_format,
+                    generation=resolved.generation + 1,
+                    active_db=resolved.previous_db,
+                    previous_db=current_relative,
+                    migration_run_id=run_id,
+                )
             write_active_pointer(storage, pointer)
             self._fault("after_rollback_pointer", migration_run_id=run_id)
             self._mark_candidate_rolled_back(resolved.path, run_id)
+            generation = pointer.generation
+            if source_format == TARGET_FORMAT_VERSION:
+                # A run an earlier build stacked on its own rollback pointer
+                # recorded that pointer, which is replaced in turn.
+                generation = self._repair_rollback_pointer(
+                    storage, workspace.workspace_id, resolve_active_database(storage)
+                ).generation
             return MigrationResult(
                 status="rolled_back",
                 action="rollback",
                 workspace_id=workspace.workspace_id,
                 source_format=TARGET_FORMAT_VERSION,
                 migration_run_id=run_id,
-                active_generation=pointer.generation,
+                active_generation=generation,
                 warnings=(
                     (
                         f"{hidden} event(s) recorded since activation stay only in "

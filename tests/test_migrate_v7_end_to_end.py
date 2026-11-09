@@ -1157,3 +1157,49 @@ def test_cli_status_leaves_a_v6_database_at_its_last_v6_version(tmp_path):
 
     assert MigrationV7Service(_registry(root)).apply(root).status == "activated"
     assert verify_v7(storage, _workspace_id(root))["status"] == "verified"
+
+
+async def test_a_rolled_back_v6_store_starts_in_v6_mode_and_reactivates(tmp_path):
+    """A format-6 rollback pointer asks nothing of the v6 file it names."""
+
+    from daem0nmcp.database import DatabaseManager
+
+    root = tmp_path / "project"
+    (root / "src").mkdir(parents=True)
+    (tmp_path / "other").mkdir()
+    storage = _v6_database(root)
+    database = storage / "daem0nmcp.db"
+
+    async def start() -> tuple[int, int]:
+        manager = DatabaseManager(str(storage))
+        try:
+            await manager.init_db()
+            return manager.format_version, manager.active_generation
+        finally:
+            await manager.close()
+
+    # A legacy start adds the retained ORM tables once, as v6 itself did.
+    assert await start() == (6, 0)
+    service = MigrationV7Service(_registry(root))
+    migrated = service.apply(root)
+    candidate = resolve_active_database(storage).path
+    assert service.rollback(root).status == "rolled_back"
+
+    assert await start() == (6, 2)
+    connection = sqlite3.connect(database)
+    try:
+        version = connection.execute(
+            "SELECT MAX(version) FROM schema_version"
+        ).fetchone()[0]
+    finally:
+        connection.close()
+    assert version == _LAST_V6_SCHEMA_VERSION
+
+    reactivated = service.apply(root)
+
+    assert (reactivated.action, reactivated.migration_run_id) == (
+        "reactivate",
+        migrated.migration_run_id,
+    )
+    assert resolve_active_database(storage).path == candidate
+    assert await start() == (7, 3)

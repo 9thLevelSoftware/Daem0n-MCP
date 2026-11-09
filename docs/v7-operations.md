@@ -327,7 +327,19 @@ repeat the same `migrate-v7 --apply` command. Use `migrate-v7 --rollback latest`
 to return to the retained predecessor and `--apply` to reactivate its verified
 candidate. Rollback refuses with `ROLLBACK_WOULD_HIDE_WRITES`, naming the count
 and the candidate that retains them, when events were recorded after
-activation; `--discard-v7-writes` proceeds and reports what stayed behind. The
+activation; `--discard-v7-writes` proceeds and reports what stayed behind.
+
+Rolling back to a format 7 predecessor (after a schema upgrade or a
+`verify-v7 --repair-projections` activation) republishes the exact
+`active-db.json` that predecessor had, so the reported generation returns to
+the predecessor's. A schema upgrade's predecessor is still on its older schema:
+the Daem0nMCP build that wrote it serves it again, and a newer build answers
+`MIGRATION_REQUIRED` until `--apply` reactivates the candidate. Repeating
+`--rollback latest` reports `already_rolled_back` instead of unwinding a second
+run; pass a migration ID to roll back the run underneath. A workspace that an
+earlier development build left failing with `V7_ACTIVATION_INCOMPLETE` or
+`ACTIVE_V7_INVALID` after such a rollback is repaired by running
+`migrate-v7 --apply` or `migrate-v7 --rollback` once. The
 generic `migrate` command remains an in-place additive migration entry point,
 capped at the last v6 schema version while a store is still format 6 so it
 cannot rewrite what `migrate-v7` snapshots; use `migrate-v7 --apply` when

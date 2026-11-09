@@ -893,7 +893,7 @@ class V7SchemaUpgradeService:
         available = shutil.disk_usage(storage).free
         action = (
             "reactivate"
-            if self._rolled_back_candidate(storage, workspace_id, active)
+            if self._rolled_back_candidate(storage, workspace_id, active, inventory)
             else "upgrade"
         )
         return MigrationResult(
@@ -949,21 +949,6 @@ class V7SchemaUpgradeService:
             raise MigrationV7Error(
                 "INSUFFICIENT_DISK_SPACE", "schema upgrade requires more free space"
             )
-        rolled_back = self._rolled_back_candidate(storage, workspace_id, active)
-        if rolled_back is not None:
-            candidate, run_id, stored_identity = rolled_back
-            if stored_identity.get("database") == _database_identity(inventory):
-                return self._activate_candidate(
-                    storage,
-                    workspace_id,
-                    active,
-                    candidate,
-                    run_id,
-                    stored_identity,
-                    action="reactivate",
-                    source_schema=source_schema,
-                    inventory=inventory,
-                )
         identity = _source_identity(storage, active, inventory)
         run_id = deterministic_id(
             "mig",
@@ -979,14 +964,15 @@ class V7SchemaUpgradeService:
         run_dir = migration_root / run_id
         resumed = self._resumable_candidate(run_dir, run_id, workspace_id, identity)
         if resumed is not None:
+            candidate, action = resumed
             return self._activate_candidate(
                 storage,
                 workspace_id,
                 active,
-                resumed,
+                candidate,
                 run_id,
                 identity,
-                action="resume",
+                action=action,
                 source_schema=source_schema,
                 inventory=inventory,
             )
@@ -1190,7 +1176,14 @@ class V7SchemaUpgradeService:
         run_id: str,
         workspace_id: str,
         identity: Mapping[str, Any],
-    ) -> Path | None:
+    ) -> tuple[Path, str] | None:
+        """The published candidate of this exact source, and how it resumes.
+
+        The run identity covers the active pointer and every source row, so a
+        candidate found here was built from the database that is active now:
+        either it never got its pointer, or a rollback returned to its source.
+        """
+
         if not run_dir.exists():
             return None
         if _is_link_or_reparse(run_dir) or not run_dir.is_dir():
@@ -1204,13 +1197,17 @@ class V7SchemaUpgradeService:
         if not candidate.is_file() or not snapshot.is_file():
             return None
         status, stored = self._read_run(candidate, run_id, workspace_id)
-        if status != "ready" or stored != dict(identity):
+        if status not in {"ready", "active", "rolled_back"} or stored != dict(identity):
             raise MigrationV7Error(
                 "INVALID_SCHEMA_UPGRADE_CANDIDATE", "resumable candidate differs"
             )
         self._validate_snapshot(candidate, run_id, identity)
         _verify_published_candidate(candidate, workspace_id)
-        return candidate
+        if status == "active":
+            # The source is active again while the run still claims to be: a
+            # rollback stopped between its pointer and its metadata.
+            self._mark_rolled_back(candidate, run_id)
+        return candidate, "resume" if status == "ready" else "reactivate"
 
     def _snapshot_hash(self, candidate: Path, run_id: str) -> str:
         connection = sqlite3.connect(f"file:{candidate.as_posix()}?mode=ro", uri=True)
@@ -1380,81 +1377,65 @@ class V7SchemaUpgradeService:
             validation={"whole_store_verified": True},
         )
 
-    def prepare_rollback(
-        self, storage: Path, workspace_id: str, active: Any
-    ) -> MigrationResult | None:
-        """Complete an interrupted schema-upgrade boundary before rollback."""
+    def prepare_rollback(self, storage: Path, workspace_id: str, active: Any) -> None:
+        """Complete an interrupted schema-upgrade activation before rollback.
 
-        run_id = active.migration_run_id
-        if run_id is None:
-            return None
-        candidate_relative = f"migrations/v7/{run_id}/candidate.db"
-        if active.relative_path == candidate_relative:
-            recovered = self._recover_active_ready(storage, workspace_id, active)
-            if recovered is not None:
-                # Activation metadata is now durable; the caller can perform
-                # the requested rollback in the same exclusive lock scope.
-                return None
-        if active.previous_db != candidate_relative:
-            return None
-        candidate = storage.joinpath(*candidate_relative.split("/"))
-        if not candidate.is_file():
-            return None
-        status, identity = self._read_run(candidate, run_id, workspace_id)
-        if status == "active":
-            if _database_identity(inventory_database(active.path)) != identity.get(
-                "database"
-            ):
+        Once the activation metadata is durable, the caller can perform the
+        requested rollback in the same exclusive lock scope.
+        """
+
+        self._recover_active_ready(storage, workspace_id, active)
+
+    def _mark_rolled_back(self, candidate: Path, run_id: str) -> None:
+        connection = sqlite3.connect(candidate)
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            now = self._clock_us()
+            changed = connection.execute(
+                "UPDATE v7_migration_runs SET status='rolled_back',updated_at_us=?,"
+                "rolled_back_at_us=? WHERE migration_run_id=? AND status='active'",
+                (now, now, run_id),
+            ).rowcount
+            if changed != 1:
                 raise MigrationV7Error(
                     "ROLLBACK_STATE_INVALID",
-                    "rolled-back schema source differs from recorded source",
+                    "schema-upgrade rollback metadata changed concurrently",
                 )
-            connection = sqlite3.connect(candidate)
-            try:
-                connection.execute("BEGIN IMMEDIATE")
-                now = self._clock_us()
-                changed = connection.execute(
-                    "UPDATE v7_migration_runs SET status='rolled_back',updated_at_us=?,"
-                    "rolled_back_at_us=? WHERE migration_run_id=? AND status='active'",
-                    (now, now, run_id),
-                ).rowcount
-                if changed != 1:
-                    raise MigrationV7Error(
-                        "ROLLBACK_STATE_INVALID",
-                        "schema-upgrade rollback metadata changed concurrently",
-                    )
-                connection.commit()
-            except Exception:
-                connection.rollback()
-                raise
-            finally:
-                connection.close()
-            status = "rolled_back"
-        if status != "rolled_back":
-            return None
-        return MigrationResult(
-            status="already_rolled_back",
-            action="already_rolled_back",
-            workspace_id=workspace_id,
-            source_format=7,
-            migration_run_id=run_id,
-            active_generation=active.generation,
-        )
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
 
     def _rolled_back_candidate(
-        self, storage: Path, workspace_id: str, active: Any
-    ) -> tuple[Path, str, dict[str, Any]] | None:
-        run_id = active.migration_run_id
-        if run_id is None:
-            return None
-        expected = f"migrations/v7/{run_id}/candidate.db"
-        if active.previous_db != expected:
-            return None
-        candidate = storage.joinpath(*expected.split("/"))
-        if not candidate.is_file():
-            return None
-        status, identity = self._read_run(candidate, run_id, workspace_id)
-        return (candidate, run_id, identity) if status == "rolled_back" else None
+        self,
+        storage: Path,
+        workspace_id: str,
+        active: Any,
+        inventory: Mapping[str, Any],
+    ) -> bool:
+        """Whether applying would reactivate a candidate a rollback retained.
+
+        A rollback republishes the source's own pointer, so the retained run
+        is the one this exact pointer and source derive, not one they name.
+        """
+
+        migration_root = _validated_migration_root(storage, create=False)
+        if migration_root is None:
+            return False
+        identity = _source_identity(storage, active, inventory)
+        run_id = deterministic_id("mig", "v7-schema-upgrade", workspace_id, identity)
+        run_dir = migration_root / run_id
+        candidate = run_dir / "candidate.db"
+        if (
+            _is_link_or_reparse(run_dir)
+            or _is_link_or_reparse(candidate)
+            or not candidate.is_file()
+        ):
+            return False
+        status, stored = self._read_run(candidate, run_id, workspace_id)
+        return status in {"active", "rolled_back"} and stored == identity
 
     def _archive_incomplete(self, run_dir: Path, root: Path, run_id: str) -> None:
         if _is_link_or_reparse(run_dir) or not run_dir.is_dir():
