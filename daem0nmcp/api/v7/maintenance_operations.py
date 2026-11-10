@@ -36,6 +36,7 @@ from ...workspace import Workspace, WorkspaceRegistry
 from .application import AdmittedRequest
 from .errors import STABLE_ERROR_CODE_SET
 from .models import (
+    MAX_CONTEXT_JSON_BYTES,
     DestructiveMutationReceipt,
     Preview,
     RecordSummary,
@@ -709,7 +710,13 @@ def _duplicate_groups(
         if take == 0:
             break
         chosen = tuple(candidates[:take])
-        selected.append(_DuplicateGroup(keeper=keeper, candidates=chosen))
+        group = _DuplicateGroup(keeper=keeper, candidates=chosen)
+        try:
+            _merge_plan(group)
+        except _UnmergeableGroupError:
+            # Merging would overflow the keeper's context; both copies stay.
+            continue
+        selected.append(group)
         event_capacity -= 1 + len(chosen)
     return selected, eligible, len(duplicate_items)
 
@@ -1416,6 +1423,7 @@ def _duplicates_preview_sync(
                         "eligible": eligible,
                         "remaining": max(0, eligible - len(records)),
                         "selected": len(records),
+                        **_kept_counts(groups),
                     },
                     sample_ids=[record.record_id for record in records[:20]],
                     expires_at=expires_at,
@@ -1497,7 +1505,34 @@ def _duplicates_replay(
     )
 
 
-def _merged_keeper_state(group: _DuplicateGroup) -> dict[str, Any]:
+# Where a duplicate's value differs from the one the keeper retains, the
+# duplicate's value is kept under this context key as
+# ``{"record_id": ..., "rationale"?, "outcome"?, "worked"?, "context"?}``.
+_MERGED_DUPLICATES_KEY = "merged_duplicates"
+_MAX_CODE_BINDINGS = 16
+
+
+class _UnmergeableGroupError(Exception):
+    """The merged keeper would not fit the context limit; nothing is merged."""
+
+
+def _binding_key(binding: object) -> tuple[object, object] | None:
+    if not isinstance(binding, dict):
+        return None
+    return (binding.get("relative_file_path"), binding.get("qualified_name"))
+
+
+def _merge_plan(group: _DuplicateGroup) -> tuple[dict[str, Any], dict[str, int]]:
+    """Return the keeper's merged state and what it takes from its duplicates.
+
+    Field by field: the keeper keeps its own content and scalar values; tags
+    are united; a pin or permanence on any member holds; the keeper stays
+    archived only if every member is; the most recently updated outcome wins.
+    A rationale, context key or code binding only a duplicate carries moves to
+    the keeper.  Where both carry different values the keeper's stays and the
+    duplicate's is preserved under ``context["merged_duplicates"]``.
+    """
+
     members = [group.keeper, *group.candidates]
     state = dict(group.keeper.state)
     tags: set[str] = set()
@@ -1514,6 +1549,7 @@ def _merged_keeper_state(group: _DuplicateGroup) -> dict[str, Any]:
         bool(member.state["is_permanent"]) for member in members
     )
     state["archived"] = all(bool(member.state["archived"]) for member in members)
+    preserved: dict[str, dict[str, Any]] = {}
     outcome_sources = [
         member
         for member in members
@@ -1526,7 +1562,106 @@ def _merged_keeper_state(group: _DuplicateGroup) -> dict[str, Any]:
         )
         state["outcome"] = outcome_source.state["outcome"]
         state["worked"] = outcome_source.state["worked"]
-    return state
+        for member in outcome_sources:
+            verdict = (member.state["outcome"], member.state["worked"])
+            if verdict != (state["outcome"], state["worked"]):
+                preserved.setdefault(member.record_id, {}).update(
+                    {"outcome": verdict[0], "worked": verdict[1]}
+                )
+
+    keeper_context = group.keeper.state["context"]
+    if not isinstance(keeper_context, dict):
+        raise MaintenanceOperationError("CAPABILITY_DEGRADED")
+    context = dict(keeper_context)
+    carried = context.get(_MERGED_DUPLICATES_KEY, [])
+    carried = list(carried) if isinstance(carried, list) else [carried]
+    bindings = context.get("code_bindings")
+    merge_bindings = bindings is None or isinstance(bindings, list)
+    bindings = list(bindings) if isinstance(bindings, list) else []
+    bound = {_binding_key(binding) for binding in bindings}
+    rationale = state["rationale"]
+    kept = {"kept_code_bindings": 0, "kept_context_keys": 0, "kept_rationales": 0}
+    # Newest duplicate first, so the most recent value fills a gap.
+    for candidate in sorted(
+        group.candidates,
+        key=lambda record: (record.created_at_us, record.record_id),
+        reverse=True,
+    ):
+        entry = preserved.setdefault(candidate.record_id, {})
+        candidate_rationale = candidate.state["rationale"]
+        if candidate_rationale:
+            if not rationale:
+                rationale = candidate_rationale
+                kept["kept_rationales"] += 1
+            elif candidate_rationale != rationale:
+                entry["rationale"] = candidate_rationale
+        candidate_context = candidate.state["context"]
+        if not isinstance(candidate_context, dict):
+            raise MaintenanceOperationError("CAPABILITY_DEGRADED")
+        conflicts: dict[str, Any] = {}
+        for key in sorted(candidate_context):
+            value = candidate_context[key]
+            if key == _MERGED_DUPLICATES_KEY and isinstance(value, list):
+                carried.extend(value)
+            elif key == "code_bindings" and merge_bindings and isinstance(value, list):
+                unmerged = []
+                for binding in value:
+                    binding_key = _binding_key(binding)
+                    if binding in bindings:
+                        continue
+                    if (
+                        binding_key is None
+                        or binding_key in bound
+                        or len(bindings) >= _MAX_CODE_BINDINGS
+                    ):
+                        unmerged.append(binding)
+                        continue
+                    bindings.append(binding)
+                    bound.add(binding_key)
+                    kept["kept_code_bindings"] += 1
+                if unmerged:
+                    conflicts[key] = unmerged
+            elif key not in context:
+                context[key] = value
+                kept["kept_context_keys"] += 1
+            elif context[key] != value:
+                conflicts[key] = value
+        if conflicts:
+            entry["context"] = conflicts
+    if bindings:
+        context["code_bindings"] = bindings
+    entries = [
+        {"record_id": record_id, **entry}
+        for record_id, entry in preserved.items()
+        if entry
+    ]
+    if carried or entries:
+        context[_MERGED_DUPLICATES_KEY] = [*carried, *entries]
+    if len(canonical_json_bytes(context)) > MAX_CONTEXT_JSON_BYTES:
+        raise _UnmergeableGroupError()
+    state["rationale"] = rationale
+    state["context"] = context
+    kept["preserved_conflicts"] = len(entries)
+    return state, kept
+
+
+def _merged_keeper_state(group: _DuplicateGroup) -> dict[str, Any]:
+    return _merge_plan(group)[0]
+
+
+def _kept_counts(groups: Sequence[_DuplicateGroup]) -> dict[str, int]:
+    """Sum what the selected merges keep, for the preview."""
+
+    totals = {
+        "kept_code_bindings": 0,
+        "kept_context_keys": 0,
+        "kept_rationales": 0,
+        "preserved_conflicts": 0,
+    }
+    for group in groups:
+        for name, value in _merge_plan(group)[1].items():
+            totals[name] += value
+    return totals
 
 
 def _duplicates_sync(

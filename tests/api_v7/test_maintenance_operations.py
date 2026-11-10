@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import json
 import sqlite3
 import tempfile
 import threading
@@ -429,7 +430,16 @@ class MaintenanceOperationTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(
-            {"duplicate_groups": 1, "eligible": 1, "remaining": 0, "selected": 1},
+            {
+                "duplicate_groups": 1,
+                "eligible": 1,
+                "kept_code_bindings": 0,
+                "kept_context_keys": 0,
+                "kept_rationales": 0,
+                "preserved_conflicts": 0,
+                "remaining": 0,
+                "selected": 1,
+            },
             preview.counts,
         )
         self.assertEqual([duplicate_id], preview.sample_ids)
@@ -494,6 +504,170 @@ class MaintenanceOperationTests(unittest.IsolatedAsyncioTestCase):
             ],
             [tuple(row) for row in event_types],
         )
+
+    async def test_duplicate_cleanup_keeps_what_only_the_duplicate_carried(
+        self,
+    ) -> None:
+        """Merging must not lose rationale, context or code bindings."""
+        binding = {
+            "relative_file_path": "src/queue.py",
+            "qualified_name": "Queue.retry",
+            "fingerprint": "a" * 64,
+            "head_commit": None,
+        }
+        own_binding = {**binding, "qualified_name": "Queue.push"}
+        duplicate_id = self._append_record(
+            "a",
+            "Use the durable queue",
+            created_at=NOW - timedelta(days=3),
+            rationale="Retries survive a restart.",
+            context={
+                "component": "queue",
+                "ticket": "A-1",
+                "code_bindings": [binding],
+            },
+        )
+        keeper_id = self._append_record(
+            "b",
+            "use the durable queue",
+            created_at=NOW - timedelta(days=2),
+            context={"ticket": "B-2", "code_bindings": [own_binding]},
+        )
+        disputed_id = self._append_record(
+            "c",
+            "Cache the session",
+            created_at=NOW - timedelta(days=3),
+            rationale="It was faster in March.",
+            outcome="It went stale.",
+            worked=False,
+        )
+        disputed_keeper_id = self._append_record(
+            "d",
+            "cache the session",
+            created_at=NOW - timedelta(days=2),
+            rationale="It is faster now.",
+        )
+        operations = self._operations()
+
+        preview = await operations["memory_duplicates_preview"](
+            workspace=self.workspace,
+            request=_request(
+                "memory_duplicates_preview",
+                workspace_id=self.workspace.workspace_id,
+            ),
+        )
+        await operations["memory_duplicates_cleanup"](
+            workspace=self.workspace,
+            request=_request(
+                "memory_duplicates_cleanup",
+                workspace_id=self.workspace.workspace_id,
+                selection_token=preview.selection_token,
+                preflight_token=PREFLIGHT_TOKEN,
+            ),
+        )
+
+        with closing(sqlite3.connect(self.database)) as connection:
+            rows = {
+                row[0]: (row[1], json.loads(row[2]), row[3], row[4])
+                for row in connection.execute(
+                    "SELECT record_id,rationale,context_json,outcome,worked "
+                    "FROM memory_records WHERE deleted_at_us IS NULL"
+                )
+            }
+        self.assertEqual({keeper_id, disputed_keeper_id}, set(rows))
+        rationale, context, _outcome, _worked = rows[keeper_id]
+        self.assertEqual("Retries survive a restart.", rationale)
+        self.assertEqual(
+            {
+                "code_bindings": [own_binding, binding],
+                "component": "queue",
+                "merged_duplicates": [
+                    {"context": {"ticket": "A-1"}, "record_id": duplicate_id}
+                ],
+                "ticket": "B-2",
+            },
+            context,
+        )
+        rationale, context, outcome, worked = rows[disputed_keeper_id]
+        self.assertEqual("It is faster now.", rationale)
+        self.assertEqual(("It went stale.", 0), (outcome, worked))
+        self.assertEqual(
+            {
+                "merged_duplicates": [
+                    {
+                        "rationale": "It was faster in March.",
+                        "record_id": disputed_id,
+                    }
+                ]
+            },
+            context,
+        )
+        self._assert_replay_reproduces_projections()
+        # The preview said what the merge would keep before anything changed.
+        self.assertEqual(
+            {
+                "duplicate_groups": 2,
+                "eligible": 2,
+                "kept_code_bindings": 1,
+                "kept_context_keys": 1,
+                "kept_rationales": 1,
+                "preserved_conflicts": 2,
+                "remaining": 0,
+                "selected": 2,
+            },
+            preview.counts,
+        )
+
+    async def test_duplicates_whose_merged_context_would_not_fit_are_left_alone(
+        self,
+    ) -> None:
+        """A merge that cannot keep both contexts must not delete either copy."""
+        self._append_record(
+            "a",
+            "Use the durable queue",
+            created_at=NOW - timedelta(days=3),
+            context={"older_notes": "x" * 40_000},
+        )
+        self._append_record(
+            "b",
+            "use the durable queue",
+            created_at=NOW - timedelta(days=2),
+            context={"newer_notes": "y" * 40_000},
+        )
+        operations = self._operations()
+
+        preview = await operations["memory_duplicates_preview"](
+            workspace=self.workspace,
+            request=_request(
+                "memory_duplicates_preview",
+                workspace_id=self.workspace.workspace_id,
+            ),
+        )
+
+        self.assertEqual(
+            (1, 1, 0, 1),
+            (
+                preview.counts["duplicate_groups"],
+                preview.counts["eligible"],
+                preview.counts["selected"],
+                preview.counts["remaining"],
+            ),
+        )
+        receipt = await operations["memory_duplicates_cleanup"](
+            workspace=self.workspace,
+            request=_request(
+                "memory_duplicates_cleanup",
+                workspace_id=self.workspace.workspace_id,
+                selection_token=preview.selection_token,
+                preflight_token=PREFLIGHT_TOKEN,
+            ),
+        )
+        self.assertEqual(0, receipt.changed_count)
+        with closing(sqlite3.connect(self.database)) as connection:
+            live = connection.execute(
+                "SELECT count(*) FROM memory_records WHERE deleted_at_us IS NULL"
+            ).fetchone()[0]
+        self.assertEqual(2, live)
 
     async def test_duplicate_preview_with_merge_disabled_selects_nothing(
         self,
@@ -935,7 +1109,16 @@ class MaintenanceOperationTests(unittest.IsolatedAsyncioTestCase):
             operations, "memory_duplicates_preview"
         )
         self.assertEqual(
-            {"duplicate_groups": 1, "eligible": 1, "remaining": 0, "selected": 1},
+            {
+                "duplicate_groups": 1,
+                "eligible": 1,
+                "kept_code_bindings": 0,
+                "kept_context_keys": 0,
+                "kept_rationales": 0,
+                "preserved_conflicts": 0,
+                "remaining": 0,
+                "selected": 1,
+            },
             duplicate_preview.counts,
         )
         self.assertEqual([old_duplicate], duplicate_preview.sample_ids)
