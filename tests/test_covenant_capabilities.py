@@ -300,6 +300,55 @@ class CapabilityGateTests(unittest.TestCase):
         self.assertLessEqual(len(store._states[scope].issued), 3)
         self.assertLessEqual(len(store._states[scope].consumed), 3)
 
+    def test_scope_quota_recycles_only_the_requesting_principals_scopes(
+        self,
+    ) -> None:
+        store = CovenantStateStore(
+            clock=self.clock,
+            ttl_seconds=300,
+            max_scopes=4,
+            max_scopes_per_principal=2,
+        )
+
+        def scope(principal: str, session: str) -> InvocationScope:
+            return InvocationScope(principal, session, self.workspace)
+
+        victim = scope("victim", "session")
+        store.mark_briefed(victim)
+        store.record_issued(victim, "nonce", "inscribe.remember", "a" * 64, 1_300)
+        for index in range(6):
+            store.mark_briefed(scope("churn", f"session-{index}"))
+            self.clock.value += 1
+        self.assertEqual(3, len(store._states))
+        self.assertEqual({"victim": 1, "churn": 2}, store._principal_scopes)
+        self.assertTrue(store.is_briefed(victim))
+        self.assertTrue(store.consume_nonce(victim, "nonce", 1_300))
+        self.assertFalse(store.is_briefed(scope("churn", "session-3")))
+        self.assertTrue(store.is_briefed(scope("churn", "session-4")))
+
+        # Touching a scope makes it the most recently used one, so the next
+        # new scope replaces the other.
+        self.assertTrue(store.is_briefed(scope("churn", "session-4")))
+        store.mark_briefed(scope("churn", "session-6"))
+        self.assertTrue(store.is_briefed(scope("churn", "session-4")))
+        self.assertFalse(store.is_briefed(scope("churn", "session-5")))
+
+        # A full table makes a principal recycle its own scope; a principal
+        # holding none is refused and nobody else loses state.
+        store.mark_briefed(scope("third", "session"))
+        self.assertEqual(4, len(store._states))
+        store.mark_briefed(scope("third", "session-2"))
+        self.assertFalse(store.is_briefed(scope("third", "session")))
+        with self.assertRaises(CovenantStateCapacityError):
+            store.mark_briefed(scope("fourth", "session"))
+        self.assertEqual({"victim": 1, "churn": 2, "third": 1}, store._principal_scopes)
+
+        self.clock.value += 301
+        store.mark_briefed(scope("fourth", "session"))
+        self.assertEqual({"fourth": 1}, store._principal_scopes)
+        with self.assertRaises(ValueError):
+            CovenantStateStore(max_scopes_per_principal=0)
+
     def test_missing_identity_fails_closed(self) -> None:
         result = self.gate.authorize(
             "inscribe.remember",

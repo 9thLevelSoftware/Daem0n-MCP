@@ -519,7 +519,16 @@ class _ScopeState:
 
 
 class CovenantStateStore:
-    """Bounded in-memory authorization state keyed by full invocation scope."""
+    """Bounded in-memory authorization state keyed by full invocation scope.
+
+    A principal that needs a new scope while it is at its own quota, or while
+    the whole table is full, gives up its own least recently used scope; that
+    scope is briefed again on its next call.  Another principal's scopes are
+    never removed, so only a principal holding no scope at all is refused when
+    the table is full.  Clients sharing one principal (stdio and
+    unauthenticated loopback HTTP use the process principal) share that quota,
+    so there the oldest idle session's scope is the one that is given up.
+    """
 
     def __init__(
         self,
@@ -528,20 +537,34 @@ class CovenantStateStore:
         ttl_seconds: int = 3600,
         max_scopes: int = 1024,
         max_capabilities_per_scope: int = MAX_CAPABILITIES_PER_SCOPE,
+        max_scopes_per_principal: int = 256,
     ) -> None:
         if max_scopes <= 0:
             raise ValueError("max_scopes must be positive")
         if max_capabilities_per_scope <= 0:
             raise ValueError("max_capabilities_per_scope must be positive")
+        if max_scopes_per_principal <= 0:
+            raise ValueError("max_scopes_per_principal must be positive")
         self._clock = clock
         self._ttl_seconds = ttl_seconds
         self._max_scopes = max_scopes
         self._max_capabilities_per_scope = max_capabilities_per_scope
+        self._max_scopes_per_principal = max_scopes_per_principal
         self._states: OrderedDict[InvocationScope, _ScopeState] = OrderedDict()
+        self._principal_scopes: dict[str, int] = {}
         self._lock = threading.Lock()
 
     def _now(self) -> int:
         return int(self._clock())
+
+    def _remove_locked(self, scope: InvocationScope) -> None:
+        if self._states.pop(scope, None) is None:
+            return
+        remaining = self._principal_scopes.get(scope.principal_id, 0) - 1
+        if remaining > 0:
+            self._principal_scopes[scope.principal_id] = remaining
+        else:
+            self._principal_scopes.pop(scope.principal_id, None)
 
     def _prune_locked(self, now: int) -> None:
         stale = [
@@ -550,18 +573,34 @@ class CovenantStateStore:
             if now - state.last_seen > self._ttl_seconds
         ]
         for scope in stale:
-            self._states.pop(scope, None)
+            self._remove_locked(scope)
 
     def _state_locked(self, scope: InvocationScope, now: int) -> _ScopeState:
         self._prune_locked(now)
         state = self._states.get(scope)
         if state is None:
-            if len(self._states) >= self._max_scopes:
-                raise CovenantStateCapacityError(
-                    "live Covenant scope capacity is unavailable"
+            owned = self._principal_scopes.get(scope.principal_id, 0)
+            if (
+                owned >= self._max_scopes_per_principal
+                or len(self._states) >= self._max_scopes
+            ):
+                if owned == 0:
+                    raise CovenantStateCapacityError(
+                        "live Covenant scope capacity is unavailable"
+                    )
+                # ``_states`` is ordered least recently used first.
+                self._remove_locked(
+                    next(
+                        held
+                        for held in self._states
+                        if held.principal_id == scope.principal_id
+                    )
                 )
             state = _ScopeState(last_seen=now)
             self._states[scope] = state
+            self._principal_scopes[scope.principal_id] = (
+                self._principal_scopes.get(scope.principal_id, 0) + 1
+            )
         else:
             state.last_seen = now
             self._states.move_to_end(scope)
@@ -1114,6 +1153,11 @@ class CovenantGate:
             return CovenantViolation.build(exc.code, operation, workspace)
         if not admitted:
             return CovenantViolation.build("TOKEN_REPLAYED", operation, workspace)
+        if consume_capability:
+            # A spent capability must stop holding issuance capacity.
+            release = getattr(self.authority, "release_consumed", None)
+            if callable(release):
+                release(preflight_token)
         return None
 
 

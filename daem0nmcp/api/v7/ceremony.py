@@ -10,7 +10,12 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Literal, Protocol
 
-from ...covenant import CovenantGate, CovenantLevel, InvocationScope
+from ...covenant import (
+    CovenantGate,
+    CovenantLevel,
+    CovenantStateCapacityError,
+    InvocationScope,
+)
 from ...workspace import Workspace
 from .models import (
     CounselChallenge,
@@ -20,10 +25,17 @@ from .models import (
     InlineCounsel,
     PreflightGuidance,
 )
+from .opaque_capabilities import OpaqueCapabilityCapacityError
 
 RECOVERABLE_TOKEN_CODES = frozenset(
     {"TOKEN_EXPIRED", "TOKEN_ARGUMENT_MISMATCH", "TOKEN_REPLAYED"}
 )
+CAPACITY_VIOLATION = "CAPABILITY_DEGRADED"
+CAPACITY_MESSAGE = (
+    "Covenant capacity for this caller is exhausted; retry after outstanding "
+    "preflight capabilities are used or expire."
+)
+CAPACITY_RETRY_AFTER_MS = 5_000
 CounselMode = Literal["inline", "challenge", "off"]
 _CONTENT_TOKEN = re.compile(r"[a-z0-9][a-z0-9_-]{3,79}")
 _TOKEN_COMPONENT = re.compile(r"[_-]")
@@ -92,6 +104,21 @@ class CeremonyOutcome:
     violation: Mapping[str, Any] | None
     notice: CovenantNotice | None
     challenge: CounselChallenge | None
+
+
+def is_capacity_violation(violation: Mapping[str, Any] | None) -> bool:
+    """Whether admission stopped because Covenant state capacity ran out."""
+
+    return violation is not None and violation.get("violation") == CAPACITY_VIOLATION
+
+
+def _capacity_violation(tool_name: str) -> dict[str, Any]:
+    return {
+        "status": "blocked",
+        "violation": CAPACITY_VIOLATION,
+        "operation": tool_name,
+        "message": CAPACITY_MESSAGE,
+    }
 
 
 def _content_tokens(value: object) -> frozenset[str]:
@@ -211,7 +238,10 @@ class CovenantCeremony:
                 raise
             except Exception:
                 return CeremonyOutcome(violation, notice, None)
-            self._gate.record_briefing(scope)
+            try:
+                self._gate.record_briefing(scope)
+            except CovenantStateCapacityError:
+                return CeremonyOutcome(_capacity_violation(tool_name), notice, None)
             notice = CovenantNotice(auto_brief=brief)
             violation = authorize(token)
             if code(violation) in RECOVERABLE_TOKEN_CODES:
@@ -244,6 +274,10 @@ class CovenantCeremony:
                 )
             except asyncio.CancelledError:
                 raise
+            except (CovenantStateCapacityError, OpaqueCapabilityCapacityError):
+                # No capability could be issued, so a counsel answer would name
+                # a remedy that cannot be followed.
+                return CeremonyOutcome(_capacity_violation(tool_name), notice, None)
             except Exception:
                 return CeremonyOutcome(violation, notice, None)
             reasons = counsel_reasons(level, guidance, normalized)
@@ -278,10 +312,14 @@ class CovenantCeremony:
 
 __all__ = [
     "ArgumentNormalizer",
+    "CAPACITY_MESSAGE",
+    "CAPACITY_RETRY_AFTER_MS",
+    "CAPACITY_VIOLATION",
     "CeremonyOutcome",
     "CounselMode",
     "CovenantCeremony",
     "PreflightService",
     "RECOVERABLE_TOKEN_CODES",
     "counsel_reasons",
+    "is_capacity_violation",
 ]
