@@ -302,6 +302,111 @@ def format_check_result(result: dict) -> str:
     return "\n".join(lines)
 
 
+def _settled(workspace):
+    """Refuse an offline command on a root whose identity is blocked."""
+
+    from .workspace import WorkspaceIdentityError
+
+    if workspace.identity_block is not None:
+        raise WorkspaceIdentityError(workspace.identity_block)
+    return workspace
+
+
+def _identity_payload(identity, counts: dict) -> dict:
+    """Describe one workspace identity without naming any host path."""
+
+    hidden = {
+        stored: total
+        for stored, total in sorted(counts.items())
+        if stored != identity.workspace_id
+    }
+    payload: dict = {
+        "workspace_id": identity.workspace_id,
+        "recorded": identity.has_file,
+        "root_key_matches": identity.root_key_matches,
+        "blocked": identity.blocked,
+        "forked_from": identity.forked_from,
+        "events_by_workspace_id": dict(sorted(counts.items())),
+        "hidden_event_count": sum(hidden.values()),
+    }
+    return payload
+
+
+def _render_identity(payload: dict) -> str:
+    lines = []
+    if payload["blocked"]:
+        lines.append(f"Blocked: {payload['blocked']}")
+    else:
+        lines.append(f"Workspace: {payload['workspace_id']}")
+    lines.append("Recorded: " + ("yes" if payload["recorded"] else "no"))
+    if payload["recorded"] and not payload["root_key_matches"]:
+        lines.append(
+            "This folder looks moved or copied; if a shared server also serves "
+            "the original, run `workspace-id --new` here."
+        )
+    if payload["forked_from"]:
+        lines.append(f"Forked from: {payload['forked_from']}")
+    if payload["hidden_event_count"]:
+        lines.append(f"Hidden events: {payload['hidden_event_count']}")
+    if payload["events_by_workspace_id"]:
+        lines.append("Stored events by workspace ID:")
+        for stored, total in payload["events_by_workspace_id"].items():
+            lines.append(f"  {stored}  {total}")
+    return "\n".join(lines)
+
+
+def _workspace_id_command(args, active_settings) -> int:
+    """Show, adopt, or fork the identity recorded with this project."""
+
+    from .workspace import (
+        WorkspaceIdentityError,
+        path_hash_workspace_id,
+        stored_event_counts,
+        workspace_identity,
+        write_workspace_identity,
+    )
+
+    other_roots = tuple(getattr(active_settings, "workspace_roots", ()) or ())
+    root = Path(getattr(active_settings, "project_root", ".")).expanduser().resolve()
+    try:
+        identity = workspace_identity(root, other_roots=other_roots)
+        if args.adopt is not None:
+            write_workspace_identity(root, workspace_id=args.adopt)
+        elif args.new:
+            fresh = path_hash_workspace_id(root)
+            hidden = identity.stored_ids - {fresh}
+            if len(hidden) == 1:
+                previous = next(iter(hidden))
+            elif identity.forked_from is not None:
+                previous = identity.forked_from
+            elif identity.recorded_id is not None:
+                previous = identity.recorded_id
+            elif len(identity.stored_ids) == 1:
+                previous = next(iter(identity.stored_ids))
+            else:
+                previous = None
+            write_workspace_identity(
+                root,
+                workspace_id=fresh,
+                forked_from=None if previous in (None, fresh) else previous,
+            )
+        if args.adopt is not None or args.new:
+            identity = workspace_identity(root, other_roots=other_roots)
+    except WorkspaceIdentityError as exc:
+        payload = {"error": {"code": exc.code, "message": exc.code}}
+        if args.json:
+            print(json.dumps(payload, sort_keys=True, separators=(",", ":")))
+        else:
+            print(f"Error: {exc.code}")
+        return 2
+    payload = _identity_payload(identity, stored_event_counts(root))
+    if args.json:
+        print(json.dumps(payload, sort_keys=True, separators=(",", ":")))
+    else:
+        safe_print(_render_identity(payload))
+    return 1 if payload["blocked"] else 0
+
+
 def main():
     """CLI entry point."""
     parser = argparse.ArgumentParser(description="Daem0nMCP CLI")
@@ -365,6 +470,22 @@ def main():
         type=_v7_batch_size,
         default=500,
         help="Rows per checkpoint batch",
+    )
+
+    workspace_id_parser = subparsers.add_parser(
+        "workspace-id",
+        help="Show or settle the workspace identity recorded with this project",
+    )
+    workspace_id_choice = workspace_id_parser.add_mutually_exclusive_group()
+    workspace_id_choice.add_argument(
+        "--adopt",
+        metavar="ID",
+        help="Record an existing workspace ID for this project",
+    )
+    workspace_id_choice.add_argument(
+        "--new",
+        action="store_true",
+        help="Record a fresh ID and keep the inherited events hidden",
     )
 
     verify_v7_parser = subparsers.add_parser(
@@ -483,6 +604,11 @@ def main():
     install_claude_parser.add_argument(
         "--dry-run", action="store_true", help="Show what would change"
     )
+    install_claude_parser.add_argument(
+        "--enable-edit-bridge",
+        action="store_true",
+        help="Also provision project-local edit-bridge credentials",
+    )
 
     # uninstall-claude-hooks command
     uninstall_claude_parser = subparsers.add_parser(
@@ -592,18 +718,22 @@ def main():
         # Create new settings instance to pick up the env var
         active_settings = Settings()
 
+    if args.command == "workspace-id":
+        sys.exit(_workspace_id_command(args, active_settings))
+
     if args.command == "verify-v7":
         from .storage_activation import DatabaseInUseError, PointerValidationError
         from .verification_v7 import VerificationV7Error, verify_v7
         from .workspace import (
             WorkspaceAccessError,
+            WorkspaceIdentityError,
             WorkspacePathError,
             WorkspaceRegistry,
         )
 
         try:
             registry = WorkspaceRegistry.from_settings(active_settings)
-            workspace = registry.resolve(args.workspace_id)
+            workspace = _settled(registry.resolve(args.workspace_id))
             workspace_settings = active_settings
             if workspace.workspace_id != registry.default.workspace_id:
                 if getattr(active_settings, "storage_path", None):
@@ -622,6 +752,7 @@ def main():
             PointerValidationError,
             VerificationV7Error,
             WorkspaceAccessError,
+            WorkspaceIdentityError,
             WorkspacePathError,
         ) as exc:
             code = getattr(exc, "code", type(exc).__name__)
@@ -660,6 +791,7 @@ def main():
         from .storage_activation import DatabaseInUseError, PointerValidationError
         from .workspace import (
             WorkspaceAccessError,
+            WorkspaceIdentityError,
             WorkspacePathError,
             WorkspaceRegistry,
         )
@@ -683,6 +815,7 @@ def main():
             DatabaseInUseError,
             PointerValidationError,
             WorkspaceAccessError,
+            WorkspaceIdentityError,
             WorkspacePathError,
         ) as exc:
             code = getattr(exc, "code", type(exc).__name__)
@@ -769,6 +902,7 @@ def main():
         )
         from .workspace import (
             WorkspaceAccessError,
+            WorkspaceIdentityError,
             WorkspacePathError,
             WorkspaceRegistry,
         )
@@ -778,7 +912,7 @@ def main():
                 update={"project_root": args.consolidation_project_path}
             )
             registry = WorkspaceRegistry.from_settings(recovery_settings)
-            target = registry.default
+            target = _settled(registry.default)
             runs = recover_consolidation(registry, target, run_id=args.run_id)
             payload = {
                 "status": "recovered",
@@ -789,6 +923,7 @@ def main():
         except (
             ConsolidationOperationError,
             WorkspaceAccessError,
+            WorkspaceIdentityError,
             WorkspacePathError,
         ) as exc:
             code = getattr(exc, "code", type(exc).__name__)
@@ -837,13 +972,14 @@ def main():
         )
         from .workspace import (
             WorkspaceAccessError,
+            WorkspaceIdentityError,
             WorkspacePathError,
             WorkspaceRegistry,
         )
 
         try:
             registry = WorkspaceRegistry.from_settings(active_settings)
-            workspace = registry.resolve(args.workspace_id)
+            workspace = _settled(registry.resolve(args.workspace_id))
             workspace_settings = active_settings
             if workspace.workspace_id != registry.default.workspace_id:
                 if getattr(active_settings, "storage_path", None):
@@ -899,6 +1035,7 @@ def main():
             PointerValidationError,
             ProjectionOperationError,
             WorkspaceAccessError,
+            WorkspaceIdentityError,
             WorkspacePathError,
         ) as exc:
             code = getattr(exc, "code", type(exc).__name__)
@@ -979,6 +1116,9 @@ def main():
         success, message = install_claude_hooks(
             dry_run=getattr(args, "dry_run", False),
             project_path=args.project_path or os.getcwd(),
+            enable_edit_bridge=True
+            if getattr(args, "enable_edit_bridge", False)
+            else None,
         )
         if args.json:
             print(json.dumps({"success": success, "message": message}))

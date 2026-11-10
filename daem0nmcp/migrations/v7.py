@@ -15,7 +15,6 @@ import os
 import re
 import sqlite3
 import stat
-import sys
 import time
 from collections.abc import Callable, Iterable
 from dataclasses import asdict, dataclass, field
@@ -23,7 +22,6 @@ from datetime import datetime, timezone
 from functools import partial
 from pathlib import Path
 from typing import Any
-from urllib.parse import quote
 
 from ..event_store import (
     CompatibilityStreamError,
@@ -41,11 +39,13 @@ from ..schema_version import CURRENT_SCHEMA_VERSION, REQUIRED_V7_SCHEMA_VERSIONS
 from ..storage_activation import (
     ActiveDatabasePointer,
     DatabaseFileLock,
+    readonly_database_uri,
     resolve_active_database,
     write_active_pointer,
 )
 from ..workspace import (
     WorkspaceRegistry,
+    ensure_workspace_identity,
     is_workspace_relative_path,
     normalize_resolved_path,
     relative_to_root,
@@ -176,24 +176,9 @@ def _quoted_identifier(name: str) -> str:
 
 
 def _readonly_connection(path: Path) -> sqlite3.Connection:
-    # A dry run never changes the source database.  On Windows the no-lock VFS
-    # keeps read-only connections off the ``-shm`` read marks.  POSIX has no
-    # equivalent: ``unix-none`` lacks shared memory, so it cannot open a WAL
-    # database at all.  There, with no ``-wal``, ``-shm`` or ``-journal`` the
-    # main file is the whole database and is read as immutable (SQLite would
-    # otherwise create the WAL files); anything else is read through the
-    # default VFS, whose only write is the volatile ``-shm`` wal-index.
-    resolved = path.resolve()
-    if sys.platform == "win32":
-        parameters = "&vfs=win32-none"
-    elif not any(
-        Path(f"{resolved}{suffix}").exists() for suffix in ("-wal", "-shm", "-journal")
-    ):
-        parameters = "&immutable=1"
-    else:
-        parameters = ""
-    uri = "file:" + quote(resolved.as_posix(), safe="/:") + f"?mode=ro{parameters}"
-    connection = sqlite3.connect(uri, uri=True)
+    # A dry run never changes the source database, so it reads through the
+    # shared URI that writes no sidecar beside it.
+    connection = sqlite3.connect(readonly_database_uri(path), uri=True)
     connection.row_factory = sqlite3.Row
     connection.execute("PRAGMA query_only=ON")
     connection.execute("PRAGMA foreign_keys=ON")
@@ -1254,6 +1239,11 @@ class MigrationV7Service:
 
     def _storage(self, selector):
         workspace = self.registry.resolve(selector)
+        if workspace.identity_block is not None:
+            raise MigrationV7Error(
+                workspace.identity_block,
+                "the workspace identity must be settled first",
+            )
         storage = resolve_derived_path(workspace.root, ".daem0nmcp", "storage")
         return workspace, storage
 
@@ -1613,6 +1603,9 @@ class MigrationV7Service:
         ):
             raise ValueError("batch_size must be between 1 and 10000")
         workspace, storage = self._storage(selector)
+        # Activation is the one offline moment that settles which ID this
+        # project's rows belong to, so record it with the project.
+        ensure_workspace_identity([workspace.root])
         with DatabaseFileLock(storage, "exclusive"):
             resolved = resolve_active_database(storage)
             if resolved.format_version == TARGET_FORMAT_VERSION:

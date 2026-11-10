@@ -82,6 +82,16 @@ class TestInstall:
         assert hooks["PostToolUse"][1]["matcher"] == hooks["PreToolUse"][0]["matcher"]
         assert "NotebookEdit" in hooks["PostToolUse"][1]["matcher"].split("|")
 
+    def test_project_path_without_opt_in_does_not_pair_edit_bridge(
+        self, fake_settings, tmp_path
+    ):
+        project = tmp_path / "project"
+        project.mkdir()
+
+        ok, message = install_claude_hooks(project_path=project)
+        assert ok, message
+        assert not (project / ".claude" / "settings.local.json").exists()
+
     def test_project_pairing_writes_paths_without_secret(self, fake_settings, tmp_path):
         project = tmp_path / "project"
         project.mkdir()

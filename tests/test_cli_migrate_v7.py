@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
+import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -28,8 +31,17 @@ EXPECTED_KEYS = {
 
 
 class MigrateV7CliTests(unittest.TestCase):
-    def _run(self, root: Path, *arguments: str):
+    def _run(
+        self,
+        root: Path,
+        *arguments: str,
+        command: str = "migrate-v7",
+        extra_env: dict[str, str] | None = None,
+    ):
         repository = Path(__file__).resolve().parents[1]
+        env = os.environ.copy()
+        if extra_env:
+            env.update(extra_env)
         return subprocess.run(
             [
                 sys.executable,
@@ -38,10 +50,11 @@ class MigrateV7CliTests(unittest.TestCase):
                 "--json",
                 "--project-path",
                 str(root),
-                "migrate-v7",
+                command,
                 *arguments,
             ],
             cwd=repository,
+            env=env,
             text=True,
             capture_output=True,
             timeout=60,
@@ -143,6 +156,55 @@ class MigrateV7CliTests(unittest.TestCase):
             payload = json.loads(resumed.stdout)
             self.assertEqual("activated", payload["status"])
             self.assertEqual("resume", payload["action"])
+
+    def test_apply_persists_identity_without_rewriting_the_database(self):
+        from daem0nmcp.storage_activation import resolve_active_database
+        from daem0nmcp.workspace import (
+            ensure_workspace_identity,
+            reset_workspace_identity_cache,
+        )
+
+        with tempfile.TemporaryDirectory() as raw:
+            root, storage = self._fixture(raw)
+            applied = self._run(root, "--apply")
+            self.assertEqual(0, applied.returncode, applied.stderr)
+            identity = root / ".daem0nmcp" / "workspace-id"
+            self.assertTrue(identity.is_file(), identity)
+            active = resolve_active_database(storage).path
+            digest = hashlib.sha256(active.read_bytes()).hexdigest()
+            reset_workspace_identity_cache()
+            ensure_workspace_identity([root])
+            self.assertEqual(digest, hashlib.sha256(active.read_bytes()).hexdigest())
+
+    def test_migrate_and_verify_refuse_a_duplicate_copy(self):
+        from daem0nmcp.workspace import path_hash_workspace_id
+
+        with tempfile.TemporaryDirectory() as raw:
+            root, _storage = self._fixture(raw)
+            self.assertEqual(0, self._run(root, "--apply").returncode)
+            copy = Path(raw) / "copy"
+            copy.mkdir()
+            shutil.copytree(root / ".daem0nmcp", copy / ".daem0nmcp")
+            extra = {
+                "DAEM0NMCP_WORKSPACE_ROOTS": json.dumps([str(root), str(copy)]),
+            }
+            migrated = self._run(copy, "--apply", extra_env=extra)
+            self.assertNotEqual(0, migrated.returncode, migrated.stdout)
+            payload = json.loads(migrated.stdout)
+            self.assertEqual("WORKSPACE_IDENTITY_DUPLICATE", payload["error"]["code"])
+            copy_id = path_hash_workspace_id(copy)
+            verified = self._run(
+                copy,
+                "--workspace-id",
+                copy_id,
+                command="verify-v7",
+                extra_env=extra,
+            )
+            self.assertNotEqual(0, verified.returncode, verified.stdout)
+            verified_payload = json.loads(verified.stdout)
+            self.assertEqual(
+                "WORKSPACE_IDENTITY_DUPLICATE", verified_payload["error"]["code"]
+            )
 
 
 if __name__ == "__main__":

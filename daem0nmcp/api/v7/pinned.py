@@ -28,6 +28,7 @@ from .errors import (
     DATABASE_IN_USE_RETRY_AFTER_MS,
     MIGRATION_REQUIRED_MESSAGE,
     ErrorCode,
+    identity_block_failure,
 )
 from .models import (
     ApiResponse,
@@ -378,6 +379,9 @@ class PinnedHandlers:
             or workspace.workspace_id != workspace_id
         ):
             return None, response.internal_error()
+        blocked = identity_block_failure(workspace.identity_block or "")
+        if blocked is not None:
+            return None, response.failure(*blocked)
         return workspace, None
 
     def _scope_for_workspace(

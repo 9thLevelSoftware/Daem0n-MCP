@@ -629,15 +629,15 @@ Daem0n keeps its own state in `~/.daem0nmcp/`). Other hooks in that file are kep
 |-----------------|------|--------------|-------|--------------|
 | `SessionStart` | `session_start` | Explains that the first Daem0n call establishes the session and brief; `session_brief` returns the full brief | `CLAUDE_PROJECT_DIR` env | Yes |
 | `PreToolUse` (`Edit\|Write\|NotebookEdit`) | `pre_edit` | Inside a Daem0n project, adds a one-line `additionalContext` reminder to call `daem0n_tool_call` targeting `memory_recall_file`; silent elsewhere | stdin event | Yes |
-| `PreToolUse` (`Bash`) | `pre_bash` | Checks the command against Daem0n rules. Currently inert: it reads a `TOOL_INPUT` env var that Claude Code does not set | `TOOL_INPUT` env | Yes (always exits 0) |
-| `PostToolUse` (`mcp__.*__edit_preflight`) | `post_edit_preflight` | Edit-bridge plumbing: stages an `edit_preflight` receipt for a bridge edit request. Nothing in Claude Code creates those requests any more, so it is a no-op | stdin event | Yes |
-| `PostToolUse` (`Edit\|Write\|NotebookEdit`) | `post_edit` | Edit-bridge plumbing: reports a bridge-approved edit as a capture candidate. Only loads the bridge when the project is paired; a no-op in Claude Code today | stdin event | Yes |
+| `PreToolUse` (`Bash`) | `pre_bash` | Checks the command against active Daem0n rules (`governance_rules` / `rules`) in read-only SQLite mode and emits matching `additionalContext` reminders | stdin event (`TOOL_INPUT` fallback) | Yes (always exits 0) |
+| `PostToolUse` (`mcp__.*__edit_preflight`) | `post_edit_preflight` | Edit-bridge plumbing: stages an `edit_preflight` receipt for a bridge edit request when the project is paired with `--enable-edit-bridge` | stdin event | Yes |
+| `PostToolUse` (`Edit\|Write\|NotebookEdit`) | `post_edit` | Edit-bridge plumbing: reports a bridge-approved edit as a capture candidate. Only loads the bridge when the project is paired | stdin event | Yes |
 | `Stop`, `SubagentStop` | `stop` | When the transcript shows a finished task with no recorded outcome, suggests direct `memory_store` and `memory_record_outcome` calls with counsel-challenge retry guidance as a `systemMessage`. Never writes memory | stdin event (`transcript_path`) | Yes |
 
 No hook blocks a tool call or keeps the agent running: every hook exits 0 and none
 returns a `permissionDecision` or `decision`.
 
-**What pairing writes.** The installer also pairs the current project (or
+**What optional pairing writes.** When `--enable-edit-bridge` (or explicit remote bridge flags) are passed, the installer also pairs the current project (or
 `--project-path`) with the local edit bridge:
 
 - an owner-only credential at `~/.daem0nmcp/edit-bridges/<authority>/credential.json`
@@ -759,6 +759,13 @@ Each project gets isolated storage at:
 ```
 <project_root>/.daem0nmcp/storage/daem0nmcp.db
 ```
+
+`<project_root>/.daem0nmcp/workspace-id` records which workspace those rows
+belong to, so the memories follow the folder when it is moved or renamed. Move
+the whole folder, `.daem0nmcp/` included; re-clone by copying `.daem0nmcp/` into
+the new clone. Two registered folders may not claim one identity — settle a
+copy with `python -m daem0nmcp.cli --project-path <root> workspace-id --new`.
+See `docs/v7-operations.md` for the full rules.
 
 ## Configuration
 

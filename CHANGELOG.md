@@ -5,6 +5,20 @@
 ### Added
 - Reproducible v7 core foundation with opt-in dependency profiles and lazy capability reporting.
 - `uninstall-claude-hooks` strips the pairing env keys from the project's `.claude/settings.local.json` (the project is `--project-path` or the current directory, and only a project the installer paired is touched); `--remove-credentials` also deletes its local edit-bridge credential and socket directories.
+- **Memories follow a project that is moved or renamed.** Each workspace now
+  records its identity in `.daem0nmcp/workspace-id` (the opaque ID, a
+  device-and-inode key for the folder, and, after a fork, the ID it was forked
+  from). Move the folder with `.daem0nmcp/` inside it and the memories come
+  along; re-clone by copying `.daem0nmcp/` into the new clone. The file names no
+  path, and nothing in it is ever used to reach the filesystem. Bootstrap also
+  writes `.daem0nmcp/.gitignore`. Two registered folders may no longer claim one
+  identity: the mismatched ones answer every call with the non-retryable
+  `WORKSPACE_IDENTITY_DUPLICATE`, and a workspace whose stored events do not
+  match its recorded ID answers `WORKSPACE_IDENTITY_AMBIGUOUS`. The new
+  `python -m daem0nmcp.cli --project-path <root> workspace-id` command prints
+  the resolved ID or the block reason with per-ID event counts, and settles
+  either with `--new` (a recorded fork that hides the inherited events without
+  touching a row) or `--adopt <id>`. No row or event hash is ever rewritten.
 - Schema 33 projects explicit `informed_by` memory provenance and verification-weighted outcomes. Existing native outcomes are backfilled during upgrade; legacy imports do not invent learning signals. `memory_store` and `memory_record_outcome` accept the new evidence fields without changing idempotency hashes for unchanged requests.
 - Shadow-first utility ranking with immediate or discounted provenance credit, repository code-binding validity and successful-outcome rebinding, and intent-aware evidence retention across direct and linked-workspace recall.
 - Optional Python 3.11+ `late-interaction` profile for lazy ColBERT/MaxSim reranking. Missing profiles report unavailable instead of falling back to embedding reranking.

@@ -99,6 +99,7 @@ async def _fetch_and_extract(
     *,
     resolver: Any | None = None,
     delegate: Any | None = None,
+    max_redirects: int = 5,
 ) -> str | None:
     """Fetch URL and extract text content with size limits."""
     try:
@@ -109,6 +110,7 @@ async def _fetch_and_extract(
             PinnedAsyncHTTPTransport,
             pinned_dependency_log_scope,
             read_bounded_identity_body,
+            resolve_pinned_redirect_url,
         )
     except ImportError:
         try:
@@ -119,32 +121,59 @@ async def _fetch_and_extract(
                 PinnedAsyncHTTPTransport,
                 pinned_dependency_log_scope,
                 read_bounded_identity_body,
+                resolve_pinned_redirect_url,
             )
         except ImportError:
             return None
 
     response = None
+    body: bytes | None = None
     try:
         transport = PinnedAsyncHTTPTransport(
             resolver=resolver,
             delegate=delegate,
         )
         with pinned_dependency_log_scope():
-            async with (
-                httpx.AsyncClient(
-                    timeout=float(INGEST_TIMEOUT),
-                    follow_redirects=False,
-                    trust_env=False,
-                    headers={"Accept-Encoding": "identity"},
-                    transport=transport,
-                ) as client,
-                client.stream("GET", url) as response,
-            ):
-                response.raise_for_status()
-                body = await read_bounded_identity_body(
-                    response,
-                    max_bytes=MAX_CONTENT_SIZE,
-                )
+            async with httpx.AsyncClient(
+                timeout=float(INGEST_TIMEOUT),
+                follow_redirects=False,
+                trust_env=False,
+                headers={"Accept-Encoding": "identity"},
+                transport=transport,
+            ) as client:
+                current_url = url
+                visited_urls: set[str] = {current_url}
+                for hop in range(max_redirects + 1):
+                    async with client.stream("GET", current_url) as response:
+                        status_code = getattr(response, "status_code", 200)
+                        if status_code in {301, 302, 303, 307, 308}:
+                            if hop >= max_redirects:
+                                raise ValueError("Maximum redirects exceeded")
+                            headers = getattr(response, "headers", None)
+                            location = (
+                                headers.get("location")
+                                if headers is not None and hasattr(headers, "get")
+                                else None
+                            )
+                            next_url = await resolve_pinned_redirect_url(
+                                current_url,
+                                location,
+                                allowed_schemes=ALLOWED_URL_SCHEMES,
+                                resolver=resolver,
+                            )
+                            if next_url is None or next_url in visited_urls:
+                                raise ValueError("Disallowed redirect target")
+                            visited_urls.add(next_url)
+                            current_url = next_url
+                            continue
+                        response.raise_for_status()
+                        body = await read_bounded_identity_body(
+                            response,
+                            max_bytes=MAX_CONTENT_SIZE,
+                        )
+                        break
+        if body is None:
+            return None
 
         encoding = response.encoding if response else "utf-8"
         return await _HTML_WORKER_POOL.run(

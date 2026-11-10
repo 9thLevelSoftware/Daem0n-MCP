@@ -615,6 +615,36 @@ def _drain_projection_jobs_sync(
     connection.execute("PRAGMA foreign_keys=ON")
     builders: dict[str, Any] | None = None
     try:
+        now_us = time.time_ns() // 1_000
+        has_due_job = (
+            connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' "
+                "AND name='background_jobs'"
+            ).fetchone()
+            is not None
+            and connection.execute(
+                "SELECT 1 FROM background_jobs "
+                "WHERE job_type='retrieval.projection_rebuild' "
+                "AND ((status='queued' AND available_at_us<=?) "
+                "OR (status='running' AND lease_expires_at_us<=?)) LIMIT 1",
+                (now_us, now_us),
+            ).fetchone()
+            is not None
+        )
+        gc_due = None
+        if include_optional and _dense_gc_schema_available(connection):
+            from .dense_generation_gc import reconcile_inactive_generation_gc
+
+            reconcile_inactive_generation_gc(connection, now_us=now_us)
+            gc_due = connection.execute(
+                "SELECT 1 FROM dense_generation_gc_jobs WHERE "
+                "(status='queued' AND available_at_us<=?) OR "
+                "(status='running' AND claim_expires_at_us<=?) LIMIT 1",
+                (now_us, now_us),
+            ).fetchone()
+        if not has_due_job and gc_due is None:
+            return ()
+
         builders = create_projection_builders(
             connection,
             path,
@@ -639,7 +669,6 @@ def _drain_projection_jobs_sync(
                 break
             runs.append(result)
         dense_builder = getattr(builders, "dense_builder", None)
-        gc_due = None
         if include_optional and _dense_gc_schema_available(connection):
             now_us = time.time_ns() // 1_000
             from .dense_generation_gc import reconcile_inactive_generation_gc

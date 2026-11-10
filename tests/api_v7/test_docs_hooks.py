@@ -240,7 +240,13 @@ class ProtocolGoldenTests(unittest.TestCase):
     def test_hooks_do_not_open_the_mutable_v6_manager_path(self) -> None:
         hook_sources = "\n".join(
             _read(ROOT / "daem0nmcp" / "claude_hooks" / name)
-            for name in ("session_start.py", "pre_edit.py", "post_edit.py", "stop.py")
+            for name in (
+                "session_start.py",
+                "pre_edit.py",
+                "pre_bash.py",
+                "post_edit.py",
+                "stop.py",
+            )
         )
 
         self.assertNotIn("get_managers", hook_sources)

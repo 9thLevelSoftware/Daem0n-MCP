@@ -14,6 +14,8 @@ from pathlib import Path
 from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 REQUIREMENTS_PATH = ROOT / "docs/release/v7/requirements.json"
 INVENTORY_PATH = ROOT / "docs/release/v7/inventory.md"
 MAPPING_PATH = ROOT / "docs/v6-to-v7-tools.json"
@@ -270,7 +272,14 @@ def synchronize(requirements: dict[str, Any], data: dict[str, Any]) -> dict[str,
                 },
             )
         )
+    tools_by_name = {tool["name"]: tool for tool in data["tools"]}
     for name in synced["expected_surface"]["planned_tools"]:
+        registered = tools_by_name.get(name)
+        entry_point = (
+            registered["operation_entry_point"]
+            if registered is not None
+            else "unwired"
+        )
         atomic.append(
             _preserve(
                 previous,
@@ -279,7 +288,7 @@ def synchronize(requirements: dict[str, Any], data: dict[str, Any]) -> dict[str,
                     "kind": "planned-tool",
                     "owner": "api/v7",
                     "package": "daem0nmcp.api.v7",
-                    "entry_point": "unwired",
+                    "entry_point": entry_point,
                     "acceptance": f"{name} is registered and exercised through the production MCP server.",
                 },
             )

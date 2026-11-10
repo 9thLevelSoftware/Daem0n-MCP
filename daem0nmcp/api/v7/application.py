@@ -16,7 +16,11 @@ from pydantic import ValidationError
 from ...covenant import CovenantGate, InvocationScope
 from ...workspace import Workspace
 from .ceremony import CovenantCeremony
-from .errors import DATABASE_IN_USE_RETRY_AFTER_MS, ErrorCode
+from .errors import (
+    DATABASE_IN_USE_RETRY_AFTER_MS,
+    ErrorCode,
+    identity_block_failure,
+)
 from .models import CapabilityState
 from .policy import V7_TOOL_LEVELS
 from .responses import ResponseFactory
@@ -192,6 +196,9 @@ class V7ToolRouter:
                     ErrorCode.UNAUTHORIZED_WORKSPACE,
                     "Workspace unavailable.",
                 )
+            blocked = identity_block_failure(workspace.identity_block or "")
+            if blocked is not None:
+                return response.failure(*blocked)
 
             durable_execution = trusted_durable and is_durable_task_execution(
                 tool_name, effective

@@ -41,7 +41,12 @@ from ...transport_security import (
     build_fastmcp_auth,
     validate_transport_security,
 )
-from ...workspace import Workspace, WorkspaceRegistry
+from ...workspace import (
+    Workspace,
+    WorkspaceRegistry,
+    configured_roots,
+    ensure_workspace_identity,
+)
 from ...workspace_access import WorkspaceAccessPolicy
 from .ceremony import CovenantCeremony
 from .code_entity_operations import (
@@ -237,20 +242,37 @@ _NATIVE_PROFILE_MODULES = {
 class _OptionalNativeRuntimeLifecycle:
     """Initialize enabled native provider entry points before worker threads."""
 
-    def __init__(self, capability_statuses: MutableMapping[str, str]) -> None:
+    def __init__(
+        self,
+        capability_statuses: MutableMapping[str, str],
+        *,
+        environ: Mapping[str, str] | None = None,
+    ) -> None:
         self._statuses = capability_statuses
+        self._environ = environ
         self.failures: dict[str, str] = {}
+
+    def _explicitly_enabled(self, profile: str) -> bool:
+        if self._environ is None:
+            return True
+        env_key = "DAEM0NMCP_" + profile.upper().replace("-", "_") + "_ENABLED"
+        raw = self._environ.get(env_key, "").strip().lower()
+        return raw in {"1", "true", "yes", "on"}
 
     def start(self) -> None:
         for profile, modules in _NATIVE_PROFILE_MODULES.items():
             if self._statuses.get(profile) != "ready":
                 continue
+            eager = self._explicitly_enabled(profile)
             for module in modules:
-                # Import the public model/runtime entry points on the main
-                # thread. This initializes NumPy/SciPy/native DLL dependencies
-                # before a dense query can race another provider's first worker.
+                # Explicitly enabled profiles import on the main thread so
+                # broken native DLLs degrade upfront; auto-enabled profiles use
+                # lightweight spec checks to avoid multi-second startup imports.
                 try:
-                    importlib.import_module(module)
+                    if eager:
+                        importlib.import_module(module)
+                    elif importlib.util.find_spec(module) is None:
+                        raise ModuleNotFoundError(module)
                 except Exception as error:
                     # Installed metadata said ready, but the package cannot run
                     # here. Report that once instead of per tool call.
@@ -828,14 +850,29 @@ def _assemble(
     }
     # Preload before anything snapshots the statuses, so an installed but
     # broken extra degrades everywhere instead of only failing per call.
-    native_runtimes = _OptionalNativeRuntimeLifecycle(capability_statuses)
+    native_runtimes = _OptionalNativeRuntimeLifecycle(capability_statuses, environ=env)
     native_runtimes.start()
     normalizer = build_argument_normalizer()
+    # Record each configured root's identity before anything resolves one, so
+    # a moved or re-cloned project keeps the ID its rows were written under.
+    ensure_workspace_identity(
+        configured_roots(
+            loaded_settings.workspace_roots,
+            default_root=getattr(loaded_settings, "project_root", None),
+        )
+    )
     registry = WorkspaceRegistry.from_settings(loaded_settings)
     workspaces = {registry.default.workspace_id: registry.default}
     for root in loaded_settings.workspace_roots:
         workspace = registry.resolve(root)
         workspaces[workspace.workspace_id] = workspace
+    # A blocked root answers every call with its identity error; it must not
+    # be bootstrapped, dreamed over, or have projections drained behind it.
+    served = tuple(
+        workspace
+        for workspace in workspaces.values()
+        if workspace.identity_block is None
+    )
     access_policy = WorkspaceAccessPolicy(
         workspaces={
             str(workspace.root): workspace.workspace_id
@@ -932,7 +969,7 @@ def _assemble(
         projection_scheduler=schedule_capture_projection,
     )
     dreaming = V7DreamingCoordinator(
-        workspaces=tuple(workspaces.values()),
+        workspaces=served,
         settings=loaded_settings,
         candidate_store=capture_candidates,
         storage_resolver=storage_resolver,
@@ -1114,7 +1151,7 @@ def _assemble(
         capture_candidates=capture_candidates,
         edit_bridge_service=edit_bridge_service,
         services=(
-            WorkspaceBootstrapLifecycle(tuple(workspaces.values())),
+            WorkspaceBootstrapLifecycle(served),
             writer,
             recall,
             runtime_health,
@@ -1130,7 +1167,7 @@ def _assemble(
             federation_dependencies,
             consolidation_dependencies,
             _ProjectionLifecycle(
-                tuple(workspaces.values()),
+                served,
                 loaded_settings,
                 capability_statuses,
             ),
