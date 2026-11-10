@@ -2691,6 +2691,59 @@ class SQLiteRetrievalRepositoryUtilityTests(unittest.IsolatedAsyncioTestCase):
                 ),
             )
 
+    async def test_traversal_seeks_each_parent_through_the_source_index(self):
+        records = [self.record(number) for number in range(700, 760)]
+        for parent, child in zip(records, records[1:], strict=False):
+            self.edge(parent, child)
+        self.fixture.connection.commit()
+        repository = self.fixture.repository()
+        statements = []
+        open_connection = repository._open_connection
+
+        def traced_connection():
+            connection = open_connection()
+            connection.set_trace_callback(statements.append)
+            return connection
+
+        repository._open_connection = traced_connection
+        await repository.load_utility_contributions(
+            WORKSPACE_ID, tuple(records[:25]), BASE_US + 100
+        )
+        traversals = [
+            statement for statement in statements if "ROW_NUMBER" in statement
+        ]
+        self.assertEqual(4, len(traversals))
+        for statement in traversals:
+            plan = [
+                str(row[3])
+                for row in self.fixture.connection.execute(
+                    "EXPLAIN QUERY PLAN " + statement
+                )
+                if "memory_provenance_edges" in str(row[3])
+            ]
+            # A plan that walks every edge of the workspace would name the
+            # primary key here instead.
+            self.assertEqual(1, len(plan), plan)
+            self.assertIn("SEARCH", plan[0])
+            self.assertIn("idx_provenance_source", plan[0])
+            self.assertIn("informed_by_record_id=?", plan[0])
+
+    async def test_last_slot_reaches_a_child_behind_every_visited_sibling(self):
+        root = self.record(500)
+        siblings = [self.record(number) for number in range(501, 564)]
+        last = self.record(600)
+        for sibling in siblings:
+            self.edge(root, sibling)
+        # The only unvisited child sorts behind the root and all 63 siblings.
+        for visited in (root, *siblings):
+            self.edge(siblings[0], visited)
+        self.edge(siblings[0], last)
+        expected = self.signal(last, 1.0)
+        result = (await self.load(root))[root]
+        self.assertEqual(
+            [(expected, 2)], [(item.event_id, item.depth) for item in result]
+        )
+
     async def test_workspace_and_both_edge_and_signal_time_boundaries(self):
         root, child, future_child, outsider = (
             self.record(number) for number in range(20, 24)

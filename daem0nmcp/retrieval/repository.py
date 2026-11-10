@@ -503,10 +503,13 @@ class SQLiteRetrievalRepository:
                     )
                 )
                 for chunk in _chunks(parents):
-                    # A record keeps at most MAX_DESCENDANTS unvisited children
-                    # and has visited at most MAX_DESCENDANTS + 1 records, so
-                    # the first 2 * MAX_DESCENDANTS + 1 children of each parent
-                    # always contain every child that record can select.
+                    # A record with r slots left has visited
+                    # MAX_DESCENDANTS + 1 - r records and selects at most r
+                    # unvisited children, so every child it can select is
+                    # among the first MAX_DESCENDANTS + 1 of its parent.
+                    # Without statistics SQLite scans the whole workspace
+                    # for an IN list of three or more parents, so the
+                    # per-parent index is named explicitly.
                     rows = connection.execute(
                         "SELECT informed_by_record_id,record_id FROM ("
                         "SELECT informed_by_record_id,record_id,ROW_NUMBER() OVER ("
@@ -514,6 +517,7 @@ class SQLiteRetrievalRepository:
                         ") AS position FROM ("
                         "SELECT DISTINCT informed_by_record_id,record_id "
                         "FROM memory_provenance_edges "
+                        "INDEXED BY idx_provenance_source "
                         "WHERE workspace_id=? AND edge_kind='store' "
                         f"AND informed_by_record_id IN ({_slots(chunk)}) "
                         "AND recorded_at_us<=?)) WHERE position<=?",
@@ -521,7 +525,7 @@ class SQLiteRetrievalRepository:
                             workspace_id,
                             *chunk,
                             transaction_at_us,
-                            2 * MAX_DESCENDANTS + 1,
+                            MAX_DESCENDANTS + 1,
                         ),
                     ).fetchall()
                     for row in rows:
