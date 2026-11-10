@@ -28,6 +28,7 @@ from daem0nmcp.covenant import (
     CovenantStateCapacityError,
     CovenantStateStore,
     InvocationScope,
+    SteadyClock,
 )
 from daem0nmcp.workspace import Workspace
 
@@ -714,6 +715,43 @@ class CapacityTests(unittest.IsolatedAsyncioTestCase):
         self.now += 301
         self.assertIsNone(
             (await self.admit(self.scope("oauth-sub:newcomer"))).violation
+        )
+
+    async def test_guided_writes_survive_a_backward_wall_clock_step(self) -> None:
+        wall = [1_700_000_000]
+        clock = SteadyClock(wall=lambda: wall[0], monotonic=lambda: self.now)
+        self.build()
+        self.opaque = OpaqueCapabilityAuthority(
+            CapabilityAuthority(
+                secret=b"test-covenant-key-is-at-least-32-bytes!!",
+                kid="test",
+                clock=clock,
+            ),
+            clock=clock,
+        )
+        self.gate.authority = self.opaque
+        self.gate.state_store = self.store = CovenantStateStore(clock=clock)
+        scope = self.scope("oauth-sub:steady")
+        self.assertIsNone((await self.admit(scope, "before the step")).violation)
+
+        wall[0] -= 600
+        self.now += 5
+        self.assertIsNone((await self.admit(scope, "after the step")).violation)
+        self.challenge_everything()
+        challenged = await self.admit(scope, "challenged after the step")
+        self.assertEqual(
+            datetime.fromtimestamp(1_700_000_305, timezone.utc),
+            challenged.challenge.expires_at,
+        )
+        self.now += 299
+        self.assertIsNone(
+            (
+                await self.admit(
+                    scope,
+                    "challenged after the step",
+                    token=challenged.challenge.preflight_token,
+                )
+            ).violation
         )
 
     async def test_exhausted_capacity_reaches_the_client_as_retryable(self) -> None:

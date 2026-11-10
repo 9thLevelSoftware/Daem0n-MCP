@@ -21,6 +21,7 @@ from daem0nmcp.covenant import (
     CovenantStateCapacityError,
     CovenantStateStore,
     InvocationScope,
+    SteadyClock,
     UnknownCovenantOperation,
     authority_from_environment,
     authorize_workflow_call,
@@ -655,6 +656,95 @@ class CapabilityGateTests(unittest.TestCase):
             "inscribe.remember", args, self.scope_a, preflight_token=token
         )
         self.assertEqual("TOKEN_EXPIRED", resurrected["violation"])
+
+    def _steady_gate(self, wall: MutableClock, monotonic: MutableClock) -> CovenantGate:
+        clock = SteadyClock(wall=wall, monotonic=monotonic)
+        return CovenantGate(
+            state_store=CovenantStateStore(clock=clock, ttl_seconds=3_600),
+            authority=CapabilityAuthority(
+                secret=b"test-covenant-key-is-at-least-32-bytes!!",
+                kid="test-key",
+                clock=clock,
+                ttl_seconds=300,
+            ),
+        )
+
+    def test_backward_wall_clock_step_does_not_block_capabilities(self) -> None:
+        wall, monotonic = MutableClock(1_700_000_000), MutableClock(50)
+        gate = self._steady_gate(wall, monotonic)
+        args = {"category": "decision", "content": "x"}
+        gate.record_briefing(self.scope_a)
+        held = gate.issue_preflight(self.scope_a, "inscribe.remember", args)
+        self.assertEqual(1_700_000_300, gate.authority.verify(held)["exp"])
+
+        wall.value -= 120
+        self.assertIsNone(
+            gate.authorize(
+                "inscribe.remember", args, self.scope_a, preflight_token=held
+            )
+        )
+        # A capability issued after the step works too, so a guided retry
+        # recovers instead of expiring until the wall clock catches up.
+        for _ in range(2):
+            monotonic.value += 1
+            fresh = gate.issue_preflight(self.scope_a, "inscribe.remember", args)
+            self.assertIsNone(
+                gate.authorize(
+                    "inscribe.remember", args, self.scope_a, preflight_token=fresh
+                )
+            )
+        self.assertTrue(gate.state_store.is_briefed(self.scope_a))
+
+    def test_wall_clock_steps_neither_shorten_nor_extend_a_lifetime(self) -> None:
+        wall, monotonic = MutableClock(1_700_000_000), MutableClock(50)
+        gate = self._steady_gate(wall, monotonic)
+        args = {"category": "decision", "content": "x"}
+        gate.record_briefing(self.scope_a)
+
+        def check(token: str) -> str | None:
+            result = gate.authorize(
+                "inscribe.remember",
+                args,
+                self.scope_a,
+                preflight_token=token,
+                consume_capability=False,
+            )
+            return None if result is None else result["violation"]
+
+        token = gate.issue_preflight(self.scope_a, "inscribe.remember", args)
+        wall.value += 86_400
+        self.assertIsNone(check(token))
+        self.assertTrue(gate.state_store.is_briefed(self.scope_a))
+
+        wall.value -= 2 * 86_400
+        monotonic.value += 299
+        self.assertIsNone(check(token))
+        monotonic.value += 1
+        self.assertEqual("TOKEN_EXPIRED", check(token))
+        wall.value -= 86_400
+        self.assertEqual("TOKEN_EXPIRED", check(token))
+
+    def test_default_clocks_share_the_steady_scale(self) -> None:
+        from daem0nmcp.api.v7.opaque_capabilities import OpaqueCapabilityAuthority
+
+        authority = authority_from_environment(local_stdio=True, environ={})
+        self.assertIs(covenant.steady_clock, authority._clock)
+        self.assertIs(covenant.steady_clock, CovenantStateStore()._clock)
+        self.assertIs(
+            covenant.steady_clock,
+            CapabilityAuthority(secret=b"k" * 32, kid="k")._clock,
+        )
+        self.assertIs(
+            covenant.steady_clock, OpaqueCapabilityAuthority(authority)._clock
+        )
+        self.assertIsInstance(covenant.steady_clock, SteadyClock)
+
+        wall, monotonic = MutableClock(1_700_000_000), MutableClock(7)
+        clock = SteadyClock(wall=wall, monotonic=monotonic)
+        wall.value = 5
+        self.assertEqual(1_700_000_000, clock())
+        monotonic.value += 12
+        self.assertEqual(1_700_000_012, clock())
 
     def test_json_surrogates_return_stable_argument_and_token_errors(self) -> None:
         invalid_text = json.loads('"\\ud800"')

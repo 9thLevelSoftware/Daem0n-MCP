@@ -80,6 +80,36 @@ class TokenValidationError(ValueError):
         super().__init__(code)
 
 
+class SteadyClock:
+    """Seconds on the wall-clock scale that only the monotonic clock advances.
+
+    Capability lifetimes are intervals, so they are measured on a clock an
+    NTP correction or a manual change cannot move.  The wall clock is read
+    once to place the scale; later wall-clock steps in either direction are
+    not seen, so a fresh capability is neither expired early nor kept alive
+    past its lifetime, and a backward step cannot stall verification.  The
+    values are meaningful only inside this process, which is also the only
+    place a capability can be redeemed.
+    """
+
+    def __init__(
+        self,
+        *,
+        wall: Callable[[], int | float] = time.time,
+        monotonic: Callable[[], int | float] = time.monotonic,
+    ) -> None:
+        self._monotonic = monotonic
+        self._offset = float(wall()) - float(monotonic())
+
+    def __call__(self) -> float:
+        return self._offset + float(self._monotonic())
+
+
+# One shared instance: the gate compares times taken by the state store and
+# the capability authorities, so their defaults must be the same scale.
+steady_clock = SteadyClock()
+
+
 class CovenantStateCapacityError(RuntimeError):
     """Raised instead of evicting another live preflight grant."""
 
@@ -533,7 +563,7 @@ class CovenantStateStore:
     def __init__(
         self,
         *,
-        clock: Callable[[], int | float] = time.time,
+        clock: Callable[[], int | float] = steady_clock,
         ttl_seconds: int = 3600,
         max_scopes: int = 1024,
         max_capabilities_per_scope: int = MAX_CAPABILITIES_PER_SCOPE,
@@ -738,7 +768,7 @@ class CapabilityAuthority:
         *,
         secret: bytes,
         kid: str,
-        clock: Callable[[], int | float] = time.time,
+        clock: Callable[[], int | float] = steady_clock,
         ttl_seconds: int = COUNSEL_TTL_SECONDS,
     ) -> None:
         if not isinstance(secret, bytes) or len(secret) < 32:
@@ -769,7 +799,11 @@ class CapabilityAuthority:
         return decoded
 
     def _verification_time(self) -> int:
-        """Return wall time while failing closed after an observed rollback."""
+        """Return clock time while failing closed after an observed rollback.
+
+        The default clock is monotonic and never trips this; it guards an
+        injected clock that can run backwards.
+        """
         now = int(self._clock())
         with self._clock_lock:
             if (
@@ -1165,7 +1199,7 @@ def authority_from_environment(
     *,
     local_stdio: bool,
     environ: Mapping[str, str] | None = None,
-    clock: Callable[[], int | float] = time.time,
+    clock: Callable[[], int | float] = steady_clock,
 ) -> CapabilityAuthority | None:
     """Build configured remote authority or an ephemeral stdio authority."""
     env = os.environ if environ is None else environ

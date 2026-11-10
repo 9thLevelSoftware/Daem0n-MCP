@@ -5,7 +5,6 @@ from __future__ import annotations
 import re
 import secrets
 import threading
-import time
 from collections import OrderedDict
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -15,6 +14,7 @@ from ...covenant import (
     CapabilityAuthority,
     InvocationScope,
     TokenValidationError,
+    steady_clock,
 )
 
 _HANDLE_PATTERN = re.compile(r"^cap_[A-Za-z0-9_-]{12,252}$")
@@ -84,7 +84,7 @@ class OpaqueCapabilityAuthority:
         max_handles: int = 4096,
         max_handles_per_principal: int = 1024,
         max_handles_per_session: int = 256,
-        clock: Callable[[], int | float] = time.time,
+        clock: Callable[[], int | float] = steady_clock,
     ) -> None:
         if not isinstance(delegate, CapabilityAuthority):
             raise TypeError("delegate must be a CapabilityAuthority")
