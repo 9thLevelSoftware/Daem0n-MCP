@@ -193,6 +193,27 @@ class DenseFreshnessTests(_FreshnessSteps, _EmbeddedFolderRuntimeCase):
         self.assertTrue(builders.dense_builder.active_is_current(WORKSPACE_ID))
         self.assertEqual(("ready", None, 2), await self._dense(service))
 
+    async def test_untrusted_vector_on_an_untouched_record_blocks_the_catch_up(self):
+        from daem0nmcp.retrieval.runtime import create_projection_builders
+
+        records, service = await self._built()
+        builders = create_projection_builders(
+            self.connection,
+            self.path,
+            config=self.config,
+            capability_statuses=STATUSES,
+        )
+        self.addCleanup(builders.close)
+
+        # The event touches one record; the stored vector that no longer
+        # matches its attestation belongs to the other.
+        self._corrupt_stored_vector(records[1])
+        self._change(records[0], "memory.pin_set", pinned=True)
+        self.assertEqual(("succeeded", None), (await self._drain())["dense"])
+        self.assertEqual([(1, "ready"), (2, "active")], self._generations())
+        self.assertTrue(builders.dense_builder.active_is_current(WORKSPACE_ID))
+        self.assertEqual(("ready", None, 2), await self._dense(service))
+
     async def test_content_membership_and_outcome_changes_still_rebuild(self):
         records, service = await self._built()
 

@@ -468,7 +468,9 @@ class DenseProjectionBuilder:
         alone cannot change a vector or a point payload, so the generation is
         still exact: only its source cursor, and the source event of the
         records such an event touched, have moved.  Recording that needs no
-        provider write.  Returns False when a real build is required.
+        provider write, but every stored vector is read back and checked
+        first, exactly as a full build would before reusing it.  Returns False
+        when a real build is required.
         """
 
         manifest_id, generation = active[0], active[1]
@@ -510,7 +512,7 @@ class DenseProjectionBuilder:
         if len(references) != len(records):
             return False
         vector_space_hash = expected.get("vector_space_hash")
-        moved: list[tuple[_DenseRecord, str, object]] = []
+        stored_refs: list[tuple[_DenseRecord, str, object]] = []
         for reference, record in zip(references, records, strict=True):
             values = tuple(reference)
             if values[:5] != (
@@ -530,13 +532,16 @@ class DenseProjectionBuilder:
                     return False
             elif values[6:] != (None, None):
                 return False
-            if values[5] != record.source_event_id:
-                moved.append((record, str(values[5]), values[7]))
+            stored_refs.append((record, str(values[5]), values[7]))
         collection_name = str(expected["collection_name"])
         try:
             self._validate_collection_count(collection_name, len(records))
-            attestations = self._moved_attestations(
-                workspace_id, generation, collection_name, moved, vector_space_hash
+            attestations = self._stored_attestations(
+                workspace_id,
+                generation,
+                collection_name,
+                stored_refs,
+                vector_space_hash,
             )
         except DenseProjectionBuildError as exc:
             if exc.code == "PROJECTION_CANCELLED":
@@ -566,6 +571,8 @@ class DenseProjectionBuilder:
                     "active dense generation changed during validation",
                 )
             for record, previous_event_id, digest in attestations:
+                if previous_event_id == record.source_event_id:
+                    continue
                 changed = self.connection.execute(
                     "UPDATE dense_projection_refs SET updated_event_id=?,"
                     "vector_sha256=?,updated_at_us=? WHERE workspace_id=? "
@@ -610,23 +617,25 @@ class DenseProjectionBuilder:
             raise
         return True
 
-    def _moved_attestations(
+    def _stored_attestations(
         self,
         workspace_id: str,
         generation: int,
         collection_name: str,
-        moved: Sequence[tuple[_DenseRecord, str, object]],
+        stored_refs: Sequence[tuple[_DenseRecord, str, object]],
         vector_space_hash: object,
     ) -> list[tuple[_DenseRecord, str, str | None]] | None:
-        """Re-attest the stored vectors of records whose source event moved.
+        """Check every stored vector and attest it to its record's source event.
 
-        An attestation binds a vector to its record's source event.  The stored
-        vector must still carry the old attestation before it receives the new
-        one; None means the provider data cannot be trusted as it stands.
+        An attestation binds a vector to its record's source event.  Each
+        stored vector must still carry the attestation recorded for it, whether
+        or not its record's source event moved, before the generation is
+        declared current; None means the provider data cannot be trusted as it
+        stands.
         """
 
         attestations: list[tuple[_DenseRecord, str, str | None]] = []
-        for batch in self._provider_batches(moved):
+        for batch in self._provider_batches(stored_refs):
             self._check_cancelled()
             expected: dict[str, tuple[_DenseRecord, str, object, object]] = {}
             for record, previous_event_id, previous_digest in batch:
