@@ -195,7 +195,9 @@ class _EntryNotFoundError(Exception):
     pass
 
 
-def _fake_loader_modules(snapshot, *, tokenizer_files, external_locations=()):
+def _fake_loader_modules(
+    snapshot, *, tokenizer_files, external_locations=(), tokenizer_class=_Tokenizer
+):
     """Stand in for the optional ONNX stack with a hub snapshot on disk.
 
     The weights are already in the snapshot; the tokenizer files arrive only
@@ -216,7 +218,7 @@ def _fake_loader_modules(snapshot, *, tokenizer_files, external_locations=()):
             assert trust_remote_code is False
             for name, payload in tokenizer_files.items():
                 (snapshot / name).write_bytes(payload)
-            return _Tokenizer()
+            return tokenizer_class()
 
     def load(path, *, load_external_data):
         assert load_external_data is False
@@ -250,6 +252,19 @@ _TOKENIZER_FILES = {
     "tokenizer_config.json": b'{"model_max_length":8}',
     "special_tokens_map.json": b"{}",
 }
+
+
+class _SentencePieceTokenizer(_Tokenizer):
+    # What the tokenizer library reports for a DeBERTa-v2 checkpoint.
+    vocab_files_names = {"vocab_file": "spm.model", "tokenizer_file": "tokenizer.json"}
+
+
+class _FastTokenizer(_Tokenizer):
+    # What it reports for a checkpoint that ships only ``tokenizer.json``.
+    vocab_files_names = {
+        "tokenizer_file": "tokenizer.json",
+        "vocab_file": "tokenizer.model",
+    }
 
 
 class OnnxEncoderFingerprintTests(unittest.TestCase):
@@ -309,6 +324,57 @@ class OnnxEncoderFingerprintTests(unittest.TestCase):
             changed_weights = self._load(snapshot)
 
         self.assertEqual(3, len({baseline, changed_tokenizer, changed_weights}))
+
+    def test_fingerprint_follows_the_vocabulary_file_the_tokenizer_names(self):
+        from daem0nmcp.retrieval.onnx_encoder import fingerprint_model_directory
+
+        files = {
+            "spm.model": b"sentencepiece pieces",
+            "tokenizer_config.json": b'{"model_max_length":8}',
+            "special_tokens_map.json": b"{}",
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            snapshot = self._snapshot(temporary)
+            baseline = self._load(
+                snapshot,
+                tokenizer_files=files,
+                tokenizer_class=_SentencePieceTokenizer,
+            )
+            whole_directory = fingerprint_model_directory(snapshot)
+            retrained = self._load(
+                snapshot,
+                tokenizer_files={**files, "spm.model": b"other pieces"},
+                tokenizer_class=_SentencePieceTokenizer,
+            )
+
+        self.assertNotEqual(baseline, retrained)
+        self.assertEqual(whole_directory, baseline)
+
+    def test_tokenizer_named_files_leave_a_covered_snapshot_unchanged(self):
+        class _Unusual(_Tokenizer):
+            vocab_files_names = {
+                "vocab_file": "absent.model",
+                "outside": "../../outside.bin",
+                "nested": "onnx/model.onnx",
+                "malformed": None,
+            }
+
+        with tempfile.TemporaryDirectory() as temporary:
+            snapshot = self._snapshot(temporary)
+            (Path(temporary) / "outside.bin").write_bytes(b"not in the snapshot")
+            (snapshot / "onnx" / "model.onnx").write_bytes(b"full precision")
+            unnamed = self._load(snapshot)
+            fast = self._load(snapshot, tokenizer_class=_FastTokenizer)
+            unusual = self._load(snapshot, tokenizer_class=_Unusual)
+            for names in (None, "tokenizer.json", ["tokenizer.json"]):
+                with self.subTest(names=names):
+                    odd = type("_Odd", (_Tokenizer,), {"vocab_files_names": names})
+                    self.assertEqual(unnamed, self._load(snapshot, tokenizer_class=odd))
+
+        # Every file the default tokenizer names was already covered, and a
+        # name that is absent or not directly in the snapshot adds nothing.
+        self.assertEqual(unnamed, fast)
+        self.assertEqual(unnamed, unusual)
 
     def test_external_tensor_files_named_by_the_graph_are_part_of_identity(self):
         with tempfile.TemporaryDirectory() as temporary:

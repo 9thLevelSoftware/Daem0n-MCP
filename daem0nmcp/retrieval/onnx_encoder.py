@@ -11,7 +11,7 @@ from __future__ import annotations
 import hashlib
 import math
 import os
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from pathlib import Path
 from typing import Any
 
@@ -77,7 +77,8 @@ class OnnxSentenceEmbeddingModel:
 
 
 # Root-level files that decide how text becomes model input.  Those present
-# in a snapshot take part in the pooled encoder's identity.
+# in a snapshot take part in the pooled encoder's identity, together with the
+# vocabulary files the loaded tokenizer names itself.
 _TOKENIZER_IDENTITY_FILES = (
     "added_tokens.json",
     "config.json",
@@ -105,13 +106,32 @@ def fingerprint_model_directory(root: Path) -> str:
     return _fingerprint_files(root, (path for path in entries if path.is_file()))
 
 
+def tokenizer_vocabulary_files(tokenizer: object) -> tuple[str, ...]:
+    """Return the vocabulary file names a loaded tokenizer reads.
+
+    The tokenizer library publishes them per tokenizer class, so a format
+    with its own file name (``spm.model`` of a sentencepiece checkpoint, for
+    one) is covered without being listed here by hand.
+    """
+
+    names = getattr(tokenizer, "vocab_files_names", None)
+    if not isinstance(names, Mapping):
+        return ()
+    return tuple(sorted({name for name in names.values() if isinstance(name, str)}))
+
+
 def fingerprint_encoder_artifacts(
-    root: Path, artifact: Path, external_data: Iterable[str] = ()
+    root: Path,
+    artifact: Path,
+    external_data: Iterable[str] = (),
+    *,
+    tokenizer_files: Iterable[str],
 ) -> str:
     """Fingerprint only the files that determine a pooled encoder's vectors.
 
     These are the loaded graph, the external tensor files it names, and the
-    tokenizer files present directly under *root*.  Anything else in the
+    tokenizer files present directly under *root*: the well-known ones and
+    those in *tokenizer_files*.  Anything else in the
     snapshot (other exports, weights for other backends, documentation) is
     ignored, so an unrelated download into the same snapshot leaves the
     identity alone.  A snapshot holding nothing but these files keeps the
@@ -125,8 +145,11 @@ def fingerprint_encoder_artifacts(
         raise RuntimeError("DENSE_ENCODER_UNAVAILABLE")
     files = {
         path
-        for path in (root / name for name in _TOKENIZER_IDENTITY_FILES)
-        if path.is_file()
+        for path in (
+            Path(os.path.abspath(root / name))
+            for name in (*_TOKENIZER_IDENTITY_FILES, *tokenizer_files)
+        )
+        if path.parent == root and path.is_file()
     }
     for path in (artifact, *(artifact.parent / name for name in external_data)):
         located = Path(os.path.abspath(path))
@@ -210,8 +233,9 @@ def load_pooled_onnx_model(
     tokenizer = AutoTokenizer.from_pretrained(
         model_id, revision=revision, trust_remote_code=False
     )
+    tokenizer_files = tokenizer_vocabulary_files(tokenizer)
     fingerprint_before = fingerprint_encoder_artifacts(
-        model_root, artifact, external_data
+        model_root, artifact, external_data, tokenizer_files=tokenizer_files
     )
     options = ort.SessionOptions()
     options.intra_op_num_threads = 4
@@ -220,7 +244,7 @@ def load_pooled_onnx_model(
         str(artifact), sess_options=options, providers=["CPUExecutionProvider"]
     )
     fingerprint_after = fingerprint_encoder_artifacts(
-        model_root, artifact, external_data
+        model_root, artifact, external_data, tokenizer_files=tokenizer_files
     )
     if fingerprint_after != fingerprint_before:
         raise RuntimeError("DENSE_ENCODER_UNAVAILABLE")
@@ -237,4 +261,5 @@ __all__ = [
     "fingerprint_encoder_artifacts",
     "fingerprint_model_directory",
     "load_pooled_onnx_model",
+    "tokenizer_vocabulary_files",
 ]
