@@ -388,6 +388,82 @@ class LexicalProjectionTests(unittest.IsolatedAsyncioTestCase):
             [candidate.evidence.record_id for candidate in result.candidates],
         )
 
+    async def test_default_ranking_is_weighted_bm25_including_tags(self):
+        """An off-topic body match must not outrank the record tagged for it."""
+
+        from daem0nmcp.retrieval.projections import LexicalProjectionBuilder
+        from daem0nmcp.retrieval.providers import LexicalProvider
+        from daem0nmcp.retrieval.types import RetrievalQuery
+
+        off_topic = self._append_record(
+            "a",
+            "Cafeteria rotation policy for the lunch shift is reviewed by "
+            "facilities each quarter",
+            "",
+            [],
+        )
+        tagged = self._append_record(
+            "b",
+            "Refresh signing keys every ninety days",
+            "",
+            ["jwt", "token-rotation"],
+        )
+        self._append_record("c", "Graph traversal is bounded", "", ["graph"])
+        self._append_record("d", "SQLite WAL transactions", "", ["storage"])
+        self._append_record("e", "Dense vectors are rebuilt", "", ["vectors"])
+        LexicalProjectionBuilder(self.connection).rebuild(WORKSPACE_ID)
+        self.connection.commit()
+        query = RetrievalQuery(workspace_id=WORKSPACE_ID, text="jwt rotation policy")
+
+        result = await LexicalProvider(self.connection).search(query, 10)
+
+        self.assertEqual("ready", result.status)
+        self.assertEqual(
+            [tagged, off_topic],
+            [candidate.evidence.record_id for candidate in result.candidates],
+        )
+        self.assertGreater(
+            result.candidates[0].raw_score, result.candidates[1].raw_score
+        )
+
+        explicit_off = await LexicalProvider(
+            self.connection, content_tiering=False
+        ).search(query, 10)
+        self.assertEqual(result.candidates, explicit_off.candidates)
+
+        tiered = await LexicalProvider(self.connection, content_tiering=True).search(
+            query, 10
+        )
+        self.assertEqual(
+            [off_topic, tagged],
+            [candidate.evidence.record_id for candidate in tiered.candidates],
+        )
+        self.assertEqual(
+            {item.evidence.record_id: item.raw_score for item in result.candidates},
+            {item.evidence.record_id: item.raw_score for item in tiered.candidates},
+        )
+
+    def test_content_tiering_defaults_off_and_follows_the_setting(self):
+        from unittest.mock import patch
+
+        from daem0nmcp.config import Settings, settings
+        from daem0nmcp.retrieval.providers import LexicalProvider
+
+        self.assertFalse(Settings.model_fields["lexical_content_tiering"].default)
+        with patch.dict(
+            "os.environ", {"DAEM0NMCP_LEXICAL_CONTENT_TIERING": "true"}, clear=False
+        ):
+            self.assertTrue(Settings(_env_file=None).lexical_content_tiering)
+        with patch.object(settings, "lexical_content_tiering", True):
+            self.assertTrue(LexicalProvider(self.connection)._content_tiering)
+            self.assertFalse(
+                LexicalProvider(self.connection, content_tiering=False)._content_tiering
+            )
+        with patch.object(settings, "lexical_content_tiering", False):
+            self.assertFalse(LexicalProvider(self.connection)._content_tiering)
+        with self.assertRaises(ValueError):
+            LexicalProvider(self.connection, content_tiering="yes")
+
     async def test_content_and_rationale_matches_precede_tag_only_matches(self):
         from daem0nmcp.retrieval.projections import LexicalProjectionBuilder
         from daem0nmcp.retrieval.providers import LexicalProvider
@@ -413,7 +489,7 @@ class LexicalProjectionTests(unittest.IsolatedAsyncioTestCase):
         )
         LexicalProjectionBuilder(self.connection).rebuild(WORKSPACE_ID)
         self.connection.commit()
-        provider = LexicalProvider(self.connection)
+        provider = LexicalProvider(self.connection, content_tiering=True)
         query = RetrievalQuery(
             workspace_id=WORKSPACE_ID, text="checkpoint journal recovery"
         )
@@ -462,7 +538,7 @@ class LexicalProjectionTests(unittest.IsolatedAsyncioTestCase):
         LexicalProjectionBuilder(self.connection).rebuild(WORKSPACE_ID)
         self.connection.commit()
 
-        result = await LexicalProvider(self.connection).search(
+        result = await LexicalProvider(self.connection, content_tiering=True).search(
             RetrievalQuery(workspace_id=WORKSPACE_ID, text="rotate signing keys"),
             10,
         )
@@ -513,7 +589,7 @@ class LexicalProjectionTests(unittest.IsolatedAsyncioTestCase):
         LexicalProjectionBuilder(self.connection).rebuild(WORKSPACE_ID)
         self.connection.commit()
 
-        result = await LexicalProvider(self.connection).search(
+        result = await LexicalProvider(self.connection, content_tiering=True).search(
             RetrievalQuery(workspace_id=WORKSPACE_ID, text="retention"),
             10,
         )
@@ -539,7 +615,7 @@ class LexicalProjectionTests(unittest.IsolatedAsyncioTestCase):
         LexicalProjectionBuilder(self.connection).rebuild(WORKSPACE_ID)
         self.connection.commit()
 
-        result = await LexicalProvider(self.connection).search(
+        result = await LexicalProvider(self.connection, content_tiering=True).search(
             RetrievalQuery(workspace_id=WORKSPACE_ID, text="snapshot retention"),
             10,
         )

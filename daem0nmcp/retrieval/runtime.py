@@ -467,6 +467,7 @@ def create_retrieval_service(
         "lexical": LexicalProvider(
             connection_factory=connection_factory,
             timeout_seconds=min(float(timeout), 60.0),
+            content_tiering=bool(getattr(config, "lexical_content_tiering", False)),
         ),
         "temporal": TemporalProvider(connection_factory=connection_factory),
         "procedure": ProcedureProvider(connection_factory=connection_factory),

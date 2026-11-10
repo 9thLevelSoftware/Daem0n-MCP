@@ -123,6 +123,9 @@ class Settings(BaseSettings):
     retrieval_utility_candidate_limit: int = Field(default=25, ge=1, le=200)
     memory_validity_mode: Literal["off", "shadow", "apply"] = "shadow"
     retrieval_retention_mode: Literal["off", "shadow", "apply"] = "shadow"
+    # Rank content/rationale matches above tag-assisted ones and drop the tag
+    # weight among them.  Off: weighted BM25 over content, rationale and tags.
+    lexical_content_tiering: bool = False
 
     # File Watcher (Phase 1: Proactive Layer)
     watcher_enabled: bool = False  # Enable file watcher daemon

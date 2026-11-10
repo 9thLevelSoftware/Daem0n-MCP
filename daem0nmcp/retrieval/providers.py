@@ -195,12 +195,23 @@ class LexicalProvider:
         connection_factory: Callable[[], sqlite3.Connection] | None = None,
         timeout_seconds: float = 2.0,
         worker_pool: BoundedWorkerPool | None = None,
+        content_tiering: bool | None = None,
     ) -> None:
         self._connection_factory = _sqlite_read_factory(connection, connection_factory)
         self._timeout_seconds = _positive_timeout(timeout_seconds, "timeout_seconds")
         if worker_pool is not None and not isinstance(worker_pool, BoundedWorkerPool):
             raise ValueError("worker_pool must be a BoundedWorkerPool")
         self._worker_pool = worker_pool or _LEXICAL_WORKERS
+        if content_tiering is None:
+            from ..config import settings
+
+            content_tiering = settings.lexical_content_tiering
+        if not isinstance(content_tiering, bool):
+            raise ValueError("content_tiering must be boolean")
+        # Off: candidates are ordered by the weighted BM25 score alone.  On:
+        # content/rationale matches precede tag-assisted ones and are ordered
+        # among themselves without the tag weight.
+        self._content_tiering = content_tiering
 
     async def search(
         self,
@@ -305,6 +316,21 @@ class LexicalProvider:
                     elapsed_ms=(perf_counter_ns() - started) / 1_000_000,
                 )
             content_weight, rationale_weight, tags_weight = LEXICAL_BM25_WEIGHTS
+            if self._content_tiering:
+                tier_column = f""",
+                           "{expected_table}".rowid IN (
+                               SELECT rowid FROM "{expected_table}"
+                               WHERE "{expected_table}" MATCH ?
+                           ) AS content_match"""
+                ordering = f"""content_match DESC,
+                             CASE WHEN content_match THEN bm25(
+                                 {expected_table}, {content_weight},
+                                 {rationale_weight}, 0
+                             ) ELSE score END ASC,
+                             document.record_id ASC"""
+            else:
+                tier_column = ""
+                ordering = "score ASC, document.record_id ASC"
             rows = []
             rank_offset = 0
             if not fts_queries:
@@ -336,11 +362,8 @@ class LexicalProvider:
                                {expected_table}, {content_weight},
                                {rationale_weight}, {tags_weight}
                            ) AS score,
-                           snippet({expected_table}, 0, '', '', ' … ', 18),
-                           "{expected_table}".rowid IN (
-                               SELECT rowid FROM "{expected_table}"
-                               WHERE "{expected_table}" MATCH ?
-                           ) AS content_match
+                           snippet({expected_table}, 0, '', '', ' … ', 18)
+                           {tier_column}
                     FROM "{expected_table}"
                     JOIN (
                         SELECT document_rowid,record_id,content_hash,
@@ -352,16 +375,15 @@ class LexicalProvider:
                     ) AS document
                       ON document.document_rowid="{expected_table}".rowid
                     WHERE "{expected_table}" MATCH ?
-                    ORDER BY content_match DESC,
-                             CASE WHEN content_match THEN bm25(
-                                 {expected_table}, {content_weight},
-                                 {rationale_weight}, 0
-                             ) ELSE score END ASC,
-                             document.record_id ASC
+                    ORDER BY {ordering}
                     LIMIT ?
                     """,
                     (
-                        "{content rationale}: (" + fts_query + ")",
+                        *(
+                            ("{content rationale}: (" + fts_query + ")",)
+                            if self._content_tiering
+                            else ()
+                        ),
                         query.workspace_id,
                         generation,
                         *filter_parameters,

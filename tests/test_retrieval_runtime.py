@@ -173,6 +173,19 @@ class RetrievalRuntimeTests(unittest.IsolatedAsyncioTestCase):
             ),
         )
 
+    def test_factory_passes_the_content_tiering_setting_to_lexical(self):
+        from daem0nmcp.retrieval.runtime import create_retrieval_service
+
+        default = create_retrieval_service(self.path, config=_settings())
+        self.services.append(default)
+        self.assertFalse(default._providers["lexical"]._content_tiering)
+
+        config = _settings()
+        config.lexical_content_tiering = True
+        tiered = create_retrieval_service(self.path, config=config)
+        self.services.append(tiered)
+        self.assertTrue(tiered._providers["lexical"]._content_tiering)
+
     def _seed_filtered_corpus(self) -> tuple[str, str]:
         """Sixty strong unfiltered matches above two weak filtered ones."""
 
