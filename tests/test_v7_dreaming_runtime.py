@@ -825,6 +825,8 @@ async def test_graph_pair_cursor_finds_pair_across_production_membership_page(
                 return Result([(1,)])
             if "FROM memory_relationship_versions" in sql:
                 return Result([])
+            if "FROM memory_capture_candidates" in sql:
+                return Result([])
             if "FROM discovery_entity_records" not in sql:
                 raise AssertionError(sql)
             rows = self.rows
@@ -1237,3 +1239,131 @@ async def test_exhausted_evidence_scan_budget_is_reported_as_incomplete(
             ).fetchone()[0]
             is None
         )
+
+
+def _connection_candidates(database: Path) -> list[dict[str, object]]:
+    with sqlite3.connect(database) as connection:
+        rows = connection.execute(
+            "SELECT proposed_record_json FROM memory_capture_candidates WHERE "
+            "json_extract(provenance_json,'$.strategy')='connection_discovery' "
+            "ORDER BY created_at_us,candidate_id"
+        ).fetchall()
+    return [json.loads(row[0])["context"] for row in rows]
+
+
+def _graph_pair(database: Path, workspace_id: str) -> None:
+    for suffix, tail in (("7", "in cache.py"), ("8", "after cache.py changes")):
+        _append(
+            database,
+            workspace_id,
+            suffix,
+            f"CacheManager calls refresh_cache() {tail}",
+            worked=True,
+            record_type="observation",
+        )
+
+
+def _rebuild_graph(database: Path, workspace_id: str) -> int:
+    from daem0nmcp.graph_projection import GraphProjectionBuilder
+
+    with sqlite3.connect(database) as connection:
+        connection.execute("PRAGMA foreign_keys=ON")
+        return (
+            GraphProjectionBuilder(connection)
+            .rebuild(workspace_id, force=True)
+            .generation
+        )
+
+
+def _connection_coordinator(workspace) -> V7DreamingCoordinator:
+    return V7DreamingCoordinator(
+        workspaces=(workspace,),
+        settings=_settings(
+            workspace.root,
+            dream_connection_min_shared_entities=2,
+            dream_community_staleness_threshold=10_000,
+        ),
+        candidate_store=CaptureCandidateStore(),
+        capability_statuses={"graph": "ready"},
+    )
+
+
+_NEEDS_GRAPH = pytest.mark.skipif(
+    importlib.util.find_spec("igraph") is None,
+    reason="real graph profile is not installed",
+)
+
+
+@pytest.mark.asyncio
+@_NEEDS_GRAPH
+async def test_graph_rebuild_does_not_propose_the_same_connection_again(
+    dream_workspace,
+) -> None:
+    workspace, database = dream_workspace
+    _graph_pair(database, workspace.workspace_id)
+    first_generation = _rebuild_graph(database, workspace.workspace_id)
+    coordinator = _connection_coordinator(workspace)
+    await coordinator.start()
+    try:
+        await coordinator.run_once(workspace)
+        assert len(_connection_candidates(database)) == 1
+        assert _rebuild_graph(database, workspace.workspace_id) > first_generation
+        await coordinator.run_once(workspace)
+        health = await coordinator.health(workspace)
+    finally:
+        await coordinator.aclose()
+
+    assert len(_connection_candidates(database)) == 1
+    assert health is not None
+    state = next(
+        item
+        for item in health["strategies"]
+        if item["strategy"] == "connection_discovery"
+    )
+    assert (state["status"], state["stable_error_code"]) == ("idle", None)
+
+
+@pytest.mark.asyncio
+@_NEEDS_GRAPH
+@pytest.mark.parametrize(
+    ("same_reason", "expected"), [(True, 1), (False, 2)], ids=["same", "new-reason"]
+)
+async def test_connection_stored_before_the_fingerprint_change_is_recognised(
+    dream_workspace, same_reason: bool, expected: int
+) -> None:
+    workspace, database = dream_workspace
+    _graph_pair(database, workspace.workspace_id)
+    generation = _rebuild_graph(database, workspace.workspace_id)
+    coordinator = _connection_coordinator(workspace)
+    await coordinator.start()
+    try:
+        analysis = coordinator._analyze(
+            workspace, "connection_discovery", threading.Event()
+        )
+        assert len(analysis.proposals) == 1
+        request = analysis.proposals[0].request
+        context = dict(request.record["context"])
+        if not same_reason:
+            context["shared_entities"] = ["some-other-entity", "yet-another-entity"]
+        # The shape stored by earlier releases: the fingerprint covered the
+        # graph generation and the exact source versions.
+        provenance = {
+            "strategy": "connection_discovery",
+            "strategy_version": 1,
+            "sources": request.provenance["sources"],
+            "graph_generation": generation - 1,
+        }
+        await CaptureCandidateStore().stage(
+            workspace,
+            CaptureCandidateRequest(
+                source_kind="dreaming",
+                record={**request.record, "context": context},
+                provenance=provenance,
+                idempotency_key="dream-connection_discovery-" + "0" * 64,
+            ),
+        )
+        await coordinator.run_once(workspace)
+    finally:
+        await coordinator.aclose()
+
+    assert len(_connection_candidates(database)) == expected

@@ -426,7 +426,14 @@ def _stable_request(
     context: Mapping[str, Any],
     sources: Sequence[_Record],
     extra: Mapping[str, Any] | None = None,
+    identity: Mapping[str, Any] | None = None,
 ) -> _Proposal:
+    """Build a candidate whose idempotency key names what is being proposed.
+
+    By default that is the exact provenance.  ``identity`` replaces it for a
+    proposal that stays the same proposal when its provenance moves on.
+    """
+
     identities = [item.identity() for item in sources]
     provenance: dict[str, Any] = {
         "strategy": strategy,
@@ -437,6 +444,12 @@ def _stable_request(
         provenance.update(dict(extra))
     fingerprint = sha256_json(
         {"strategy": strategy, "workspace_id": workspace_id, "provenance": provenance}
+        if identity is None
+        else {
+            "strategy": strategy,
+            "workspace_id": workspace_id,
+            "identity": dict(identity),
+        }
     )
     request = CaptureCandidateRequest(
         source_kind="dreaming",
@@ -456,6 +469,37 @@ def _stable_request(
             (item.record_id, item.source_event_id) for item in sources
         ),
     )
+
+
+def _proposed_connections(
+    connection: sqlite3.Connection, workspace_id: str, outer_record_id: str
+) -> dict[str, set[tuple[str, ...]]]:
+    """Return the reasons already proposed for each peer of one record.
+
+    A connection is the pair of records plus the entities they share.  Pending
+    and promoted candidates both count, whichever graph generation or record
+    version surfaced them, so the lookup reads the stored proposal itself and
+    also recognises candidates staged before the key named the pair.
+    """
+
+    proposed: dict[str, set[tuple[str, ...]]] = {}
+    for peer, shared_json in connection.execute(
+        "SELECT json_extract(proposed_record_json,'$.context.source_record_ids[1]'),"
+        "json_extract(proposed_record_json,'$.context.shared_entities') "
+        "FROM memory_capture_candidates WHERE workspace_id=? "
+        "AND source_kind='dreaming' "
+        "AND json_extract(provenance_json,'$.strategy')='connection_discovery' "
+        "AND json_extract(proposed_record_json,"
+        "'$.context.source_record_ids[0]')=?",
+        (workspace_id, outer_record_id),
+    ).fetchall():
+        try:
+            shared = json.loads(str(shared_json))
+        except ValueError:
+            continue
+        if isinstance(peer, str) and isinstance(shared, list):
+            proposed.setdefault(peer, set()).add(tuple(str(item) for item in shared))
+    return proposed
 
 
 class V7DreamingCoordinator:
@@ -1204,6 +1248,7 @@ class V7DreamingCoordinator:
 
         deadline = time.monotonic() + _ANALYSIS_SECONDS
         proposals: list[_Proposal] = []
+        proposed: dict[str, set[tuple[str, ...]]] | None = None
         last_peer = peer_after
         stopped = False
         for inspected, (right, (peer, entities)) in enumerate(
@@ -1236,6 +1281,15 @@ class V7DreamingCoordinator:
             ).fetchone()
             if linked is not None:
                 continue
+            reason = shared[:32]
+            if proposed is None:
+                proposed = _proposed_connections(
+                    connection, workspace.workspace_id, outer_record_id
+                )
+            if reason in proposed.get(right, ()):
+                # Already proposed for this reason; a graph rebuild or an
+                # edit to either record does not make it a new connection.
+                continue
             proposals.append(
                 _stable_request(
                     workspace_id=workspace.workspace_id,
@@ -1245,12 +1299,16 @@ class V7DreamingCoordinator:
                     rationale="The active graph generation contains enough shared entity memberships.",
                     context={
                         "source_record_ids": [outer_record_id, right],
-                        "shared_entities": list(shared[:32]),
+                        "shared_entities": list(reason),
                         "confidence": self._settings.dream_connection_confidence,
                         "committed": False,
                     },
                     sources=(source, peer),
                     extra={"graph_generation": generation},
+                    identity={
+                        "record_ids": [outer_record_id, right],
+                        "shared_entities": list(reason),
+                    },
                 )
             )
             if len(proposals) >= self._settings.dream_connection_max_per_session:
