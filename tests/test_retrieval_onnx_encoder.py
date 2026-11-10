@@ -281,6 +281,10 @@ class OnnxEncoderFingerprintTests(unittest.TestCase):
     def test_unrelated_later_downloads_keep_the_fingerprint(self):
         with tempfile.TemporaryDirectory() as temporary:
             snapshot = self._snapshot(temporary)
+            # A warm snapshot: nothing the encoder uses arrives during
+            # the load, so only the unrelated files can move the value.
+            for name, payload in _TOKENIZER_FILES.items():
+                (snapshot / name).write_bytes(payload)
             first = self._load(snapshot)
             (snapshot / "README.md").write_bytes(b"model card")
             (snapshot / "model.safetensors").write_bytes(b"torch weights")
