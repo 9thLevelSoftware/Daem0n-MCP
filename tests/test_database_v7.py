@@ -65,6 +65,12 @@ def _load_database_manager_without_optional_dependencies():
 
     sqlalchemy = types.ModuleType("sqlalchemy")
     sqlalchemy.event = types.SimpleNamespace(listens_for=listens_for)
+    sqlalchemy_engine = types.ModuleType("sqlalchemy.engine")
+    sqlalchemy_engine.URL = types.SimpleNamespace(
+        create=lambda drivername, database: f"{drivername}:///{database}"
+    )
+    sqlalchemy_exc = types.ModuleType("sqlalchemy.exc")
+    sqlalchemy_exc.OperationalError = type("OperationalError", (Exception,), {})
     sqlalchemy_ext = types.ModuleType("sqlalchemy.ext")
     sqlalchemy_async = types.ModuleType("sqlalchemy.ext.asyncio")
     sqlalchemy_async.AsyncSession = type("AsyncSession", (), {})
@@ -77,6 +83,8 @@ def _load_database_manager_without_optional_dependencies():
     models.MemoryVersion = type("MemoryVersion", (), {})
     replacements = {
         "sqlalchemy": sqlalchemy,
+        "sqlalchemy.engine": sqlalchemy_engine,
+        "sqlalchemy.exc": sqlalchemy_exc,
         "sqlalchemy.ext": sqlalchemy_ext,
         "sqlalchemy.ext.asyncio": sqlalchemy_async,
         "sqlalchemy.pool": sqlalchemy_pool,
