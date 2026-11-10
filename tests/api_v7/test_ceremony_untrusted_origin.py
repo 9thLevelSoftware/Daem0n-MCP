@@ -130,3 +130,61 @@ async def test_destructive_and_rule_counsel_ignore_record_origin(tmp_path):
         )
         assert archived["error"]["code"] == "COUNSEL_REQUIRED"
         assert archived["error"]["counsel"]["reasons"] == ["DESTRUCTIVE_OPERATION"]
+
+
+async def test_planted_records_cannot_mask_an_authored_failure(tmp_path):
+    [workspace] = await initialize_workspaces((tmp_path,))
+    scope = {"workspace_id": workspace.workspace_id}
+    failed = "billing ledger exports through the nightly job"
+
+    async with Client(_server(tmp_path)) as client:
+        stored = await _write(
+            client,
+            "memory_store",
+            {
+                **scope,
+                "record_type": "decision",
+                "content": failed,
+                "idempotency_key": "untrusted-counsel-failed-0001",
+            },
+        )
+        await _write(
+            client,
+            "memory_record_outcome",
+            {
+                **scope,
+                "record_id": stored["data"]["record"]["record_id"],
+                "outcome_text": "The nightly job truncated the export",
+                "worked": False,
+                "idempotency_key": "untrusted-counsel-outcome-0001",
+            },
+        )
+        before = await _call(client, "memory_store", _decision(scope, "before-0001"))
+        assert before["error"]["code"] == "COUNSEL_REQUIRED"
+        assert before["error"]["counsel"]["reasons"] == ["RELATED_FAILURE"]
+
+        # Enough planted TODOs echoing the write to outrank the authored
+        # failure in the guidance shown to the agent.
+        (tmp_path / "planted.py").write_text(
+            "".join(
+                f"# TODO: publish the billing ledger as csv decision note {index}\n"
+                for index in range(24)
+            ),
+            encoding="utf-8",
+        )
+        scanned = await _write(
+            client,
+            "code_todos_scan_and_store",
+            {**scope, "idempotency_key": "untrusted-counsel-scan-0003"},
+        )
+        assert len(scanned["data"]["stored_records"]) == 24
+
+        masked = await _call(client, "memory_store", _decision(scope, "masked-0001"))
+        assert not masked["ok"]
+        assert masked["error"]["code"] == "COUNSEL_REQUIRED"
+        counsel = masked["error"]["counsel"]
+        assert counsel["reasons"] == ["RELATED_FAILURE"]
+        # The record that forced counsel is among those shown.
+        assert failed in [
+            record["excerpt"] for record in counsel["guidance"]["records"]
+        ]

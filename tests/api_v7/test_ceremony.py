@@ -307,21 +307,45 @@ class CeremonyTests(unittest.IsolatedAsyncioTestCase):
             (await self.admit("memory_prune")).challenge.reasons,
         )
 
-        # An authored record of the same kind keeps its reason; another kind
-        # does not vouch for it.
-        authored.value = PreflightGuidance(records=[record("authentication session")])
-        self.assertIsNone((await self.admit()).challenge)
-        authored.value = PreflightGuidance(
-            records=[record("authentication session", warning=True)]
+        # The reasons are the ones authored records raise, whatever the
+        # planted records would have raised, and the authored record that
+        # raised one is shown ahead of them.
+        failed = record("authentication session").model_copy(
+            update={"record_id": "mem_" + "c" * 64}
         )
-        self.assertEqual(["RELATED_WARNING"], (await self.admit()).challenge.reasons)
+        authored.value = PreflightGuidance(records=[failed])
+        masked = (await self.admit()).challenge
+        self.assertEqual(["RELATED_FAILURE"], masked.reasons)
+        self.assertEqual([failed, planted], masked.guidance.records)
+        warned = record("authentication session", warning=True).model_copy(
+            update={"record_id": "mem_" + "d" * 64}
+        )
+        authored.value = PreflightGuidance(records=[warned])
+        shown = (await self.admit()).challenge
+        self.assertEqual(["RELATED_WARNING"], shown.reasons)
+        self.assertEqual(warned.excerpt, shown.guidance.warnings[0])
 
-        # Nothing is read a second time unless a related record was found,
-        # and an unreadable second opinion keeps the challenge.
-        calls = len(authored.calls)
+        # Planted records that crowd every authored record out of the first
+        # read cannot hide it, and the shown guidance stays bounded.
+        crowd = [
+            record(f"authentication session TODO {index}", warning=True).model_copy(
+                update={"record_id": "mem_" + f"{index:064x}"}
+            )
+            for index in range(20)
+        ]
+        self.service.value = PreflightGuidance(records=crowd)
+        authored.value = PreflightGuidance(records=[failed])
+        crowded = (await self.admit()).challenge
+        self.assertEqual(["RELATED_FAILURE"], crowded.reasons)
+        self.assertEqual([failed, *crowd[:19]], crowded.guidance.records)
         self.service.value = PreflightGuidance()
+        hidden = (await self.admit()).challenge
+        self.assertEqual(["RELATED_FAILURE"], hidden.reasons)
+        self.assertEqual([failed], hidden.guidance.records)
+        authored.value = PreflightGuidance()
         self.assertIsNone((await self.admit()).challenge)
-        self.assertEqual(calls, len(authored.calls))
+
+        # An unreadable second opinion keeps the challenge.
         self.service.value = PreflightGuidance(records=[planted])
         for failure in (RuntimeError("unavailable"), None):
             with self.subTest(failure=failure):

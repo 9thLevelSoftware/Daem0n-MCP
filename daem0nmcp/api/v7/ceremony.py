@@ -24,6 +24,7 @@ from .models import (
     CovenantNotice,
     InlineCounsel,
     PreflightGuidance,
+    RecordSummary,
 )
 from .opaque_capabilities import OpaqueCapabilityCapacityError
 
@@ -40,6 +41,9 @@ CounselMode = Literal["inline", "challenge", "off"]
 _RECORD_REASONS: frozenset[CounselReason] = frozenset(
     {"RELATED_WARNING", "RELATED_FAILURE"}
 )
+# The bounds ``PreflightGuidance`` puts on what a challenge may show.
+_GUIDANCE_RECORD_LIMIT = 20
+_GUIDANCE_WARNING_LIMIT = 50
 _CONTENT_TOKEN = re.compile(r"[a-z0-9][a-z0-9_-]{3,79}")
 _TOKEN_COMPONENT = re.compile(r"[_-]")
 _COUNSEL_STOPWORDS = frozenset(
@@ -145,6 +149,32 @@ def _content_tokens(value: object) -> frozenset[str]:
     return frozenset(tokens - _COUNSEL_STOPWORDS)
 
 
+def _related_records(
+    guidance: PreflightGuidance, normalized_arguments: Mapping[str, Any]
+) -> list[RecordSummary]:
+    """The guidance records that share a path or two content tokens with a call."""
+
+    argument_tokens = _content_tokens(
+        {
+            key: value
+            for key, value in normalized_arguments.items()
+            if key not in {"idempotency_key", "workspace_id", "preflight_token"}
+        }
+    )
+    path = normalized_arguments.get("relative_file_path")
+    related: list[RecordSummary] = []
+    for record in guidance.records:
+        if isinstance(path, str) and path == record.relative_file_path:
+            related.append(record)
+            continue
+        record_tokens = _content_tokens(
+            [record.excerpt, list(record.tags), record.relative_file_path]
+        )
+        if len(argument_tokens & record_tokens) >= 2:
+            related.append(record)
+    return related
+
+
 def counsel_reasons(
     level: CovenantLevel,
     guidance: PreflightGuidance,
@@ -165,27 +195,8 @@ def counsel_reasons(
             add("RULE_ASK_FIRST")
         if rule.warnings:
             add("RULE_WARNING")
-    argument_tokens = _content_tokens(
-        {
-            key: value
-            for key, value in normalized_arguments.items()
-            if key not in {"idempotency_key", "workspace_id", "preflight_token"}
-        }
-    )
-    path = normalized_arguments.get("relative_file_path")
-    for record in guidance.records:
-        related = isinstance(path, str) and path == record.relative_file_path
-        if not related:
-            record_tokens = _content_tokens(
-                [record.excerpt, list(record.tags), record.relative_file_path]
-            )
-            related = len(argument_tokens & record_tokens) >= 2
-        if related:
-            add(
-                "RELATED_WARNING"
-                if record.record_type == "warning"
-                else "RELATED_FAILURE"
-            )
+    for record in _related_records(guidance, normalized_arguments):
+        add("RELATED_WARNING" if record.record_type == "warning" else "RELATED_FAILURE")
     return reasons
 
 
@@ -205,46 +216,69 @@ class CovenantCeremony:
         self._authored_preflight = authored_preflight_service
         self._brief_reader = brief_reader
 
-    async def _confirmed_reasons(
+    async def _authored_counsel(
         self,
         reasons: list[CounselReason],
+        guidance: PreflightGuidance,
         level: CovenantLevel,
         workspace: Workspace,
         tool_name: str,
         normalized: Mapping[str, Any],
-    ) -> list[CounselReason]:
-        """Keep a related-record reason only if an authored record backs it.
+    ) -> tuple[list[CounselReason], PreflightGuidance]:
+        """Take the related-record reasons from authored records alone.
 
         ``preflight_service`` reads every stored record, including scanned
         TODOs and ingested pages whose text anyone who controls a file or a
-        site can write.  Those stay visible as guidance, but they must not by
-        themselves force counsel, so a related-record reason is checked
-        against guidance read without them.  Failing to read it keeps the
-        reason.
+        site can write.  Those stay visible as guidance, but they must neither
+        force counsel by themselves nor crowd out the authored record that
+        warrants it, so the related-record reasons are computed from guidance
+        read without them, and the authored records that raised a reason are
+        shown first.  Failing to read it keeps the reasons already found.
         """
 
-        if self._authored_preflight is None or not _RECORD_REASONS.intersection(
-            reasons
-        ):
-            return reasons
+        if self._authored_preflight is None:
+            return reasons, guidance
         try:
             raw = self._authored_preflight.guidance(
                 workspace, tool_name, normalized, None
             )
             if inspect.isawaitable(raw):
                 raw = await raw
-            authored = counsel_reasons(
-                level, PreflightGuidance.model_validate(raw), normalized
-            )
+            authored = PreflightGuidance.model_validate(raw)
+            related = _related_records(authored, normalized)
+            record_reasons = [
+                reason
+                for reason in counsel_reasons(level, authored, normalized)
+                if reason in _RECORD_REASONS
+            ]
+            shown = {record.record_id for record in guidance.records}
+            missing = [record for record in related if record.record_id not in shown]
+            if missing:
+                records = [*missing, *guidance.records]
+                warnings = [
+                    *[
+                        record.excerpt
+                        for record in missing
+                        if record.record_type == "warning"
+                        and record.excerpt not in guidance.warnings
+                    ],
+                    *guidance.warnings,
+                ]
+                guidance = guidance.model_copy(
+                    update={
+                        "records": records[:_GUIDANCE_RECORD_LIMIT],
+                        "warnings": warnings[:_GUIDANCE_WARNING_LIMIT],
+                    }
+                )
         except asyncio.CancelledError:
             raise
         except Exception:
-            return reasons
-        return [
-            reason
-            for reason in reasons
-            if reason not in _RECORD_REASONS or reason in authored
-        ]
+            return reasons, guidance
+        return (
+            [reason for reason in reasons if reason not in _RECORD_REASONS]
+            + record_reasons,
+            guidance,
+        )
 
     async def admit(
         self,
@@ -326,8 +360,9 @@ class CovenantCeremony:
                 return CeremonyOutcome(_capacity_violation(tool_name), notice, None)
             except Exception:
                 return CeremonyOutcome(violation, notice, None)
-            reasons = await self._confirmed_reasons(
+            reasons, guidance = await self._authored_counsel(
                 counsel_reasons(level, guidance, normalized),
+                guidance,
                 level,
                 workspace,
                 tool_name,
