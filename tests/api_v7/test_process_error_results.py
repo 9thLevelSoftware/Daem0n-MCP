@@ -10,6 +10,8 @@ from __future__ import annotations
 import json
 
 import pytest
+from mcp import McpError
+from mcp.types import INVALID_PARAMS
 
 from daem0nmcp.database import DatabaseManager
 from daem0nmcp.workspace import WorkspaceRegistry
@@ -147,6 +149,15 @@ async def test_rejected_arguments_are_described_without_echoing_them(
         # A registered tool the default listing omits: the MCP layer checks
         # only listed tools, so this one is refused by the framework instead.
         "unlisted tool": ("memory_search_text", {**scope, "query": oversized}),
+        "unexpected field, unlisted tool": (
+            "memory_search_text",
+            {**scope, "query": "x", MARKER: 1},
+        ),
+        # A key the caller chose inside a free-form map is input too.
+        "caller-chosen map key": (
+            "memory_store",
+            {**store, "context": {MARKER: oversized}},
+        ),
         # Accepted by the JSON schema, refused by the model's own validators.
         "duplicate tags": ("memory_store", {**store, "tags": [MARKER, MARKER]}),
         "escaping path": (
@@ -197,7 +208,36 @@ async def test_rejected_arguments_are_described_without_echoing_them(
             }
         ]
         assert MARKER not in relayed.content[0].text
+        relayed = await session.call_tool(
+            "daem0n_tool_call",
+            {
+                **scope,
+                "tool": "memory_search_text",
+                "arguments": {"query": "x", MARKER: 1},
+            },
+        )
+        assert relayed.isError is True
+        assert _envelope(relayed)["error"]["field_errors"] == [
+            {"field": "arguments", "code": "INVALID_VALUE", "message": "Invalid value."}
+        ]
+        assert MARKER not in relayed.content[0].text
 
         # A well-formed call is unaffected by the checks above.
         stored = await session.call_tool("memory_store", {**store, "tags": [MARKER]})
         assert _envelope(stored)["ok"] is True
+
+
+async def test_unknown_prompt_is_refused_without_echoing_its_name(
+    initialized_workspace,
+):
+    """No prompts are registered; the refusal must not repeat the request."""
+
+    workspace = initialized_workspace
+    async with process_client(workspace.root, "stdio") as session:
+        assert (await session.list_prompts()).prompts == []
+        for name in ("no_such_prompt", MARKER + "y" * 1_100_000):
+            with pytest.raises(McpError) as refused:
+                await session.get_prompt(name, {MARKER: MARKER})
+            assert refused.value.error.code == INVALID_PARAMS
+            assert refused.value.error.message == "Unknown prompt"
+            assert refused.value.error.data is None

@@ -19,11 +19,13 @@ from ...covenant import invocation_scope_var
 from .errors import ErrorCode
 from .gateway_operations import (
     GATEWAY_TOOL_NAMES,
+    MAX_EXAMINED_ARGUMENT_PROBLEMS,
     MAX_REPORTED_ARGUMENT_PROBLEMS,
     _argument_field,
     _ToolArgumentValidationError,
     argument_rejection_text,
     bind_gateway_handlers,
+    declared_argument_names,
 )
 from .middleware import (
     EnvelopeErrorMiddleware,
@@ -360,22 +362,30 @@ def _resource_adapter(spec: Any):
     return read
 
 
-def _schema_problems(validator: Any, arguments: Any) -> list[tuple[str, str]]:
-    problems: list[tuple[str, str]] = []
-    for error in validator.iter_errors(arguments):
+def _schema_problems(
+    schema: Any, validator: Any, arguments: Any
+) -> list[tuple[str, str]]:
+    problems: dict[tuple[str, str], None] = {}
+    declared: frozenset[str] | None = None
+    for examined, error in enumerate(validator.iter_errors(arguments)):
+        if (
+            examined >= MAX_EXAMINED_ARGUMENT_PROBLEMS
+            or len(problems) > MAX_REPORTED_ARGUMENT_PROBLEMS
+        ):
+            break
+        if declared is None:
+            declared = declared_argument_names(schema)
         rule = str(error.validator)
         if rule == "required" and isinstance(error.instance, Mapping):
             # The missing names come from the schema, not from the caller.
-            problems.extend(
-                (_argument_field((*error.absolute_path, name)), rule)
-                for name in error.validator_value
-                if name not in error.instance
-            )
+            for name in error.validator_value:
+                if name not in error.instance:
+                    path = (*error.absolute_path, name)
+                    problems[(_argument_field(path, declared), rule)] = None
         else:
-            problems.append((_argument_field(tuple(error.absolute_path)), rule))
-        if len(problems) > MAX_REPORTED_ARGUMENT_PROBLEMS:
-            break
-    return problems
+            path = tuple(error.absolute_path)
+            problems[(_argument_field(path, declared), rule)] = None
+    return list(problems)
 
 
 def _install_bounded_call_rejections(server: Any, manifest: V7Manifest) -> None:
@@ -413,13 +423,45 @@ def _install_bounded_call_rejections(server: Any, manifest: V7Manifest) -> None:
         if definition is not None:
             schema = definition.inputSchema
             problems = _schema_problems(
-                validator_for(schema)(schema), request.params.arguments or {}
+                schema, validator_for(schema)(schema), request.params.arguments or {}
             )
             if problems:
                 return rejection(argument_rejection_text(problems))
         return await original(request)
 
     low_level.request_handlers[mcp.types.CallToolRequest] = handle_call
+
+
+def _install_bounded_prompt_rejections(server: Any) -> None:
+    """Answer a prompt that cannot be served without repeating the request.
+
+    The MCP layer underneath reports any failure of this request as code 0
+    with the framework's text, which quotes the requested name whole.
+    """
+
+    import mcp.types
+    from fastmcp.exceptions import NotFoundError
+    from mcp import McpError
+
+    low_level = server._mcp_server
+    original = low_level.request_handlers.get(mcp.types.GetPromptRequest)
+    if original is None:
+        return
+
+    async def handle_get_prompt(request: Any) -> Any:
+        try:
+            return await original(request)
+        except NotFoundError:
+            error = mcp.types.ErrorData(
+                code=mcp.types.INVALID_PARAMS, message="Unknown prompt"
+            )
+        except Exception:
+            error = mcp.types.ErrorData(
+                code=mcp.types.INTERNAL_ERROR, message="Prompt unavailable"
+            )
+        raise McpError(error)
+
+    low_level.request_handlers[mcp.types.GetPromptRequest] = handle_get_prompt
 
 
 def _mcp_task(view: TaskView) -> Any:
@@ -824,7 +866,14 @@ def build_fastmcp_server(
         server.add_middleware(item)
     # Innermost of the tool chain, so every layer above it, and the client,
     # sees ``isError`` exactly when the envelope says ``ok: false``.
-    server.add_middleware(EnvelopeErrorMiddleware())
+    server.add_middleware(
+        EnvelopeErrorMiddleware(
+            {
+                spec.name: declared_argument_names(spec.input_schema)
+                for spec in manifest.tools
+            }
+        )
+    )
     if listed_tools is not None:
         server.add_middleware(ListedToolsMiddleware(listed_tools))
 
@@ -886,6 +935,7 @@ def build_fastmcp_server(
     if hasattr(server, "_mcp_server"):
         # Before the task protocol, which wraps this handler for plain calls.
         _install_bounded_call_rejections(server, manifest)
+        _install_bounded_prompt_rejections(server)
 
     if task_dispatcher is not None:
         invocation_middleware = next(

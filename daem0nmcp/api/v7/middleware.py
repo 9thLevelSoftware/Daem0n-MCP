@@ -215,17 +215,25 @@ class EnvelopeErrorMiddleware(_MiddlewareBase):
     so that one failure is restated as field paths and fixed rule names.
     """
 
-    def __init__(self) -> None:
+    def __init__(
+        self, declared_argument_names: Mapping[str, frozenset[str]] | None = None
+    ) -> None:
         if FASTMCP_MIDDLEWARE_AVAILABLE:
             super().__init__()
+        # Per tool, the names its input schema declares: the only names a
+        # restated rejection may contain.
+        self._declared = dict(declared_argument_names or {})
 
     async def on_call_tool(self, context: Any, call_next: Callable[[Any], Any]) -> Any:
         try:
             result = await _resolve_awaitable(call_next(context))
         except _BaseValidationError as exc:
             cause = exc.__cause__
+            declared = self._declared.get(
+                str(getattr(context.message, "name", "")), frozenset()
+            )
             problems = (
-                model_argument_problems(cause)
+                model_argument_problems(cause, declared)
                 if isinstance(cause, _PydanticValidationError)
                 else []
             )

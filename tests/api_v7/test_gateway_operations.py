@@ -155,46 +155,58 @@ class GatewayOperationsTests(unittest.IsolatedAsyncioTestCase):
                 )
 
     def test_argument_rejection_text_is_bounded_and_never_quotes_input(self) -> None:
-        from pydantic import BaseModel, ValidationError
+        from pydantic import BaseModel
 
         from daem0nmcp.api.v7.gateway_operations import (
             MAX_REPORTED_ARGUMENT_PROBLEMS,
             argument_rejection_text,
+            declared_argument_names,
             model_argument_problems,
         )
 
+        class Row(BaseModel):
+            size: int
+
         class Probe(BaseModel):
             values: dict[str, int]
+            rows: list[Row]
+            count: int
+
+        declared = declared_argument_names(Probe.model_json_schema())
+        self.assertEqual({"values", "rows", "size", "count"}, declared)
 
         hostile = "caller text; with (punctuation)" * 400
+        # Map keys are the caller's, whether or not they look like field names.
         supplied = {f"field_{index}": hostile for index in range(40)}
         supplied[hostile] = hostile
-        with self.assertRaises(ValidationError) as caught:
-            Probe.model_validate({"values": supplied})
-
-        problems = model_argument_problems(caught.exception)
+        problems = model_argument_problems(
+            self._failure(
+                Probe,
+                {"values": supplied, "rows": [{"size": 1}, {"size": hostile}]},
+            ),
+            declared,
+        )
         text = argument_rejection_text(problems)
 
-        self.assertEqual(MAX_REPORTED_ARGUMENT_PROBLEMS + 1, len(problems))
-        self.assertNotIn("caller text", text)
-        self.assertLess(len(text), 1_000)
-        self.assertTrue(
-            text.startswith(
-                "Input validation error: arguments.values.field_0 (int_parsing); "
-            ),
+        self.assertEqual(
+            "Input validation error: arguments.values (int_parsing); "
+            "arguments.rows.1.size (int_parsing); arguments.count (missing). "
+            "Compare the arguments with the tool's input schema.",
             text,
         )
-        self.assertIn("; and more. ", text)
-        # A field name that is not a plain identifier stops the path early.
+        # Without declared names nothing below the root is reported.
         self.assertEqual(
-            "Input validation error: arguments.values (int_parsing). "
-            "Compare the arguments with the tool's input schema.",
-            argument_rejection_text(
-                model_argument_problems(
-                    self._failure(Probe, {"values": {hostile: hostile}})
-                )
-            ),
+            [("arguments", "int_parsing")],
+            model_argument_problems(
+                self._failure(Probe, {"values": {"field_0": hostile}, "count": 1}),
+                frozenset(),
+            )[:1],
         )
+        many = [(f"arguments.rows.{index}.size", "int_parsing") for index in range(40)]
+        text = argument_rejection_text(many)
+        self.assertEqual(MAX_REPORTED_ARGUMENT_PROBLEMS, text.count("int_parsing"))
+        self.assertIn("; and more. ", text)
+        self.assertLess(len(text), 1_000)
 
     @staticmethod
     def _failure(model, value):

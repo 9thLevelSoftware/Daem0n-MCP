@@ -29,9 +29,37 @@ class _ToolArgumentValidationError(ValidationError):
     """Identify validation failures at the target adapter's input boundary."""
 
 
-def _argument_field(location: tuple[object, ...]) -> str:
+def declared_argument_names(schema: object) -> frozenset[str]:
+    """Every property name an input schema declares, at any depth."""
+
+    names: set[str] = set()
+    pending = [schema]
+    while pending:
+        node = pending.pop()
+        if isinstance(node, Mapping):
+            properties = node.get("properties")
+            if isinstance(properties, Mapping):
+                names.update(name for name in properties if isinstance(name, str))
+            pending.extend(node.values())
+        elif isinstance(node, (list, tuple)):
+            pending.extend(node)
+    return frozenset(names)
+
+
+def _argument_field(
+    location: tuple[object, ...], declared: frozenset[str] | None = None
+) -> str:
+    """Render where an argument failed, as far as the schema names the path.
+
+    A key of a free-form map, or the name of an unexpected field, is chosen
+    by the caller.  With ``declared`` the path stops at the first such name,
+    so the text holds list positions and names the schema itself declares.
+    """
+
     field = "arguments"
     for part in location:
+        if declared is not None and not isinstance(part, int) and part not in declared:
+            break
         candidate = f"{field}.{part}"
         if len(candidate) > 256 or _DIAGNOSTIC_FIELD.fullmatch(candidate) is None:
             break
@@ -40,6 +68,9 @@ def _argument_field(location: tuple[object, ...]) -> str:
 
 
 MAX_REPORTED_ARGUMENT_PROBLEMS = 10
+# Failures looked at before giving up on finding further distinct ones: many
+# bad entries of one map all reduce to the same reported path.
+MAX_EXAMINED_ARGUMENT_PROBLEMS = 100
 
 
 def argument_rejection_text(problems: list[tuple[str, str]]) -> str:
@@ -55,15 +86,18 @@ def argument_rejection_text(problems: list[tuple[str, str]]) -> str:
     )
 
 
-def model_argument_problems(exc: ValidationError) -> list[tuple[str, str]]:
+def model_argument_problems(
+    exc: ValidationError, declared: frozenset[str]
+) -> list[tuple[str, str]]:
     """Reduce a pydantic failure to field paths and its fixed error types."""
 
-    return [
-        (_argument_field(tuple(error["loc"])), str(error["type"]))
+    problems = dict.fromkeys(
+        (_argument_field(tuple(error["loc"]), declared), str(error["type"]))
         for error in exc.errors(
             include_url=False, include_context=False, include_input=False
-        )[: MAX_REPORTED_ARGUMENT_PROBLEMS + 1]
-    ]
+        )[:MAX_EXAMINED_ARGUMENT_PROBLEMS]
+    )
+    return list(problems)[: MAX_REPORTED_ARGUMENT_PROBLEMS + 1]
 
 
 def build_gateway_operations(
@@ -101,6 +135,9 @@ def bind_gateway_handlers(
 
     index = build_tool_search_index(manifest)
     specs = {spec.name: spec for spec in manifest.tools}
+    declared_names = {
+        name: declared_argument_names(spec.input_schema) for name, spec in specs.items()
+    }
 
     async def tools_search(*, query: str, limit: int = 5) -> ApiResponse[Any]:
         response = response_factory.begin(None)
@@ -164,7 +201,7 @@ def bind_gateway_handlers(
         except _ToolArgumentValidationError as exc:
             field_errors = [
                 FieldError(
-                    field=_argument_field(error["loc"]),
+                    field=_argument_field(error["loc"], declared_names[tool]),
                     code="INVALID_VALUE",
                     message="Invalid value.",
                 )
@@ -233,9 +270,11 @@ def bind_gateway_handlers(
 __all__ = [
     "CORE_LISTED_TOOLS",
     "GATEWAY_TOOL_NAMES",
+    "MAX_EXAMINED_ARGUMENT_PROBLEMS",
     "MAX_REPORTED_ARGUMENT_PROBLEMS",
     "argument_rejection_text",
     "bind_gateway_handlers",
     "build_gateway_operations",
+    "declared_argument_names",
     "model_argument_problems",
 ]
