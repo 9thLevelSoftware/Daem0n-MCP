@@ -277,7 +277,7 @@ capability/access before obtaining fresh counsel and retrying with the same
 idempotency key; an immediate retry cannot fix unchanged malformed source.
 Missing symbols, unsupported symbol-file extensions, and sources above the
 5 MiB raw-file limit remain `INVALID_ARGUMENT`.
-Fully qualified symbol identities take precedence. A short name is accepted only
+Fully qualified symbol identities take precedence. A dotted name that is one symbol's full identity and also names another symbol without its module prefix is ambiguous. A short name is accepted only
 when it identifies one canonical symbol; ambiguous names are `INVALID_ARGUMENT`,
 not a binding to every same-named definition. If an existing short binding
 becomes ambiguous, recall reports `unverifiable` until it is rebound explicitly.
