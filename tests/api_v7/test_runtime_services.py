@@ -997,6 +997,23 @@ class RecallAdapterTests(
                     frozenset({linked.workspace_id}),
                     lambda _workspace: None,
                 )
+
+            def refuse(*_arguments: object) -> None:
+                raise runtime_services.FederatedRetrievalError("UNAUTHORIZED_WORKSPACE")
+
+            # A refusal raised on the worker keeps its stable code.
+            with (
+                patch.object(runtime_services, "validate_directional_links", refuse),
+                self.assertRaisesRegex(
+                    runtime_services.RuntimeServiceError, "^UNAUTHORIZED_WORKSPACE$"
+                ),
+            ):
+                await adapter.retrieve(
+                    self.workspace,
+                    query,
+                    frozenset({linked.workspace_id}),
+                    lambda _workspace: None,
+                )
         finally:
             adapter.close()
 
