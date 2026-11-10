@@ -17,6 +17,7 @@ from sqlalchemy import create_engine
 from daem0nmcp import database
 from daem0nmcp.database import DatabaseManager
 from daem0nmcp.migrations import MIGRATIONS, run_migrations
+from daem0nmcp.migrations.schema import _LAST_V6_SCHEMA_VERSION
 from daem0nmcp.models import Base
 from daem0nmcp.schema_version import CURRENT_SCHEMA_VERSION
 from daem0nmcp.storage_activation import (
@@ -31,6 +32,26 @@ from daem0nmcp.workspace import WorkspaceRegistry
 
 PROCESSES = 4
 TIMEOUT_SECONDS = 300
+# The tables a format-6 build knew; every other model table is newer.
+V6_TABLES = (
+    "memories",
+    "memory_versions",
+    "facts",
+    "memory_relationships",
+    "rules",
+    "context_triggers",
+    "active_context",
+    "code_entities",
+    "enforcement_bypass_log",
+    "extracted_entities",
+    "file_hashes",
+    "memory_code_refs",
+    "memory_communities",
+    "memory_entity_refs",
+    "project_links",
+    "session_state",
+)
+
 # Every worker imports first, reports ready and then spins on the gate, so the
 # contended calls start together instead of being spread over interpreter
 # start-up.
@@ -242,6 +263,29 @@ def _model_tables_only(database: Path) -> None:
         engine.dispose()
 
 
+def _populated_v6_store(storage: Path) -> Path:
+    """A store an older build wrote: its own tables, its ledger, one memory."""
+
+    storage.mkdir(parents=True)
+    database = storage / "daem0nmcp.db"
+    tables = Base.metadata.tables
+    engine = create_engine(f"sqlite:///{database}")
+    try:
+        Base.metadata.create_all(engine, tables=[tables[name] for name in V6_TABLES])
+    finally:
+        engine.dispose()
+    run_migrations(str(database), maximum_version=_LAST_V6_SCHEMA_VERSION)
+    engine = create_engine(f"sqlite:///{database}")
+    try:
+        with engine.begin() as connection:
+            connection.execute(
+                tables["memories"].insert().values(category="decision", content="x")
+            )
+    finally:
+        engine.dispose()
+    return database
+
+
 def test_concurrent_first_start_gives_every_process_the_same_v7_store(tmp_path):
     """Fresh-store bootstrap is serialised between processes."""
     storage = tmp_path / ".daem0nmcp" / "storage"
@@ -266,6 +310,33 @@ def test_concurrent_first_start_gives_every_process_the_same_v7_store(tmp_path):
     with closing(sqlite3.connect(active.path)) as connection:
         assert connection.execute("PRAGMA integrity_check").fetchall() == [("ok",)]
         assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
+
+
+def test_concurrent_first_open_of_an_older_store_creates_each_table_once(tmp_path):
+    """Starts that add the newer tables to an existing store do not collide."""
+    storage = tmp_path / ".daem0nmcp" / "storage"
+    database = _populated_v6_store(storage)
+
+    results = _run_together(_FIRST_START_WORKER, storage, tmp_path / "gate")
+
+    print("DATABASE_IN_USE retries:", [result.pop("busy") for result in results])
+    expected = {
+        "format_version": 6,
+        "generation": 0,
+        "schema_version": _LAST_V6_SCHEMA_VERSION,
+    }
+    assert results == [expected] * PROCESSES
+    assert resolve_active_database(storage).pointer is None
+    with closing(sqlite3.connect(database)) as connection:
+        present = {
+            row[0]
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            )
+        }
+        assert set(Base.metadata.tables) <= present
+        assert connection.execute("SELECT count(*) FROM memories").fetchone() == (1,)
+        assert connection.execute("PRAGMA integrity_check").fetchall() == [("ok",)]
 
 
 async def test_two_managers_in_one_process_start_on_the_same_fresh_storage(tmp_path):

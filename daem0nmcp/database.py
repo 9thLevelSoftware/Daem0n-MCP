@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Literal
 
 from sqlalchemy import event
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import NullPool
 
@@ -458,8 +459,7 @@ class DatabaseManager:
             )
 
         # Then create any new tables
-        async with self.engine.begin() as conn:
-            await conn.run_sync(Base.metadata.create_all)
+        await self._create_missing_tables()
 
         # For fresh databases, run migrations after tables are created
         if is_new_db:
@@ -494,6 +494,28 @@ class DatabaseManager:
             self.active_generation = 1
         else:
             self._validate_database(format_version=6)
+
+    async def _create_missing_tables(self) -> None:
+        """Create the model tables the database does not have yet.
+
+        An existing store is opened under the shared storage lock, so another
+        start may be adding the same tables to it: each looks for a table and
+        then creates it, and the one that comes second is refused.  The table
+        it was refused over now exists, so it looks again; every refusal is
+        over a different table, which bounds the number of passes.
+        """
+
+        for _ in range(len(Base.metadata.tables)):
+            try:
+                async with self.engine.begin() as conn:
+                    await conn.run_sync(Base.metadata.create_all)
+            except OperationalError as exc:
+                if "already exists" not in str(exc.orig):
+                    raise
+            else:
+                return
+        async with self.engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
 
     async def init_legacy_v6(self) -> None:
         """Initialize a retained format-6 database without publishing v7 schema.
