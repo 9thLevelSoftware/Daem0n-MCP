@@ -400,6 +400,14 @@ def _related(
     )
 
 
+def _interrupted(error: sqlite3.OperationalError) -> bool:
+    """Whether a read was stopped by the progress handler (SQLITE_INTERRUPT)."""
+
+    # Python 3.10 has neither the error code attribute nor the constant.
+    code = getattr(error, "sqlite_errorcode", None)
+    return code == 9 if code is not None else "interrupted" in str(error)
+
+
 def _scan_deadline(budget_end: float, remaining_sources: int) -> float:
     """Give each remaining source an equal share of the evidence scan budget."""
 
@@ -896,7 +904,7 @@ class V7DreamingCoordinator:
                     connection, workspace, cursor, cancelled
                 )
             except sqlite3.OperationalError as error:
-                if getattr(error, "sqlite_errorcode", None) == sqlite3.SQLITE_INTERRUPT:
+                if _interrupted(error):
                     return _Analysis(pending_count=1, cursor=cursor)
                 raise
             finally:

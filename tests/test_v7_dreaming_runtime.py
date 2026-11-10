@@ -1697,3 +1697,38 @@ async def test_cut_short_evidence_scan_does_not_name_partial_evidence(
     assert [item["record_id"] for item in json.loads(provenance)["sources"]] == [
         pending
     ]
+
+
+@pytest.mark.asyncio
+async def test_interrupted_analysis_is_pending_work_without_sqlite_error_codes(
+    dream_workspace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace, database = dream_workspace
+    _append(
+        database, workspace.workspace_id, "d", "postgres migration pending", worked=None
+    )
+
+    def interrupted(*_args: object, **_kwargs: object) -> _Analysis:
+        # What sqlite3 raises before Python 3.11: no sqlite_errorcode attribute.
+        raise sqlite3.OperationalError("interrupted")
+
+    monkeypatch.setattr(V7DreamingCoordinator, "_pending_analysis", interrupted)
+    monkeypatch.delattr(sqlite3, "SQLITE_INTERRUPT", raising=False)
+    coordinator = V7DreamingCoordinator(
+        workspaces=(workspace,),
+        settings=_settings(workspace.root),
+        candidate_store=CaptureCandidateStore(),
+        capability_statuses={"graph": "disabled"},
+    )
+    await coordinator.start()
+    try:
+        await coordinator.run_once(workspace)
+        health = await coordinator.health(workspace)
+    finally:
+        await coordinator.aclose()
+
+    assert health is not None
+    state = next(
+        item for item in health["strategies"] if item["strategy"] == "pending_outcome"
+    )
+    assert (state["status"], state["stable_error_code"]) == ("idle", None)
