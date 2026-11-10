@@ -440,6 +440,8 @@ def _assert_every_opener_refuses_the_unreadable_candidate(
         service.recover_pointer(root)
     assert recovery.value.code == "POINTER_RECOVERY_AMBIGUOUS"
     assert relative in str(recovery.value)
+    # Recovery names the same ways out as every other command.
+    assert "out of the storage directory" in str(recovery.value)
 
     assert source.read_bytes() == source_bytes
     assert not (storage / "active-db.json").exists()
@@ -478,6 +480,45 @@ def test_a_locked_candidate_of_a_pointerless_store_is_not_taken_for_inactive(
     assert "cannot be read" in str(start.value)
 
     # Released, it is readable again and still recorded as active.
+    with pytest.raises(RuntimeError) as later:
+        _start_manager(storage)
+    assert "is still recorded as the active" in str(later.value)
+
+
+def test_a_migration_root_that_cannot_be_listed_is_not_taken_for_empty(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Candidates that cannot even be enumerated may include the active one."""
+
+    from tests.test_migrate_v7_end_to_end import _registry
+
+    storage, _candidate, _relative = _migrated_v6_store_without_pointer(tmp_path)
+    source = storage / "daem0nmcp.db"
+    source_bytes = source.read_bytes()
+    root = storage / "migrations" / "v7"
+    listing = Path.iterdir
+
+    def unlistable(path: Path):
+        if path == root:
+            raise PermissionError("migration root cannot be listed")
+        return listing(path)
+
+    with monkeypatch.context() as patched:
+        patched.setattr(Path, "iterdir", unlistable)
+        with pytest.raises(RuntimeError) as start:
+            _remember(storage, "would land in the retained v6 source")
+        with pytest.raises(MigrationV7Error) as recovery:
+            MigrationV7Service(_registry(tmp_path)).recover_pointer(tmp_path)
+
+    assert getattr(start.value, "code", None) == "ACTIVE_POINTER_MISSING"
+    assert "migrations/v7 cannot be listed" in str(start.value)
+    assert "from a backup" in str(start.value)
+    assert str(tmp_path) not in str(start.value)
+    assert recovery.value.code == "POINTER_RECOVERY_AMBIGUOUS"
+    assert source.read_bytes() == source_bytes
+    assert not (storage / "active-db.json").exists()
+
+    # Listable again, the candidate is found and named.
     with pytest.raises(RuntimeError) as later:
         _start_manager(storage)
     assert "is still recorded as the active" in str(later.value)

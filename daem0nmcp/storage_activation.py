@@ -338,19 +338,30 @@ ACTIVE_POINTER_MISSING_DETAIL = (
 class CandidateUnreadableError(RuntimeError):
     """A published candidate of a pointerless store could not be inspected.
 
-    The message is the operator text; ``candidate`` is storage-relative.
+    The message is the operator text; ``candidate`` is storage-relative and
+    names the candidate, or the migration root when that cannot be listed.
     """
 
-    def __init__(self, candidate: str) -> None:
+    def __init__(self, candidate: str, *, unlistable: bool = False) -> None:
         self.candidate = candidate
-        super().__init__(
-            f"{POINTER_NAME} is missing and {candidate} cannot be read, so it "
-            f"may be the active format-7 database and {DEFAULT_DATABASE_NAME} "
-            "is not opened in its place. If another process is using that "
-            f"file, stop it and retry. Otherwise restore {POINTER_NAME} from a "
-            "backup, or, if that migration run was never activated, move its "
-            "directory out of the storage directory"
-        )
+        if unlistable:
+            message = (
+                f"{POINTER_NAME} is missing and {candidate} cannot be listed, so "
+                "it may hold the active format-7 database and "
+                f"{DEFAULT_DATABASE_NAME} is not opened in its place. Make that "
+                f"directory readable and retry, or restore {POINTER_NAME} from "
+                "a backup"
+            )
+        else:
+            message = (
+                f"{POINTER_NAME} is missing and {candidate} cannot be read, so it "
+                f"may be the active format-7 database and {DEFAULT_DATABASE_NAME} "
+                "is not opened in its place. If another process is using that "
+                f"file, stop it and retry. Otherwise restore {POINTER_NAME} from a "
+                "backup, or, if that migration run was never activated, move its "
+                "directory out of the storage directory"
+            )
+        super().__init__(message)
 
 
 def active_candidate_without_pointer(storage: Path) -> str | None:
@@ -367,6 +378,8 @@ def active_candidate_without_pointer(storage: Path) -> str | None:
     ``CandidateUnreadableError`` instead of answering "none".  Only a published
     ``candidate.db`` counts: a run directory without one, a partial candidate,
     and a readable file that holds no run table were never named by a pointer.
+    A migration root that exists but cannot be listed, or a run directory that
+    cannot be looked into, may hide that database and is refused the same way.
     """
 
     root = storage / "migrations" / "v7"
@@ -374,20 +387,28 @@ def active_candidate_without_pointer(storage: Path) -> str | None:
         if (storage / "migrations").is_symlink() or root.is_symlink():
             return None
         run_dirs = sorted(root.iterdir(), key=lambda path: path.name)
-    except OSError:
+    except (FileNotFoundError, NotADirectoryError):
         return None
+    except OSError as exc:
+        raise CandidateUnreadableError("migrations/v7", unlistable=True) from exc
     unreadable: str | None = None
     for run_dir in run_dirs:
         name = run_dir.name
-        candidate = run_dir / "candidate.db"
-        if (
-            not _valid_prefixed_hash(name, "mig")
-            or run_dir.is_symlink()
-            or candidate.is_symlink()
-            or not candidate.is_file()
-        ):
+        if not _valid_prefixed_hash(name, "mig"):
             continue
+        candidate = run_dir / "candidate.db"
         relative = f"migrations/v7/{name}/candidate.db"
+        try:
+            if (
+                run_dir.is_symlink()
+                or candidate.is_symlink()
+                or not candidate.is_file()
+            ):
+                continue
+        except OSError:
+            if unreadable is None:
+                unreadable = relative
+            continue
         try:
             # Read-only: inspecting a candidate must not checkpoint or
             # otherwise change a database this process does not own.

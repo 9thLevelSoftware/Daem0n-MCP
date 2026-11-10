@@ -401,7 +401,8 @@ another process, or damaged) is treated the same way, because it may be that
 active database: stop the process holding it and retry, restore the pointer
 from a backup, or, when that run was never activated, move its
 `migrations/v7/<migration-id>/` directory out of the storage directory. A
-brand-new,
+`migrations/v7/` directory that exists but cannot be listed is refused too,
+until it is made readable or the pointer is restored. A brand-new,
 still empty database whose first start stopped before its pointer was written
 is the one case finished automatically on the next start.
 

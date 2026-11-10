@@ -1729,10 +1729,7 @@ class MigrationV7Service:
                     active_candidate = active_candidate_without_pointer(storage)
                 except CandidateUnreadableError as exc:
                     raise MigrationV7Error(
-                        "POINTER_RECOVERY_AMBIGUOUS",
-                        f"the lost pointer may have named {exc.candidate}, "
-                        "which cannot be read; restore active-db.json from a "
-                        "backup",
+                        "POINTER_RECOVERY_AMBIGUOUS", str(exc)
                     ) from exc
                 if active_candidate is not None:
                     raise MigrationV7Error(
