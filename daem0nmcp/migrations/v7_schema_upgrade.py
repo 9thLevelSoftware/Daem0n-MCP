@@ -1464,10 +1464,33 @@ class V7SchemaUpgradeService:
         while True:
             archived = root / f"schema-upgrade-incomplete-{run_id[4:20]}-{suffix}"
             if not archived.exists():
-                os.replace(run_dir, archived)
+                _replace_directory(run_dir, archived)
                 _fsync_directory(root)
                 return
             suffix += 1
+
+
+_REPLACE_ATTEMPTS = 20
+_REPLACE_PAUSE_SECONDS = 0.1
+
+
+def _replace_directory(source: Path, target: Path) -> None:
+    """Move a directory, waiting out a handle another program briefly holds.
+
+    Windows refuses to move a directory while any file in it is open, and
+    scanners and indexers open a database file for a moment after it is
+    written.  The refusal is retried for a bounded time, then reported.
+    """
+
+    for attempt in range(_REPLACE_ATTEMPTS):
+        try:
+            os.replace(source, target)
+        except PermissionError:
+            if attempt == _REPLACE_ATTEMPTS - 1:
+                raise
+            time.sleep(_REPLACE_PAUSE_SECONDS)
+        else:
+            return
 
 
 __all__ = ["V7SchemaUpgradeService"]

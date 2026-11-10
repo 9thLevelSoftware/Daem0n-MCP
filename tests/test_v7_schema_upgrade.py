@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import sqlite3
 import subprocess
 import sys
@@ -216,7 +217,9 @@ def _authority_rows(path: Path) -> dict[str, list[tuple[object, ...]]]:
 
 
 def _schema_versions(path: Path) -> set[int]:
-    with sqlite3.connect(path) as connection:
+    # ``closing`` because a connection used as a context manager only commits;
+    # a handle left open keeps Windows from moving the candidate's directory.
+    with closing(sqlite3.connect(path)) as connection:
         return {
             int(row[0])
             for row in connection.execute("SELECT version FROM schema_version")
@@ -2079,3 +2082,38 @@ def test_dry_run_holds_shared_lock_before_resolving_pointer(tmp_path: Path):
     ):
         assert service.dry_run(tmp_path).action == "upgrade"
     assert observed_inside_lock
+
+
+def test_archiving_waits_out_a_briefly_held_directory(tmp_path: Path, monkeypatch):
+    """A refused directory move is retried, and a lasting refusal is reported."""
+
+    from daem0nmcp.migrations import v7_schema_upgrade
+
+    monkeypatch.setattr(v7_schema_upgrade, "_REPLACE_PAUSE_SECONDS", 0)
+    real_replace = os.replace
+    refusals = 2
+    calls = 0
+
+    def replace(source, target):
+        nonlocal refusals, calls
+        calls += 1
+        if refusals:
+            refusals -= 1
+            raise PermissionError(5, "Access is denied")
+        real_replace(source, target)
+
+    monkeypatch.setattr(v7_schema_upgrade.os, "replace", replace)
+    source = tmp_path / "run"
+    source.mkdir()
+    (source / "candidate.db.partial").write_bytes(b"x")
+    target = tmp_path / "archived"
+
+    v7_schema_upgrade._replace_directory(source, target)
+
+    assert calls == 3
+    assert (target / "candidate.db.partial").read_bytes() == b"x"
+
+    refusals = v7_schema_upgrade._REPLACE_ATTEMPTS
+    with pytest.raises(PermissionError):
+        v7_schema_upgrade._replace_directory(target, tmp_path / "again")
+    assert target.is_dir()
