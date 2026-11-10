@@ -1292,10 +1292,14 @@ class Task8RecallService:
                     for workspace_id in sorted(workspaces)
                 }
                 linked = tuple(sorted(linked_workspace_ids))
-                validate_directional_links(
-                    active_by_id[origin.workspace_id].path,
-                    origin.workspace_id,
-                    linked,
+                origin_path = active_by_id[origin.workspace_id].path
+                # Verifying the link ledgers and fusing the sources are
+                # blocking work: they run on the hydration workers, which
+                # finish before a cancellation releases the locks held here.
+                await self._run_snapshot(
+                    lambda: validate_directional_links(
+                        origin_path, origin.workspace_id, linked
+                    )
                 )
                 for selected in workspaces.values():
                     value = authorizer(selected)
@@ -1340,27 +1344,30 @@ class Task8RecallService:
                         await asyncio.shield(acquire)
                         guard.release()
                         raise
-                    validate_directional_links(
-                        active_by_id[origin.workspace_id].path,
-                        origin.workspace_id,
-                        linked,
+                    await self._run_snapshot(
+                        lambda: validate_directional_links(
+                            origin_path, origin.workspace_id, linked
+                        )
                     )
                     for selected in workspaces.values():
                         value = authorizer(selected)
                         if inspect.isawaitable(value):
                             await value
-                    hydrated = compose_federated_results(
-                        dict(pairs),
-                        query,
-                        label_applicability=(
-                            getattr(
-                                self._effective_config(), "memory_validity_mode", "off"
-                            )
-                            == "apply"
-                        ),
-                        retention_mode=getattr(
-                            self._effective_config(), "retrieval_retention_mode", "off"
-                        ),
+                    composition_config = self._effective_config()
+                    hydrated = await self._run_snapshot(
+                        lambda: compose_federated_results(
+                            dict(pairs),
+                            query,
+                            label_applicability=(
+                                getattr(
+                                    composition_config, "memory_validity_mode", "off"
+                                )
+                                == "apply"
+                            ),
+                            retention_mode=getattr(
+                                composition_config, "retrieval_retention_mode", "off"
+                            ),
+                        )
                     )
                 finally:
                     guard.release()

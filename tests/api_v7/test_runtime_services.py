@@ -941,6 +941,77 @@ class RecallAdapterTests(
         legacy = await run(self._retrieval_result(stored))
         self.assertNotIn("private.txt", legacy.model_dump_json())
 
+    async def test_federated_link_checks_and_composition_leave_the_event_loop(
+        self,
+    ) -> None:
+        """Ledger verification and fusion must not stall every other request."""
+        from unittest.mock import patch
+
+        from daem0nmcp.api.v7 import runtime_services
+        from daem0nmcp.workspace import WorkspaceRegistry
+
+        linked_directory = tempfile.TemporaryDirectory()
+        self.addCleanup(linked_directory.cleanup)
+        linked_root = Path(linked_directory.name).resolve()
+        linked = WorkspaceRegistry([linked_root], default_root=linked_root).default
+        workspaces = {linked.workspace_id: linked}
+        database = self.database
+
+        class Resolver:
+            @contextmanager
+            def locked_active(self, _workspace: object):
+                yield SimpleNamespace(path=database)
+
+        loop_thread = threading.get_ident()
+        calls: list[tuple[str, bool, tuple[object, ...]]] = []
+        composed = object()
+
+        def validate(path: Path, origin: str, linked_ids: tuple[str, ...]) -> None:
+            on_loop = threading.get_ident() == loop_thread
+            calls.append(("validate", on_loop, (path, origin, linked_ids)))
+
+        def compose(results: dict, query: object, **options: object) -> object:
+            on_loop = threading.get_ident() == loop_thread
+            calls.append(("compose", on_loop, (sorted(results), query)))
+            return composed
+
+        adapter = runtime_services.Task8RecallService(
+            storage_resolver=Resolver(),
+            workspace_resolver=SimpleNamespace(resolve=workspaces.__getitem__),
+            service_factory=lambda _path: object(),
+        )
+
+        async def source(workspace: object, _active: object, _query: object) -> str:
+            return "source:" + workspace.workspace_id
+
+        adapter._retrieve_source = source
+        query = self._query(self.workspace.workspace_id)
+        try:
+            with (
+                patch.object(runtime_services, "validate_directional_links", validate),
+                patch.object(runtime_services, "compose_federated_results", compose),
+            ):
+                result = await adapter.retrieve(
+                    self.workspace,
+                    query,
+                    frozenset({linked.workspace_id}),
+                    lambda _workspace: None,
+                )
+        finally:
+            adapter.close()
+
+        self.assertIs(composed, result)
+        link_check = (database, self.workspace.workspace_id, (linked.workspace_id,))
+        both = sorted((self.workspace.workspace_id, linked.workspace_id))
+        self.assertEqual(
+            [
+                ("validate", False, link_check),
+                ("validate", False, link_check),
+                ("compose", False, (both, query)),
+            ],
+            calls,
+        )
+
     async def test_recall_rejects_federation_and_preserves_abstention(
         self,
     ) -> None:
