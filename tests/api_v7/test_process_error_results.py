@@ -108,3 +108,96 @@ async def test_failed_envelopes_set_is_error_and_keep_the_envelope(
         envelope = _envelope(retried)
         assert envelope["ok"] is True, envelope
         assert retried.isError is False
+
+
+MARKER = "zq9-caller-supplied-marker"
+
+
+def _rejection_text(result) -> str:
+    assert result.isError is True
+    assert result.structuredContent is None
+    [content] = result.content
+    return content.text
+
+
+async def test_rejected_arguments_are_described_without_echoing_them(
+    initialized_workspace,
+):
+    """stdio has no request size limit, so the reply must bound itself."""
+
+    workspace = initialized_workspace
+    scope = {"workspace_id": workspace.workspace_id}
+    oversized = MARKER + "y" * 1_100_000
+    store = {
+        **scope,
+        "record_type": "decision",
+        "content": "Use signed session cookies",
+        "idempotency_key": "rejected-arguments-0001",
+    }
+    rejected = {
+        # Refused by the advertised JSON schema.
+        "oversized value": ("memory_recall", {**scope, "query": oversized}),
+        "wrong type": ("memory_recall", {**scope, "query": [MARKER]}),
+        "unexpected field": ("memory_recall", {**scope, "query": "x", MARKER: 1}),
+        "oversized field name": (
+            "memory_recall",
+            {**scope, "query": "x", oversized: 1},
+        ),
+        "oversized workspace": ("memory_recall", {"workspace_id": oversized}),
+        # A registered tool the default listing omits: the MCP layer checks
+        # only listed tools, so this one is refused by the framework instead.
+        "unlisted tool": ("memory_search_text", {**scope, "query": oversized}),
+        # Accepted by the JSON schema, refused by the model's own validators.
+        "duplicate tags": ("memory_store", {**store, "tags": [MARKER, MARKER]}),
+        "escaping path": (
+            "memory_store",
+            {**store, "relative_file_path": f"../{MARKER}.py"},
+        ),
+    }
+    async with process_client(workspace.root, "stdio") as session:
+        for label, (tool, arguments) in rejected.items():
+            text = _rejection_text(await session.call_tool(tool, arguments))
+            assert MARKER not in text, (label, text[:300])
+            assert len(text) < 4_000, (label, len(text))
+            assert text.startswith("Input validation error: "), (label, text)
+
+        text = _rejection_text(
+            await session.call_tool("memory_recall", {**scope, "query": oversized})
+        )
+        assert "arguments.query (maxLength)" in text
+        text = _rejection_text(await session.call_tool("memory_recall", scope))
+        assert "arguments.query (required)" in text
+
+        text = _rejection_text(await session.call_tool("tool_" + oversized, {}))
+        assert MARKER not in text
+        assert len(text) < 4_000
+
+        # The gateway's own arguments are held to the same rule ...
+        text = _rejection_text(
+            await session.call_tool(
+                "daem0n_tool_call",
+                {**scope, "tool": "memory_recall", "arguments": {"query": oversized}},
+            )
+        )
+        assert MARKER not in text
+        assert len(text) < 4_000
+        # ... and it reports its target's rejection as a bounded envelope.
+        relayed = await session.call_tool(
+            "daem0n_tool_call",
+            {**scope, "tool": "memory_recall", "arguments": {"query": [MARKER]}},
+        )
+        envelope = _envelope(relayed)
+        assert relayed.isError is True
+        assert envelope["error"]["code"] == "INVALID_ARGUMENT"
+        assert envelope["error"]["field_errors"] == [
+            {
+                "field": "arguments.query",
+                "code": "INVALID_VALUE",
+                "message": "Invalid value.",
+            }
+        ]
+        assert MARKER not in relayed.content[0].text
+
+        # A well-formed call is unaffected by the checks above.
+        stored = await session.call_tool("memory_store", {**store, "tags": [MARKER]})
+        assert _envelope(stored)["ok"] is True

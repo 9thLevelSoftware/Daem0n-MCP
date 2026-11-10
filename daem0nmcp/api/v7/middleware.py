@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Any, Literal, Protocol, TypeVar, cast
 from urllib.parse import urlsplit
 
 from pydantic import TypeAdapter
+from pydantic import ValidationError as _PydanticValidationError
 
 from ...covenant import (
     CovenantGate,
@@ -25,6 +26,7 @@ from ...covenant import (
     workspace_resolver_var,
 )
 from ...workspace import Workspace
+from .gateway_operations import argument_rejection_text, model_argument_problems
 from .models import WorkspaceId
 from .registry import V7_DASHBOARD_RESOURCE_URIS
 
@@ -32,6 +34,7 @@ if TYPE_CHECKING:
     FASTMCP_MIDDLEWARE_AVAILABLE: bool
     from fastmcp.exceptions import ResourceError as _BaseResourceError
     from fastmcp.exceptions import ToolError as _BaseToolError
+    from fastmcp.exceptions import ValidationError as _BaseValidationError
     from fastmcp.server.middleware import Middleware as _MiddlewareBase
     from mcp import McpError as _McpError
     from mcp.types import INVALID_PARAMS as _INVALID_PARAMS
@@ -40,6 +43,7 @@ else:
     try:  # Keep the model-free boundary importable without FastMCP.
         from fastmcp.exceptions import ResourceError as _BaseResourceError
         from fastmcp.exceptions import ToolError as _BaseToolError
+        from fastmcp.exceptions import ValidationError as _BaseValidationError
         from fastmcp.server.middleware import Middleware as _MiddlewareBase
         from mcp import McpError as _McpError
         from mcp.types import INVALID_PARAMS as _INVALID_PARAMS
@@ -57,6 +61,9 @@ else:
             pass
 
         class _BaseResourceError(RuntimeError):
+            pass
+
+        class _BaseValidationError(RuntimeError):
             pass
 
         class _ErrorData:
@@ -200,6 +207,10 @@ class EnvelopeErrorMiddleware(_MiddlewareBase):
     Handlers report failures as ordinary ``ok: false`` envelopes.  The content
     and structured content are passed through untouched so a client can still
     read ``error.counsel`` and ``error.remedy``; only the flag changes.
+
+    Arguments the framework refuses never reach a handler and have no
+    envelope.  Its error text is pydantic's, which quotes the refused value,
+    so that one failure is restated as field paths and fixed rule names.
     """
 
     def __init__(self) -> None:
@@ -207,7 +218,18 @@ class EnvelopeErrorMiddleware(_MiddlewareBase):
             super().__init__()
 
     async def on_call_tool(self, context: Any, call_next: Callable[[Any], Any]) -> Any:
-        result = await _resolve_awaitable(call_next(context))
+        try:
+            result = await _resolve_awaitable(call_next(context))
+        except _BaseValidationError as exc:
+            cause = exc.__cause__
+            problems = (
+                model_argument_problems(cause)
+                if isinstance(cause, _PydanticValidationError)
+                else []
+            )
+            raise _BaseToolError(
+                argument_rejection_text(problems or [("arguments", "invalid")])
+            ) from None
         structured = getattr(result, "structured_content", None)
         if (
             not isinstance(structured, dict)

@@ -154,6 +154,58 @@ class GatewayOperationsTests(unittest.IsolatedAsyncioTestCase):
                     dict(annotations),
                 )
 
+    def test_argument_rejection_text_is_bounded_and_never_quotes_input(self) -> None:
+        from pydantic import BaseModel, ValidationError
+
+        from daem0nmcp.api.v7.gateway_operations import (
+            MAX_REPORTED_ARGUMENT_PROBLEMS,
+            argument_rejection_text,
+            model_argument_problems,
+        )
+
+        class Probe(BaseModel):
+            values: dict[str, int]
+
+        hostile = "caller text; with (punctuation)" * 400
+        supplied = {f"field_{index}": hostile for index in range(40)}
+        supplied[hostile] = hostile
+        with self.assertRaises(ValidationError) as caught:
+            Probe.model_validate({"values": supplied})
+
+        problems = model_argument_problems(caught.exception)
+        text = argument_rejection_text(problems)
+
+        self.assertEqual(MAX_REPORTED_ARGUMENT_PROBLEMS + 1, len(problems))
+        self.assertNotIn("caller text", text)
+        self.assertLess(len(text), 1_000)
+        self.assertTrue(
+            text.startswith(
+                "Input validation error: arguments.values.field_0 (int_parsing); "
+            ),
+            text,
+        )
+        self.assertIn("; and more. ", text)
+        # A field name that is not a plain identifier stops the path early.
+        self.assertEqual(
+            "Input validation error: arguments.values (int_parsing). "
+            "Compare the arguments with the tool's input schema.",
+            argument_rejection_text(
+                model_argument_problems(
+                    self._failure(Probe, {"values": {hostile: hostile}})
+                )
+            ),
+        )
+
+    @staticmethod
+    def _failure(model, value):
+        from pydantic import ValidationError
+
+        try:
+            model.model_validate(value)
+        except ValidationError as exc:
+            return exc
+        raise AssertionError("the probe value was expected to be rejected")
+
     async def test_gateway_search_text_and_direct_hidden_call(self) -> None:
         async with Client(self.server) as client:
             result = await client.call_tool(

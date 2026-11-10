@@ -39,6 +39,33 @@ def _argument_field(location: tuple[object, ...]) -> str:
     return field
 
 
+MAX_REPORTED_ARGUMENT_PROBLEMS = 10
+
+
+def argument_rejection_text(problems: list[tuple[str, str]]) -> str:
+    """Name the offending fields and the violated rule, never the value."""
+
+    distinct = list(dict.fromkeys(problems))
+    shown = distinct[:MAX_REPORTED_ARGUMENT_PROBLEMS]
+    listed = "; ".join(f"{field} ({rule})" for field, rule in shown)
+    more = "; and more" if len(distinct) > len(shown) else ""
+    return (
+        f"Input validation error: {listed}{more}. "
+        "Compare the arguments with the tool's input schema."
+    )
+
+
+def model_argument_problems(exc: ValidationError) -> list[tuple[str, str]]:
+    """Reduce a pydantic failure to field paths and its fixed error types."""
+
+    return [
+        (_argument_field(tuple(error["loc"])), str(error["type"]))
+        for error in exc.errors(
+            include_url=False, include_context=False, include_input=False
+        )[: MAX_REPORTED_ARGUMENT_PROBLEMS + 1]
+    ]
+
+
 def build_gateway_operations(
     response_factory: ResponseFactory,
 ) -> Mapping[str, Callable[..., object]]:
@@ -206,6 +233,9 @@ def bind_gateway_handlers(
 __all__ = [
     "CORE_LISTED_TOOLS",
     "GATEWAY_TOOL_NAMES",
+    "MAX_REPORTED_ARGUMENT_PROBLEMS",
+    "argument_rejection_text",
     "bind_gateway_handlers",
     "build_gateway_operations",
+    "model_argument_problems",
 ]

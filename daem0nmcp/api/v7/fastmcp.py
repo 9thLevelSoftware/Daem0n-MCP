@@ -19,7 +19,10 @@ from ...covenant import invocation_scope_var
 from .errors import ErrorCode
 from .gateway_operations import (
     GATEWAY_TOOL_NAMES,
+    MAX_REPORTED_ARGUMENT_PROBLEMS,
+    _argument_field,
     _ToolArgumentValidationError,
+    argument_rejection_text,
     bind_gateway_handlers,
 )
 from .middleware import (
@@ -355,6 +358,68 @@ def _resource_adapter(spec: Any):
     read.__qualname__ = read.__name__
     read.__doc__ = spec.description
     return read
+
+
+def _schema_problems(validator: Any, arguments: Any) -> list[tuple[str, str]]:
+    problems: list[tuple[str, str]] = []
+    for error in validator.iter_errors(arguments):
+        rule = str(error.validator)
+        if rule == "required" and isinstance(error.instance, Mapping):
+            # The missing names come from the schema, not from the caller.
+            problems.extend(
+                (_argument_field((*error.absolute_path, name)), rule)
+                for name in error.validator_value
+                if name not in error.instance
+            )
+        else:
+            problems.append((_argument_field(tuple(error.absolute_path)), rule))
+        if len(problems) > MAX_REPORTED_ARGUMENT_PROBLEMS:
+            break
+    return problems
+
+
+def _install_bounded_call_rejections(server: Any, manifest: V7Manifest) -> None:
+    """Refuse unusable calls here, with a reply that cannot echo the caller.
+
+    The MCP layer underneath answers a call that fails the advertised schema
+    with the validator's own text, which embeds the offending value (and so
+    can be as large as the request), and an unknown tool with its name.  The
+    check below is the one that layer runs, against the very definition it
+    would use, so a call that passes is unaffected.
+    """
+
+    import mcp.types
+    from jsonschema.validators import validator_for
+
+    low_level = server._mcp_server
+    original = low_level.request_handlers[mcp.types.CallToolRequest]
+    listed_definition = getattr(low_level, "_get_cached_tool_definition", None)
+    if not callable(listed_definition):
+        raise FastMCPCompatibilityError("the MCP tool definition cache is unavailable")
+    registered = frozenset(spec.name for spec in manifest.tools)
+
+    def rejection(text: str) -> Any:
+        return mcp.types.ServerResult(
+            mcp.types.CallToolResult(
+                content=[mcp.types.TextContent(type="text", text=text)],
+                isError=True,
+            )
+        )
+
+    async def handle_call(request: Any) -> Any:
+        if request.params.name not in registered:
+            return rejection("Unknown tool; use daem0n_tools_search.")
+        definition = await listed_definition(request.params.name)
+        if definition is not None:
+            schema = definition.inputSchema
+            problems = _schema_problems(
+                validator_for(schema)(schema), request.params.arguments or {}
+            )
+            if problems:
+                return rejection(argument_rejection_text(problems))
+        return await original(request)
+
+    low_level.request_handlers[mcp.types.CallToolRequest] = handle_call
 
 
 def _mcp_task(view: TaskView) -> Any:
@@ -733,6 +798,10 @@ def build_fastmcp_server(
             meta={"daem0nmcp/apiVersion": "7"},
             task=False,
         )(_resource_adapter(resource_spec))
+
+    if hasattr(server, "_mcp_server"):
+        # Before the task protocol, which wraps this handler for plain calls.
+        _install_bounded_call_rejections(server, manifest)
 
     if task_dispatcher is not None:
         invocation_middleware = next(
