@@ -2009,6 +2009,7 @@ class MaintenanceOperationTests(unittest.IsolatedAsyncioTestCase):
         promoted_at: datetime,
         strategy: str = "failed_decision",
         tags: list[str] | None = None,
+        staged_at: datetime | None = None,
     ) -> str:
         """Stage and promote one capture candidate; return the new record ID."""
         from daem0nmcp.capture_candidates import (
@@ -2024,7 +2025,8 @@ class MaintenanceOperationTests(unittest.IsolatedAsyncioTestCase):
             "context": {},
             "tags": ["dreaming", "failed-decision"] if tags is None else tags,
         }
-        candidate = await store.stage(
+        staging = CaptureCandidateStore(clock=lambda: staged_at or promoted_at)
+        candidate = await staging.stage(
             self.workspace,
             CaptureCandidateRequest(
                 source_kind=source_kind,
@@ -2135,6 +2137,55 @@ class MaintenanceOperationTests(unittest.IsolatedAsyncioTestCase):
             }
         self.assertEqual({newer, other_strategy, *captured, *hand_tagged}, live)
         self._assert_replay_reproduces_projections()
+
+    async def test_dream_purge_keeps_the_analysis_dreaming_produced_last(
+        self,
+    ) -> None:
+        """Promotion order must not decide which analysis is superseded."""
+        # Staged first, promoted last.
+        stale = await self._promote_candidate(
+            source_kind="dreaming",
+            key="dream-stale",
+            source_event="1",
+            staged_at=NOW - timedelta(days=5),
+            promoted_at=NOW - timedelta(days=2),
+        )
+        fresh = await self._promote_candidate(
+            source_kind="dreaming",
+            key="dream-fresh",
+            source_event="2",
+            staged_at=NOW - timedelta(days=4),
+            promoted_at=NOW - timedelta(days=3),
+        )
+        operations = self._operations()
+
+        preview = await operations["dream_duplicates_preview"](
+            workspace=self.workspace,
+            request=_request(
+                "dream_duplicates_preview",
+                workspace_id=self.workspace.workspace_id,
+            ),
+        )
+
+        self.assertEqual([stale], preview.sample_ids)
+        receipt = await operations["dream_duplicates_purge"](
+            workspace=self.workspace,
+            request=_request(
+                "dream_duplicates_purge",
+                workspace_id=self.workspace.workspace_id,
+                selection_token=preview.selection_token,
+                preflight_token=PREFLIGHT_TOKEN,
+            ),
+        )
+        self.assertEqual([stale], receipt.affected_ids)
+        with closing(sqlite3.connect(self.database)) as connection:
+            live = [
+                row[0]
+                for row in connection.execute(
+                    "SELECT record_id FROM memory_records WHERE deleted_at_us IS NULL"
+                )
+            ]
+        self.assertEqual([fresh], live)
 
     async def _preview_all_cleanups(self, operations):
         """Preview prune, duplicates and compaction over the same fixture."""

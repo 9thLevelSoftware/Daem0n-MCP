@@ -937,7 +937,7 @@ def _promoted_dreaming_records(
     workspace_id: str,
     scan_limit: int | None,
     cancelled: threading.Event | None,
-) -> Iterator[tuple[tuple[str, str], _RecordSnapshot]]:
+) -> Iterator[tuple[tuple[str, str], _RecordSnapshot, int]]:
     """Yield the live records v7 dreaming produced, keyed by what they re-examine.
 
     v7 dreaming stages capture candidates; a record is its output only when
@@ -945,7 +945,9 @@ def _promoted_dreaming_records(
     ``dreaming``.  Tags are not consulted: the promoter may change them, and
     anyone may write them.  Records of one strategy about the same source
     records share a key; a later run over newer versions of those sources
-    supersedes the earlier one.
+    supersedes the earlier one.  Each record comes with the time dreaming
+    staged its candidate: a record's own creation time is when someone
+    promoted it, which says nothing about how fresh the analysis is.
     """
 
     if (
@@ -970,10 +972,11 @@ def _promoted_dreaming_records(
             raise MaintenanceOperationError("TASK_REQUIRED")
     promoted = connection.execute(
         "SELECT candidate.candidate_id,candidate.provenance_json,"
-        f"candidate.promoted_event_id {scope} ORDER BY candidate.candidate_id",
+        "candidate.promoted_event_id,candidate.created_at_us "
+        f"{scope} ORDER BY candidate.candidate_id",
         (workspace_id,),
     ).fetchall()
-    for candidate_id, provenance_json, promoted_event_id in promoted:
+    for candidate_id, provenance_json, promoted_event_id, staged_at_us in promoted:
         if cancelled is not None and cancelled.is_set():
             raise _WorkerCancelledError()
         created = connection.execute(
@@ -1003,7 +1006,11 @@ def _promoted_dreaming_records(
         record = _load_snapshot(connection, workspace_id, str(created["stream_id"]))
         if record.state["deleted_at_us"] is not None:
             continue
-        yield ("v7", f"{strategy}:{sha256_json(source_ids)}"), record
+        yield ("v7", f"{strategy}:{sha256_json(source_ids)}"), record, int(staged_at_us)
+
+
+def _creation_order(record: _RecordSnapshot) -> tuple[int, int, str]:
+    return (record.created_at_us, record.created_at_us, record.record_id)
 
 
 def _dream_candidates(
@@ -1042,10 +1049,20 @@ def _dream_candidates(
             group_key = ("summary", day)
         if group_key is not None:
             grouped.setdefault(group_key, []).append(record)
-    for group_key, record in _promoted_dreaming_records(
+    staged_at_us: dict[str, int] = {}
+    for group_key, record, staged in _promoted_dreaming_records(
         connection, workspace_id, scan_limit, cancelled
     ):
         grouped.setdefault(group_key, []).append(record)
+        staged_at_us[record.record_id] = staged
+
+    def age(record: _RecordSnapshot) -> tuple[int, int, str]:
+        return (
+            staged_at_us.get(record.record_id, record.created_at_us),
+            record.created_at_us,
+            record.record_id,
+        )
+
     candidates: list[_RecordSnapshot] = []
     selected_ids: set[str] = set()
     reevaluation_duplicates = 0
@@ -1057,10 +1074,10 @@ def _dream_candidates(
         members = grouped[key]
         if len(members) <= 1:
             continue
-        keeper = max(
-            members,
-            key=lambda record: (record.created_at_us, record.record_id),
-        )
+        # v6 groups go by record creation, as they always did; v7 groups by
+        # when dreaming produced the analysis.
+        order = age if key[0] == "v7" else _creation_order
+        keeper = max(members, key=order)
         duplicates = sorted(
             (
                 record
@@ -1074,7 +1091,7 @@ def _dream_candidates(
                     and (record.state["pinned"] or record.state["is_permanent"])
                 )
             ),
-            key=lambda record: (record.created_at_us, record.record_id),
+            key=order,
         )
         candidates.extend(duplicates)
         selected_ids.update(record.record_id for record in duplicates)
