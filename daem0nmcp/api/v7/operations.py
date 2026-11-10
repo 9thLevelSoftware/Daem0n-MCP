@@ -1821,10 +1821,7 @@ def _covenant_status(
             raw_briefed_at = status.get("briefed_at")
             briefed = status.get("briefed") is True
             if briefed and type(raw_briefed_at) is int:
-                briefed_at = datetime.fromtimestamp(
-                    raw_briefed_at,
-                    tz=timezone.utc,
-                )
+                briefed_at = dependencies.covenant_gate.wall_instant(raw_briefed_at)
             elif briefed:
                 briefed = False
         except Exception:

@@ -19,6 +19,7 @@ from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from enum import Enum
 from functools import wraps
 from pathlib import Path
@@ -98,11 +99,21 @@ class SteadyClock:
         wall: Callable[[], int | float] = time.time,
         monotonic: Callable[[], int | float] = time.monotonic,
     ) -> None:
+        self._wall = wall
         self._monotonic = monotonic
         self._offset = float(wall()) - float(monotonic())
 
     def __call__(self) -> float:
         return self._offset + float(self._monotonic())
+
+    def wall_time(self, seconds: int | float) -> float:
+        """Place an instant of this scale on the wall clock as it reads now.
+
+        For display only.  The distance from now is kept, so after a
+        wall-clock step a client is still told how long a capability has
+        left, and how long ago something happened, by its own clock.
+        """
+        return float(self._wall()) + (float(seconds) - self())
 
 
 # One shared instance: the gate compares times taken by the state store and
@@ -751,6 +762,17 @@ class CovenantStateStore:
                 "active_capabilities": len(state.issued),
             }
 
+    def wall_instant(self, seconds: int | float) -> datetime:
+        """Return a time taken from this store's clock as a UTC instant to show.
+
+        Times on a steady clock are converted to the wall clock; those of
+        any other clock are shown as they are.  Never use the result to
+        decide whether something has expired.
+        """
+        convert = getattr(self._clock, "wall_time", None)
+        shown = convert(seconds) if callable(convert) else seconds
+        return datetime.fromtimestamp(round(shown), timezone.utc)
+
 
 @dataclass(frozen=True, slots=True)
 class _IssuedCapability:
@@ -1046,6 +1068,14 @@ class CovenantGate:
         self.policy = policy
         self._argument_normalizer = argument_normalizer
         self._workspace_authorizer = workspace_authorizer
+
+    def wall_instant(self, seconds: int | float) -> datetime:
+        """UTC instant to show a client for a capability or briefing time.
+
+        The state store and the authority share one time scale, so the
+        store's clock places either kind of time.
+        """
+        return self.state_store.wall_instant(seconds)
 
     def workspace_authorized(self, scope: InvocationScope) -> bool:
         if self._workspace_authorizer is None:

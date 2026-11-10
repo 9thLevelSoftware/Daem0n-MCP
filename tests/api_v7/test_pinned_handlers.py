@@ -941,6 +941,56 @@ class PinnedHandlerTests(unittest.TestCase):
             )
         )
 
+    def test_preflight_expiry_is_shown_on_the_current_wall_clock(self) -> None:
+        from daem0nmcp.api.v7.pinned import build_pinned_handlers
+        from daem0nmcp.api.v7.tools import MemoryPreflightOutput
+        from daem0nmcp.covenant import SteadyClock
+
+        wall, monotonic = [1_700_000_000], [50]
+        clock = SteadyClock(wall=lambda: wall[0], monotonic=lambda: monotonic[0])
+        workspace = Workspace(WORKSPACE_ID, Path.cwd())
+        scope = InvocationScope("principal", "session", str(workspace.root))
+        gate = _gate()
+        gate.state_store = CovenantStateStore(clock=clock)
+        gate.authority = CapabilityAuthority(
+            secret=b"p" * 32, kid="pinned-tests", clock=clock
+        )
+        gate.record_briefing(scope)
+        handlers = build_pinned_handlers(
+            _dependencies(
+                gate=gate,
+                scope=scope,
+                workspace=workspace,
+                briefing_service=_UnusedService(),
+                preflight_service=_PreflightService(),
+            )
+        )
+        # The wall clock is set forward an hour while ten seconds pass.
+        wall[0] += 3_610
+        monotonic[0] += 10
+
+        response = asyncio.run(
+            handlers["memory_preflight"](
+                workspace_id=WORKSPACE_ID,
+                target_tool="memory_store",
+                target_arguments={
+                    "record_type": "decision",
+                    "content": "Use event streams.",
+                    "idempotency_key": "decision-0001",
+                },
+                description="Persist the decision.",
+            )
+        )
+
+        validated = MemoryPreflightOutput.model_validate(response)
+        self.assertTrue(validated.ok)
+        self.assertEqual(
+            datetime.fromtimestamp(wall[0] + 300, timezone.utc),
+            validated.data.expires_at,
+        )
+        claims = gate.authority.verify(validated.data.preflight_token)
+        self.assertEqual(1_700_000_310, claims["exp"])
+
     def test_preflight_requires_communion_before_target_guidance(self) -> None:
         # Catches pre-policy guidance reads and token issuance in a fresh scope.
         from daem0nmcp.api.v7.errors import ErrorCode

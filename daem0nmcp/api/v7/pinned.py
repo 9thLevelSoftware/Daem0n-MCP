@@ -607,7 +607,7 @@ class PinnedHandlers:
                 target_call_arguments,
             )
             claims = self._dependencies.covenant_gate.authority.verify(token)
-            expires_at = datetime.fromtimestamp(claims["exp"], timezone.utc)
+            expires_at = self._dependencies.covenant_gate.wall_instant(claims["exp"])
             data = PreflightData(
                 guidance=guidance,
                 preflight_token=token,

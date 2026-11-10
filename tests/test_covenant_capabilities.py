@@ -9,6 +9,7 @@ import hmac
 import json
 import tempfile
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 
 import daem0nmcp.covenant as covenant
@@ -745,6 +746,40 @@ class CapabilityGateTests(unittest.TestCase):
         self.assertEqual(1_700_000_000, clock())
         monotonic.value += 12
         self.assertEqual(1_700_000_012, clock())
+
+    def test_displayed_instants_follow_the_wall_clock_after_a_step(self) -> None:
+        for step in (3_600, -600):
+            with self.subTest(step=step):
+                wall, monotonic = MutableClock(1_700_000_000), MutableClock(50)
+                gate = self._steady_gate(wall, monotonic)
+                gate.record_briefing(self.scope_a)
+                briefed_at = gate.state_store.status(self.scope_a)["briefed_at"]
+
+                wall.value += step + 10
+                monotonic.value += 10
+                args = {"category": "decision", "content": "x"}
+                token = gate.issue_preflight(self.scope_a, "inscribe.remember", args)
+                exp = gate.authority.verify(token)["exp"]
+
+                # Enforcement and the signed claim stay on the steady scale.
+                self.assertEqual(1_700_000_310, exp)
+                self.assertEqual(1_700_000_000, briefed_at)
+                # What a client is shown is placed on today's wall clock:
+                # 300 seconds from now, and briefed 10 seconds ago.
+                self.assertEqual(
+                    datetime.fromtimestamp(wall.value + 300, timezone.utc),
+                    gate.wall_instant(exp),
+                )
+                self.assertEqual(
+                    datetime.fromtimestamp(wall.value - 10, timezone.utc),
+                    gate.wall_instant(briefed_at),
+                )
+
+    def test_displayed_instants_of_a_plain_clock_are_unchanged(self) -> None:
+        self.assertEqual(
+            datetime.fromtimestamp(1_300, timezone.utc),
+            self.gate.wall_instant(1_300),
+        )
 
     def test_json_surrogates_return_stable_argument_and_token_errors(self) -> None:
         invalid_text = json.loads('"\\ud800"')

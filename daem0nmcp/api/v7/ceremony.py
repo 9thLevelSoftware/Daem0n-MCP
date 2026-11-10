@@ -7,7 +7,6 @@ import inspect
 import re
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from typing import Any, Literal, Protocol
 
 from ...covenant import (
@@ -277,8 +276,8 @@ class CovenantCeremony:
                     raw_guidance = await raw_guidance
                 guidance = PreflightGuidance.model_validate(raw_guidance)
                 new_token = self._gate.issue_preflight(scope, tool_name, call_args)
-                expires_at = datetime.fromtimestamp(
-                    self._gate.authority.verify(new_token)["exp"], timezone.utc
+                expires_at = self._gate.wall_instant(
+                    self._gate.authority.verify(new_token)["exp"]
                 )
             except asyncio.CancelledError:
                 raise

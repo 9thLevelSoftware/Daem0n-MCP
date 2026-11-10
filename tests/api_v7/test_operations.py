@@ -219,6 +219,30 @@ class CoreOperationTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(after.next_step)
         self.assertNotIn("capabil", str(after.model_dump()).casefold())
 
+    async def test_covenant_status_shows_briefed_at_on_the_current_wall_clock(
+        self,
+    ) -> None:
+        from daem0nmcp.covenant import CovenantStateStore, SteadyClock
+
+        wall, monotonic = [1_700_000_000], [50]
+        self.gate.state_store = CovenantStateStore(
+            clock=SteadyClock(wall=lambda: wall[0], monotonic=lambda: monotonic[0])
+        )
+        operation = self._operations()["covenant_status"]
+        request = _request("covenant_status", workspace_id=WORKSPACE_ID)
+        self.gate.record_briefing(self.scope)
+        # The wall clock is set back ten minutes while five seconds pass.
+        wall[0] -= 595
+        monotonic[0] += 5
+
+        status = await operation(workspace=self.fixture.workspace, request=request)
+
+        self.assertTrue(status.briefed)
+        self.assertEqual(
+            datetime.fromtimestamp(wall[0] - 5, tz=timezone.utc),
+            status.briefed_at,
+        )
+
     async def test_versions_are_hash_bound_path_redacted_and_cursor_bounded(
         self,
     ) -> None:

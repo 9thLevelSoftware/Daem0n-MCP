@@ -793,8 +793,10 @@ class CapacityTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone((await self.admit(scope, "after the step")).violation)
         self.challenge_everything()
         challenged = await self.admit(scope, "challenged after the step")
+        # The capability lives 300 more seconds; the client is told when
+        # that is on the wall clock it can read, which has been set back.
         self.assertEqual(
-            datetime.fromtimestamp(1_700_000_305, timezone.utc),
+            datetime.fromtimestamp(wall[0] + 300, timezone.utc),
             challenged.challenge.expires_at,
         )
         self.now += 299
