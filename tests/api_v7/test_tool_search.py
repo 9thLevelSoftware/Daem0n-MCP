@@ -99,6 +99,32 @@ class StableToolSearchTests(unittest.TestCase):
         self.assertEqual(index.search("deleted")[0].name, "memory_prune")
         self.assertEqual(index.search("hiding records")[0].name, "memory_archive_set")
 
+    def test_singular_and_plural_of_words_ending_in_s_meet(self) -> None:
+        for singular, plural in (
+            ("class", "classes"),
+            ("process", "processes"),
+            ("status", "statuses"),
+            ("pass", "passes"),
+            ("access", "accesses"),
+        ):
+            with self.subTest(word=singular):
+                index = ToolSearchIndex()
+                index.add_tool(ToolMetadata("t_one", f"Lists the {plural}."))
+                index.add_tool(ToolMetadata("t_two", f"Shows one {singular}."))
+                both = ["t_one", "t_two"]
+                self.assertEqual([t.name for t in index.search(singular)], both)
+                self.assertEqual([t.name for t in index.search(plural)], both)
+
+    def test_a_content_word_does_not_match_a_function_word(self) -> None:
+        index = ToolSearchIndex()
+        index.add_tool(ToolMetadata("t_one", "Does not change anything."))
+        index.add_tool(ToolMetadata("t_two", "Finds the notes in a file."))
+        # "note" and "notes" stem to "not", which is also a function word.
+        self.assertEqual([t.name for t in index.search("notes")], ["t_two"])
+        self.assertEqual([t.name for t in index.search("a note")], ["t_two"])
+        # A query of function words alone still finds them.
+        self.assertEqual([t.name for t in index.search("not")], ["t_one"])
+
     def test_a_rare_word_and_a_name_word_outrank_a_common_one(self) -> None:
         index = ToolSearchIndex()
         index.add_tool(ToolMetadata("alpha_tool", "Workspace memory workspace prune."))

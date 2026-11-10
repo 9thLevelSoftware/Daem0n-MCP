@@ -104,7 +104,10 @@ def _stem(token: str) -> str:
     else:
         for suffix in ("ing", "ed", "es", "s"):
             if token.endswith(suffix) and len(token) - len(suffix) >= 3:
-                token = token[: -len(suffix)]
+                # "class" and "status" are singular: stripping their last
+                # letter would stop them meeting "classes" and "statuses".
+                if suffix != "s" or not token.endswith(("ss", "us")):
+                    token = token[: -len(suffix)]
                 break
     if len(token) > 3 and token.endswith("e"):
         token = token[:-1]
@@ -113,6 +116,12 @@ def _stem(token: str) -> str:
 
 def _raw_terms(value: str) -> frozenset[str]:
     return frozenset(_stem(token) for token in _TOKEN.findall(value.casefold()))
+
+
+def _function_words(value: str) -> frozenset[str]:
+    return frozenset(
+        token for token in _TOKEN.findall(value.casefold()) if token in _STOP_WORDS
+    )
 
 
 def _tokens(value: str) -> frozenset[str]:
@@ -163,6 +172,7 @@ class ToolSearchIndex:
     def __init__(self) -> None:
         self._tools: dict[str, ToolMetadata] = {}
         self._documents: dict[int, frozenset[str]] = {}
+        self._function_words: dict[int, frozenset[str]] = {}
         self._name_terms: dict[int, frozenset[str]] = {}
         self._doc_to_name: dict[int, str] = {}
 
@@ -192,7 +202,11 @@ class ToolSearchIndex:
             raise ValueError("tool title must be a string")
 
         self._tools[name] = tool
-        self._documents[doc_id] = _raw_terms(_searchable(tool))
+        # Function words are indexed apart from content words, so a content
+        # word whose stem equals one ("notes" and "not") cannot match it.
+        text = _searchable(tool)
+        self._documents[doc_id] = _tokens(text)
+        self._function_words[doc_id] = _function_words(text)
         self._name_terms[doc_id] = _raw_terms(
             " ".join((name, tool.title or "", *tool.tags))
         )
@@ -206,6 +220,7 @@ class ToolSearchIndex:
         doc_id = _document_id(name)
         del self._tools[name]
         self._documents.pop(doc_id, None)
+        self._function_words.pop(doc_id, None)
         self._name_terms.pop(doc_id, None)
         self._doc_to_name.pop(doc_id, None)
 
@@ -224,24 +239,26 @@ class ToolSearchIndex:
             raise ValueError("top_k must be a positive integer")
         if not self._tools:
             return []
-        query_tokens = _tokens(query) or _raw_terms(query)
+        query_tokens = _tokens(query)
+        documents = self._documents
+        if not query_tokens:
+            query_tokens = _function_words(query)
+            documents = self._function_words
         if not query_tokens:
             return []
         normalized_query = " ".join(_TOKEN.findall(query.casefold()))
 
-        total = len(self._documents)
+        total = len(documents)
         weights = {
             token: math.log(
-                1.0
-                + total
-                / sum(token in document for document in self._documents.values())
+                1.0 + total / sum(token in document for document in documents.values())
             )
             for token in sorted(query_tokens)
-            if any(token in document for document in self._documents.values())
+            if any(token in document for document in documents.values())
         }
 
         ranked: list[tuple[float, int, str, ToolMetadata]] = []
-        for doc_id, document_tokens in self._documents.items():
+        for doc_id, document_tokens in documents.items():
             name = self._doc_to_name[doc_id]
             tool = self._tools[name]
             if category is not None and tool.category != category:
