@@ -8,8 +8,15 @@ import math
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
-from benchmarks.coding_memory_eval import _corpus, run_evaluation
+from benchmarks.coding_memory_eval import (
+    _Corpus,
+    _corpus,
+    _metrics,
+    _Query,
+    run_evaluation,
+)
 from daem0nmcp.api.v7.discovery_operations import default_code_indexer_factory
 from daem0nmcp.schema_version import CURRENT_SCHEMA_VERSION
 
@@ -158,6 +165,78 @@ class CodingMemoryFixtureTests(unittest.TestCase):
         )
         self.assertEqual(
             24, len({q.text for q in corpus.queries if q.family == "retention"})
+        )
+
+    def _retention(self, items: list[tuple[str, str]], context: str) -> float:
+        """Score one retention query against a stubbed recall result."""
+
+        corpus = _Corpus(
+            queries=[
+                _Query("reuse", "outcome_reuse", "reuse", (("good", 3),)),
+                _Query("chain", "provenance_chain", "chain", (("background", 3),)),
+                _Query(
+                    "retention",
+                    "retention",
+                    "deploy release rollout",
+                    (("expected", 3),),
+                    "freeze release writes",
+                ),
+            ]
+        )
+
+        def result(pairs: list[tuple[str, str]], rendered: str) -> SimpleNamespace:
+            return SimpleNamespace(
+                items=[
+                    SimpleNamespace(
+                        citation=citation, record=SimpleNamespace(record_id=record)
+                    )
+                    for citation, record in pairs
+                ],
+                rendered_context=rendered,
+                token_usage=SimpleNamespace(rendered=1),
+            )
+
+        results = {
+            "reuse": result([("[E1]", "mem_good")], "[E1] decision\nreuse"),
+            "chain": result([("[E1]", "mem_background")], "[E1] note\nchain"),
+            "retention": result(items, context),
+        }
+        record_ids = {
+            "good": "mem_good",
+            "background": "mem_background",
+            "expected": "mem_expected",
+            "other": "mem_other",
+        }
+        report = _metrics(corpus, record_ids, results, [1.0], False)
+        return report["retention"]["required_fact_retention"]
+
+    def test_required_fact_in_another_record_is_not_retention(self):
+        steps = "Steps: freeze release writes | apply release rollout"
+        self.assertEqual(
+            0.0,
+            self._retention(
+                [("[E1]", "mem_other")],
+                f"[E1] procedure\ndeploy release rollout\n{steps}",
+            ),
+        )
+        self.assertEqual(
+            0.0,
+            self._retention(
+                [("[E1]", "mem_expected"), ("[E2]", "mem_other")],
+                "[E1] procedure\ndeploy release rollout\n\n"
+                f"[E2] procedure\ndeploy release rollout\n{steps}",
+            ),
+        )
+
+    def test_required_fact_in_the_expected_record_is_retention(self):
+        steps = "Steps: freeze release writes | apply release rollout"
+        self.assertEqual(
+            1.0,
+            self._retention(
+                [("[E1]", "mem_other"), ("[E2]", "mem_expected")],
+                "[E1] procedure\ndeploy release rollout\n\n"
+                f"[E2] procedure\ndeploy release rollout\n{steps}",
+            ),
         )
 
 

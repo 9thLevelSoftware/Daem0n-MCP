@@ -461,6 +461,23 @@ def _percentile(values: list[float], quantile: float) -> float:
     return ordered[low] + (ordered[high] - ordered[low]) * (position - low)
 
 
+def _retains_required_fact(
+    query: _Query, record_ids: dict[str, str], result: RetrievalData
+) -> bool:
+    """Report whether the expected record's own rendered block keeps the fact."""
+
+    expected = record_ids[query.relevant[0][0]]
+    citations = {
+        item.citation for item in result.items if item.record.record_id == expected
+    }
+    # The composer joins one block per item with a blank line and starts each
+    # block with its citation; fixture text never contains a blank line.
+    return any(
+        block.partition(" ")[0] in citations and (query.required_fact or "") in block
+        for block in (result.rendered_context or "").split("\n\n")
+    )
+
+
 def _metrics(
     corpus: _Corpus,
     record_ids: dict[str, str],
@@ -508,7 +525,7 @@ def _metrics(
     validity["symbol"] = _flag_metrics(symbol_flags) if symbols_available else None
     retention = [query for query in corpus.queries if query.family == "retention"]
     retained = sum(
-        query.required_fact in (results[query.key].rendered_context or "")
+        _retains_required_fact(query, record_ids, results[query.key])
         for query in retention
     )
     return {
