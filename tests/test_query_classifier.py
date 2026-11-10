@@ -11,6 +11,8 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 pytest.importorskip("numpy")
+# The classifier imports sentence_transformers.util (models-local profile).
+pytest.importorskip("sentence_transformers")
 
 import numpy as np
 
