@@ -68,7 +68,15 @@ _MAX_COMMUNITIES = 1_000
 _MAX_COMMUNITY_MEMBERS = 20_000
 _CLAIM_SPLIT_RE = re.compile(r"(?<=[.!?])\s+|[\r\n]+")
 _WORD_RE = re.compile(r"[A-Za-z0-9]+(?:[-_][A-Za-z0-9]+)*")
-_NEGATIONS = frozenset({"no", "not", "never", "none", "without"})
+# A contraction is rewritten to "not" before tokenizing: the word pattern would
+# otherwise split "don't" into "don" and "t" and lose the negation.
+_CONTRACTED_NEGATION_RE = re.compile(
+    r"\b[A-Za-z]+n['\u2019]t\b|\bcannot\b"
+    r"|\b(?:are|could|did|does|do|had|has|have|is|should|was|were|would)nt\b",
+    re.IGNORECASE,
+)
+_CLAUSE_SPLIT_RE = re.compile(r"[,;:()\u2013\u2014]|\s-\s|\bbut\b", re.IGNORECASE)
+_NEGATIONS = frozenset({"neither", "never", "no", "none", "nor", "not", "without"})
 _STOP_WORDS = frozenset(
     {
         "a",
@@ -80,6 +88,9 @@ _STOP_WORDS = frozenset(
         "be",
         "been",
         "by",
+        "did",
+        "do",
+        "does",
         "for",
         "from",
         "has",
@@ -533,25 +544,63 @@ def _claims(text: str) -> list[str]:
     return claims or [text[:2_000]]
 
 
-def _semantic_signature(text: str) -> tuple[frozenset[str], bool]:
-    tokens = [token.casefold() for token in _WORD_RE.findall(text)]
-    semantic = frozenset(
+def _tokens(text: str) -> list[str]:
+    expanded = _CONTRACTED_NEGATION_RE.sub(" not ", text)
+    return [token.casefold() for token in _WORD_RE.findall(expanded)]
+
+
+def _semantic_terms(text: str) -> frozenset[str]:
+    return frozenset(
         token
-        for token in tokens
+        for token in _tokens(text)
         if token not in _STOP_WORDS and token not in _NEGATIONS
     )
-    return semantic, any(token in _NEGATIONS for token in tokens)
 
 
-def _match_score(claim_terms: frozenset[str], evidence: str) -> tuple[float, bool]:
-    evidence_terms, evidence_negated = _semantic_signature(evidence)
+def _polarity(terms: frozenset[str], text: str) -> bool | None:
+    """Whether ``text`` negates what ``terms`` name; ``None`` when unclear.
+
+    Only the sentences that share the most terms are read, and inside them a
+    negation counts only when one of the terms follows it within its clause.
+    A negation elsewhere in the text is about something else.  Two negations
+    in one clause, or clauses that disagree, are not resolved by guessing.
+    """
+    best_overlap = 0
+    best_sentences: list[list[list[str]]] = []
+    for sentence in _CLAIM_SPLIT_RE.split(text):
+        clauses = [_tokens(clause) for clause in _CLAUSE_SPLIT_RE.split(sentence)]
+        overlap = len(terms & {token for clause in clauses for token in clause})
+        if overlap > best_overlap:
+            best_overlap = overlap
+            best_sentences = [clauses]
+        elif overlap and overlap == best_overlap:
+            best_sentences.append(clauses)
+    polarities: set[bool] = set()
+    for clauses in best_sentences:
+        for tokens in clauses:
+            if terms.isdisjoint(tokens):
+                continue
+            negations = sum(
+                1
+                for index, token in enumerate(tokens)
+                if token in _NEGATIONS and not terms.isdisjoint(tokens[index + 1 :])
+            )
+            if negations > 1:
+                return None
+            polarities.add(negations == 1)
+    if len(polarities) != 1:
+        return None
+    return polarities.pop()
+
+
+def _match_score(claim_terms: frozenset[str], evidence: str) -> float:
     if not claim_terms:
-        return 0.0, evidence_negated
-    overlap = len(claim_terms & evidence_terms)
+        return 0.0
+    overlap = len(claim_terms & _semantic_terms(evidence))
     minimum = 1 if len(claim_terms) == 1 else 2
     if overlap < minimum:
-        return 0.0, evidence_negated
-    return overlap / len(claim_terms), evidence_negated
+        return 0.0
+    return overlap / len(claim_terms)
 
 
 def _memory_verify_sync(
@@ -588,13 +637,17 @@ def _memory_verify_sync(
                 contradictions: list[Contradiction] = []
                 all_refs: dict[tuple[str, str], EvidenceRef] = {}
                 for claim in _claims(request.text):
-                    claim_terms, claim_negated = _semantic_signature(claim)
+                    claim_terms = _semantic_terms(claim)
+                    claim_negated = _polarity(claim_terms, claim)
                     matches: list[tuple[float, bool, _RecordEvidence]] = []
-                    for item in evidence:
-                        score, evidence_negated = _match_score(
-                            claim_terms, item.content
-                        )
-                        if score >= 0.75:
+                    for item in evidence if claim_negated is not None else ():
+                        score = _match_score(claim_terms, item.content)
+                        if score < 0.75:
+                            continue
+                        evidence_negated = _polarity(claim_terms, item.content)
+                        # Evidence whose stance on the claim is unclear proves
+                        # nothing either way.
+                        if evidence_negated is not None:
                             matches.append((score, evidence_negated, item))
                     matches.sort(
                         key=lambda entry: (
@@ -673,12 +726,12 @@ def _relevant_records(
     *,
     limit: int = 100,
 ) -> list[_RecordEvidence]:
-    terms, _negated = _semantic_signature(subject.content)
+    terms = _semantic_terms(subject.content)
     scored: list[tuple[float, _RecordEvidence]] = []
     for item in records:
         if item.record.record_id == subject.record.record_id:
             continue
-        score, _ = _match_score(terms, item.content)
+        score = _match_score(terms, item.content)
         if score >= 0.4:
             scored.append((score, item))
     scored.sort(key=lambda entry: (-entry[0], entry[1].record.record_id))
@@ -921,10 +974,10 @@ def _rule_evolution_sync(
                     revisions = _governance_revision_count(
                         connection, workspace.workspace_id, row
                     )
-                    terms, _ = _semantic_signature(rule.trigger)
+                    terms = _semantic_terms(rule.trigger)
                     matches: list[tuple[float, _RecordEvidence]] = []
                     for item in memory_evidence:
-                        score, _ = _match_score(terms, item.content)
+                        score = _match_score(terms, item.content)
                         if score >= 0.4:
                             matches.append((score, item))
                     matches.sort(
@@ -1143,16 +1196,16 @@ def _hierarchical_recall_sync(
                         raise IntelligenceOperationError("CAPABILITY_DEGRADED")
                     members_by_community[str(member["community_id"])].append(record)
 
-                query_terms, _ = _semantic_signature(request.query)
+                query_terms = _semantic_terms(request.query)
                 direct: list[tuple[float, sqlite3.Row]] = []
                 fallback: list[tuple[float, sqlite3.Row]] = []
                 for row in communities:
-                    label_score, _ = _match_score(query_terms, str(row["label"]))
+                    label_score = _match_score(query_terms, str(row["label"]))
                     if label_score > 0:
                         direct.append((label_score, row))
                     member_score = max(
                         (
-                            _match_score(query_terms, item.content)[0]
+                            _match_score(query_terms, item.content)
                             for item in members_by_community[str(row["community_id"])]
                         ),
                         default=0.0,
@@ -1217,10 +1270,10 @@ def _position_evidence(
     position: str,
     records: list[_RecordEvidence],
 ) -> list[tuple[float, _RecordEvidence]]:
-    terms, _ = _semantic_signature(position)
+    terms = _semantic_terms(position)
     selected: list[tuple[float, _RecordEvidence]] = []
     for item in records:
-        score, _ = _match_score(terms, item.content)
+        score = _match_score(terms, item.content)
         if score < 0.4:
             continue
         if item.worked is True:

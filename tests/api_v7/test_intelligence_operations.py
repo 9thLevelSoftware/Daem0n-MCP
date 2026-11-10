@@ -336,6 +336,74 @@ class IntelligenceOperationTests(unittest.IsolatedAsyncioTestCase):
             {ref.record_id for ref in result.contradictions[0].evidence_refs},
         )
 
+    async def test_memory_verify_scopes_negation_to_the_claim(self) -> None:
+        """A verdict agents act on must not invert or borrow a negation."""
+        cases = (
+            # (stored record, claim, expected verdict)
+            ("We don't use Postgres.", "We use Postgres.", "contradicted"),
+            ("We don't use Postgres.", "We don't use Postgres.", "supported"),
+            ("We do not use Postgres.", "We don't use Postgres.", "supported"),
+            ("We don\u2019t use Postgres.", "We do not use Postgres.", "supported"),
+            ("We can\u2019t use Postgres.", "We can use Postgres.", "contradicted"),
+            ("We dont use Postgres.", "We use Postgres.", "contradicted"),
+            ("We no longer use Postgres.", "We use Postgres.", "contradicted"),
+            ("We never use Postgres.", "We use Postgres.", "contradicted"),
+            ("We use Postgres.", "We never use Postgres.", "contradicted"),
+            # A negation in another sentence or clause is not about the claim.
+            (
+                "We use Postgres. Do not commit secrets.",
+                "We use Postgres.",
+                "supported",
+            ),
+            (
+                "We use Postgres. Do not commit secrets.",
+                "We don't use Postgres.",
+                "contradicted",
+            ),
+            ("We use Postgres, not MySQL.", "We use Postgres.", "supported"),
+            ("No, we use Postgres.", "We use Postgres.", "supported"),
+            # Polarity that cannot be read off the text is not guessed.
+            (
+                "It is not true that we don't use Postgres.",
+                "We use Postgres.",
+                "unknown",
+            ),
+            (
+                "We use Postgres for storage. We do not use Postgres for caching.",
+                "We use Postgres.",
+                "unknown",
+            ),
+            ("We use Postgres.", "We never don't use Postgres.", "unknown"),
+            # No English negation word: plain term agreement.
+            ("Nous utilisons Postgres.", "Nous utilisons Postgres.", "supported"),
+            ("The cache is enabled.", "The cache is enabled.", "supported"),
+        )
+        for stored, claim, expected in cases:
+            with self.subTest(stored=stored, claim=claim):
+                if self.dependencies is not None:
+                    self.dependencies.close()
+                self.setUp()
+                record_id, _event_id = self._append_record("a", stored)
+                result = await self._operations()["memory_verify"](
+                    workspace=self.workspace,
+                    request=_request(
+                        "memory_verify",
+                        workspace_id=self.workspace.workspace_id,
+                        text=claim,
+                    ),
+                )
+
+                self.assertEqual(expected, result.overall_status)
+                self.assertEqual([expected], [item.status for item in result.claims])
+                self.assertEqual(
+                    set() if expected == "unknown" else {record_id},
+                    {ref.record_id for ref in result.evidence_refs},
+                )
+                self.assertEqual(
+                    1 if expected == "contradicted" else 0,
+                    len(result.contradictions),
+                )
+
     async def test_a_task_completes_the_scan_the_foreground_defers(self) -> None:
         """TASK_REQUIRED must be an answer a task can actually satisfy."""
         from unittest.mock import patch
