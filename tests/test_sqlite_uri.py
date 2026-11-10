@@ -11,6 +11,7 @@ from pathlib import Path, PurePosixPath, PureWindowsPath
 import pytest
 
 from daem0nmcp.database import DatabaseManager
+from daem0nmcp.workspace import sqlite_file_uri
 from tests.api_v7.process_client import (
     initialize_workspaces,
     process_client,
@@ -33,12 +34,6 @@ _QUESTION_MARK = pytest.param(
         sys.platform == "win32", reason="Windows file names cannot contain '?'"
     ),
 )
-
-
-def _sqlite_file_uri(*args, **kwargs):
-    from daem0nmcp.workspace import sqlite_file_uri
-
-    return sqlite_file_uri(*args, **kwargs)
 
 
 def _entries(directory: Path) -> set[str]:
@@ -65,14 +60,20 @@ def _entries(directory: Path) -> set[str]:
             PureWindowsPath(r"\\server\share\dir one\x.db"),
             "file:////server/share/dir%20one/x.db",
         ),
+        # The extended-length spelling names the same file without its prefix.
+        (PureWindowsPath(r"\\?\C:\long\x.db"), "file:///C:/long/x.db"),
+        (
+            PureWindowsPath(r"\\?\UNC\server\share\x.db"),
+            "file:////server/share/x.db",
+        ),
     ],
 )
 def test_uri_escapes_every_path_and_keeps_windows_forms(path, expected):
     """An unescaped '?', '#' or '%' would be read as URI syntax, not as a name."""
 
-    assert _sqlite_file_uri(path) == expected
-    assert _sqlite_file_uri(path, mode="ro") == expected + "?mode=ro"
-    assert _sqlite_file_uri(path, mode="rw") == expected + "?mode=rw"
+    assert sqlite_file_uri(path) == expected
+    assert sqlite_file_uri(path, mode="ro") == expected + "?mode=ro"
+    assert sqlite_file_uri(path, mode="rw") == expected + "?mode=rw"
 
 
 def test_uri_resolves_a_relative_path_against_the_working_directory(
@@ -86,13 +87,37 @@ def test_uri_resolves_a_relative_path_against_the_working_directory(
         connection.execute("CREATE TABLE marker (value TEXT)")
         connection.commit()
 
-    relative = _sqlite_file_uri(Path("sub dir") / "x.db", mode="ro")
-    assert relative == _sqlite_file_uri(tmp_path / "sub dir" / "x.db", mode="ro")
-    assert relative == _sqlite_file_uri(os.path.join("sub dir", "x.db"), mode="ro")
+    relative = sqlite_file_uri(Path("sub dir") / "x.db", mode="ro")
+    assert relative == sqlite_file_uri(tmp_path / "sub dir" / "x.db", mode="ro")
+    assert relative == sqlite_file_uri(os.path.join("sub dir", "x.db"), mode="ro")
     with closing(sqlite3.connect(relative, uri=True)) as connection:
         assert connection.execute("SELECT count(*) FROM marker").fetchone() == (0,)
     with pytest.raises(ValueError):
-        _sqlite_file_uri(PureWindowsPath("relative") / "x.db")
+        sqlite_file_uri(PureWindowsPath("relative") / "x.db")
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32", reason="creating a symlink needs privileges on Windows"
+)
+def test_uri_keeps_parent_steps_of_a_relative_path_for_the_system(
+    tmp_path, monkeypatch
+):
+    """'link/..' is the parent of the link's target, not of the link itself."""
+
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "real" / "inner").mkdir(parents=True)
+    (tmp_path / "other").mkdir()
+    (tmp_path / "other" / "link").symlink_to(
+        tmp_path / "real" / "inner", target_is_directory=True
+    )
+    with closing(sqlite3.connect(tmp_path / "real" / "x.db")) as connection:
+        connection.execute("CREATE TABLE marker (value TEXT)")
+        connection.commit()
+
+    uri = sqlite_file_uri(Path("other") / "link" / ".." / "x.db", mode="ro")
+    with closing(sqlite3.connect(uri, uri=True)) as connection:
+        assert connection.execute("SELECT count(*) FROM marker").fetchone() == (0,)
+    assert _entries(tmp_path / "other") == {"link"}
 
 
 @pytest.mark.parametrize("name", [*_PORTABLE_NAMES, _QUESTION_MARK])
@@ -107,7 +132,7 @@ def test_uri_opens_exactly_the_named_file(tmp_path, name):
         connection.execute("INSERT INTO marker VALUES (?)", (name,))
         connection.commit()
 
-    uri = _sqlite_file_uri(database, mode="ro")
+    uri = sqlite_file_uri(database, mode="ro")
     with closing(sqlite3.connect(uri, uri=True)) as connection:
         assert connection.execute("SELECT value FROM marker").fetchone() == (name,)
         with pytest.raises(sqlite3.OperationalError):

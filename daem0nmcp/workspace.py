@@ -97,7 +97,14 @@ def sqlite_file_uri(
     if not pure.is_absolute():
         if not isinstance(pure, Path):
             raise ValueError("a path of another platform must be absolute")
-        pure = Path(os.path.abspath(pure))
+        # POSIX resolves ``link/..`` through the link, so the path is joined
+        # to the working directory as written; collapsing ``..`` first could
+        # name another file.  Windows collapses it the same way itself.
+        pure = Path(
+            os.path.abspath(pure)
+            if os.name == "nt"
+            else os.path.join(os.getcwd(), pure)
+        )
     text = pure.as_posix()
     if isinstance(pure, PureWindowsPath):
         # SQLite's Windows VFS accepts forward slashes only outside the

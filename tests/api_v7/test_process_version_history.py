@@ -6,22 +6,18 @@ from datetime import datetime, timezone
 
 import pytest
 
-from daem0nmcp.database import DatabaseManager
-from daem0nmcp.workspace import WorkspaceRegistry
-from tests.api_v7.process_client import process_client, succeed
+from tests.api_v7.process_client import (
+    initialize_workspaces,
+    process_client,
+    succeed,
+)
 from tests.api_v7.test_process_surface import _preflight
 
 
 @pytest.fixture
 async def initialized_workspace(tmp_path):
-    storage = tmp_path / ".daem0nmcp" / "storage"
-    storage.mkdir(parents=True)
-    manager = DatabaseManager(str(storage))
-    try:
-        await manager.init_db()
-    finally:
-        await manager.close()
-    return WorkspaceRegistry([tmp_path], default_root=tmp_path).default
+    (workspace,) = await initialize_workspaces((tmp_path,))
+    return workspace
 
 
 def _instant(value: str) -> datetime:
