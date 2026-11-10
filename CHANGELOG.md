@@ -80,6 +80,7 @@
   remedy; and `migrate-v7 --rollback` refuses with `ROLLBACK_WOULD_HIDE_WRITES`
   rather than silently stranding writes made since activation (pass
   `--discard-v7-writes` to accept that).
+- Removed the unused v6 BM25 modules (`daem0nmcp/bm25_index.py`, `daem0nmcp/fusion.py`) and the `rank-bm25` dependency from the `local` extra; v7 lexical retrieval is SQLite FTS5 and nothing imported them. The `bm25_k1`/`bm25_b` settings are still accepted and ignored.
 
 ### Security
 - Hooks, the OpenCode plugin, the git pre-commit hook and the documented server registrations no longer launch with `python -m`, which imported a `daem0nmcp/` package from the opened project. The OpenCode plugin no longer takes its interpreter from the project's `opencode.json`. Existing installs keep the old command until `install-claude-hooks` and `install-opencode` are re-run (delete `.opencode/plugins/daem0n.ts` first if it is reported as outdated); SessionStart shows a reminder until then. The launch command does not alter `PYTHONPATH`: an empty or relative entry there still exposes the working directory.

@@ -944,8 +944,6 @@ daem0nmcp/
 ├── rules.py             # Rule engine with BM25 matching
 ├── similarity.py        # TF-IDF index, decay, conflict detection
 ├── vectors.py           # ModernBERT embeddings (ONNX/torch, asymmetric encoding)
-├── bm25_index.py        # BM25 Okapi keyword retrieval
-├── fusion.py            # Reciprocal Rank Fusion for hybrid search
 ├── surprise.py          # Titans-inspired novelty detection
 ├── recall_planner.py    # TiMem-style complexity classification
 ├── retrieval_router.py  # Auto-Zoom query-aware search dispatch
