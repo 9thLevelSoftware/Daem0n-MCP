@@ -980,6 +980,46 @@ def test_actual_cli_status_does_not_upgrade_an_older_v7_schema(tmp_path: Path):
     assert resolve_active_database(storage).generation == 1
 
 
+@pytest.mark.parametrize("orphaned", [False, True])
+def test_actual_cli_migrate_does_not_upgrade_an_older_v7_schema(
+    tmp_path: Path, orphaned: bool
+):
+    """The generic additive command is the other way into the ledger."""
+
+    if orphaned:
+        storage, source, _registry, _expected = _orphaned_learning_fixture(tmp_path)
+    else:
+        storage, source, _registry = _fixture(
+            tmp_path, maximum_version=CURRENT_SCHEMA_VERSION - 1
+        )
+    source_bytes = source.read_bytes()
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "daem0nmcp.cli",
+            "--json",
+            "--project-path",
+            str(tmp_path),
+            "migrate",
+        ],
+        cwd=Path(__file__).resolve().parents[1],
+        text=True,
+        capture_output=True,
+        timeout=300,
+        check=False,
+    )
+
+    assert result.returncode == 1, result.stdout + result.stderr
+    error = json.loads(result.stdout)["error"]
+    assert error["code"] == "MIGRATION_REQUIRED"
+    assert "migrate-v7 --apply" in error["message"]
+    assert "FOREIGN KEY" not in result.stdout + result.stderr
+    assert source.read_bytes() == source_bytes
+    assert not (storage / "migrations").exists()
+    assert resolve_active_database(storage).generation == 1
+
+
 def test_semantic_physical_contract_accepts_historical_orm_spellings(
     tmp_path: Path,
 ):

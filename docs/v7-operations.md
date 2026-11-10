@@ -315,7 +315,8 @@ reports `already_active` when the active schema is current.
 Opening a format 7 database never upgrades its schema as a side effect. After
 a Daem0nMCP upgrade that raises the schema version, `system_health` reports
 `STORAGE_SCHEMA_OUTDATED`, and the legacy CLI commands (`status`, `check`,
-`briefing`, `pre-commit`, `remember`, `record-outcome`, `index`, `watch`) and
+`briefing`, `pre-commit`, `remember`, `record-outcome`, `index`, `watch`,
+`migrate`) and
 Python helpers stop with `MIGRATION_REQUIRED`, naming this command, before
 they write anything to the database.
 
@@ -336,14 +337,19 @@ the predecessor's. A schema upgrade's predecessor is still on its older schema:
 the Daem0nMCP build that wrote it serves it again, and a newer build answers
 `MIGRATION_REQUIRED` until `--apply` reactivates the candidate. Repeating
 `--rollback latest` reports `already_rolled_back` instead of unwinding a second
-run; pass a migration ID to roll back the run underneath. A workspace that an
+run; pass a migration ID to roll back the run underneath, which works while
+that database is still on its older schema. A reactivation that stops after
+writing the pointer leaves the start failing with `V7_ACTIVATION_INCOMPLETE`
+until `migrate-v7 --apply` (or `--rollback`) is run again. A workspace that an
 earlier development build left failing with `V7_ACTIVATION_INCOMPLETE` or
 `ACTIVE_V7_INVALID` after such a rollback is repaired by running
 `migrate-v7 --apply` or `migrate-v7 --rollback` once. The
-generic `migrate` command remains an in-place additive migration entry point,
-capped at the last v6 schema version while a store is still format 6 so it
-cannot rewrite what `migrate-v7` snapshots; use `migrate-v7 --apply` when
-retention, verification, atomic activation, and rollback are required.
+generic `migrate` command remains an in-place additive migration entry point
+for format 6 only, capped at the last v6 schema version so it cannot rewrite
+what `migrate-v7` snapshots. On a format 7 store whose schema is older than
+the build it changes nothing and answers `MIGRATION_REQUIRED`, like every
+other legacy command: `migrate-v7 --apply` is the one command that upgrades a
+format 7 schema, with retention, verification, atomic activation, and rollback.
 
 `active-db.json` is part of the store: back it up and copy it together with
 `daem0nmcp.db` and `migrations/`. A format 7 `daem0nmcp.db` found without it is

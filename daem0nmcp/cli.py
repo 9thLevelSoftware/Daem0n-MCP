@@ -1114,7 +1114,42 @@ def main():
                 print(f"  Vectors available: {result['vectors_available']}")
                 safe_print(f"\n{result['message']}")
         else:
-            count, applied = run_migrations(db_path, workspace_id=db.workspace_id)
+            from .database import SchemaUpgradeRequiredError
+            from .schema_version import CURRENT_SCHEMA_VERSION
+
+            schema_version = db._schema_version() if db.db_path.exists() else 0
+            if (
+                db.format_version == 7
+                and db.db_path.exists()
+                and schema_version < CURRENT_SCHEMA_VERSION
+            ):
+                # Only `migrate-v7 --apply` upgrades an active format-7 store:
+                # it works on a verified copy and keeps what rollback needs.
+                refusal = SchemaUpgradeRequiredError(schema_version)
+                if args.json:
+                    print(
+                        json.dumps(
+                            {
+                                "database": db_path,
+                                "error": {
+                                    "code": refusal.code,
+                                    "message": str(refusal),
+                                },
+                            },
+                            sort_keys=True,
+                            separators=(",", ":"),
+                        )
+                    )
+                else:
+                    print(f"ERROR: {refusal}", file=sys.stderr)
+                sys.exit(1)
+            count, applied = run_migrations(
+                db_path,
+                workspace_id=db.workspace_id,
+                # A format-6 store is what `migrate-v7` snapshots; it stops at
+                # the last v6 version here exactly as it does at start.
+                maximum_version=db._v6_migration_ceiling(schema_version),
+            )
             if args.json:
                 result = {
                     "database": db_path,
