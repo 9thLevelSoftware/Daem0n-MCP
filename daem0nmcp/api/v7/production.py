@@ -726,7 +726,9 @@ def _briefing_reader(readers: ResourceRepositoryReaders):
     return read
 
 
-def _guidance_reader(readers: ResourceRepositoryReaders):
+def _guidance_reader(
+    readers: ResourceRepositoryReaders, *, include_untrusted_origin: bool = True
+):
     async def read(
         workspace: Workspace,
         target_tool: str,
@@ -747,9 +749,11 @@ def _guidance_reader(readers: ResourceRepositoryReaders):
                 rule_limit=50,
                 active_context_limit=1,
                 include_git_changes=False,
-                # Counsel still weighs every stored warning and failure,
-                # whatever its origin; only the briefs withhold them.
-                include_untrusted_origin=True,
+                # Counsel still shows every stored warning and failure,
+                # whatever its origin; only the briefs withhold them.  The
+                # ceremony reads again without them before a related record
+                # is allowed to force counsel.
+                include_untrusted_origin=include_untrusted_origin,
             )
             candidate_records = [
                 *_public_items(snapshot.failures, RecordSummary),
@@ -761,7 +765,10 @@ def _guidance_reader(readers: ResourceRepositoryReaders):
                 readers.warning_reader,
                 workspace,
                 ResourceReadRequest(
-                    "warnings", 20, "updated_at_desc", include_untrusted_origin=True
+                    "warnings",
+                    20,
+                    "updated_at_desc",
+                    include_untrusted_origin=include_untrusted_origin,
                 ),
                 RecordSummary,
             )
@@ -769,7 +776,10 @@ def _guidance_reader(readers: ResourceRepositoryReaders):
                 readers.failure_reader,
                 workspace,
                 ResourceReadRequest(
-                    "failures", 20, "updated_at_desc", include_untrusted_origin=True
+                    "failures",
+                    20,
+                    "updated_at_desc",
+                    include_untrusted_origin=include_untrusted_origin,
                 ),
                 RecordSummary,
             )
@@ -1002,6 +1012,11 @@ def _assemble(
             argument_normalizer=normalizer,
             preflight_service=preflight_service,
             brief_reader=_compact_brief_reader(resource_readers),
+            authored_preflight_service=BasicPreflightService(
+                reader=_guidance_reader(
+                    resource_readers, include_untrusted_origin=False
+                )
+            ),
         )
         if loaded_settings.covenant_mode == "guided"
         else None

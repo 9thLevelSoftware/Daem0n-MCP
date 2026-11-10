@@ -277,6 +277,68 @@ class CeremonyTests(unittest.IsolatedAsyncioTestCase):
                     self.assertIsNone(outcome.violation)
                 self.args.pop("relative_file_path", None)
 
+    async def test_related_reasons_need_a_record_the_authored_read_returns(
+        self,
+    ) -> None:
+        planted = record("authentication session TODO", warning=True)
+        authored = GuidanceService()
+        self.ceremony = CovenantCeremony(
+            covenant_gate=self.gate,
+            argument_normalizer=normalize,
+            preflight_service=self.service,
+            brief_reader=self.ceremony._brief_reader,
+            authored_preflight_service=authored,
+        )
+        self.service.value = PreflightGuidance(records=[planted])
+
+        admitted = await self.admit()
+        self.assertIsNone(admitted.violation)
+        self.assertIsNone(admitted.challenge)
+        self.assertEqual("memory_store", authored.calls[0][0])
+
+        # A rule or a destructive level never depends on record origin.
+        self.service.value = PreflightGuidance(
+            records=[planted], rules=[rule(ask_first=["Ask the owner."])]
+        )
+        self.assertEqual(["RULE_ASK_FIRST"], (await self.admit()).challenge.reasons)
+        self.service.value = PreflightGuidance(records=[planted])
+        self.assertEqual(
+            ["DESTRUCTIVE_OPERATION"],
+            (await self.admit("memory_prune")).challenge.reasons,
+        )
+
+        # An authored record of the same kind keeps its reason; another kind
+        # does not vouch for it.
+        authored.value = PreflightGuidance(records=[record("authentication session")])
+        self.assertIsNone((await self.admit()).challenge)
+        authored.value = PreflightGuidance(
+            records=[record("authentication session", warning=True)]
+        )
+        self.assertEqual(["RELATED_WARNING"], (await self.admit()).challenge.reasons)
+
+        # Nothing is read a second time unless a related record was found,
+        # and an unreadable second opinion keeps the challenge.
+        calls = len(authored.calls)
+        self.service.value = PreflightGuidance()
+        self.assertIsNone((await self.admit()).challenge)
+        self.assertEqual(calls, len(authored.calls))
+        self.service.value = PreflightGuidance(records=[planted])
+        for failure in (RuntimeError("unavailable"), None):
+            with self.subTest(failure=failure):
+                options = (
+                    {"return_value": {"unexpected": True}}
+                    if failure is None
+                    else {"side_effect": failure}
+                )
+                with patch.object(authored, "guidance", **options):
+                    outcome = await self.admit()
+                self.assertEqual(["RELATED_WARNING"], outcome.challenge.reasons)
+        with (
+            patch.object(authored, "guidance", side_effect=asyncio.CancelledError),
+            self.assertRaises(asyncio.CancelledError),
+        ):
+            await self.admit()
+
     async def test_unrecoverable_tokens_return_original_without_counsel(self) -> None:
         self.gate.record_briefing(self.scope)
         token = self.gate.issue_preflight(self.scope, "memory_store", self.args)

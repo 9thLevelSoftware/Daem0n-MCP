@@ -37,6 +37,9 @@ CAPACITY_MESSAGE = (
 )
 CAPACITY_RETRY_AFTER_MS = 5_000
 CounselMode = Literal["inline", "challenge", "off"]
+_RECORD_REASONS: frozenset[CounselReason] = frozenset(
+    {"RELATED_WARNING", "RELATED_FAILURE"}
+)
 _CONTENT_TOKEN = re.compile(r"[a-z0-9][a-z0-9_-]{3,79}")
 _TOKEN_COMPONENT = re.compile(r"[_-]")
 _COUNSEL_STOPWORDS = frozenset(
@@ -194,11 +197,54 @@ class CovenantCeremony:
         argument_normalizer: ArgumentNormalizer,
         preflight_service: PreflightService,
         brief_reader: Callable[[Workspace], Awaitable[Mapping[str, object]]],
+        authored_preflight_service: PreflightService | None = None,
     ) -> None:
         self._gate = covenant_gate
         self._normalizer = argument_normalizer
         self._preflight = preflight_service
+        self._authored_preflight = authored_preflight_service
         self._brief_reader = brief_reader
+
+    async def _confirmed_reasons(
+        self,
+        reasons: list[CounselReason],
+        level: CovenantLevel,
+        workspace: Workspace,
+        tool_name: str,
+        normalized: Mapping[str, Any],
+    ) -> list[CounselReason]:
+        """Keep a related-record reason only if an authored record backs it.
+
+        ``preflight_service`` reads every stored record, including scanned
+        TODOs and ingested pages whose text anyone who controls a file or a
+        site can write.  Those stay visible as guidance, but they must not by
+        themselves force counsel, so a related-record reason is checked
+        against guidance read without them.  Failing to read it keeps the
+        reason.
+        """
+
+        if self._authored_preflight is None or not _RECORD_REASONS.intersection(
+            reasons
+        ):
+            return reasons
+        try:
+            raw = self._authored_preflight.guidance(
+                workspace, tool_name, normalized, None
+            )
+            if inspect.isawaitable(raw):
+                raw = await raw
+            authored = counsel_reasons(
+                level, PreflightGuidance.model_validate(raw), normalized
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            return reasons
+        return [
+            reason
+            for reason in reasons
+            if reason not in _RECORD_REASONS or reason in authored
+        ]
 
     async def admit(
         self,
@@ -280,7 +326,13 @@ class CovenantCeremony:
                 return CeremonyOutcome(_capacity_violation(tool_name), notice, None)
             except Exception:
                 return CeremonyOutcome(violation, notice, None)
-            reasons = counsel_reasons(level, guidance, normalized)
+            reasons = await self._confirmed_reasons(
+                counsel_reasons(level, guidance, normalized),
+                level,
+                workspace,
+                tool_name,
+                normalized,
+            )
             if counsel_mode == "challenge" and not reasons:
                 reasons = ["TASK_ADMISSION"]
             if not reasons and counsel_mode == "inline":
