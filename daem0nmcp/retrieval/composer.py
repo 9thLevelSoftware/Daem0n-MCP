@@ -163,7 +163,9 @@ class RetentionPolicy:
 def query_identifiers(text: str) -> frozenset[str]:
     identifiers: set[str] = set()
     for token in re.split(r"[^\w./\\-]+", text):
-        token = token.replace("\\", "/")
+        # A full stop or ellipsis that ends the sentence is not part of the
+        # name; interior dots (``file.py``, ``v1.2``, ``a.b.c``) are.
+        token = token.rstrip(".").replace("\\", "/")
         if "/" in token and not token.endswith("/"):
             rooted = token.startswith("./")
             token = PurePosixPath(token).as_posix()

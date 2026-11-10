@@ -94,6 +94,69 @@ class RetentionComposerTests(unittest.TestCase):
                     )
                     self.assertLessEqual(result.context.rendered_tokens, 256)
 
+    def test_query_identifiers_drop_trailing_sentence_punctuation(self):
+        cases = (
+            ("fix the crash in src/auth/session.py.", {"src/auth/session.py"}),
+            ("why does src/auth/session.py... hang", {"src/auth/session.py"}),
+            ("see session.py, router.ts; and cache.py:", None),
+            ('open "src/auth/session.py".', {"src/auth/session.py"}),
+            ("(see ./src/auth/session.py).", {"./src/auth/session.py"}),
+            ("[pkg.Router.apply_routes].", {"pkg.Router.apply_routes"}),
+            ("call apply_routes.", {"apply_routes"}),
+            ("ask RouterConfig.", {"RouterConfig"}),
+            (r"edit src\auth\session.py.", {"src/auth/session.py"}),
+            # Real names that end in a dot-suffix or start with a dot survive.
+            ("bump to v1.2", {"v1.2"}),
+            ("bump to v1.2.", {"v1.2"}),
+            ("import a.b.c", {"a.b.c"}),
+            ("import a.b.c.", {"a.b.c"}),
+            ("edit .gitignore.", {".gitignore"}),
+            ("edit ./router.ts.", {"./router.ts"}),
+            ("list ../src/cache.py.", {"../src/cache.py"}),
+            # A directory keeps its trailing separator.
+            ("list src/auth/", {"src/auth/"}),
+            # Plain prose and bare punctuation never become identifiers.
+            ("it crashed at the end.", set()),
+            ("and then ... nothing. Really.", set()),
+            ("wait . and .. then", set()),
+        )
+        for text, expected in cases:
+            with self.subTest(text=text):
+                if expected is None:
+                    expected = {"session.py", "router.ts", "cache.py"}
+                self.assertEqual(frozenset(expected), query_identifiers(text))
+
+    def test_path_ending_a_sentence_keeps_bound_evidence_under_budget(self):
+        composer = EvidenceComposer(tokenizer=WordTokenizer())
+        background = tuple(
+            _source(digit, "background detail " * 150, score=1.0) for digit in "1234"
+        )
+        bound = replace(
+            _source(
+                "5", "Acquire a lease before replacing the routing snapshot.", score=0.1
+            ),
+            code_bindings=(("src/http/router.ts", "pkg.Router.apply_routes"),),
+        )
+        cases = (
+            ("fix the crash in src/http/router.ts.", True),
+            ("what broke http/router.ts...", True),
+            ("who calls pkg.Router.apply_routes.", True),
+            ("fix the crash in ./src/http/router.ts.", True),
+            ("fix the crash in src/admin/router.ts.", False),
+            ("fix the crash in ./router.ts.", False),
+        )
+        for text, expected in cases:
+            with self.subTest(text=text):
+                result = composer.compose(
+                    background + (bound,),
+                    token_budget=256,
+                    retention=RetentionPolicy("debug", query_identifiers(text)),
+                )
+                retained_ids = {
+                    item.evidence_refs[0].record_id for item in result.items
+                }
+                self.assertEqual(expected, bound.candidate.record_id in retained_ids)
+
     def test_implement_retains_late_procedure_under_256_token_budget(self):
         composer = EvidenceComposer(tokenizer=WordTokenizer())
         baseline = composer.compose(_sources(), token_budget=256)
