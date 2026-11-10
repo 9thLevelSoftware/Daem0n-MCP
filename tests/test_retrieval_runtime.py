@@ -255,6 +255,78 @@ class RetrievalRuntimeTests(unittest.IsolatedAsyncioTestCase):
                 )
                 self.assertEqual((), result.policy_rejection_counts)
 
+    async def test_archived_records_do_not_exhaust_a_filtered_recall(self):
+        from daem0nmcp.event_store import EventCommand, EventStore
+        from daem0nmcp.retrieval.projections import LexicalProjectionBuilder
+        from daem0nmcp.retrieval.runtime import create_retrieval_service
+        from daem0nmcp.retrieval.types import RetrievalQuery
+
+        older, newer = self._seed_filtered_corpus()
+        connection = sqlite3.connect(self.path)
+        connection.execute("PRAGMA foreign_keys=ON")
+        # Sixty archived records of the same scope, newer and stronger matches.
+        for number in range(0x300, 0x300 + 60):
+            record = _record("deploy deploy deploy")
+            record.update(record_type="warning", tags=["scoped"], archived=True)
+            EventStore(connection).append_and_project(
+                EventCommand(
+                    workspace_id=WORKSPACE_ID,
+                    stream_id=f"mem_{number:064x}",
+                    stream_kind="memory",
+                    event_type="memory.created",
+                    occurred_at_us=1_000 + number,
+                    recorded_at_us=1_000 + number,
+                    actor_type="system",
+                    payload={"record": record},
+                )
+            )
+        LexicalProjectionBuilder(connection, clock_us=lambda: 6_000).rebuild(
+            WORKSPACE_ID
+        )
+        connection.execute("DELETE FROM background_jobs")
+        connection.commit()
+        connection.close()
+        service = create_retrieval_service(self.path, config=_settings())
+        self.services.append(service)
+
+        for name, text, filters in (
+            ("category search", "deploy", {"categories": frozenset({"warning"})}),
+            ("tag search", "deploy", {"tags": frozenset({"scoped"})}),
+            ("category listing", "", {"categories": frozenset({"warning"})}),
+            ("unfiltered search", "older newer", {}),
+        ):
+            with self.subTest(case=name):
+                result = await service.retrieve(
+                    RetrievalQuery(
+                        workspace_id=WORKSPACE_ID,
+                        text=text,
+                        token_budget=4_000,
+                        **filters,
+                    )
+                )
+                self.assertFalse(result.abstained, result.reason)
+                self.assertEqual(
+                    {older, newer},
+                    {item.evidence_refs[0].record_id for item in result.items},
+                )
+                self.assertEqual((), result.policy_rejection_counts)
+
+        included = await service.retrieve(
+            RetrievalQuery(
+                workspace_id=WORKSPACE_ID,
+                text="",
+                limit=100,
+                candidate_limit=100,
+                token_budget=100_000,
+                categories=frozenset({"warning"}),
+                include_archived=True,
+            )
+        )
+        self.assertTrue(
+            {item.evidence_refs[0].record_id for item in included.items}
+            - {older, newer}
+        )
+
     async def test_empty_query_with_a_filter_lists_filtered_records(self):
         from daem0nmcp.retrieval.runtime import create_retrieval_service
         from daem0nmcp.retrieval.types import RetrievalQuery

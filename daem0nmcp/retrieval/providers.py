@@ -307,6 +307,12 @@ class LexicalProvider:
                     manifest_generation=generation,
                     elapsed_ms=(perf_counter_ns() - started) / 1_000_000,
                 )
+            # An archived document the query excludes must not take a
+            # candidate slot.  This is not an explicit scope, so it does not
+            # turn an empty query into a listing.
+            scope_sql = filter_sql
+            if not query.include_archived:
+                filter_sql += " AND archived=0"
             content_weight, rationale_weight, tags_weight = LEXICAL_BM25_WEIGHTS
             if self._content_tiering:
                 tier_column = f""",
@@ -384,6 +390,33 @@ class LexicalProvider:
                     ),
                 ).fetchall()
                 if rows:
+                    break
+                # A rung whose only matches are excluded archived documents
+                # still ends the ladder: weaker matches must not stand in for
+                # a stricter match the caller chose not to see.
+                if (
+                    filter_sql != scope_sql
+                    and connection.execute(
+                        f"""
+                        SELECT 1 FROM "{expected_table}"
+                        JOIN (
+                            SELECT document_rowid FROM retrieval_documents
+                            WHERE workspace_id=? AND projection_generation=?
+                                  {scope_sql} AND archived<>0
+                        ) AS document
+                          ON document.document_rowid="{expected_table}".rowid
+                        WHERE "{expected_table}" MATCH ?
+                        LIMIT 1
+                        """,
+                        (
+                            query.workspace_id,
+                            generation,
+                            *filter_parameters,
+                            fts_query,
+                        ),
+                    ).fetchone()
+                    is not None
+                ):
                     break
         except (json.JSONDecodeError, sqlite3.Error, TypeError, ValueError):
             return self._unavailable(started)

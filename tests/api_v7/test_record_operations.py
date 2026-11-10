@@ -874,6 +874,57 @@ class RecordOperationTests(unittest.IsolatedAsyncioTestCase):
             )
         self.assertEqual("INVALID_ARGUMENT", caught.exception.code)
 
+    async def test_text_search_skips_archived_matches_without_failing(self) -> None:
+        """An archived match is absent from the page, not a search failure."""
+        stored = await self._operations()["memory_store_batch"](
+            workspace=self.workspace,
+            request=self._batch_request(
+                records=[
+                    {"record_type": "learning", "content": "Postgres pooling notes."},
+                    {"record_type": "learning", "content": "Vacuum schedule notes."},
+                ]
+            ),
+        )
+        await self._operations()["memory_archive_set"](
+            workspace=self.workspace,
+            request=_request(
+                "memory_archive_set",
+                workspace_id=self.workspace.workspace_id,
+                record_id=stored.records[0].record_id,
+                archived=True,
+                preflight_token=PREFLIGHT_TOKEN,
+            ),
+        )
+        from daem0nmcp.retrieval.projections import LexicalProjectionBuilder
+
+        with closing(sqlite3.connect(self.database)) as connection:
+            connection.execute("PRAGMA foreign_keys=ON")
+            LexicalProjectionBuilder(connection, clock_us=lambda: 500).rebuild(
+                self.workspace.workspace_id
+            )
+            connection.commit()
+
+        operation = self._operations()["memory_search_text"]
+        for query, expected in (
+            ("postgres", []),
+            # Only the any-single-term rung reaches the archived record.
+            ("postgres timeout errors", []),
+            ("notes", [stored.records[1].record_id]),
+            ("vacuum schedule", [stored.records[1].record_id]),
+        ):
+            with self.subTest(query=query):
+                page = await operation(
+                    workspace=self.workspace,
+                    request=_request(
+                        "memory_search_text",
+                        workspace_id=self.workspace.workspace_id,
+                        query=query,
+                    ),
+                )
+                self.assertEqual(
+                    expected, [item.record.record_id for item in page.items]
+                )
+
     async def test_text_search_fails_closed_without_lexical_projection(self) -> None:
         """Missing lexical authority must not silently select a legacy search path."""
         from daem0nmcp.api.v7.record_operations import RecordOperationError

@@ -378,6 +378,7 @@ class LexicalProjectionTests(unittest.IsolatedAsyncioTestCase):
             RetrievalQuery(
                 workspace_id=WORKSPACE_ID,
                 text="deprecated TF-IDF fallback",
+                include_archived=True,
             ),
             10,
         )
@@ -387,6 +388,105 @@ class LexicalProjectionTests(unittest.IsolatedAsyncioTestCase):
             [complete],
             [candidate.evidence.record_id for candidate in result.candidates],
         )
+
+        # Excluded from the candidates, the archived complete match still ends
+        # the ladder before the one-token hit.
+        excluded = await LexicalProvider(self.connection).search(
+            RetrievalQuery(
+                workspace_id=WORKSPACE_ID,
+                text="deprecated TF-IDF fallback",
+            ),
+            10,
+        )
+        self.assertEqual("ready", excluded.status)
+        self.assertEqual((), excluded.candidates)
+
+    async def test_archived_documents_do_not_take_candidate_slots(self):
+        """Archived records must not crowd out or hide the live matches."""
+
+        from daem0nmcp.retrieval.projections import LexicalProjectionBuilder
+        from daem0nmcp.retrieval.providers import LexicalProvider
+        from daem0nmcp.retrieval.types import RetrievalQuery
+
+        # The live record is the weakest match of the scope.
+        live = self._append_record(
+            "a", "alpha " + "filler " * 40, "", ["scoped"], record_type="warning"
+        )
+        archived = [
+            self._append_record(
+                suffix,
+                "alpha alpha",
+                "",
+                ["scoped"],
+                record_type="warning",
+                archived=True,
+            )
+            for suffix in "bcdef"
+        ]
+        archived_only = self._append_record(
+            "9", "Postgres pooling notes", "", ["database"], archived=True
+        )
+        LexicalProjectionBuilder(self.connection).rebuild(WORKSPACE_ID)
+        self.connection.commit()
+        provider = LexicalProvider(self.connection)
+
+        for name, text, filters in (
+            ("search", "alpha", {}),
+            ("tag search", "alpha", {"tags": frozenset({"scoped"})}),
+            ("tag listing", "", {"tags": frozenset({"scoped"})}),
+            ("category listing", "  ", {"categories": frozenset({"warning"})}),
+        ):
+            with self.subTest(case=name):
+                result = await provider.search(
+                    RetrievalQuery(
+                        workspace_id=WORKSPACE_ID,
+                        text=text,
+                        limit=3,
+                        candidate_limit=3,
+                        **filters,
+                    ),
+                    3,
+                )
+                self.assertEqual("ready", result.status)
+                self.assertEqual(
+                    [live],
+                    [candidate.evidence.record_id for candidate in result.candidates],
+                )
+                included = await provider.search(
+                    RetrievalQuery(
+                        workspace_id=WORKSPACE_ID,
+                        text=text,
+                        limit=3,
+                        candidate_limit=3,
+                        include_archived=True,
+                        **filters,
+                    ),
+                    3,
+                )
+                self.assertEqual(3, len(included.candidates))
+                self.assertTrue(
+                    {candidate.evidence.record_id for candidate in included.candidates}
+                    & set(archived)
+                )
+
+        # An archived match is not reached through any rung of the ladder.
+        for text in ("postgres", "postgres timeout errors"):
+            with self.subTest(text=text):
+                result = await provider.search(
+                    RetrievalQuery(workspace_id=WORKSPACE_ID, text=text), 10
+                )
+                self.assertEqual("ready", result.status)
+                self.assertEqual((), result.candidates)
+                included = await provider.search(
+                    RetrievalQuery(
+                        workspace_id=WORKSPACE_ID, text=text, include_archived=True
+                    ),
+                    10,
+                )
+                self.assertEqual(
+                    [archived_only],
+                    [candidate.evidence.record_id for candidate in included.candidates],
+                )
 
     async def test_default_ranking_is_weighted_bm25_including_tags(self):
         """An off-topic body match must not outrank the record tagged for it."""
@@ -1128,8 +1228,15 @@ class LexicalProjectionTests(unittest.IsolatedAsyncioTestCase):
         self.connection.commit()
         provider = LexicalProvider(self.connection)
         result = await provider.search(
+            RetrievalQuery(
+                workspace_id=WORKSPACE_ID, text="newterm", include_archived=True
+            ),
+            10,
+        )
+        excluded = await provider.search(
             RetrievalQuery(workspace_id=WORKSPACE_ID, text="newterm"), 10
         )
+        self.assertEqual((), excluded.candidates)
         document = self.connection.execute(
             "SELECT content,rationale,tags_text,archived,source_event_id "
             "FROM retrieval_documents WHERE workspace_id=? AND record_id=?",
