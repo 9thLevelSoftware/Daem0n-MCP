@@ -11,6 +11,7 @@ from daem0nmcp.transport_security import (
     StrictJsonBodyMiddleware,
     TransportSecurityError,
     build_http_origin_middleware,
+    get_auth_configuration,
     strict_stdio_json_boundary,
     validate_transport_security,
 )
@@ -141,6 +142,51 @@ class TransportSecurityTests(unittest.TestCase):
                 validate_transport_security(
                     "127.0.0.1", environ={"DAEM0NMCP_ALLOWED_HOSTS": allowed}
                 )
+
+    def test_jwks_uri_must_be_https_unless_it_is_loopback(self):
+        def environment(jwks_uri: str) -> dict[str, str]:
+            return {
+                "FASTMCP_SERVER_AUTH": (
+                    "fastmcp.server.auth.providers.jwt.JWTVerifier"
+                ),
+                "FASTMCP_SERVER_AUTH_JWT_JWKS_URI": jwks_uri,
+                "FASTMCP_SERVER_AUTH_JWT_ISSUER": "https://issuer.example",
+                "FASTMCP_SERVER_AUTH_JWT_AUDIENCE": "daem0nmcp",
+            }
+
+        for jwks_uri in (
+            "http://issuer.example/jwks",
+            "http://203.0.113.10/jwks",
+            "http://localhost.issuer.example/jwks",
+            "http://user@127.0.0.1@issuer.example/jwks",
+            "ftp://issuer.example/jwks",
+            "file:///etc/jwks.json",
+            "issuer.example/jwks",
+            "https:///jwks",
+            "https://issuer.example:port/jwks",
+        ):
+            with self.subTest(jwks_uri=jwks_uri):
+                with self.assertRaisesRegex(
+                    TransportSecurityError, "INVALID_AUTH_CONFIGURATION"
+                ):
+                    get_auth_configuration(environment(jwks_uri))
+                with self.assertRaisesRegex(
+                    TransportSecurityError, "INVALID_AUTH_CONFIGURATION"
+                ):
+                    validate_transport_security(
+                        "0.0.0.0", environ=environment(jwks_uri)
+                    )
+
+        for jwks_uri in (
+            "https://issuer.example/jwks",
+            "HTTPS://issuer.example/jwks",
+            "http://127.0.0.1:8080/jwks.json",
+            "http://localhost:8080/jwks.json",
+            "http://[::1]:8080/jwks.json",
+        ):
+            with self.subTest(jwks_uri=jwks_uri):
+                configuration = get_auth_configuration(environment(jwks_uri))
+                self.assertEqual(configuration.kwargs["jwks_uri"], jwks_uri)
 
     def test_remote_browser_origins_are_default_deny_and_explicitly_allowlisted(self):
         middleware = build_http_origin_middleware(

@@ -820,8 +820,19 @@ class LocalBridgeClient:
                     connection.close()
 
 
+class _RefuseRedirects(urllib.request.HTTPRedirectHandler):
+    """Leave every 3xx answer unfollowed so the bearer stays with its host."""
+
+    def redirect_request(self, *_args: Any, **_kwargs: Any) -> None:
+        return None
+
+
 class RemoteBridgeHTTPSClient:
-    """Bounded authenticated HTTPS client for trusted remote host adapters."""
+    """Bounded authenticated HTTPS client for trusted remote host adapters.
+
+    The bearer is sent only to the configured host, directly: redirects are
+    refused and environment or system proxy settings are not consulted.
+    """
 
     def __init__(
         self,
@@ -847,7 +858,11 @@ class RemoteBridgeHTTPSClient:
             raise ValueError("remote edit bridge client configuration is invalid")
         self._base_url = base_url.rstrip("/")
         self._bearer = bearer
-        self._ssl_context = ssl_context
+        self._opener = urllib.request.build_opener(
+            urllib.request.ProxyHandler({}),
+            urllib.request.HTTPSHandler(context=ssl_context),
+            _RefuseRedirects(),
+        )
         self._origin = origin
         self._timeout_seconds = timeout_seconds
 
@@ -871,9 +886,8 @@ class RemoteBridgeHTTPSClient:
             headers=headers,
         )
         try:
-            with urllib.request.urlopen(
+            with self._opener.open(
                 request,
-                context=self._ssl_context,
                 timeout=self._timeout_seconds,
             ) as response:
                 raw = response.read(MAX_BRIDGE_BODY_BYTES + 1)
@@ -882,6 +896,9 @@ class RemoteBridgeHTTPSClient:
                 payload = _strict_json_loads(raw)
                 status = response.status
         except urllib.error.HTTPError as error:
+            if 300 <= error.code < 400:
+                error.close()
+                raise BridgeConnectionError from None
             try:
                 raw = error.read(MAX_BRIDGE_BODY_BYTES + 1)
                 if len(raw) > MAX_BRIDGE_BODY_BYTES:

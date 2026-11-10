@@ -63,6 +63,12 @@ root and provide it in the protected client configuration or pairing flow;
 `session_brief` then confirms that ID. Clients do not choose filesystem paths. Leave
 `DAEM0NMCP_STORAGE_PATH` unset when serving multiple registered workspaces.
 
+A workspace ID is an identifier, not a secret. It is a truncated SHA-256 of the
+canonical root path, so anyone who knows or guesses the path can compute it.
+"Opaque" means only that it is not a path and carries no meaning for clients.
+Access is decided by the authenticated principal and its grants, never by
+knowledge of the ID.
+
 For authenticated remote principals, set `DAEM0NMCP_WORKSPACE_ACCESS_FILE` to
 the server-managed grants file. If unset, the server uses
 `<managed-storage>/v7-workspace-access.json`. The file and its parent directory

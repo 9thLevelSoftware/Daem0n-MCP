@@ -63,6 +63,11 @@ protected bridge pairing. A remote client must not derive it from a filesystem
 path or enumerate roots. `session_brief(workspace_id="ws_<opaque>")` confirms
 the configured selection after connection.
 
+The ID is not a credential. It is a truncated SHA-256 of the canonical root
+path and can be computed by anyone who knows that path; do not rely on keeping
+it private. What protects a workspace is the authenticated principal and the
+grants file below.
+
 `DAEM0NMCP_SYNC_TIMEOUT_SECONDS` controls foreground work and accepts 1–60
 seconds, defaulting to 15. Calls which exceed their foreground admission limits
 need the durable-task capability. To enable it, install the `tasks` profile and
@@ -100,6 +105,10 @@ export DAEM0NMCP_TRUSTED_PROXY_IPS=127.0.0.1
 export DAEM0NMCP_WORKSPACE_ACCESS_FILE=/secure/daem0n/workspace-access.json
 python -m daem0nmcp.server --transport streamable-http --host 127.0.0.1 --port 8765
 ```
+
+`FASTMCP_SERVER_AUTH_JWT_JWKS_URI` must be an `https://` URL; plain `http://` is
+accepted only for a loopback host. Any other value stops startup with
+`INVALID_AUTH_CONFIGURATION`.
 
 The access file and its parent directory must be owner-only. Its exact JSON
 shape is `{"schema_version":1,"grants":{"oauth-sub:<subject>":["ws_<opaque>"]}}`.
@@ -577,8 +586,10 @@ and the desktop CA file must trust its issuer. Pairing pins the server authority
 Origin, CA path and bytes, workspace, and desktop directory identity. Editing
 project configuration cannot change that recipient; intentional changes require
 operator reprovisioning. A workspace grant in the server's access file is still
-required. The current bridge configuration provisions one credential identity
-per application server. See the [bridge implementation and verification
+required. The desktop client connects to that authority directly: it ignores
+`HTTPS_PROXY` and other proxy settings and treats any redirect as a failed
+call, so the bearer is never sent to another host. The current bridge
+configuration provisions one credential identity per application server. See the [bridge implementation and verification
 report](release/v7/p6-edit-capture.md) for enforcement boundaries.
 
 ## Durable-task lifecycle

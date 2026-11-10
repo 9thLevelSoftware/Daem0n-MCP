@@ -631,6 +631,20 @@ def _is_loopback_host(host: str) -> bool:
         return False
 
 
+def _is_protected_key_source(jwks_uri: str) -> bool:
+    """Signing keys fetched over plain HTTP let a network attacker mint tokens."""
+    try:
+        parsed = urlsplit(jwks_uri)
+        hostname = parsed.hostname
+        port = parsed.port  # raises ValueError when malformed
+    except ValueError:
+        return False
+    if not hostname or port == 0:
+        return False
+    scheme = parsed.scheme.lower()
+    return scheme == "https" or (scheme == "http" and _is_loopback_host(hostname))
+
+
 def get_auth_configuration(
     environ: Mapping[str, str] | None = None,
 ) -> AuthConfiguration | None:
@@ -655,6 +669,12 @@ def get_auth_configuration(
         raise TransportSecurityError(
             "INVALID_AUTH_CONFIGURATION",
             "JWTVerifier requires JWKS URI, issuer, and audience",
+        )
+    if not _is_protected_key_source(kwargs["jwks_uri"]):
+        raise TransportSecurityError(
+            "INVALID_AUTH_CONFIGURATION",
+            "the JWKS URI must use https; plain http is accepted only for a "
+            "loopback host",
         )
     return AuthConfiguration(provider=provider, kwargs=kwargs)
 
