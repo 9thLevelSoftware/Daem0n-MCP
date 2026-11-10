@@ -1331,9 +1331,9 @@ writer and recall service. The lexical mode requires no model downloads.
 Event times are fixed and the seed only shuffles the order of the writes: every
 seed reports the same metrics, so repeating a run with other seeds adds no
 evidence. Latency measurements are wall-clock and excluded from deterministic
-comparisons. The fixture uses an exclusively
-created deterministic temporary directory; concurrent identical runs fail
-closed rather than sharing storage.
+comparisons. Each run creates its own temporary directory and removes it when
+it ends, so concurrent runs never share storage and a directory left by a
+killed run does not block the next one.
 
 Reports expose all arm settings. Utility weight is **0.2 in the evaluation**
 (the product default stays 0.1). Retention distractors are same-category

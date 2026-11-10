@@ -7,7 +7,6 @@ import asyncio
 import json
 import math
 import random
-import shutil
 import sqlite3
 import tempfile
 from contextlib import closing
@@ -588,14 +587,14 @@ async def run_evaluation(
     symbols_available = bool(
         getattr(default_code_indexer_factory(), "available", False)
     )
-    # Stable registry-derived IDs also stabilize real provider score ties. An
-    # exclusive mkdir fails closed rather than touching any existing fixture.
-    temporary = (
-        Path(tempfile.gettempdir()) / f"daem0nmcp-coding-eval-{mode}-{topics}-{seed}"
-    )
-    temporary.mkdir()
-    try:
-        workspace, database = _workspace(temporary)
+    # A directory of its own per run: a leftover from a killed run cannot block
+    # the next one, and the context manager removes it on success, failure and
+    # interruption. Workspace and record IDs derive from this path and so
+    # differ per run; the fixture leaves no metric to a tie between records.
+    with tempfile.TemporaryDirectory(
+        prefix=f"daem0nmcp-coding-eval-{mode}-{topics}-{seed}-"
+    ) as scratch:
+        workspace, database = _workspace(Path(scratch))
         corpus = _corpus(workspace.root, topics, symbols_available)
         clock = _Clock()
         writer = SQLiteMemoryEventWriter(
@@ -632,7 +631,7 @@ async def run_evaluation(
                 "retention_stress_reason": "same-category background drafts prevent category-diversity rescue of actionable steps",
                 "utility_weight": _UTILITY_WEIGHT,
                 "arm_overrides": arms,
-                "workspace_identity": "exclusive_deterministic_scratch_registry",
+                "workspace_identity": "unique_scratch_directory_per_run",
             },
             "arms": {},
         }
@@ -666,8 +665,6 @@ async def run_evaluation(
                 corpus, record_ids, results, latencies, symbols_available
             )
         return report
-    finally:
-        shutil.rmtree(temporary)
 
 
 def _positive_topics(value: str) -> int:

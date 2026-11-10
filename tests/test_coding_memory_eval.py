@@ -9,6 +9,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest import mock
 
 from benchmarks.coding_memory_eval import (
     _Corpus,
@@ -188,13 +189,6 @@ class CodingMemoryEvaluationTests(unittest.TestCase):
                 )
                 self.assertTrue(math.isfinite(arm["latency_ms"]["p95"]))
 
-    def test_exclusively_owned_workspace_is_removed_after_runs(self):
-        scratch = (
-            Path(tempfile.gettempdir())
-            / "daem0nmcp-coding-eval-lexical_only-6-20261004"
-        )
-        self.assertFalse(scratch.exists())
-
 
 class CodingMemoryFixtureTests(unittest.TestCase):
     def _corpus(self, topics: int):
@@ -319,6 +313,39 @@ class CodingMemoryFixtureTests(unittest.TestCase):
                 f"[E2] procedure\ndeploy release rollout\n{steps}",
             ),
         )
+
+
+class CodingMemoryScratchDirectoryTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self) -> None:
+        scratch = tempfile.TemporaryDirectory()
+        self.addCleanup(scratch.cleanup)
+        self.scratch = Path(scratch.name)
+        patcher = mock.patch.object(tempfile, "tempdir", scratch.name)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    async def test_leftover_directory_of_a_killed_run_does_not_block_a_run(self):
+        leftover = self.scratch / "daem0nmcp-coding-eval-lexical_only-1-20261004"
+        (leftover / "workspace").mkdir(parents=True)
+
+        report = await run_evaluation(mode="lexical_only", topics=1, seed=20261004)
+
+        self.assertEqual(1, report["metadata"]["topics"])
+        self.assertEqual([leftover], list(self.scratch.iterdir()))
+        self.assertEqual([leftover / "workspace"], list(leftover.iterdir()))
+
+    async def test_scratch_directory_is_removed_on_failure_and_interruption(self):
+        for error in (RuntimeError("seed failed"), asyncio.CancelledError()):
+            with self.subTest(error=type(error).__name__):
+                with (
+                    mock.patch(
+                        "benchmarks.coding_memory_eval._seed", side_effect=error
+                    ) as seed,
+                    self.assertRaises(type(error)),
+                ):
+                    await run_evaluation(mode="lexical_only", topics=1, seed=1)
+                seed.assert_called_once()
+                self.assertEqual([], list(self.scratch.iterdir()))
 
 
 class CodingMemoryEvaluationInputTests(unittest.IsolatedAsyncioTestCase):
