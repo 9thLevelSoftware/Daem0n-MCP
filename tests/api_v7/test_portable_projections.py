@@ -2247,3 +2247,181 @@ async def test_retry_after_a_contended_finalize_releases_its_abandoned_lease(
     finally:
         connection.close()
     assert leases == 0
+
+
+def _default_local_config() -> SimpleNamespace:
+    """A local install as shipped: no Qdrant URL and no Qdrant path."""
+
+    config = _config()
+    config.qdrant_url = None
+    config.qdrant_api_key = None
+    config.qdrant_path = None
+    return config
+
+
+def _patched_document_encoder(config: SimpleNamespace):
+    def encoder(_config, purpose: str) -> ConfiguredEmbeddingEncoder:
+        selected = ConfiguredEmbeddingEncoder(
+            model_id=config.embedding_model,
+            dimension=config.embedding_dimension,
+            prefix=(
+                config.embedding_query_prefix
+                if purpose == "query"
+                else config.embedding_document_prefix
+            ),
+            backend=config.embedding_backend,
+        )
+        selected._model = SimpleNamespace(
+            encode=lambda texts, **_kwargs: [[0.1, 0.2, 0.3] for _ in texts]
+        )
+        return selected
+
+    return patch("daem0nmcp.retrieval.runtime._embedding_encoder", side_effect=encoder)
+
+
+async def test_default_local_install_transfers_vectors_beside_the_database(
+    tmp_path: Path,
+):
+    """Without a configured path the transfer client had no folder to open."""
+
+    source = _fixture(tmp_path / "source")
+    target = _fixture(tmp_path / "target")
+    source.append("vector source", occurred_at_us=100, recorded_at_us=200)
+    config = _default_local_config()
+    backends: dict[Path, _QdrantBackend] = {
+        source.database.parent / "qdrant": _QdrantBackend(),
+        target.database.parent / "qdrant": _QdrantBackend(),
+    }
+    _install_dense_source(source, backends[source.database.parent / "qdrant"], config)
+    opened: list[Path] = []
+
+    def local_client(**kwargs: object) -> _QdrantClient:
+        # Only the client constructor is replaced, so the real selection of a
+        # remote URL or a local folder still decides what is opened.
+        assert set(kwargs) == {"path"}
+        opened.append(Path(str(kwargs["path"])))
+        return _QdrantClient(backends[opened[-1]])
+
+    with (
+        patch(
+            "daem0nmcp.retrieval.providers._default_qdrant_client_factory",
+            side_effect=local_client,
+        ),
+        _patched_document_encoder(config),
+    ):
+        pages = await _all_pages(
+            build_core_operations(_dependencies(source, config))["workspace_export"],
+            source,
+            include_legacy_projection=False,
+            include_vectors=True,
+        )
+        assert any(page.page_kind == "vectors" for page in pages)
+        result = await _import_pages(
+            build_core_operations(_dependencies(target, config))["workspace_import"],
+            target,
+            pages,
+        )
+
+    assert result.diagnostics == []
+    assert set(opened) == set(backends)
+    assert opened[0] == source.database.parent / "qdrant"
+    imported = backends[target.database.parent / "qdrant"].collections
+    assert [len(points) for points in imported.values()] == [1]
+
+
+async def test_configured_qdrant_path_still_decides_the_transfer_folder(
+    tmp_path: Path,
+):
+    """The database-directory default must not override an explicit path."""
+
+    source = _fixture(tmp_path / "source")
+    source.append("vector source", occurred_at_us=100, recorded_at_us=200)
+    config = _default_local_config()
+    config.qdrant_path = tmp_path / "elsewhere" / "vectors"
+    backend = _QdrantBackend()
+    _install_dense_source(source, backend, config)
+    opened: list[Path] = []
+
+    def local_client(**kwargs: object) -> _QdrantClient:
+        opened.append(Path(str(kwargs["path"])))
+        return _QdrantClient(backend)
+
+    with (
+        patch(
+            "daem0nmcp.retrieval.providers._default_qdrant_client_factory",
+            side_effect=local_client,
+        ),
+        _patched_document_encoder(config),
+    ):
+        pages = await _all_pages(
+            build_core_operations(_dependencies(source, config))["workspace_export"],
+            source,
+            include_legacy_projection=False,
+            include_vectors=True,
+        )
+
+    assert any(page.page_kind == "vectors" for page in pages)
+    assert set(opened) == {tmp_path / "elsewhere" / "vectors"}
+
+
+async def test_default_local_install_round_trips_vectors_through_embedded_qdrant(
+    tmp_path: Path,
+):
+    """The same transfer against real embedded Qdrant, with nothing configured."""
+
+    qdrant = pytest.importorskip("qdrant_client")
+    source = _fixture(tmp_path / "source")
+    target = _fixture(tmp_path / "target")
+    source.append("vector source", occurred_at_us=100, recorded_at_us=200)
+    config = _default_local_config()
+    staged = _QdrantBackend()
+    _install_dense_source(source, staged, config)
+    ((collection_name, points),) = staged.collections.items()
+    client = qdrant.QdrantClient(path=str(source.database.parent / "qdrant"))
+    try:
+        client.create_collection(
+            collection_name=collection_name,
+            vectors_config=qdrant.models.VectorParams(
+                size=3, distance=qdrant.models.Distance.COSINE
+            ),
+        )
+        client.upsert(
+            collection_name=collection_name,
+            points=[qdrant.models.PointStruct(**point) for point in points],
+            wait=True,
+        )
+    finally:
+        client.close()
+
+    with _patched_document_encoder(config):
+        pages = await _all_pages(
+            build_core_operations(_dependencies(source, config))["workspace_export"],
+            source,
+            include_legacy_projection=False,
+            include_vectors=True,
+        )
+        assert any(page.page_kind == "vectors" for page in pages)
+        result = await _import_pages(
+            build_core_operations(_dependencies(target, config))["workspace_import"],
+            target,
+            pages,
+        )
+
+    assert result.diagnostics == []
+    connection = sqlite3.connect(target.database)
+    try:
+        details = json.loads(
+            connection.execute(
+                "SELECT details_json FROM projection_manifests WHERE workspace_id=? "
+                "AND projection_name='dense' AND status='active'",
+                (WORKSPACE_ID,),
+            ).fetchone()[0]
+        )
+    finally:
+        connection.close()
+    client = qdrant.QdrantClient(path=str(target.database.parent / "qdrant"))
+    try:
+        count = client.count(collection_name=details["collection_name"], exact=True)
+    finally:
+        client.close()
+    assert count.count == 1
