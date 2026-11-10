@@ -18,7 +18,8 @@ MAX_HOOK_INPUT_BYTES = 256 * 1024
 REINSTALL_NOTICE = (
     "Daem0n: these Claude Code hooks were installed by an older version whose "
     "launch command also imports from the project a session is opened in. "
-    "Run python -m daem0nmcp.cli install-claude-hooks once to rewrite them."
+    "Run python -m daem0nmcp.cli install-claude-hooks once, from a directory "
+    "you trust (not a project you only opened), to rewrite them."
 )
 
 

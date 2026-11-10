@@ -107,6 +107,10 @@ def _format_briefing(stats: dict) -> str:
 def main() -> None:
     project_path = get_project_path()
     if project_path is None:
+        if started_by_module_switch():
+            # The command is in the user's settings, so it runs in every
+            # project they open, not only in Daem0n ones.
+            succeed(json.dumps({"systemMessage": REINSTALL_NOTICE}))
         sys.exit(0)
     workspace_id = _workspace_id(project_path)
     message = (

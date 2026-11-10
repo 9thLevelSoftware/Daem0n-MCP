@@ -22,6 +22,7 @@ import pytest
 from daem0nmcp.claude_hooks.install import (
     _is_daem0n_entry,
     install_claude_hooks,
+    module_launch_args,
     uninstall_claude_hooks,
 )
 from daem0nmcp.hooks import PRE_COMMIT_HOOK
@@ -267,6 +268,18 @@ def test_reinstall_replaces_the_module_commands_older_versions_wrote(fake_settin
     assert _hook_commands(fake_settings) == commands
 
 
+def test_dry_run_reports_the_older_commands_it_would_replace(fake_settings):
+    fake_settings.parent.mkdir(parents=True)
+    older = json.dumps({"hooks": {"Stop": [_legacy_entry("stop")]}})
+    fake_settings.write_text(older, encoding="utf-8")
+
+    ok, message = install_claude_hooks(dry_run=True)
+
+    assert ok, message
+    assert "Would replace 1 older hook command " in message
+    assert fake_settings.read_text(encoding="utf-8") == older
+
+
 def test_first_install_does_not_claim_to_replace_anything(fake_settings):
     ok, message = install_claude_hooks()
 
@@ -304,10 +317,38 @@ def test_hook_started_by_an_older_command_asks_for_a_reinstall(tmp_path):
     assert result.returncode == 0, result.stderr
     output = json.loads(result.stdout)
     assert "python -m daem0nmcp.cli install-claude-hooks" in output["systemMessage"]
+    # Typed inside this project, that command would import from it as well.
+    assert "from a directory you trust" in output["systemMessage"]
     context = output["hookSpecificOutput"]
     assert context["hookEventName"] == "SessionStart"
     assert "[Daem0n] IMPORTANT" in context["additionalContext"]
     assert 'workspace_id="ws_' in context["additionalContext"]
+
+
+def test_older_command_asks_for_a_reinstall_outside_daem0n_projects_too(tmp_path):
+    """The settings are the user's: every project they open is exposed."""
+    project = tmp_path / "elsewhere"
+    project.mkdir()
+
+    result = _run(
+        [sys.executable, "-m", "daem0nmcp.claude_hooks.session_start"],
+        project,
+        tmp_path,
+    )
+
+    assert result.returncode == 0, result.stderr
+    output = json.loads(result.stdout)
+    assert list(output) == ["systemMessage"]
+    assert "install-claude-hooks" in output["systemMessage"]
+
+    current = _run(
+        [sys.executable, *module_launch_args("daem0nmcp.claude_hooks.session_start")],
+        project,
+        tmp_path,
+    )
+
+    assert current.returncode == 0, current.stderr
+    assert current.stdout == ""
 
 
 # ─── documented and generated server commands ──────────────────────

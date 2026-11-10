@@ -292,9 +292,17 @@ def install_claude_hooks(
 
     settings["hooks"] = hooks_section
 
+    replaced_note = (
+        f" {replaced} older hook command{'s' if replaced != 1 else ''}"
+        ' that ran "python -m", which also imports from the project a'
+        " session is opened in."
+    )
     if dry_run:
         formatted = json.dumps(settings, indent=2)
-        return True, f"[dry-run] Would write to {_settings_path()}:\n{formatted}"
+        message = f"[dry-run] Would write to {_settings_path()}:\n{formatted}"
+        if replaced:
+            message += f"\nWould replace{replaced_note}"
+        return True, message
 
     try:
         _write_settings(settings)
@@ -304,11 +312,7 @@ def install_claude_hooks(
     events = ", ".join(sorted(new_defs["hooks"]))
     message = f"Installed Daem0n hooks for: {events}\nSettings: {_settings_path()}"
     if replaced:
-        message += (
-            f"\nReplaced {replaced} older hook command{'s' if replaced != 1 else ''}"
-            ' that ran "python -m", which also imports from the project a'
-            " session is opened in."
-        )
+        message += f"\nReplaced{replaced_note}"
     if installation is not None:
         state = "created" if installation.created else "reused"
         message += (
