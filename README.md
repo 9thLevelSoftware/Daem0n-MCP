@@ -1154,6 +1154,9 @@ DAEM0NMCP_RETRIEVAL_UTILITY_CREDIT=trace
 discounted credit through explicit provenance. The default ranking weight is
 0.1. Set `DAEM0NMCP_RETRIEVAL_UTILITY_MODE=off` to disable computation. Failed
 decisions remain warnings rather than being demoted by their own failures.
+Utility only reorders candidates whose rank prior and fused score are within 5%
+of each other, so outcome history breaks near-ties and never outranks a clearly
+better match.
 
 ### Bind guidance to repository code
 

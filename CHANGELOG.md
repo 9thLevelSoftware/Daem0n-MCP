@@ -96,6 +96,13 @@
 - Lexical recall falls back to single-term matches when a query of three or more terms has no stricter match (ranked below other providers' hits), and control characters or terminal escape sequences in a query are separators instead of `INVALID_FTS_QUERY`.
 - Recall filters (categories, tags, record IDs) are applied inside the lexical candidate query instead of after an unfiltered top-N. A query with no searchable term plus such a filter lists the filtered records most recently changed first. Archived records no longer occupy lexical candidate slots or make `memory_search_text` fail.
 - The CI type check passes under pydantic 2.14, and three legacy test modules skip instead of failing collection when `sentence-transformers` is not installed.
+- Recall runs the dense provider alongside the temporal, procedure and outcome providers instead of awaiting every optional provider in turn, so a slow dense search no longer adds to their time.
+- Recall category diversity is bounded: a hit from a new category must rank within twice the limit, such hits take at most a third of the result slots, and results are returned in rank order instead of pick order.
+- Token budgets hold for text without word spaces: the core tokenizer counts each character of CJK, kana, Hangul, Thai and the other unsegmented scripts as a token instead of one token per unbroken run. Counts for other scripts are unchanged.
+- A path or symbol at the end of a sentence keeps its code-binding affinity during recall packing; the trailing full stop is no longer part of the identifier.
+- The pooled ONNX encoder identity covers only the graph, its external tensor files and the tokenizer files, taken after the tokenizer is in place. A first cold load no longer fails and unrelated downloads into the model snapshot no longer invalidate dense projections. Installs whose snapshot held other files rebuild dense once (`rebuild-projection --projection dense`).
+- Utility ranking reorders only candidates of near-equal relevance (rank prior and fused score within 5%), so outcome history can no longer lift a distant match over the best match or sink a strong match at any weight. In shadow mode the diagnostic can read `UTILITY_SHADOW_SAME` where it read `UTILITY_SHADOW_REORDER`.
+- Single-step utility credit is scaled only by the direct and first-hop outcomes that produced it, and utility evidence for all recall candidates is read in a bounded number of indexed set-based queries instead of several queries per candidate.
 
 ## [6.0.0] - 2026-01-29
 
