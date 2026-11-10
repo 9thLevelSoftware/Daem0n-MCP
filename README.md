@@ -803,6 +803,12 @@ Each project gets isolated storage at:
 
 All settings are configurable via environment variables with `DAEM0NMCP_` prefix.
 
+A `.env` file in the working directory is not read: the server is usually
+launched inside a project, so that file belongs to the repository, not to the
+operator. To keep settings in a file, set `DAEM0NMCP_ENV_FILE` to its absolute
+path in the server's environment. A relative path or a missing file is refused
+at startup, and real environment variables override values from the file.
+
 ### Core Settings
 
 | Variable | Default | Description |

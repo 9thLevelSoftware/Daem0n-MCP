@@ -6,17 +6,19 @@ Example: DAEM0NMCP_LOG_LEVEL=DEBUG
 """
 
 import math
+import os
 import re
 import shutil
 from collections.abc import Mapping
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from .workspace import resolve_derived_path
 
+ENV_FILE_VARIABLE = "DAEM0NMCP_ENV_FILE"
 _DEFAULT_EMBEDDING_BACKEND = "onnx"
 _RETRIEVAL_PROVIDERS = frozenset(
     {"lexical", "dense", "graph", "temporal", "procedure", "outcome"}
@@ -24,12 +26,37 @@ _RETRIEVAL_PROVIDERS = frozenset(
 _QDRANT_COLLECTION_PREFIX = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,31}$")
 
 
+def _operator_env_file() -> Path | None:
+    """Return the settings file the operator named, never one found by location.
+
+    The server is normally launched with the project as its working directory,
+    so a `.env` found there is repository-controlled input, not configuration.
+    """
+    configured = os.environ.get(ENV_FILE_VARIABLE, "")
+    if not configured:
+        return None
+    path = Path(configured)
+    if not path.is_absolute():
+        raise ValueError(
+            f"{ENV_FILE_VARIABLE} must be an absolute path; "
+            f"a relative path would be resolved against the working directory"
+        )
+    if not path.is_file():
+        raise ValueError(f"{ENV_FILE_VARIABLE} does not name a file: {configured}")
+    return path
+
+
 class Settings(BaseSettings):
     """Daem0nMCP configuration settings."""
 
     model_config = SettingsConfigDict(
-        env_prefix="DAEM0NMCP_", env_file=".env", env_file_encoding="utf-8"
+        env_prefix="DAEM0NMCP_", env_file=None, env_file_encoding="utf-8"
     )
+
+    def __init__(self, **values: Any) -> None:
+        if "_env_file" not in values:
+            values["_env_file"] = _operator_env_file()
+        super().__init__(**values)
 
     # Core paths
     project_root: str = "."
