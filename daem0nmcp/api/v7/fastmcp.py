@@ -523,13 +523,17 @@ def _covenant_task_refusal(envelope: Mapping[str, Any]) -> Exception:
     from mcp.types import INVALID_PARAMS, ErrorData
 
     error = envelope["error"]
+    if error.get("remedy"):
+        message = (
+            "The covenant refused this task. error.data.error is the tool's "
+            "own answer: follow its remedy, then send the task again."
+        )
+    else:
+        message = f"The covenant refused this task: {error['message']}"
     return McpError(
         ErrorData(
             code=INVALID_PARAMS,
-            message=(
-                "The covenant refused this task. error.data.error is the tool's "
-                "own answer: follow its remedy, then send the task again."
-            ),
+            message=message,
             data={
                 "code": error["code"],
                 "error": error,
@@ -559,7 +563,16 @@ _TASK_REFUSALS: Mapping[str, tuple[str, str]] = {
     "COMMUNION_REQUIRED": (
         "COMMUNION_REQUIRED",
         "A renewed workspace briefing is required for this task; call "
-        "session_brief for its workspace, then retry.",
+        "session_brief for the workspace the task belongs to, then retry.",
+    ),
+    "COUNSEL_REQUIRED": (
+        "COUNSEL_REQUIRED",
+        "The covenant requires counsel for this task; obtain a token for "
+        "these exact arguments with memory_preflight, then retry.",
+    ),
+    "IDENTITY_UNAVAILABLE": (
+        "IDENTITY_UNAVAILABLE",
+        "This session's identity is not established for the task's workspace.",
     ),
     "TASK_NOT_FOUND": ("TASK_NOT_FOUND", "Task not found."),
     "UNAUTHORIZED_WORKSPACE": ("TASK_NOT_FOUND", "Task not found."),
@@ -580,9 +593,19 @@ _TASK_REFUSALS: Mapping[str, tuple[str, str]] = {
         "Task capacity is unavailable; retry later.",
     ),
     "TASKS_UNAVAILABLE": ("TASKS_UNAVAILABLE", "Task execution is unavailable."),
+    "CAPABILITY_DEGRADED": (
+        "CAPABILITY_DEGRADED",
+        "Covenant admission capacity is unavailable; retry later.",
+    ),
 }
+_TASK_TOKEN_REFUSAL = (
+    "The preflight token was refused for this task; obtain a new one for "
+    "these exact arguments with memory_preflight, then retry."
+)
 # Conditions of the server, not of the request: the protocol's internal error.
-_TASK_SERVER_CONDITIONS = frozenset({"TASK_QUEUE_FULL", "TASKS_UNAVAILABLE"})
+_TASK_SERVER_CONDITIONS = frozenset(
+    {"TASK_QUEUE_FULL", "TASKS_UNAVAILABLE", "CAPABILITY_DEGRADED"}
+)
 
 
 def _task_protocol_error(exc: Exception) -> Exception:
@@ -597,7 +620,10 @@ def _task_protocol_error(exc: Exception) -> Exception:
     from mcp import McpError
     from mcp.types import INTERNAL_ERROR, INVALID_PARAMS, METHOD_NOT_FOUND, ErrorData
 
-    refusal = _TASK_REFUSALS.get(getattr(exc, "code", "TASKS_UNAVAILABLE"))
+    raised = getattr(exc, "code", "TASKS_UNAVAILABLE")
+    refusal = _TASK_REFUSALS.get(raised)
+    if refusal is None and raised.startswith("TOKEN_"):
+        refusal = (raised, _TASK_TOKEN_REFUSAL)
     if refusal is None:
         return McpError(
             ErrorData(
@@ -611,7 +637,7 @@ def _task_protocol_error(exc: Exception) -> Exception:
         code = METHOD_NOT_FOUND
     elif reported in _TASK_SERVER_CONDITIONS:
         code = INTERNAL_ERROR
-        data["retryable"] = reported == "TASK_QUEUE_FULL"
+        data["retryable"] = reported != "TASKS_UNAVAILABLE"
     else:
         code = INVALID_PARAMS
     return McpError(ErrorData(code=code, message=message, data=data))
