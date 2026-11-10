@@ -15,7 +15,11 @@ import pytest
 from daem0nmcp.database import DatabaseManager
 from daem0nmcp.event_store import EventCommand, EventStore
 from daem0nmcp.memory import MemoryManager
-from daem0nmcp.migrations.v7 import MigrationV7Error, MigrationV7Service
+from daem0nmcp.migrations.v7 import (
+    MigrationInterrupted,
+    MigrationV7Error,
+    MigrationV7Service,
+)
 from daem0nmcp.storage_activation import resolve_active_database
 from daem0nmcp.workspace import WorkspaceRegistry
 from tests.test_v7_schema_upgrade import (
@@ -246,6 +250,88 @@ def test_recovery_refuses_what_it_cannot_prove(tmp_path: Path):
     assert not (legacy_storage / "active-db.json").exists()
 
 
+def test_a_store_migrated_from_v6_that_lost_its_pointer_is_not_run_as_v6(
+    tmp_path: Path,
+):
+    """There the pointer named a candidate and the default file is the v6 source."""
+
+    from tests.test_migrate_v7_end_to_end import _registry, _v6_database
+
+    storage = _v6_database(tmp_path)
+    source = storage / "daem0nmcp.db"
+    registry = _registry(tmp_path)
+    service = MigrationV7Service(registry)
+    migrated = service.apply(tmp_path)
+    candidate = resolve_active_database(storage)
+    assert candidate.relative_path == (
+        f"migrations/v7/{migrated.migration_run_id}/candidate.db"
+    )
+    source_bytes = source.read_bytes()
+    candidate_bytes = candidate.path.read_bytes()
+    runs = sorted(path.name for path in (storage / "migrations" / "v7").iterdir())
+    _lose_the_pointer(storage)
+
+    with pytest.raises(RuntimeError) as start:
+        _remember(storage, "would land in the retained v6 source")
+    assert getattr(start.value, "code", None) == "ACTIVE_POINTER_MISSING"
+    assert candidate.relative_path in str(start.value)
+    assert "from a backup" in str(start.value)
+    assert str(tmp_path) not in str(start.value)
+
+    for attempt in (
+        lambda: service.dry_run(tmp_path),
+        lambda: service.apply(tmp_path),
+        lambda: service.rollback(tmp_path),
+    ):
+        with pytest.raises(MigrationV7Error) as refused:
+            attempt()
+        assert refused.value.code == "ACTIVE_POINTER_MISSING"
+        assert candidate.relative_path in str(refused.value)
+    with pytest.raises(MigrationV7Error) as recovery:
+        service.recover_pointer(tmp_path)
+    assert recovery.value.code == "POINTER_RECOVERY_AMBIGUOUS"
+    assert candidate.relative_path in str(recovery.value)
+
+    assert source.read_bytes() == source_bytes
+    assert candidate.path.read_bytes() == candidate_bytes
+    assert runs == sorted(
+        path.name for path in (storage / "migrations" / "v7").iterdir()
+    )
+    assert not (storage / "active-db.json").exists()
+
+
+def test_a_v6_store_whose_migration_was_rolled_back_or_never_activated_still_opens(
+    tmp_path: Path,
+):
+    """Only a candidate still recorded as active stands for a lost pointer."""
+
+    from tests.test_migrate_v7_end_to_end import _registry, _v6_database
+
+    rolled_root = tmp_path / "rolled"
+    rolled_storage = _v6_database(rolled_root)
+    service = MigrationV7Service(_registry(rolled_root))
+    service.apply(rolled_root)
+    assert service.rollback(rolled_root).status == "rolled_back"
+    _lose_the_pointer(rolled_storage)
+    assert _start_manager(rolled_storage) == (6, 0)
+
+    stopped_root = tmp_path / "stopped"
+    stopped_storage = _v6_database(stopped_root)
+
+    def interrupt(stage: str, _details: dict[str, object]) -> None:
+        if stage == "before_pointer":
+            raise MigrationInterrupted(stage)
+
+    with pytest.raises(MigrationInterrupted):
+        MigrationV7Service(_registry(stopped_root), fault_injector=interrupt).apply(
+            stopped_root
+        )
+    assert not (stopped_storage / "active-db.json").exists()
+    resumed = MigrationV7Service(_registry(stopped_root)).apply(stopped_root)
+    assert resumed.status == "activated"
+    assert _start_manager(stopped_storage) == (7, 1)
+
+
 def _cli(root: Path, *arguments: str) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         [
@@ -270,10 +356,14 @@ def test_actual_cli_names_and_performs_the_pointer_recovery(tmp_path: Path):
     _append_event(database, registry.default.workspace_id, "1")
     published = _lose_the_pointer(storage)
 
-    status = _cli(tmp_path, "status")
-    assert status.returncode == 1, status.stdout + status.stderr
-    assert "ACTIVE_POINTER_MISSING" in status.stdout + status.stderr
-    assert RECOVERY_COMMAND in status.stdout + status.stderr
+    for command in ("status", "briefing", "migrate"):
+        refusal = _cli(tmp_path, command)
+        assert refusal.returncode == 1, refusal.stdout + refusal.stderr
+        message = json.loads(refusal.stdout)["error"]
+        assert message.startswith("ACTIVE_POINTER_MISSING")
+        assert RECOVERY_COMMAND in message
+        assert "Traceback" not in refusal.stderr
+        assert str(tmp_path) not in refusal.stdout
 
     refused = _cli(tmp_path, "migrate-v7", "--apply")
     assert refused.returncode == 1, refused.stdout + refused.stderr

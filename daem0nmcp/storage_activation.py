@@ -324,6 +324,59 @@ ACTIVE_POINTER_MISSING_DETAIL = (
 )
 
 
+def active_candidate_without_pointer(storage: Path) -> str | None:
+    """The migration candidate a pointerless store still records as active.
+
+    A store migrated from format 6 keeps that file as ``daem0nmcp.db`` and runs
+    on a candidate only the pointer names.  With the pointer lost the retained
+    format-6 file would be opened and written instead, so a candidate whose own
+    run is still ``active`` is reported by its storage-relative name.  Links
+    are skipped: no pointer can have named one.
+    """
+
+    root = storage / "migrations" / "v7"
+    try:
+        if (storage / "migrations").is_symlink() or root.is_symlink():
+            return None
+        run_dirs = sorted(root.iterdir(), key=lambda path: path.name)
+    except OSError:
+        return None
+    for run_dir in run_dirs:
+        name = run_dir.name
+        candidate = run_dir / "candidate.db"
+        if (
+            not _valid_prefixed_hash(name, "mig")
+            or run_dir.is_symlink()
+            or candidate.is_symlink()
+            or not candidate.is_file()
+        ):
+            continue
+        try:
+            connection = sqlite3.connect(candidate)
+            try:
+                row = connection.execute(
+                    "SELECT status FROM v7_migration_runs WHERE migration_run_id=?",
+                    (name,),
+                ).fetchone()
+            finally:
+                connection.close()
+        except (OSError, sqlite3.Error):
+            continue
+        if row is not None and row[0] == "active":
+            return f"migrations/v7/{name}/candidate.db"
+    return None
+
+
+def active_candidate_pointer_missing_detail(candidate: str) -> str:
+    """Operator text for a store whose lost pointer named ``candidate``."""
+
+    return (
+        f"{POINTER_NAME} is missing and {candidate} is still recorded as the "
+        f"active format-7 database, so {DEFAULT_DATABASE_NAME}, its retained "
+        f"predecessor, is not opened. Restore {POINTER_NAME} from a backup"
+    )
+
+
 def _fsync_directory(path: Path) -> None:
     """Persist a directory entry where the platform exposes directory handles."""
 

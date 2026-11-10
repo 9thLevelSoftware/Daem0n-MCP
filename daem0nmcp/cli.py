@@ -1033,9 +1033,20 @@ def main():
     from .database import DatabaseManager
     from .memory import MemoryManager
     from .rules import RulesEngine
+    from .storage_activation import ACTIVE_POINTER_MISSING_CODE
 
     storage_path = active_settings.get_storage_path()
-    db = DatabaseManager(storage_path)
+    try:
+        db = DatabaseManager(storage_path)
+    except RuntimeError as exc:
+        if getattr(exc, "code", None) != ACTIVE_POINTER_MISSING_CODE:
+            raise
+        # The refusal is the operator's instruction, not a crash.
+        if args.json:
+            print(json.dumps({"error": str(exc)}))
+        else:
+            print(f"ERROR: {exc}", file=sys.stderr)
+        sys.exit(1)
     memory = MemoryManager(db)
     rules = RulesEngine(db)
 

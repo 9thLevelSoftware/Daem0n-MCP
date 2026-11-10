@@ -45,6 +45,8 @@ from ..storage_activation import (
     ActiveDatabasePointer,
     DatabaseFileLock,
     PointerValidationError,
+    active_candidate_pointer_missing_detail,
+    active_candidate_without_pointer,
     has_canonical_v7_state,
     resolve_active_database,
     validate_pointer,
@@ -1651,17 +1653,28 @@ class MigrationV7Service:
         )
 
     @staticmethod
-    def _require_pointer_for_v7_state(resolved) -> None:
-        """Refuse to treat a format-7 database that lost its pointer as v6.
+    def _require_pointer_for_v7_state(storage: Path, resolved) -> None:
+        """Refuse to treat a format-7 store that lost its pointer as v6.
 
         Without a pointer the store resolves as format 6, and migrating it
         would import its retained v6 tables into a new candidate and leave
-        every record that exists only in the event log behind.
+        every record that exists only in the event log behind.  The same holds
+        when the pointer named a migration candidate: the default database is
+        then that candidate's retained source, and migrating it again would
+        abandon the candidate holding every later write.
         """
 
-        if resolved.pointer is None and has_canonical_v7_state(resolved.path):
+        if resolved.pointer is not None:
+            return
+        if has_canonical_v7_state(resolved.path):
             raise MigrationV7Error(
                 ACTIVE_POINTER_MISSING_CODE, ACTIVE_POINTER_MISSING_DETAIL
+            )
+        candidate = active_candidate_without_pointer(storage)
+        if candidate is not None:
+            raise MigrationV7Error(
+                ACTIVE_POINTER_MISSING_CODE,
+                active_candidate_pointer_missing_detail(candidate),
             )
 
     def recover_pointer(
@@ -1685,6 +1698,13 @@ class MigrationV7Service:
                     "active-db.json is present; there is nothing to recover",
                 )
             if not has_canonical_v7_state(resolved.path):
+                active_candidate = active_candidate_without_pointer(storage)
+                if active_candidate is not None:
+                    raise MigrationV7Error(
+                        "POINTER_RECOVERY_AMBIGUOUS",
+                        f"the lost pointer named {active_candidate}, which was "
+                        "not rolled back; restore active-db.json from a backup",
+                    )
                 raise MigrationV7Error(
                     "POINTER_RECOVERY_UNAVAILABLE",
                     f"{DEFAULT_DATABASE_NAME} holds no format-7 state; a "
@@ -1731,7 +1751,7 @@ class MigrationV7Service:
         workspace, storage = self._storage(selector)
         with DatabaseFileLock(storage, "shared"):
             resolved = resolve_active_database(storage)
-            self._require_pointer_for_v7_state(resolved)
+            self._require_pointer_for_v7_state(storage, resolved)
             if resolved.format_version == TARGET_FORMAT_VERSION:
                 from .v7_schema_upgrade import V7SchemaUpgradeService
 
@@ -1790,7 +1810,7 @@ class MigrationV7Service:
         workspace, storage = self._storage(selector)
         with DatabaseFileLock(storage, "exclusive"):
             resolved = resolve_active_database(storage)
-            self._require_pointer_for_v7_state(resolved)
+            self._require_pointer_for_v7_state(storage, resolved)
             if resolved.format_version == TARGET_FORMAT_VERSION:
                 from .v7_schema_upgrade import V7SchemaUpgradeService
 
@@ -3614,7 +3634,7 @@ class MigrationV7Service:
         workspace, storage = self._storage(selector)
         with DatabaseFileLock(storage, "exclusive"):
             resolved = resolve_active_database(storage)
-            self._require_pointer_for_v7_state(resolved)
+            self._require_pointer_for_v7_state(storage, resolved)
             requested = (
                 None if migration_run_id in (None, "latest") else migration_run_id
             )

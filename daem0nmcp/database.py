@@ -27,6 +27,8 @@ from .storage_activation import (
     LOCK_NAME,
     ActiveDatabasePointer,
     DatabaseFileLock,
+    active_candidate_pointer_missing_detail,
+    active_candidate_without_pointer,
     has_canonical_v7_state,
     resolve_active_database,
     write_active_pointer,
@@ -64,8 +66,8 @@ class ActivePointerMissingError(RuntimeError):
 
     code = ACTIVE_POINTER_MISSING_CODE
 
-    def __init__(self) -> None:
-        super().__init__(f"{self.code}: {ACTIVE_POINTER_MISSING_DETAIL}")
+    def __init__(self, detail: str = ACTIVE_POINTER_MISSING_DETAIL) -> None:
+        super().__init__(f"{self.code}: {detail}")
 
 
 class DatabaseManager:
@@ -141,12 +143,19 @@ class DatabaseManager:
                 # write bypasses the event log.  Format-7 state in it means
                 # the pointer was lost, unless the database is a brand-new one
                 # whose creation stopped before publishing it.
-                if (
-                    self._active_database.pointer is None
-                    and has_canonical_v7_state(self.db_path)
-                    and not self._is_unpublished_fresh_database()
-                ):
-                    raise ActivePointerMissingError()
+                if self._active_database.pointer is None:
+                    if has_canonical_v7_state(self.db_path):
+                        if not self._is_unpublished_fresh_database():
+                            raise ActivePointerMissingError()
+                    else:
+                        # A store migrated from format 6 runs on a candidate
+                        # only the pointer names; this file is its retained
+                        # source and must not take the writes instead.
+                        candidate = active_candidate_without_pointer(self.storage_path)
+                        if candidate is not None:
+                            raise ActivePointerMissingError(
+                                active_candidate_pointer_missing_detail(candidate)
+                            )
         except Exception:
             self._database_lock.release()
             raise
