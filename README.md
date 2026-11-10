@@ -632,6 +632,11 @@ If the response is `COUNSEL_REQUIRED`, review `error.counsel`, then call
 includes its pre-minted token. `memory_preflight` remains available for advance
 planning and is required in strict mode. Keep the idempotency key on retries.
 
+Every failed call, `COUNSEL_REQUIRED` included, is an `ok: false` envelope and
+sets the MCP result's `isError: true`. The envelope is still delivered in full,
+as `structuredContent` and as JSON text; a client library that raises on
+`isError` must be told to return the result instead so the remedy can be read.
+
 ### Track Outcomes
 
 ```text

@@ -162,7 +162,12 @@ class V7CompositionTests(unittest.TestCase):
             distribution_version="3.4.7",
         )
         self.assertIsNot(first, second)
-        self.assertEqual(len(first.middlewares), 1)
+        # The surface's invocation middleware, then the adapter's own layer
+        # that makes isError mirror the envelope.
+        self.assertEqual(
+            [type(item).__name__ for item in first.middlewares],
+            ["V7InvocationMiddleware", "EnvelopeErrorMiddleware"],
+        )
         self.assertEqual(len(first.tools), 77)
         self.assertEqual(len(first.resources), 10)
 

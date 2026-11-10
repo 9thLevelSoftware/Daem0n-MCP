@@ -146,6 +146,37 @@ class ListedToolsMiddleware(_MiddlewareBase):
         return [tool for tool in await call_next(context) if tool.name in self._listed]
 
 
+class EnvelopeErrorMiddleware(_MiddlewareBase):
+    """Make the protocol's ``isError`` flag mirror the envelope's ``ok``.
+
+    Handlers report failures as ordinary ``ok: false`` envelopes.  The content
+    and structured content are passed through untouched so a client can still
+    read ``error.counsel`` and ``error.remedy``; only the flag changes.
+    """
+
+    def __init__(self) -> None:
+        if FASTMCP_MIDDLEWARE_AVAILABLE:
+            super().__init__()
+
+    async def on_call_tool(self, context: Any, call_next: Callable[[Any], Any]) -> Any:
+        result = await _resolve_awaitable(call_next(context))
+        structured = getattr(result, "structured_content", None)
+        if (
+            not isinstance(structured, dict)
+            or structured.get("ok") is not False
+            or getattr(result, "is_error", False)
+        ):
+            return result
+        from fastmcp.tools import ToolResult
+
+        return ToolResult(
+            content=getattr(result, "content", None),
+            structured_content=structured,
+            meta=getattr(result, "meta", None),
+            is_error=True,
+        )
+
+
 class V7InvocationMiddleware(_MiddlewareBase):
     """Install a transport-authenticated scope around v7 tools and resources."""
 
@@ -530,6 +561,7 @@ class ResourceCommunionAuthorizer:
 
 
 __all__ = [
+    "EnvelopeErrorMiddleware",
     "FASTMCP_MIDDLEWARE_AVAILABLE",
     "ListedToolsMiddleware",
     "RESOURCE_SUFFIXES",

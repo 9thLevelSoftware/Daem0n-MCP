@@ -305,9 +305,13 @@ async def process_client(
 
 async def call(session: ClientSession, tool: str, arguments: dict) -> dict:
     result = await session.call_tool(tool, arguments)
-    assert not result.isError, f"{tool}: MCP protocol error"
     assert isinstance(result.structuredContent, dict), (
-        f"{tool}: missing structured response"
+        f"{tool}: MCP protocol error or missing structured response"
+    )
+    # A failed envelope is flagged as a tool execution error and still carries
+    # the whole envelope; a protocol error has no structured content at all.
+    assert result.isError is (result.structuredContent.get("ok") is False), (
+        f"{tool}: isError does not mirror the envelope"
     )
     return result.structuredContent
 

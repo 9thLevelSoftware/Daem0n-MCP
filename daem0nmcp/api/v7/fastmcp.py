@@ -22,7 +22,11 @@ from .gateway_operations import (
     _ToolArgumentValidationError,
     bind_gateway_handlers,
 )
-from .middleware import ListedToolsMiddleware, V7InvocationMiddleware
+from .middleware import (
+    EnvelopeErrorMiddleware,
+    ListedToolsMiddleware,
+    V7InvocationMiddleware,
+)
 from .registry import ToolSpec, V7Manifest
 from .responses import ResponseFactory
 from .task_dispatcher import DurableTaskDispatcher, TaskDispatcherError, TaskView
@@ -641,6 +645,9 @@ def build_fastmcp_server(
     )
     for item in middleware:
         server.add_middleware(item)
+    # Innermost of the tool chain, so every layer above it, and the client,
+    # sees ``isError`` exactly when the envelope says ``ok: false``.
+    server.add_middleware(EnvelopeErrorMiddleware())
     if listed_tools is not None:
         server.add_middleware(ListedToolsMiddleware(listed_tools))
 

@@ -478,6 +478,49 @@ class RemoteInvocationMiddlewareTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(workspace_resolver_var.get())
 
 
+class EnvelopeErrorMiddlewareTests(unittest.IsolatedAsyncioTestCase):
+    async def _through(self, result: object) -> object:
+        from daem0nmcp.api.v7.middleware import EnvelopeErrorMiddleware
+
+        async def downstream(_context: object) -> object:
+            return result
+
+        return await EnvelopeErrorMiddleware().on_call_tool(
+            SimpleNamespace(), downstream
+        )
+
+    async def test_failed_envelope_is_flagged_without_changing_its_payload(
+        self,
+    ) -> None:
+        from fastmcp.tools import ToolResult
+
+        envelope = {"api_version": "7", "ok": False, "error": {"code": "X"}}
+        original = ToolResult(structured_content=envelope, meta={"trace": "t"})
+        self.assertFalse(original.is_error)
+
+        flagged = await self._through(original)
+
+        self.assertTrue(flagged.is_error)
+        self.assertEqual(flagged.structured_content, envelope)
+        self.assertEqual(flagged.content, original.content)
+        self.assertEqual(flagged.meta, {"trace": "t"})
+        wire = flagged.to_mcp_result()
+        self.assertTrue(wire.isError)
+        self.assertEqual(wire.structuredContent, envelope)
+
+    async def test_successes_and_non_envelopes_pass_through_untouched(self) -> None:
+        from fastmcp.tools import ToolResult
+
+        for result in (
+            ToolResult(structured_content={"api_version": "7", "ok": True}),
+            ToolResult(structured_content={"value": 1}),
+            ToolResult(content="plain text"),
+            ToolResult(structured_content={"ok": False}, is_error=True),
+        ):
+            with self.subTest(result=result):
+                self.assertIs(await self._through(result), result)
+
+
 class ResourceInvocationMiddlewareTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
         from daem0nmcp.api.v7.middleware import V7InvocationMiddleware
