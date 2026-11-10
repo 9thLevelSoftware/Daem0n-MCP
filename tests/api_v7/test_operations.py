@@ -309,6 +309,121 @@ class CoreOperationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.version_id, result.evidence_refs[0].version_id)
         self.assertEqual("temporal", result.evidence_refs[0].provider)
 
+    async def test_versions_follow_recorded_order_when_occurrence_runs_backwards(
+        self,
+    ) -> None:
+        """Requiring rising occurrence times made such a record unlistable."""
+        base = 1_700_000_000_000_000
+        occurrences = (base + 10, base + 20, base + 20, base + 5, base + 30)
+        events = [
+            self.fixture.append(
+                f"decision {index}",
+                occurred_at_us=occurred,
+                recorded_at_us=base + 1_000 + index,
+            )
+            for index, occurred in enumerate(occurrences)
+        ]
+        operation = self._operations()["memory_versions_list"]
+
+        async def page(**arguments: object):
+            return await operation(
+                workspace=self.fixture.workspace,
+                request=_request(
+                    "memory_versions_list",
+                    workspace_id=WORKSPACE_ID,
+                    record_id="mem_" + "a" * 64,
+                    **arguments,
+                ),
+            )
+
+        whole = await page()
+        paged = []
+        cursor = None
+        while True:
+            one = await page(limit=1, cursor=cursor)
+            paged.extend(one.items)
+            if not one.truncated:
+                break
+            cursor = one.next_cursor
+
+        def instant(offset: int) -> datetime:
+            return datetime.fromtimestamp(base / 1_000_000, tz=timezone.utc).replace(
+                microsecond=offset
+            )
+
+        self.assertEqual(events, [item.event_id for item in whole.items])
+        self.assertEqual(whole.items, paged)
+        self.assertEqual(
+            [instant(10), instant(20), instant(20), instant(5), instant(30)],
+            [item.valid_from for item in whole.items],
+        )
+        # The fourth event reaches back before the first three, so none of
+        # them stays valid; it holds from its own time until the fifth.
+        self.assertEqual(
+            [instant(10), instant(20), instant(20), instant(30), None],
+            [item.valid_to for item in whole.items],
+        )
+        self.assertEqual(
+            ["superseded"] * 4 + ["current"],
+            [item.record.current_status for item in whole.items],
+        )
+        self.assertEqual(
+            sorted(item.transaction_time for item in whole.items),
+            [item.transaction_time for item in whole.items],
+        )
+
+    async def test_at_time_returns_the_last_recorded_version_that_had_occurred(
+        self,
+    ) -> None:
+        """Picking the latest occurrence dropped what was recorded after it."""
+        base = 1_700_000_000_000_000
+        self.fixture.append(
+            "stored", occurred_at_us=base + 20, recorded_at_us=base + 1_000
+        )
+        backdated = self.fixture.append(
+            "stored, then given a backdated outcome",
+            occurred_at_us=base + 5,
+            recorded_at_us=base + 2_000,
+        )
+        operation = self._operations()["memory_at_time_get"]
+
+        async def excerpt(valid_us: int, transaction_us: int | None = None) -> str:
+            arguments: dict[str, object] = {
+                "valid_time": datetime.fromtimestamp(
+                    base / 1_000_000, tz=timezone.utc
+                ).replace(microsecond=valid_us)
+            }
+            if transaction_us is not None:
+                arguments["transaction_time"] = datetime.fromtimestamp(
+                    base / 1_000_000, tz=timezone.utc
+                ).replace(microsecond=transaction_us)
+            result = await operation(
+                workspace=self.fixture.workspace,
+                request=_request(
+                    "memory_at_time_get",
+                    workspace_id=WORKSPACE_ID,
+                    record_id="mem_" + "a" * 64,
+                    **arguments,
+                ),
+            )
+            if result.record.excerpt != "stored":
+                self.assertEqual(backdated, result.evidence_refs[0].event_id)
+            return result.record.excerpt
+
+        latest = "stored, then given a backdated outcome"
+        self.assertEqual(latest, await excerpt(50))
+        self.assertEqual(latest, await excerpt(20))
+        self.assertEqual(latest, await excerpt(10))
+        # Both time axes still filter: before the outcome was recorded only
+        # the stored version was known, and before either occurred, nothing.
+        self.assertEqual("stored", await excerpt(50, 1_500))
+        with self.assertRaises(Exception) as caught:
+            await excerpt(10, 1_500)
+        self.assertEqual("NOT_FOUND", caught.exception.code)
+        with self.assertRaises(Exception) as caught:
+            await excerpt(1)
+        self.assertEqual("NOT_FOUND", caught.exception.code)
+
     async def test_tampered_event_history_fails_closed(self) -> None:
         self.fixture.append(
             "trusted",

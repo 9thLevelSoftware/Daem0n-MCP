@@ -746,6 +746,43 @@ def _first_occurred_at(
     return row[0]
 
 
+def _earliest_later_occurrence(
+    connection: sqlite3.Connection,
+    workspace_id: str,
+    record_id: str,
+    selected: Sequence[Mapping[str, Any]],
+) -> dict[int, int | None]:
+    """Map each listed version to the earliest occurrence recorded after it.
+
+    Every event carries the whole record, so a version stops being valid at
+    the earliest occurrence time among the events appended after it, however
+    many versions later that event is.
+    """
+
+    if not selected:
+        return {}
+    first_version = int(selected[0]["stream_version"])
+    rows = connection.execute(
+        "SELECT stream_version,occurred_at_us FROM memory_events "
+        "WHERE workspace_id=? AND stream_id=? AND stream_kind='memory' "
+        "AND stream_version>? ORDER BY stream_version DESC",
+        (workspace_id, record_id, first_version),
+    ).fetchall()
+    earliest: dict[int, int | None] = {}
+    running: int | None = None
+    expected_version = first_version + len(rows)
+    for version, occurred_at_us in rows:
+        if type(version) is not int or type(occurred_at_us) is not int:
+            raise CoreOperationError("IMPORT_INVALID")
+        if version != expected_version:
+            raise CoreOperationError("IMPORT_INVALID")
+        earliest[version] = running
+        running = occurred_at_us if running is None else min(running, occurred_at_us)
+        expected_version -= 1
+    earliest[first_version] = running
+    return earliest
+
+
 def _versions_sync(
     dependencies: CoreOperationDependencies,
     workspace: Workspace,
@@ -792,14 +829,23 @@ def _versions_sync(
             expected_version += 1
         truncated = len(events) > request.limit
         selected = events[: request.limit]
+        later_occurred = _earliest_later_occurrence(
+            connection, workspace.workspace_id, request.record_id, selected
+        )
         items: list[MemoryVersionView] = []
         for index, event in enumerate(selected):
             next_event = events[index + 1] if index + 1 < len(events) else None
             valid_to = None
-            if next_event is not None:
-                if next_event["occurred_at_us"] <= event["occurred_at_us"]:
-                    raise CoreOperationError("IMPORT_INVALID")
-                valid_to = _utc_from_us(next_event["occurred_at_us"])
+            superseded_from = later_occurred[int(event["stream_version"])]
+            if superseded_from is not None:
+                # Versions are listed in the order they were recorded, and a
+                # later one may carry an earlier occurrence time (a backdated
+                # outcome, or a record first stored with a future time).  It
+                # then replaces this version from before it began, which
+                # leaves this version an empty validity interval.
+                valid_to = _utc_from_us(
+                    max(superseded_from, int(event["occurred_at_us"]))
+                )
             items.append(
                 MemoryVersionView(
                     version_id=_version_id(event),
@@ -850,7 +896,11 @@ def _at_time_sync(
             f"SELECT {_EVENT_COLUMNS} FROM memory_events "
             "WHERE workspace_id=? AND stream_id=? AND stream_kind='memory' "
             "AND occurred_at_us<=? AND recorded_at_us<=? "
-            "ORDER BY occurred_at_us DESC,stream_version DESC LIMIT 1",
+            # Among the versions that had occurred and were known by then,
+            # the one recorded last is the state: every event carries the
+            # whole record, so an earlier-recorded version with a later
+            # occurrence time would drop what was recorded after it.
+            "ORDER BY stream_version DESC LIMIT 1",
             (
                 workspace.workspace_id,
                 request.record_id,
