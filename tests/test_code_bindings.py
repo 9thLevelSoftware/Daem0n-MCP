@@ -534,6 +534,174 @@ def test_typescript_decorator_owns_intervening_comment(
     assert evaluator.evaluate(workspace.root, ordinary).applicability == "current"
 
 
+_RUST_ATTRIBUTED = (
+    "pub struct Service;\n"
+    "\n"
+    "impl Service {\n"
+    "    #[inline]\n"
+    "    pub fn target(&self) -> i32 {\n"
+    "        #![allow(unused)]\n"
+    "        1\n"
+    "    }\n"
+    "\n"
+    "    #[cfg(test)]\n"
+    "    // attached comment\n"
+    "    fn gated(&self) -> i32 {\n"
+    "        2\n"
+    "    }\n"
+    "\n"
+    "    #[inline]\n"
+    "    fn sibling(&self) -> i32 {\n"
+    "        3\n"
+    "    }\n"
+    "}\n"
+    "\n"
+    "#[derive(Debug)]\n"
+    "/// A point.\n"
+    "#[repr(C)]\n"
+    "pub struct Point {\n"
+    "    x: i32,\n"
+    "}\n"
+)
+
+
+@pytest.mark.parametrize(
+    ("name", "old", "new"),
+    [
+        (
+            "sample.Service.target",
+            "    #[inline]\n    pub fn",
+            "    #[cold]\n    pub fn",
+        ),
+        ("sample.Service.target", "    #[inline]\n    pub fn", "    pub fn"),
+        ("sample.Service.gated", "#[cfg(test)]", "#[cfg(not(test))]"),
+        ("sample.Service.gated", "attached comment", "changed attached comment"),
+        ("sample.Point", "#[derive(Debug)]", "#[derive(Debug, Clone)]"),
+        ("sample.Point", "#[repr(C)]", "#[repr(packed)]"),
+        ("Point", "#[derive(Debug)]\n", ""),
+        ("sample.Service.target", "#![allow(unused)]", "#![allow(dead_code)]"),
+    ],
+)
+def test_rust_attribute_changes_revalidate_binding(workspace, name, old, new):
+    require_parser()
+    path = workspace.root / "sample.rs"
+    assert _RUST_ATTRIBUTED.count(old) == 1
+    path.write_text(_RUST_ATTRIBUTED, encoding="utf-8")
+    context = context_for(workspace, [("sample.rs", name)])
+    evaluator = BindingEvaluator()
+    assert evaluator.evaluate(workspace.root, context).applicability == "current"
+    edit(path, _RUST_ATTRIBUTED.replace(old, new))
+    result = evaluator.evaluate(workspace.root, context)
+    assert result.applicability == "needs_revalidation"
+    assert result.changed == (f"sample.rs::{name}",)
+
+
+def test_rust_sibling_attribute_does_not_revalidate_binding(workspace):
+    require_parser()
+    path = workspace.root / "sample.rs"
+    original = (
+        "#![allow(dead_code)]\n"
+        "// ordinary comment\n"
+        "fn target() -> i32 {\n"
+        "    1\n"
+        "}\n"
+        "\n"
+        "#[inline]\n"
+        "fn sibling() -> i32 {\n"
+        "    2\n"
+        "}\n"
+        "\n"
+        "mod inner {\n"
+        "    #![allow(unused)]\n"
+        "}\n"
+        "\n"
+        "fn after() -> i32 {\n"
+        "    3\n"
+        "}\n"
+    )
+    path.write_text(original, encoding="utf-8")
+    refs = [("sample.rs", "sample.target"), ("sample.rs", "sample.after")]
+    context = context_for(workspace, refs)
+    evaluator = BindingEvaluator()
+    for old, new in [
+        ("#[inline]", "#[cold]"),
+        ("#![allow(dead_code)]", "#![allow(unused_variables)]"),
+        ("#![allow(unused)]", "#![allow(unused_imports)]"),
+        ("ordinary comment", "changed ordinary comment"),
+    ]:
+        edit(path, original.replace(old, new))
+        assert evaluator.evaluate(workspace.root, context).applicability == "current"
+    edit(path, original.replace("    1\n", "    4\n"))
+    result = evaluator.evaluate(workspace.root, context)
+    assert result.changed == ("sample.rs::sample.target",)
+
+
+def test_rust_attribute_revalidates_fallback_binding(workspace, monkeypatch):
+    # Without the entity query the tree walk still names enums, traits and impls.
+    require_parser()
+    monkeypatch.delitem(code_indexer.ENTITY_QUERIES, "rust")
+    path = workspace.root / "sample.rs"
+    original = (
+        "#[derive(Debug)]\n"
+        "/* attached */\n"
+        "pub enum Mode {\n"
+        "    On,\n"
+        "}\n"
+        "\n"
+        "#[derive(Debug)]\n"
+        "pub enum Other {\n"
+        "    Off,\n"
+        "}\n"
+    )
+    path.write_text(original, encoding="utf-8")
+    context = context_for(workspace, [("sample.rs", "sample.Mode")])
+    evaluator = BindingEvaluator()
+    edit(path, original.replace("#[derive(Debug)]\npub enum Other", "pub enum Other"))
+    assert evaluator.evaluate(workspace.root, context).applicability == "current"
+    edit(path, original.replace("#[derive(Debug)]\n/*", "#[derive(Clone)]\n/*"))
+    result = evaluator.evaluate(workspace.root, context)
+    assert result.applicability == "needs_revalidation"
+    assert result.changed == ("sample.rs::sample.Mode",)
+
+
+def test_legacy_attributed_rust_binding_requires_revalidation_once(workspace):
+    require_parser()
+    path = workspace.root / "sample.rs"
+    path.write_text(
+        "#[inline]\nfn target() -> i32 {\n    1\n}\n\nfn plain() -> i32 {\n    2\n}\n",
+        encoding="utf-8",
+    )
+    refs = [("sample.rs", "sample.target"), ("sample.rs", "sample.plain")]
+    legacy = {
+        "code_bindings": [
+            {
+                "relative_file_path": "sample.rs",
+                "qualified_name": "sample.target",
+                "fingerprint": hashlib.sha256(
+                    b"fn target() -> i32 {\n    1\n}"
+                ).hexdigest(),
+                "head_commit": None,
+            },
+            {
+                "relative_file_path": "sample.rs",
+                "qualified_name": "sample.plain",
+                "fingerprint": hashlib.sha256(
+                    b"fn plain() -> i32 {\n    2\n}"
+                ).hexdigest(),
+                "head_commit": None,
+            },
+        ]
+    }
+    result = BindingEvaluator().evaluate(workspace.root, legacy)
+    assert result.applicability == "needs_revalidation"
+    assert result.changed == ("sample.rs::sample.target",)
+    rebound = context_for(workspace, refs)
+    assert (
+        BindingEvaluator().evaluate(workspace.root, rebound).applicability == "current"
+    )
+    assert rebound["code_bindings"][1] == legacy["code_bindings"][1]
+
+
 @pytest.mark.parametrize("extension", ["py", "ts"])
 def test_query_and_fallback_bindings_are_interchangeable(
     workspace, monkeypatch, extension
