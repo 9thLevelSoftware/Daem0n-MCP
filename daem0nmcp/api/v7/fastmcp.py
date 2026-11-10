@@ -605,11 +605,26 @@ def _install_task_protocol(
     low_level.request_handlers[mcp.types.GetTaskPayloadRequest] = handle_result
     low_level.request_handlers[mcp.types.CancelTaskRequest] = handle_cancel
     low_level.request_handlers[mcp.types.ListTasksRequest] = handle_list
-    _set_task_capabilities(low_level, enabled=True)
+    _set_owned_capabilities(low_level, tasks_enabled=True)
 
 
-def _set_task_capabilities(low_level: Any, *, enabled: bool) -> None:
-    """Advertise only the owned task handlers, independent of Docket."""
+def _without_list_changed(capabilities: Any) -> Any:
+    """Withdraw the promise of list-changed notifications.
+
+    The manifest is fixed when the server is built, so no tool, resource or
+    prompt list ever changes and no such notification is ever sent.
+    """
+
+    updates = {
+        name: capability.model_copy(update={"listChanged": False})
+        for name in ("prompts", "resources", "tools")
+        if (capability := getattr(capabilities, name, None)) is not None
+    }
+    return capabilities.model_copy(update=updates)
+
+
+def _set_owned_capabilities(low_level: Any, *, tasks_enabled: bool) -> None:
+    """Advertise only what this server does, independent of the framework."""
 
     import mcp.types
 
@@ -620,11 +635,13 @@ def _set_task_capabilities(low_level: Any, *, enabled: bool) -> None:
         notification_options: Any,
         experimental_capabilities: Any,
     ) -> Any:
-        capabilities = original(
-            notification_options,
-            experimental_capabilities,
+        capabilities = _without_list_changed(
+            original(
+                notification_options,
+                experimental_capabilities,
+            )
         )
-        if not enabled:
+        if not tasks_enabled:
             return capabilities.model_copy(update={"tasks": None})
         task_capabilities = mcp.types.ServerTasksCapability(
             list=mcp.types.TasksListCapability(),
@@ -653,7 +670,7 @@ def _disable_upstream_task_protocol(server: Any) -> None:
         mcp.types.ListTasksRequest,
     ):
         low_level.request_handlers.pop(request_type, None)
-    _set_task_capabilities(low_level, enabled=False)
+    _set_owned_capabilities(low_level, tasks_enabled=False)
 
 
 def build_fastmcp_server(
