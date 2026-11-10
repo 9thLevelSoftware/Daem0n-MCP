@@ -735,7 +735,8 @@ def main():
                 # Migration details stay redacted to the code, except the
                 # rollback refusal, whose detail is the operator signal: a
                 # count and the storage-relative candidate, never a host path;
-                # and a lost pointer, whose detail is the recovery step.
+                # a lost pointer, whose detail is the recovery step; and an
+                # unreadable source, whose detail is the way out (file names).
                 "error": {
                     "code": exc.code,
                     "message": str(exc)
@@ -744,6 +745,7 @@ def main():
                         "ROLLBACK_WOULD_HIDE_WRITES",
                         "ACTIVE_POINTER_MISSING",
                         "POINTER_RECOVERY_AMBIGUOUS",
+                        "SOURCE_UNREADABLE",
                     }
                     else exc.code,
                 },

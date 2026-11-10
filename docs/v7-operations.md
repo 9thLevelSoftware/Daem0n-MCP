@@ -402,7 +402,12 @@ active database: stop the process holding it and retry, restore the pointer
 from a backup, or, when that run was never activated, move its
 `migrations/v7/<migration-id>/` directory out of the storage directory. A
 `migrations/v7/` directory that exists but cannot be listed is refused too,
-until it is made readable or the pointer is restored. A brand-new,
+until it is made readable or the pointer is restored. When `daem0nmcp.db`
+itself cannot be read without a pointer (not a database, held by another
+process, or left with an unfinished `daem0nmcp.db-journal`), `migrate-v7`
+answers `SOURCE_UNREADABLE` rather than guess its format; the dry run and
+`--rollback` never write that file, while `--apply` rolls an unfinished
+journal back and continues. A brand-new,
 still empty database whose first start stopped before its pointer was written
 is the one case finished automatically on the next start.
 

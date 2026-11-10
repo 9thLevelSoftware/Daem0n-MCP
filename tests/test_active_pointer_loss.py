@@ -589,6 +589,39 @@ def test_the_pointer_guard_leaves_an_unfinished_wal_of_the_source_alone(
 def test_a_source_the_pointer_guard_cannot_read_is_refused_not_passed(
     tmp_path: Path,
 ):
+    """A pointerless database that cannot be read is not taken for format 6."""
+
+    storage, database, registry = _workspace(tmp_path)
+    _append_event(database, registry.default.workspace_id, "1")
+    _lose_the_pointer(storage)
+    damaged = bytearray(database.read_bytes())
+    damaged[:100] = b"\xff" * 100
+    database.write_bytes(bytes(damaged))
+    service = MigrationV7Service(registry)
+
+    for operation in (service.dry_run, service.apply, service.rollback):
+        with pytest.raises(MigrationV7Error) as refused:
+            operation(tmp_path)
+        assert refused.value.code == "SOURCE_UNREADABLE"
+        assert str(tmp_path) not in str(refused.value)
+
+    assert not (storage / "migrations").exists()
+    assert database.read_bytes() == bytes(damaged)
+
+    # The command line passes the reason on, not only the code.
+    printed = _cli(tmp_path, "migrate-v7")
+    assert printed.returncode == 1, printed.stdout + printed.stderr
+    error = json.loads(printed.stdout)["error"]
+    assert error["code"] == "SOURCE_UNREADABLE"
+    assert "daem0nmcp.db cannot be read" in error["message"]
+    assert str(tmp_path) not in printed.stdout
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="Windows reads the source through the no-lock VFS, past any holder",
+)
+def test_a_locked_source_is_refused_by_the_pointer_guard(tmp_path: Path):
     """A pointerless format-7 database that is locked is not taken for format 6."""
 
     storage, database, registry = _workspace(tmp_path)
@@ -609,6 +642,54 @@ def test_a_source_the_pointer_guard_cannot_read_is_refused_not_passed(
     with pytest.raises(MigrationV7Error) as readable:
         service.dry_run(tmp_path)
     assert readable.value.code == "ACTIVE_POINTER_MISSING"
+
+
+def test_apply_rolls_back_a_journal_the_read_only_guard_cannot(tmp_path: Path):
+    """A source whose last writer died mid-transaction can still be migrated."""
+
+    import shutil
+
+    from tests.test_migrate_v7_end_to_end import _registry, _v6_database
+
+    storage = _v6_database(tmp_path)
+    names = ("daem0nmcp.db", "daem0nmcp.db-journal")
+    source, journal = (storage / name for name in names)
+    aside = tmp_path / "aside"
+    aside.mkdir()
+    with closing(sqlite3.connect(source)) as writer:
+        assert writer.execute("PRAGMA journal_mode=DELETE").fetchone()[0] == "delete"
+        # A one-page cache spills to the file, so the journal is synced.
+        writer.execute("PRAGMA cache_size=1")
+        writer.execute("CREATE TABLE filler(value TEXT)")
+        writer.commit()
+        writer.execute("BEGIN")
+        writer.executemany(
+            "INSERT INTO filler VALUES (?)", [("x" * 2000,) for _ in range(400)]
+        )
+        # What a writer that died here leaves behind.
+        for name in names:
+            shutil.copyfile(storage / name, aside / name)
+        writer.rollback()
+    for name in names:
+        shutil.copyfile(aside / name, storage / name)
+    source_bytes = source.read_bytes()
+    service = MigrationV7Service(_registry(tmp_path))
+
+    for operation in (service.dry_run, service.rollback):
+        with pytest.raises(MigrationV7Error) as refused:
+            operation(tmp_path)
+        assert refused.value.code == "SOURCE_UNREADABLE"
+        assert "daem0nmcp.db-journal" in str(refused.value)
+        assert "migrate-v7 --apply" in str(refused.value)
+    assert source.read_bytes() == source_bytes
+    assert journal.exists()
+
+    result = service.apply(tmp_path)
+
+    assert (result.status, result.action) == ("activated", "migrate")
+    assert not journal.exists()
+    with closing(sqlite3.connect(source)) as connection:
+        assert connection.execute("SELECT count(*) FROM filler").fetchone()[0] == 0
 
 
 def test_a_migration_root_that_cannot_be_listed_is_a_migration_error(

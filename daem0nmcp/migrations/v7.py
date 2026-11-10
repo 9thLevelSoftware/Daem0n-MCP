@@ -1661,7 +1661,9 @@ class MigrationV7Service:
         )
 
     @staticmethod
-    def _require_pointer_for_v7_state(storage: Path, resolved) -> None:
+    def _require_pointer_for_v7_state(
+        storage: Path, resolved, *, recover_journal: bool = False
+    ) -> None:
         """Refuse to treat a format-7 store that lost its pointer as v6.
 
         Without a pointer the store resolves as format 6, and migrating it
@@ -1670,6 +1672,10 @@ class MigrationV7Service:
         when the pointer named a migration candidate: the default database is
         then that candidate's retained source, and migrating it again would
         abandon the candidate holding every later write.
+
+        ``recover_journal`` is for the one caller that goes on to write the
+        source: a rollback journal a dead writer left behind cannot be read
+        past read-only, so it is rolled back by a read-write open instead.
         """
 
         if resolved.pointer is not None:
@@ -1678,18 +1684,37 @@ class MigrationV7Service:
         # read is refused, because "no format-7 state" was not established.
         holds_v7_state = False
         if resolved.path.is_file():
+            journal = Path(f"{resolved.path}-journal")
             try:
-                connection = _readonly_connection(resolved.path)
                 try:
-                    holds_v7_state = canonical_v7_state_in(connection)
-                finally:
-                    connection.close()
+                    connection = _readonly_connection(resolved.path)
+                    try:
+                        holds_v7_state = canonical_v7_state_in(connection)
+                    finally:
+                        connection.close()
+                except sqlite3.Error:
+                    if not (recover_journal and journal.exists()):
+                        raise
+                    # Fails at once when a live writer still owns the journal.
+                    connection = sqlite3.connect(resolved.path, timeout=0)
+                    try:
+                        holds_v7_state = canonical_v7_state_in(connection)
+                    finally:
+                        connection.close()
             except (OSError, sqlite3.Error) as exc:
-                raise MigrationV7Error(
-                    "SOURCE_UNREADABLE",
+                detail = (
                     f"{DEFAULT_DATABASE_NAME} cannot be read, so whether it "
-                    "holds format-7 state is unknown",
-                ) from exc
+                    "holds format-7 state is unknown. "
+                )
+                if journal.exists():
+                    detail += (
+                        f"{journal.name} is present: if no process is writing "
+                        "the database, that is an unfinished transaction, "
+                        "which `migrate-v7 --apply` rolls back"
+                    )
+                else:
+                    detail += "Stop any process that is using it and retry"
+                raise MigrationV7Error("SOURCE_UNREADABLE", detail) from exc
         if holds_v7_state:
             raise MigrationV7Error(
                 ACTIVE_POINTER_MISSING_CODE, ACTIVE_POINTER_MISSING_DETAIL
@@ -1842,7 +1867,7 @@ class MigrationV7Service:
         workspace, storage = self._storage(selector)
         with DatabaseFileLock(storage, "exclusive"):
             resolved = resolve_active_database(storage)
-            self._require_pointer_for_v7_state(storage, resolved)
+            self._require_pointer_for_v7_state(storage, resolved, recover_journal=True)
             if resolved.format_version == TARGET_FORMAT_VERSION:
                 from .v7_schema_upgrade import V7SchemaUpgradeService
 
