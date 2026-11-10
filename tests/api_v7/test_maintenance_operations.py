@@ -669,6 +669,188 @@ class MaintenanceOperationTests(unittest.IsolatedAsyncioTestCase):
             ).fetchone()[0]
         self.assertEqual(2, live)
 
+    async def test_duplicates_of_different_visibility_are_never_merged(
+        self,
+    ) -> None:
+        """A merge must not move a record or its content across visibility."""
+        cases = {
+            # The private copy is older: the public keeper must stay public
+            # and must not gain the private rationale or context.
+            "private duplicate": (
+                {"visibility": "private", "secret": "s3"},
+                {},
+            ),
+            "explicitly public keeper": (
+                {"visibility": "private", "secret": "s3"},
+                {"visibility": "workspace"},
+            ),
+            # The private copy is newer: the public one must not vanish into it.
+            "private keeper": (
+                {},
+                {"visibility": "private", "secret": "s3"},
+            ),
+        }
+        operations = self._operations()
+        for index, (name, (older_context, newer_context)) in enumerate(cases.items()):
+            with self.subTest(case=name):
+                older_rationale = "older reasoning" if older_context else None
+                newer_rationale = "newer reasoning" if newer_context else None
+                older = self._append_record(
+                    "0123456789abcdef"[2 * index],
+                    f"Rotate the signing key ({index})",
+                    created_at=NOW - timedelta(days=3),
+                    rationale=older_rationale,
+                    context=older_context,
+                )
+                newer = self._append_record(
+                    "0123456789abcdef"[2 * index + 1],
+                    f"rotate the signing key ({index})",
+                    created_at=NOW - timedelta(days=2),
+                    rationale=newer_rationale,
+                    context=newer_context,
+                )
+                preview = await operations["memory_duplicates_preview"](
+                    workspace=self.workspace,
+                    request=_request(
+                        "memory_duplicates_preview",
+                        workspace_id=self.workspace.workspace_id,
+                    ),
+                )
+                self.assertEqual([], preview.sample_ids)
+                self.assertEqual(0, preview.counts["duplicate_groups"])
+                receipt = await operations["memory_duplicates_cleanup"](
+                    workspace=self.workspace,
+                    request=_request(
+                        "memory_duplicates_cleanup",
+                        workspace_id=self.workspace.workspace_id,
+                        selection_token=preview.selection_token,
+                        preflight_token=PREFLIGHT_TOKEN,
+                    ),
+                )
+                self.assertEqual(0, receipt.changed_count)
+                with closing(sqlite3.connect(self.database)) as connection:
+                    rows = {
+                        row[0]: (row[1], json.loads(row[2]))
+                        for row in connection.execute(
+                            "SELECT record_id,rationale,context_json "
+                            "FROM memory_records WHERE deleted_at_us IS NULL "
+                            "AND record_id IN (?,?)",
+                            (older, newer),
+                        )
+                    }
+                self.assertEqual(
+                    {
+                        older: (older_rationale, older_context),
+                        newer: (newer_rationale, newer_context),
+                    },
+                    rows,
+                )
+
+    async def test_duplicates_of_one_visibility_merge_without_changing_it(
+        self,
+    ) -> None:
+        """Copies under the same policy still merge, spelled out or implied."""
+        self._append_record(
+            "a",
+            "Rotate the signing key",
+            created_at=NOW - timedelta(days=3),
+            context={"visibility": "workspace", "ticket": "A-1"},
+        )
+        implied = self._append_record(
+            "b", "rotate the signing key", created_at=NOW - timedelta(days=2)
+        )
+        self._append_record(
+            "c",
+            "Keep the recovery codes offline",
+            created_at=NOW - timedelta(days=3),
+            context={"visibility": "private"},
+        )
+        private = self._append_record(
+            "d",
+            "keep the recovery codes offline",
+            created_at=NOW - timedelta(days=2),
+            context={"visibility": "private"},
+        )
+        operations = self._operations()
+
+        preview = await operations["memory_duplicates_preview"](
+            workspace=self.workspace,
+            request=_request(
+                "memory_duplicates_preview",
+                workspace_id=self.workspace.workspace_id,
+            ),
+        )
+        await operations["memory_duplicates_cleanup"](
+            workspace=self.workspace,
+            request=_request(
+                "memory_duplicates_cleanup",
+                workspace_id=self.workspace.workspace_id,
+                selection_token=preview.selection_token,
+                preflight_token=PREFLIGHT_TOKEN,
+            ),
+        )
+
+        with closing(sqlite3.connect(self.database)) as connection:
+            contexts = {
+                row[0]: json.loads(row[1])
+                for row in connection.execute(
+                    "SELECT record_id,context_json FROM memory_records "
+                    "WHERE deleted_at_us IS NULL"
+                )
+            }
+        # The keeper does not take on a visibility key it never had.
+        self.assertEqual(
+            {implied: {"ticket": "A-1"}, private: {"visibility": "private"}},
+            contexts,
+        )
+        self.assertEqual(1, preview.counts["kept_context_keys"])
+        self._assert_replay_reproduces_projections()
+
+    async def test_a_user_owned_merged_duplicates_value_blocks_the_merge(
+        self,
+    ) -> None:
+        """The merge log must not swallow or reshape someone's own value."""
+        for index, (older_context, newer_context) in enumerate(
+            (
+                # The duplicate's rationale needs a merge-log entry, which
+                # would overwrite or wrap the value already under that key.
+                ({"merged_duplicates": "my own note"}, {}),
+                ({}, {"merged_duplicates": "my own note"}),
+            )
+        ):
+            self._append_record(
+                "abcd"[2 * index],
+                f"Use the durable queue ({index})",
+                created_at=NOW - timedelta(days=3),
+                rationale="Older reasoning.",
+                context=older_context,
+            )
+            self._append_record(
+                "abcd"[2 * index + 1],
+                f"use the durable queue ({index})",
+                created_at=NOW - timedelta(days=2),
+                rationale="Newer reasoning.",
+                context=newer_context,
+            )
+        operations = self._operations()
+
+        preview = await operations["memory_duplicates_preview"](
+            workspace=self.workspace,
+            request=_request(
+                "memory_duplicates_preview",
+                workspace_id=self.workspace.workspace_id,
+            ),
+        )
+
+        self.assertEqual(
+            (2, 0, 2),
+            (
+                preview.counts["duplicate_groups"],
+                preview.counts["selected"],
+                preview.counts["remaining"],
+            ),
+        )
+
     async def test_duplicate_preview_with_merge_disabled_selects_nothing(
         self,
     ) -> None:

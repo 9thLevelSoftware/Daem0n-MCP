@@ -729,13 +729,19 @@ def _normalized_duplicate_content(value: object) -> str:
     return " ".join(value.casefold().split())
 
 
-def _duplicate_key(snapshot: _RecordSnapshot) -> tuple[str, str, str]:
+def _duplicate_key(snapshot: _RecordSnapshot) -> tuple[str, str, str, str]:
+    context = snapshot.state["context"]
+    if not isinstance(context, dict):
+        raise MaintenanceOperationError("CAPABILITY_DEGRADED")
     return (
         str(snapshot.state["record_type"]),
         _normalized_duplicate_content(snapshot.state["content"]),
         ""
         if snapshot.state["file_path_relative"] is None
         else str(snapshot.state["file_path_relative"]),
+        # Visibility is a retrieval policy.  Copies under different policies
+        # are not duplicates: merging them would hide one or expose the other.
+        canonical_json_bytes(context.get("visibility", "workspace")).decode("utf-8"),
     )
 
 
@@ -750,8 +756,8 @@ def _duplicate_groups(
     # a digest and its record's ID; that first member is loaded again once a
     # second one turns up.
     first_seen: dict[bytes, str] = {}
-    first_ids: dict[tuple[str, str, str], str] = {}
-    grouped: dict[tuple[str, str, str], list[_RecordSnapshot]] = {}
+    first_ids: dict[tuple[str, str, str, str], str] = {}
+    grouped: dict[tuple[str, str, str, str], list[_RecordSnapshot]] = {}
     for snapshot in _scan_snapshots(
         connection,
         "record.workspace_id=? AND record.deleted_at_us IS NULL",
@@ -800,7 +806,7 @@ def _duplicate_groups(
         try:
             _merge_plan(group)
         except _UnmergeableGroupError:
-            # Merging would overflow the keeper's context; both copies stay.
+            # The keeper's context cannot hold the merge; both copies stay.
             continue
         selected.append(group)
         event_capacity -= 1 + len(chosen)
@@ -1694,7 +1700,7 @@ _MAX_CODE_BINDINGS = 16
 
 
 class _UnmergeableGroupError(Exception):
-    """The merged keeper would not fit the context limit; nothing is merged."""
+    """The merged keeper cannot hold what the group carries; nothing is merged."""
 
 
 def _binding_key(binding: object) -> tuple[object, object] | None:
@@ -1755,7 +1761,10 @@ def _merge_plan(group: _DuplicateGroup) -> tuple[dict[str, Any], dict[str, int]]
         raise MaintenanceOperationError("CAPABILITY_DEGRADED")
     context = dict(keeper_context)
     carried = context.get(_MERGED_DUPLICATES_KEY, [])
-    carried = list(carried) if isinstance(carried, list) else [carried]
+    if not isinstance(carried, list):
+        # Someone's own value sits where the merge log goes; leave it alone.
+        raise _UnmergeableGroupError()
+    carried = list(carried)
     bindings = context.get("code_bindings")
     merge_bindings = bindings is None or isinstance(bindings, list)
     bindings = list(bindings) if isinstance(bindings, list) else []
@@ -1782,7 +1791,12 @@ def _merge_plan(group: _DuplicateGroup) -> tuple[dict[str, Any], dict[str, int]]
         conflicts: dict[str, Any] = {}
         for key in sorted(candidate_context):
             value = candidate_context[key]
-            if key == _MERGED_DUPLICATES_KEY and isinstance(value, list):
+            if key == "visibility":
+                # Equal across the group (see _duplicate_key); never inherited.
+                continue
+            if key == _MERGED_DUPLICATES_KEY:
+                if not isinstance(value, list):
+                    raise _UnmergeableGroupError()
                 carried.extend(value)
             elif key == "code_bindings" and merge_bindings and isinstance(value, list):
                 unmerged = []
