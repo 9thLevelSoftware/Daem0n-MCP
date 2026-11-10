@@ -156,6 +156,7 @@ class _ProductionAssembly:
     task_dispatcher: DurableTaskDispatcher | None
     services: tuple[object, ...]
     sync_timeout_seconds: float
+    covenant_mode: str
     edit_broker: EditApprovalBroker
     capture_candidates: CaptureCandidateStore
     edit_bridge_service: LocalBridgeServer | RemoteBridgeHTTPSServer | None
@@ -1152,6 +1153,7 @@ def _assemble(
         tasks_enabled=tasks_enabled,
         task_dispatcher=task_dispatcher,
         sync_timeout_seconds=loaded_settings.sync_timeout_seconds,
+        covenant_mode=loaded_settings.covenant_mode,
         edit_broker=edit_broker,
         capture_candidates=capture_candidates,
         edit_bridge_service=edit_bridge_service,
@@ -1220,6 +1222,7 @@ def create_v7_server(
         task_dispatcher=assembly.task_dispatcher,
         lifespan=_runtime_lifespan(assembly.services),
         sync_timeout_seconds=assembly.sync_timeout_seconds,
+        covenant_mode=assembly.covenant_mode,
     )
     with suppress(AttributeError, TypeError):
         server._daem0nmcp_v7_services = assembly.services

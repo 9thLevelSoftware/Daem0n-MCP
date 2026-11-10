@@ -30,6 +30,9 @@ still require their own explicit `session_brief`; task submission stays strict.
 Run long-running targets directly as MCP tasks, using the full listing if
 needed; the gateway does not submit tasks. Use `system_health` for diagnostics.
 
+The server states this protocol itself: the MCP initialize result carries
+`instructions` generated for the active covenant mode and tool listing.
+
 Each scoped call uses an opaque `workspace_id`. The supported transports are
 stdio and Streamable HTTP at `/mcp`. Read-only warnings, failures, rules, and
 active context use the `memory://workspaces/{workspace_id}/...` resources. See
