@@ -134,7 +134,9 @@ def _validated_workspace(
         raise RuntimeServiceError("INVALID_WORKSPACE")
     try:
         canonical = normalize_resolved_path(workspace.root.resolve(strict=True))
-        registered = WorkspaceRegistry([canonical], default_root=canonical).default
+        registered = WorkspaceRegistry(
+            [canonical], default_root=canonical, live_storage=True
+        ).default
     except (OSError, RuntimeError, TypeError, ValueError) as exc:
         raise RuntimeServiceError("INVALID_WORKSPACE") from exc
     if registered.identity_block is not None or (

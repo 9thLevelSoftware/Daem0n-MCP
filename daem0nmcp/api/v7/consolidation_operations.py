@@ -137,7 +137,9 @@ def _exact_workspace(value: object, workspace_id: str) -> Workspace:
     try:
         canonical = value.root.resolve(strict=True)
         if (
-            WorkspaceRegistry([canonical], default_root=canonical).default.workspace_id
+            WorkspaceRegistry(
+                [canonical], default_root=canonical, live_storage=True
+            ).default.workspace_id
             != workspace_id
         ):
             raise ValueError

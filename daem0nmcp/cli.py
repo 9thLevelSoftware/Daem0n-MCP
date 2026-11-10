@@ -1008,7 +1008,9 @@ def main():
         )
 
         try:
-            registry = WorkspaceRegistry.from_settings(active_settings)
+            registry = WorkspaceRegistry.from_settings(
+                active_settings, live_storage=True
+            )
             workspace = _settled(registry.resolve(args.workspace_id))
             workspace_settings = active_settings
             if workspace.workspace_id != registry.default.workspace_id:

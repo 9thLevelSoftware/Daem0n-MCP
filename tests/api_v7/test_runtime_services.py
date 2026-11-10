@@ -123,10 +123,13 @@ class WriterServiceTests(
         database = relocated / ".daem0nmcp" / "storage" / "daem0nmcp.db"
         original_reader = workspace_module._open_identity_reader
 
-        def unavailable_reader(root):
+        locked_reads = []
+
+        def unavailable_reader(root, *, live_storage=False):
             if root == relocated:
+                locked_reads.append(live_storage)
                 raise sqlite3.OperationalError("database is locked")
-            return original_reader(root)
+            return original_reader(root, live_storage=live_storage)
 
         reset_workspace_identity_cache()
         with mock.patch.object(
@@ -139,6 +142,7 @@ class WriterServiceTests(
                     fallback,
                     self._store_command(idempotency_key="unknown-identity-write"),
                 )
+        self.assertIn(True, locked_reads)
 
         with closing(sqlite3.connect(database)) as connection:
             identifiers = connection.execute(

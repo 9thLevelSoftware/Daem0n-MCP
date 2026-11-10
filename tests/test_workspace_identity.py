@@ -220,10 +220,13 @@ def test_unavailable_identity_is_retried_after_a_transient_read_failure(
     original = workspace_module._open_identity_reader
     unavailable = True
 
-    def read(selected):
+    reads = []
+
+    def read(selected, *, live_storage=False):
+        reads.append(live_storage)
         if unavailable:
             raise sqlite3.OperationalError("database is locked")
-        return original(selected)
+        return original(selected, live_storage=live_storage)
 
     monkeypatch.setattr(workspace_module, "_open_identity_reader", read)
     first = workspace_identity(root)
@@ -235,8 +238,148 @@ def test_unavailable_identity_is_retried_after_a_transient_read_failure(
     recovered = workspace_identity(root)
     assert not recovered.storage_unavailable
     assert recovered.workspace_id == FOREIGN
+    assert reads == [False, False]
     assert _database_digest(root) == before
     assert not _identity_file(root).exists()
+
+
+def test_identity_reader_keeps_a_snapshot_while_a_writer_grows_the_database(
+    tmp_path, monkeypatch
+):
+    from daem0nmcp import workspace as workspace_module
+
+    root = _project(tmp_path, "growing-store")
+    _seed_events(root, FOREIGN)
+    database = root / ".daem0nmcp" / "storage" / DEFAULT_DATABASE_NAME
+    with closing(sqlite3.connect(database)) as connection:
+        assert connection.execute("PRAGMA journal_mode=WAL").fetchone()[0] == "wal"
+    assert not Path(f"{database}-wal").exists()
+    original_reader = workspace_module._open_identity_reader
+
+    class GrowingReader:
+        def __init__(self):
+            self.connection = original_reader(root, live_storage=True)
+            self.grown = False
+
+        def execute(self, statement):
+            if statement == "SELECT DISTINCT workspace_id FROM memory_events":
+                with closing(sqlite3.connect(database)) as writer:
+                    writer.executemany(
+                        "INSERT INTO memory_events VALUES (?, ?)",
+                        [(FOREIGN, "x" * 4000)] * 100,
+                    )
+                    writer.commit()
+                self.grown = True
+            return self.connection.execute(statement)
+
+        def close(self):
+            self.connection.close()
+
+    reader = GrowingReader()
+
+    def open_reader(_root, *, live_storage=False):
+        assert live_storage
+        return reader
+
+    monkeypatch.setattr(workspace_module, "_open_identity_reader", open_reader)
+    assert workspace_module._load_stored_workspace_ids(
+        root, live_storage=True
+    ) == frozenset({FOREIGN})
+    assert reader.grown
+    with closing(sqlite3.connect(database)) as connection:
+        assert connection.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+        assert (
+            connection.execute("SELECT COUNT(*) FROM memory_events").fetchone()[0]
+            == 101
+        )
+
+
+def test_identity_reader_uses_one_snapshot_for_memory_and_governance(
+    tmp_path, monkeypatch
+):
+    from daem0nmcp import workspace as workspace_module
+
+    root = _project(tmp_path, "changing-store")
+    _seed_events(root, FOREIGN)
+    _seed_events(root, table="governance_events")
+    database = root / ".daem0nmcp" / "storage" / DEFAULT_DATABASE_NAME
+    with closing(sqlite3.connect(database)) as connection:
+        connection.execute("PRAGMA journal_mode=WAL")
+    original_reader = workspace_module._open_identity_reader
+
+    class ChangingReader:
+        def __init__(self):
+            self.connection = original_reader(root, live_storage=True)
+
+        def execute(self, statement):
+            if statement == "SELECT DISTINCT workspace_id FROM governance_events":
+                with closing(sqlite3.connect(database)) as writer:
+                    writer.execute("DELETE FROM memory_events")
+                    writer.execute(
+                        "INSERT INTO governance_events VALUES (?, ?)",
+                        (OTHER, "changed-owner"),
+                    )
+                    writer.commit()
+            return self.connection.execute(statement)
+
+        def close(self):
+            self.connection.close()
+
+    def open_reader(_root, *, live_storage=False):
+        assert live_storage
+        return ChangingReader()
+
+    monkeypatch.setattr(workspace_module, "_open_identity_reader", open_reader)
+    assert workspace_module._load_stored_workspace_ids(
+        root, live_storage=True
+    ) == frozenset({FOREIGN})
+
+
+def test_offline_identity_reader_preserves_database_pointer_and_sidecars(tmp_path):
+    from daem0nmcp import workspace as workspace_module
+
+    root = _project(tmp_path, "offline-store")
+    _seed_events(root, FOREIGN)
+    storage = root / ".daem0nmcp" / "storage"
+    database = storage / DEFAULT_DATABASE_NAME
+    with closing(sqlite3.connect(database)) as connection:
+        connection.execute("PRAGMA journal_mode=WAL")
+    write_active_pointer(
+        storage, ActiveDatabasePointer(7, 1, DEFAULT_DATABASE_NAME, None, None)
+    )
+    before = {path.name: path.read_bytes() for path in storage.iterdir()}
+
+    with closing(workspace_module._open_identity_reader(root)) as connection:
+        assert connection.execute(
+            "SELECT DISTINCT workspace_id FROM memory_events"
+        ).fetchall() == [(FOREIGN,)]
+        assert {path.name: path.read_bytes() for path in storage.iterdir()} == before
+
+    assert {path.name: path.read_bytes() for path in storage.iterdir()} == before
+
+
+def test_live_identity_does_not_reuse_an_offline_cached_resolution(
+    tmp_path, monkeypatch
+):
+    from daem0nmcp import workspace as workspace_module
+
+    root = _project(tmp_path, "cross-mode-cache")
+    _seed_events(root, FOREIGN)
+    assert workspace_identity(root).workspace_id == FOREIGN
+    original_reader = workspace_module._open_identity_reader
+    modes = []
+
+    def open_reader(selected, *, live_storage=False):
+        modes.append(live_storage)
+        connection = original_reader(selected, live_storage=live_storage)
+        assert connection.in_transaction
+        return connection
+
+    monkeypatch.setattr(workspace_module, "_open_identity_reader", open_reader)
+    identity = workspace_identity(root, live_storage=True)
+    assert identity.workspace_id == FOREIGN
+    assert not identity.storage_unavailable
+    assert modes == [True]
 
 
 def test_governance_events_alone_are_adopted(tmp_path):

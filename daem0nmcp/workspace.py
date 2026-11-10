@@ -327,8 +327,10 @@ def _read_identity_file(root: Path) -> tuple[_RecordedIdentity | None, bool]:
     return _RecordedIdentity(identifier, recorded, forked), False
 
 
-def _open_identity_reader(root: Path) -> sqlite3.Connection | None:
-    """Open the root's own active database read-only, creating nothing."""
+def _open_identity_reader(
+    root: Path, *, live_storage: bool = False
+) -> sqlite3.Connection | None:
+    """Read the active database using live locking or offline no-sidecar mode."""
 
     storage = _identity_directory(root) / "storage"
     reject_linked_ancestry(storage)
@@ -361,18 +363,32 @@ def _open_identity_reader(root: Path) -> sqlite3.Connection | None:
     database = resolve_active_database(storage).path
     if not database.is_file():
         raise sqlite3.DatabaseError("active database is missing")
-    # The shared read-only URI leaves no ``-shm`` behind, so resolving an
-    # identity stays a read even inside an offline dry run.
-    connection = sqlite3.connect(readonly_database_uri(database), uri=True)
-    connection.execute("PRAGMA query_only=ON")
+    # Offline inspection must leave no sidecars. Live readers must instead
+    # participate in SQLite locking and keep every identity query in one
+    # snapshot: immutable/no-lock readers are unsafe across checkpoints.
+    uri = (
+        sqlite_file_uri(database, mode="ro")
+        if live_storage
+        else readonly_database_uri(database)
+    )
+    connection = sqlite3.connect(uri, uri=True)
+    try:
+        connection.execute("PRAGMA query_only=ON")
+        if live_storage:
+            connection.execute("BEGIN")
+    except Exception:
+        connection.close()
+        raise
     return connection
 
 
-def _load_stored_workspace_ids(root: Path) -> frozenset[str] | None:
+def _load_stored_workspace_ids(
+    root: Path, *, live_storage: bool = False
+) -> frozenset[str] | None:
     """IDs in the store, or ``None`` if a store exists but could not be read."""
 
     try:
-        connection = _open_identity_reader(root)
+        connection = _open_identity_reader(root, live_storage=live_storage)
     except ProtectedPathError:
         raise
     except Exception:
@@ -435,14 +451,14 @@ def _same_folder(left: Path, right: Path) -> bool:
         return False
 
 
-def _claim_identity(root: Path) -> WorkspaceIdentity:
+def _claim_identity(root: Path, *, live_storage: bool = False) -> WorkspaceIdentity:
     """Decide the ID one root claims, ignoring every other registered root."""
 
     current = _identity_root_key(root)
     path_hash = _workspace_id(root)
     recorded, malformed = _read_identity_file(root)
     try:
-        stored = _load_stored_workspace_ids(root)
+        stored = _load_stored_workspace_ids(root, live_storage=live_storage)
     except ProtectedPathError:
         return WorkspaceIdentity(
             workspace_id=path_hash,
@@ -522,10 +538,15 @@ def _block(identity: WorkspaceIdentity, root: Path, code: str) -> WorkspaceIdent
     )
 
 
-def _resolve_identities(canonical: Sequence[Path]) -> dict[str, WorkspaceIdentity]:
+def _resolve_identities(
+    canonical: Sequence[Path], *, live_storage: bool = False
+) -> dict[str, WorkspaceIdentity]:
     """Resolve every registered root together; the order never matters."""
 
-    identities = {_root_key(root): _claim_identity(root) for root in canonical}
+    identities = {
+        _root_key(root): _claim_identity(root, live_storage=live_storage)
+        for root in canonical
+    }
     by_root = {_root_key(root): root for root in canonical}
     holders: dict[str, list[str]] = {}
     for key, identity in identities.items():
@@ -616,6 +637,8 @@ def reset_workspace_identity_cache() -> None:
 
 def resolve_workspace_identities(
     canonical: Sequence[Path],
+    *,
+    live_storage: bool = False,
 ) -> dict[str, WorkspaceIdentity]:
     """Resolve, and cache per process, the identities of registered roots.
 
@@ -624,12 +647,15 @@ def resolve_workspace_identities(
     """
 
     ordered = sorted(canonical, key=_root_key)
-    key = tuple(_root_key(root) for root in ordered)
+    key = (
+        "live" if live_storage else "offline",
+        *(_root_key(root) for root in ordered),
+    )
     stamps = tuple(_identity_stamp(root) for root in ordered)
     cached = _IDENTITY_CACHE.get(key)
     if cached is not None and cached[0] == stamps:
         return cached[1]
-    identities = _resolve_identities(canonical)
+    identities = _resolve_identities(canonical, live_storage=live_storage)
     # A transient database lock need not change any file stamp when it clears.
     # Recheck unknown identities instead of caching a provisional path hash.
     if any(identity.storage_unavailable for identity in identities.values()):
@@ -651,11 +677,14 @@ def workspace_identity(
     root: str | os.PathLike[str],
     *,
     other_roots: Iterable[str | os.PathLike[str]] = (),
+    live_storage: bool = False,
 ) -> WorkspaceIdentity:
-    """Resolve one root's identity, read-only, writing nothing."""
+    """Resolve one root's identity; offline reads leave no SQLite sidecars."""
 
     canonical = configured_roots(other_roots, default_root=root)
-    return resolve_workspace_identities(canonical)[_root_key(canonical[0])]
+    return resolve_workspace_identities(canonical, live_storage=live_storage)[
+        _root_key(canonical[0])
+    ]
 
 
 def _publish_identity(temporary: Path, destination: Path, *, replace: bool) -> None:
@@ -770,6 +799,8 @@ def write_workspace_identity(
 
 def ensure_workspace_identity(
     roots: Iterable[str | os.PathLike[str]],
+    *,
+    live_storage: bool = False,
 ) -> dict[str, WorkspaceIdentity]:
     """Persist the identity of every configured root before it is served.
 
@@ -779,7 +810,7 @@ def ensure_workspace_identity(
     """
 
     canonical = configured_roots(roots)
-    identities = _resolve_identities(canonical)
+    identities = _resolve_identities(canonical, live_storage=live_storage)
     persist_failed = False
     for root in canonical:
         key = _root_key(root)
@@ -803,13 +834,16 @@ def ensure_workspace_identity(
         _ensure_storage_gitignore(root)
     if persist_failed:
         ordered = sorted(canonical, key=_root_key)
-        cache_key = tuple(_root_key(item) for item in ordered)
+        cache_key = (
+            "live" if live_storage else "offline",
+            *(_root_key(item) for item in ordered),
+        )
         stamps = tuple(_identity_stamp(item) for item in ordered)
         if len(_IDENTITY_CACHE) >= _IDENTITY_CACHE_LIMIT:
             _IDENTITY_CACHE.clear()
         _IDENTITY_CACHE[cache_key] = (stamps, identities)
         return identities
-    return resolve_workspace_identities(canonical)
+    return resolve_workspace_identities(canonical, live_storage=live_storage)
 
 
 def _parse_workspace_roots(raw: str | None) -> list[str]:
@@ -838,9 +872,12 @@ class WorkspaceRegistry:
         roots: Iterable[str | os.PathLike[str]] = (),
         *,
         default_root: str | os.PathLike[str] | None = None,
+        live_storage: bool = False,
     ) -> None:
         canonical_roots = configured_roots(roots, default_root=default_root)
-        identities = resolve_workspace_identities(canonical_roots)
+        identities = resolve_workspace_identities(
+            canonical_roots, live_storage=live_storage
+        )
 
         self._by_id: dict[str, Workspace] = {}
         self._by_root: dict[str, Workspace] = {}
@@ -862,12 +899,12 @@ class WorkspaceRegistry:
 
     @classmethod
     def from_environment(
-        cls, environ: Mapping[str, str] | None = None
+        cls, environ: Mapping[str, str] | None = None, *, live_storage: bool = False
     ) -> WorkspaceRegistry:
         env = os.environ if environ is None else environ
         project_root = env.get("DAEM0NMCP_PROJECT_ROOT")
         extra_roots = _parse_workspace_roots(env.get("DAEM0NMCP_WORKSPACE_ROOTS"))
-        return cls(extra_roots, default_root=project_root)
+        return cls(extra_roots, default_root=project_root, live_storage=live_storage)
 
     @classmethod
     def from_config(
@@ -875,17 +912,23 @@ class WorkspaceRegistry:
         *,
         project_root: str | None,
         workspace_roots: Sequence[str] = (),
+        live_storage: bool = False,
     ) -> WorkspaceRegistry:
-        return cls(workspace_roots, default_root=project_root)
+        return cls(
+            workspace_roots, default_root=project_root, live_storage=live_storage
+        )
 
     @classmethod
-    def from_settings(cls, loaded_settings: object) -> WorkspaceRegistry:
+    def from_settings(
+        cls, loaded_settings: object, *, live_storage: bool = False
+    ) -> WorkspaceRegistry:
         """Build a registry from Pydantic-loaded settings, including `.env`."""
         project_root = getattr(loaded_settings, "project_root", ".")
         workspace_roots = getattr(loaded_settings, "workspace_roots", ())
         return cls.from_config(
             project_root=project_root,
             workspace_roots=workspace_roots,
+            live_storage=live_storage,
         )
 
     @property

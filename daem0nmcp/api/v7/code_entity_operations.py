@@ -171,7 +171,9 @@ def _authorize(
         raise CodeEntityOperationError("UNAUTHORIZED_WORKSPACE")
     try:
         root = workspace.root.resolve(strict=True)
-        registered = WorkspaceRegistry([root], default_root=root).default
+        registered = WorkspaceRegistry(
+            [root], default_root=root, live_storage=True
+        ).default
         exact = os.path.normcase(str(root)) == os.path.normcase(str(workspace.root))
     except (OSError, RuntimeError, TypeError, ValueError):
         raise CodeEntityOperationError("UNAUTHORIZED_WORKSPACE") from None

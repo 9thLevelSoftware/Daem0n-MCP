@@ -68,7 +68,9 @@ def _authorize(workspace: Workspace, request: AdmittedRequest, tool: str) -> Non
         raise EditCaptureOperationError("UNAUTHORIZED_WORKSPACE")
     try:
         root = workspace.root.resolve(strict=True)
-        expected = WorkspaceRegistry([root], default_root=root).default
+        expected = WorkspaceRegistry(
+            [root], default_root=root, live_storage=True
+        ).default
     except (OSError, RuntimeError, TypeError, ValueError):
         raise EditCaptureOperationError("UNAUTHORIZED_WORKSPACE") from None
     if expected.workspace_id != workspace.workspace_id or os.path.normcase(

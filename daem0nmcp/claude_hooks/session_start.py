@@ -135,7 +135,7 @@ def main() -> None:
             # project they open, not only in Daem0n ones.
             succeed(json.dumps({"systemMessage": REINSTALL_NOTICE}))
         sys.exit(0)
-    message = _hook_message(workspace_identity(project_path))
+    message = _hook_message(workspace_identity(project_path, live_storage=True))
     if started_by_module_switch():
         # JSON output lets the notice reach the user, not only the model.
         succeed(

@@ -902,9 +902,10 @@ def _assemble(
         configured_roots(
             loaded_settings.workspace_roots,
             default_root=getattr(loaded_settings, "project_root", None),
-        )
+        ),
+        live_storage=True,
     )
-    registry = WorkspaceRegistry.from_settings(loaded_settings)
+    registry = WorkspaceRegistry.from_settings(loaded_settings, live_storage=True)
     workspaces = {registry.default.workspace_id: registry.default}
     for root in loaded_settings.workspace_roots:
         workspace = registry.resolve(root)

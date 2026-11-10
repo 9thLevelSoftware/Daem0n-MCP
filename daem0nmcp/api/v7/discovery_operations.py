@@ -474,7 +474,9 @@ def _authorize(
         raise DiscoveryOperationError("UNAUTHORIZED_WORKSPACE")
     try:
         canonical = workspace.root.resolve(strict=True)
-        registered = WorkspaceRegistry([canonical], default_root=canonical).default
+        registered = WorkspaceRegistry(
+            [canonical], default_root=canonical, live_storage=True
+        ).default
         exact_root = os.path.normcase(str(workspace.root)) == os.path.normcase(
             str(canonical)
         )
