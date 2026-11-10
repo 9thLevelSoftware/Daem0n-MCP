@@ -16,7 +16,6 @@ from pydantic_core import InitErrorDetails
 
 from ... import __version__
 from ...covenant import invocation_scope_var
-from .ceremony import RECOVERABLE_TOKEN_CODES
 from .errors import ErrorCode
 from .gateway_operations import (
     GATEWAY_TOOL_NAMES,
@@ -479,12 +478,15 @@ def _mcp_task(view: TaskView) -> Any:
     )
 
 
-# Refusals of the covenant gate that the tool's own admission can answer
-# with a briefing, counsel or a remedy.
-_COVENANT_TASK_REFUSALS = frozenset(
-    {"COMMUNION_REQUIRED", "COUNSEL_REQUIRED", "TOKEN_MISSING"}
-    | RECOVERABLE_TOKEN_CODES
-)
+def _is_covenant_task_refusal(code: str) -> bool:
+    """Whether the tool's own admission can answer this gate refusal.
+
+    It answers with a briefing, counsel or a remedy, as it would a plain call.
+    """
+
+    return code in {"COMMUNION_REQUIRED", "COUNSEL_REQUIRED"} or code.startswith(
+        "TOKEN_"
+    )
 
 
 def _covenant_task_refusal(envelope: Mapping[str, Any]) -> Exception:
@@ -510,22 +512,82 @@ def _covenant_task_refusal(envelope: Mapping[str, Any]) -> Exception:
     )
 
 
-def _task_protocol_error(exc: Exception) -> Exception:
-    from mcp import McpError
-    from mcp.types import INVALID_PARAMS, ErrorData
+# Dispatcher refusal -> (code reported in error.data, message).  A workspace
+# the caller may not use is reported exactly like a task that does not exist.
+_TASK_REFUSALS: Mapping[str, tuple[str, str]] = {
+    "TASK_NOT_SUPPORTED": (
+        "TASK_NOT_SUPPORTED",
+        "This tool does not support task-augmented execution; call it "
+        "without task metadata.",
+    ),
+    "INVALID_ARGUMENT": (
+        "INVALID_ARGUMENT",
+        "Task arguments do not match the tool's input schema.",
+    ),
+    "INVALID_TASK_METADATA": (
+        "INVALID_TASK_METADATA",
+        "Task metadata is invalid: ttl or executionTimeout is out of range.",
+    ),
+    "INVALID_CURSOR": ("INVALID_CURSOR", "Task list cursor is invalid."),
+    "COMMUNION_REQUIRED": (
+        "COMMUNION_REQUIRED",
+        "A renewed workspace briefing is required for this task; call "
+        "session_brief for its workspace, then retry.",
+    ),
+    "TASK_NOT_FOUND": ("TASK_NOT_FOUND", "Task not found."),
+    "UNAUTHORIZED_WORKSPACE": ("TASK_NOT_FOUND", "Task not found."),
+    "IDEMPOTENCY_REQUIRED": (
+        "IDEMPOTENCY_REQUIRED",
+        "Task execution requires replay-safe idempotency; supply an idempotency_key.",
+    ),
+    "IDEMPOTENCY_CONFLICT": (
+        "IDEMPOTENCY_CONFLICT",
+        "This idempotency key already names a task with other arguments.",
+    ),
+    "TASK_RESULT_UNAVAILABLE": (
+        "TASK_RESULT_UNAVAILABLE",
+        "The task ended without a result; read its status.",
+    ),
+    "TASK_QUEUE_FULL": (
+        "TASK_QUEUE_FULL",
+        "Task capacity is unavailable; retry later.",
+    ),
+    "TASKS_UNAVAILABLE": ("TASKS_UNAVAILABLE", "Task execution is unavailable."),
+}
+# Conditions of the server, not of the request: the protocol's internal error.
+_TASK_SERVER_CONDITIONS = frozenset({"TASK_QUEUE_FULL", "TASKS_UNAVAILABLE"})
 
-    code = getattr(exc, "code", "TASKS_UNAVAILABLE")
-    if code == "COMMUNION_REQUIRED":
-        message = "A renewed workspace briefing is required for this task."
-    elif code in {"TASK_NOT_FOUND", "UNAUTHORIZED_WORKSPACE"}:
-        message = "Task not found."
-    elif code == "IDEMPOTENCY_REQUIRED":
-        message = "Task execution requires replay-safe idempotency."
-    elif code == "TASK_QUEUE_FULL":
-        message = "Task capacity is unavailable; retry later."
+
+def _task_protocol_error(exc: Exception) -> Exception:
+    """Report a dispatcher refusal so a client can tell which one it was.
+
+    The JSON-RPC code is the one the task specification assigns: method not
+    found for a tool that cannot run as a task, internal error for a server
+    condition, invalid params otherwise.  ``error.data.code`` names the
+    refusal; a refusal without an entry stays generic and carries no data.
+    """
+
+    from mcp import McpError
+    from mcp.types import INTERNAL_ERROR, INVALID_PARAMS, METHOD_NOT_FOUND, ErrorData
+
+    refusal = _TASK_REFUSALS.get(getattr(exc, "code", "TASKS_UNAVAILABLE"))
+    if refusal is None:
+        return McpError(
+            ErrorData(
+                code=INVALID_PARAMS,
+                message="Task request is invalid or unavailable.",
+            )
+        )
+    reported, message = refusal
+    data: dict[str, Any] = {"code": reported}
+    if reported == "TASK_NOT_SUPPORTED":
+        code = METHOD_NOT_FOUND
+    elif reported in _TASK_SERVER_CONDITIONS:
+        code = INTERNAL_ERROR
+        data["retryable"] = reported == "TASK_QUEUE_FULL"
     else:
-        message = "Task request is invalid or unavailable."
-    return McpError(ErrorData(code=INVALID_PARAMS, message=message))
+        code = INVALID_PARAMS
+    return McpError(ErrorData(code=code, message=message, data=data))
 
 
 def _install_task_protocol(
@@ -624,7 +686,7 @@ def _install_task_protocol(
             try:
                 view = await accept()
             except TaskDispatcherError as exc:
-                if exc.code not in _COVENANT_TASK_REFUSALS:
+                if not _is_covenant_task_refusal(exc.code):
                     raise _task_protocol_error(exc) from None
                 envelope = await covenant_admission(
                     context.message.name, context.message.arguments

@@ -150,3 +150,65 @@ async def test_strict_task_refusals_name_the_explicit_ceremony(tmp_path):
         assert unadvised.data["code"] == "COUNSEL_REQUIRED"
         assert unadvised.data["error"]["remedy"]["tool"] == "memory_preflight"
         assert unadvised.data["error"]["counsel"] is None
+
+
+async def test_task_refusals_are_told_apart_by_code_and_data(tmp_path):
+    async with _client(tmp_path, tasks=True) as (client, workspace_id):
+        scope = {"workspace_id": workspace_id}
+        forbidden = await _refusal(
+            client,
+            "memory_store",
+            scope
+            | {
+                "record_type": "decision",
+                "content": "Plain calls only",
+                "idempotency_key": "task-admission-store-0001",
+            },
+        )
+        malformed = await _refusal(client, "memory_recall", scope)
+        with pytest.raises(McpError) as bad_metadata:
+            await client.session.send_request(
+                mcp_types.ClientRequest(
+                    mcp_types.CallToolRequest(
+                        params=mcp_types.CallToolRequestParams(
+                            name="memory_recall",
+                            arguments=scope | {"query": "queued recall"},
+                            task=mcp_types.TaskMetadata(ttl=-1),
+                        )
+                    )
+                ),
+                _TaskCallResult,
+            )
+        with pytest.raises(McpError) as missing:
+            await client.session.send_request(
+                mcp_types.ClientRequest(
+                    mcp_types.GetTaskRequest(
+                        params=mcp_types.GetTaskRequestParams(taskId="tsk_" + "0" * 64)
+                    )
+                ),
+                mcp_types.GetTaskResult,
+            )
+        with pytest.raises(McpError) as bad_cursor:
+            await client.session.send_request(
+                mcp_types.ClientRequest(
+                    mcp_types.ListTasksRequest(
+                        params=mcp_types.PaginatedRequestParams(cursor="not-a-cursor")
+                    )
+                ),
+                mcp_types.ListTasksResult,
+            )
+
+    # The protocol's own code for a tool that cannot run as a task.
+    assert forbidden.code == mcp_types.METHOD_NOT_FOUND
+    assert forbidden.data == {"code": "TASK_NOT_SUPPORTED"}
+    others = {
+        "INVALID_ARGUMENT": malformed,
+        "INVALID_TASK_METADATA": bad_metadata.value.error,
+        "TASK_NOT_FOUND": missing.value.error,
+        "INVALID_CURSOR": bad_cursor.value.error,
+    }
+    for code, error in others.items():
+        assert error.code == mcp_types.INVALID_PARAMS, code
+        assert error.data == {"code": code}
+    messages = [forbidden.message, *(error.message for error in others.values())]
+    assert len(set(messages)) == len(messages)
