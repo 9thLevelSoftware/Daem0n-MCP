@@ -34,7 +34,35 @@ from .specialized import (
     TemporalProvider,
 )
 
-_TOKEN = re.compile(r"\w+|[^\w\s]", re.UNICODE)
+# Scripts written without spaces between words.  A whole unbroken run of them
+# is one ``\w+`` match, yet a model tokenizer spends about one token or more
+# per character, so each of these characters counts as its own token.
+# Over-counting is safe for a budget; under-counting is not.
+_UNSEGMENTED_SCRIPT_CHARS = (
+    "\u0e00-\u0eff"  # Thai, Lao
+    "\u0f00-\u0fff"  # Tibetan
+    "\u1000-\u109f"  # Myanmar
+    "\u1100-\u11ff"  # Hangul Jamo
+    "\u1780-\u17ff"  # Khmer
+    "\u3040-\u30ff"  # Hiragana, Katakana
+    "\u3100-\u312f"  # Bopomofo
+    "\u3130-\u318f"  # Hangul compatibility Jamo
+    "\u31a0-\u31bf"  # Bopomofo extended
+    "\u31f0-\u31ff"  # Katakana phonetic extensions
+    "\u3400-\u4dbf"  # CJK unified ideographs extension A
+    "\u4e00-\u9fff"  # CJK unified ideographs
+    "\ua960-\ua97f"  # Hangul Jamo extended A
+    "\uac00-\ud7ff"  # Hangul syllables, Jamo extended B
+    "\uf900-\ufaff"  # CJK compatibility ideographs
+    "\uff66-\uff9f"  # Halfwidth Katakana
+    "\uffa0-\uffdc"  # Halfwidth Hangul
+    "\U00020000-\U0003ffff"  # CJK unified ideographs extensions B and later
+)
+# Text in every other script tokenizes exactly as ``\w+|[^\w\s]`` does.
+_TOKEN = re.compile(
+    f"[{_UNSEGMENTED_SCRIPT_CHARS}]|[^\\W{_UNSEGMENTED_SCRIPT_CHARS}]+|[^\\w\\s]",
+    re.UNICODE,
+)
 _WORKSPACE_ID = re.compile(r"^ws_[0-9a-f]{24}$")
 _RUNTIME_JOB_WORKERS = BoundedWorkerPool(
     max_workers=1,
