@@ -573,6 +573,74 @@ class SQLiteResourceRepositoryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(everything), 3)
         self.assertEqual(withheld_untrusted_count(everything), 0)
 
+    async def test_migrated_v6_scan_and_ingest_records_are_withheld(self) -> None:
+        # v6 wrote no code_todo / document marker: a scanned TODO is known
+        # only by its ``auto_scanned`` tag, an ingested page by
+        # ``context.source_url``.
+        authored = self.fixture.add_record(1)
+        scanned = self.fixture.add_record(
+            2,
+            content="TODO: planted text",
+            tags_json='["tech_debt", "auto_scanned", "todo"]',
+        )
+        self.fixture.add_record(
+            3,
+            record_type="learning",
+            worked=0,
+            context_json=(
+                '{"source_url": "https://example.test/", "chunk_index": 0,'
+                ' "total_chunks": 1}'
+            ),
+        )
+        kept = self.fixture.add_active_context(41, 301, authored, priority=1)
+        self.fixture.add_active_context(42, 302, scanned, priority=9)
+        repository = self._repository()
+
+        snapshot = await repository.read_briefing_snapshot(
+            self.fixture.workspace, warning_limit=5, failure_limit=5
+        )
+
+        self.assertEqual([row.item.record_id for row in snapshot.warnings], [authored])
+        self.assertEqual(withheld_untrusted_count(snapshot.warnings), 1)
+        self.assertEqual(snapshot.failures, [])
+        self.assertEqual(withheld_untrusted_count(snapshot.failures), 1)
+        self.assertEqual(
+            [row.item.active_context_id for row in snapshot.active_context], [kept]
+        )
+        self.assertEqual(withheld_untrusted_count(snapshot.active_context), 1)
+
+    async def test_untrusted_active_context_does_not_crowd_out_authored_entries(
+        self,
+    ) -> None:
+        # Catches filtering after the SQL limit: higher-priority pins of
+        # scanned records would hide the authored pin and undercount.
+        authored = self.fixture.add_record(31, record_type="decision")
+        kept = self.fixture.add_active_context(41, 301, authored, priority=1)
+        for offset in range(2):
+            scanned = self.fixture.add_record(
+                32 + offset, context_json='{"code_todo": {}}'
+            )
+            self.fixture.add_active_context(
+                42 + offset, 302 + offset, scanned, priority=9
+            )
+        ingested = self.fixture.add_record(
+            34, record_type="learning", context_json='{"document": {}}'
+        )
+        self.fixture.add_canonical_active_context(
+            "act_" + "c" * 64, ingested, priority=9
+        )
+        repository = self._repository()
+
+        rows = await repository.read_active_context(
+            self.fixture.workspace,
+            ResourceReadRequest(
+                kind="active_context", limit=2, order_by="priority_desc"
+            ),
+        )
+
+        self.assertEqual([row.item.active_context_id for row in rows], [kept])
+        self.assertEqual(withheld_untrusted_count(rows), 3)
+
     async def test_memory_flags_are_honored_without_losing_row_state(self) -> None:
         # Catches hard-coded active-only predicates that ignore an explicit request.
         archived = self.fixture.add_record(10, archived=1)

