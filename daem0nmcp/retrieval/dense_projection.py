@@ -471,7 +471,9 @@ class DenseProjectionBuilder:
         records such an event touched, have moved.  Recording that needs no
         provider write, but every stored vector is read back and checked
         first, exactly as a full build would before reusing it.  Returns False
-        when a real build is required.
+        when a real build is required.  That includes every generation without
+        a vector space hash: nothing recorded vouches for its stored vectors,
+        and a full build never reuses them either.
         """
 
         manifest_id, generation = active[0], active[1]
@@ -486,7 +488,8 @@ class DenseProjectionBuilder:
             "WHERE manifest_id=? AND status='active'",
             (manifest_id,),
         ).fetchone()
-        if row is None:
+        vector_space_hash = expected.get("vector_space_hash")
+        if row is None or not isinstance(vector_space_hash, str):
             return False
         try:
             stored = json.loads(str(row[1]))
@@ -512,7 +515,6 @@ class DenseProjectionBuilder:
         ).fetchall()
         if len(references) != len(records):
             return False
-        vector_space_hash = expected.get("vector_space_hash")
         stored_refs: list[tuple[_DenseRecord, str, object]] = []
         for reference, record in zip(references, records, strict=True):
             values = tuple(reference)
@@ -524,14 +526,11 @@ class DenseProjectionBuilder:
                 "ready",
             ):
                 return False
-            if isinstance(vector_space_hash, str):
-                if (
-                    values[6] != VECTOR_ATTESTATION_FORMAT
-                    or not isinstance(values[7], str)
-                    or len(values[7]) != 64
-                ):
-                    return False
-            elif values[6:] != (None, None):
+            if (
+                values[6] != VECTOR_ATTESTATION_FORMAT
+                or not isinstance(values[7], str)
+                or len(values[7]) != 64
+            ):
                 return False
             stored_refs.append((record, str(values[5]), values[7]))
         collection_name = str(expected["collection_name"])
@@ -624,8 +623,8 @@ class DenseProjectionBuilder:
         generation: int,
         collection_name: str,
         stored_refs: Sequence[tuple[_DenseRecord, str, object]],
-        vector_space_hash: object,
-    ) -> list[tuple[_DenseRecord, str, str | None]] | None:
+        vector_space_hash: str,
+    ) -> list[tuple[_DenseRecord, str, str]] | None:
         """Check every stored vector and attest it to its record's source event.
 
         An attestation binds a vector to its record's source event.  Each
@@ -635,7 +634,7 @@ class DenseProjectionBuilder:
         stands.
         """
 
-        attestations: list[tuple[_DenseRecord, str, str | None]] = []
+        attestations: list[tuple[_DenseRecord, str, str]] = []
         for batch in self._provider_batches(stored_refs):
             self._check_cancelled()
             expected: dict[str, tuple[_DenseRecord, str, object, object]] = {}
@@ -678,9 +677,6 @@ class DenseProjectionBuilder:
                     or len(vector) != self.dimension
                 ):
                     return None
-                if not isinstance(vector_space_hash, str):
-                    attestations.append((record, previous_event_id, None))
-                    continue
                 try:
                     digests = [
                         provider_vector_sha256(

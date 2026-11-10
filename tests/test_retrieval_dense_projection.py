@@ -2033,6 +2033,81 @@ class DenseProjectionTests(unittest.TestCase):
 
         self.assertEqual(5, encoder.calls)
 
+    def test_unattested_generation_is_rebuilt_not_caught_up_in_place(self):
+        """Without a vector space hash nothing vouches for a stored vector."""
+
+        from daem0nmcp.event_store import EventCommand, EventStore
+        from daem0nmcp.retrieval.dense_projection import DenseProjectionBuilder
+        from daem0nmcp.retrieval.providers import dense_point_id
+
+        class UnattestedEncoder:
+            def encode(self, text: str) -> list[float]:
+                return DeterministicEncoder.encode(self, text)
+
+        for label, corrupt in (
+            ("zeroed", [0.0, 0.0, 0.0]),
+            ("non-finite", [float("nan"), 1.0, 1.0]),
+            ("other", [9.0, 1.0, 9.0]),
+            ("intact", None),
+        ):
+            with self.subTest(vector=label):
+                self.setUp()
+                touched = self._append("7", "unattested first")
+                other = self._append("8", "unattested second")
+                builder = DenseProjectionBuilder(
+                    self.connection,
+                    provider_key="local",
+                    model_id="deterministic-test-model",
+                    dimension=3,
+                    encoder=UnattestedEncoder(),
+                    client=self.client,
+                    collection_prefix="test-dense",
+                    clock_us=lambda: 702,
+                )
+                first = builder.rebuild(WORKSPACE_ID)
+                self.assertEqual(1, first.generation)
+                details = json.loads(
+                    self.connection.execute(
+                        "SELECT details_json FROM projection_manifests "
+                        "WHERE status='active'"
+                    ).fetchone()[0]
+                )
+                self.assertIsNone(details.get("vector_space_hash"))
+                if corrupt is not None:
+                    points = self.client.collections[first.collection_name]["points"]
+                    points[dense_point_id(WORKSPACE_ID, other)]["vector"] = corrupt
+
+                # A pin leaves every content hash alone: the in-place catch-up
+                # applies to it when the stored vectors can be verified.
+                EventStore(self.connection).append_and_project(
+                    EventCommand(
+                        workspace_id=WORKSPACE_ID,
+                        stream_id=touched,
+                        stream_kind="memory",
+                        event_type="memory.pin_set",
+                        occurred_at_us=900,
+                        recorded_at_us=900,
+                        actor_type="system",
+                        payload={
+                            "record": {
+                                **self._record("unattested first"),
+                                "pinned": True,
+                            }
+                        },
+                    )
+                )
+                self.connection.commit()
+
+                result = builder.rebuild(WORKSPACE_ID)
+
+                self.assertEqual((2, False), (result.generation, result.reused), label)
+                self.assertTrue(builder.active_is_current(WORKSPACE_ID))
+                rebuilt = self.client.collections[result.collection_name]["points"]
+                self.assertEqual(
+                    DeterministicEncoder().encode("unattested second"),
+                    rebuilt[dense_point_id(WORKSPACE_ID, other)]["vector"],
+                )
+
     def test_payload_and_source_event_substitution_cannot_seed_reuse(self):
         from daem0nmcp.retrieval.dense_projection import DenseProjectionBuilder
         from daem0nmcp.retrieval.providers import dense_point_id
