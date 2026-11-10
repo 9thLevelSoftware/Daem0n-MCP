@@ -967,8 +967,10 @@ async def test_connection_discovery_and_community_refresh_use_active_graph(
         assert generation > first.generation
 
 
-_MST = dreaming_runtime._MIN_SHARED_TERMS
-_EPR = dreaming_runtime._EVIDENCE_PAGE_ROWS
+# Read with defaults so the module still collects against older source.
+_MST = getattr(dreaming_runtime, "_MIN_SHARED_TERMS", 2)
+_EPR = getattr(dreaming_runtime, "_EVIDENCE_PAGE_ROWS", 64)
+_MCC = dreaming_runtime._MAX_CONTENT_CHARS
 
 
 def _pending_candidate_context(database: Path, record_id: str) -> dict[str, object]:
@@ -1509,3 +1511,189 @@ async def test_community_refresh_that_yields_to_foreground_is_not_degraded(
     assert health["yielded"] is True
     assert scheduled == []
     assert state.community_failures == 0
+
+
+def _append_numbered(
+    database: Path, workspace_id: str, contents: list[str], *, worked: bool | None
+) -> list[str]:
+    return [
+        _append(database, workspace_id, f"{index + 1:064x}", content, worked=worked)
+        for index, content in enumerate(contents)
+    ]
+
+
+def _pending_state(database: Path, record_id: str) -> tuple[object, object]:
+    with sqlite3.connect(database) as connection:
+        return connection.execute(
+            "SELECT worked,outcome FROM memory_records WHERE record_id=?", (record_id,)
+        ).fetchone()
+
+
+@pytest.mark.asyncio
+async def test_opposing_outcome_ranked_below_the_retained_evidence_blocks_unanimity(
+    dream_workspace,
+) -> None:
+    workspace, database = dream_workspace
+    pending = _append(
+        database,
+        workspace.workspace_id,
+        "d",
+        "postgres migration cutover replica pending",
+        worked=None,
+    )
+    # More agreeing records than are retained, all ranked above the opposing one.
+    _append_numbered(
+        database,
+        workspace.workspace_id,
+        [f"postgres migration cutover replica stage{index}" for index in range(12)],
+        worked=True,
+    )
+    _append(
+        database,
+        workspace.workspace_id,
+        "e",
+        "postgres migration rollback",
+        worked=False,
+    )
+
+    await _run_pending_pass(workspace, dream_pending_dry_run=False)
+
+    assert _pending_state(database, pending) == (None, None)
+    assert _pending_candidate_context(database, pending)["classification"] == "mixed"
+
+
+@pytest.mark.asyncio
+async def test_successful_alternative_ranked_below_the_retained_evidence_is_found(
+    dream_workspace,
+) -> None:
+    workspace, database = dream_workspace
+    failed = _append(
+        database,
+        workspace.workspace_id,
+        "d",
+        "postgres migration cutover replica",
+        worked=False,
+    )
+    _append_numbered(
+        database,
+        workspace.workspace_id,
+        [f"postgres migration cutover replica stage{index}" for index in range(12)],
+        worked=None,
+    )
+    alternative = _append(
+        database,
+        workspace.workspace_id,
+        "e",
+        "postgres migration rollback",
+        worked=True,
+    )
+
+    await _run_pending_pass(workspace)
+
+    with sqlite3.connect(database) as connection:
+        proposed, provenance = connection.execute(
+            "SELECT proposed_record_json,provenance_json FROM "
+            "memory_capture_candidates WHERE "
+            "json_extract(provenance_json,'$.strategy')='failed_decision' AND "
+            "json_extract(provenance_json,'$.sources[0].record_id')=?",
+            (failed,),
+        ).fetchone()
+    assert json.loads(proposed)["context"]["classification"] == (
+        "successful_alternative"
+    )
+    assert alternative in {
+        source["record_id"] for source in json.loads(provenance)["sources"]
+    }
+
+
+@pytest.mark.asyncio
+async def test_long_unrelated_record_does_not_make_evidence_incomplete(
+    dream_workspace,
+) -> None:
+    workspace, database = dream_workspace
+    pending = _append(
+        database, workspace.workspace_id, "d", "postgres migration pending", worked=None
+    )
+    _append_migration_evidence(database, workspace.workspace_id)
+    for index in range(_EPR + 6):
+        _append(
+            database,
+            workspace.workspace_id,
+            f"{index + 1:064x}",
+            f"unrelated observation number{index}",
+            worked=None,
+            record_type="observation",
+        )
+    _append(
+        database,
+        workspace.workspace_id,
+        "a",
+        "carousel " + "x" * (_MCC + 100),
+        worked=None,
+        record_type="observation",
+    )
+
+    await _run_pending_pass(workspace)
+
+    context = _pending_candidate_context(database, pending)
+    assert context["evidence_count"] == 2
+    assert context["classification"] == "unanimous_positive"
+
+
+@pytest.mark.asyncio
+async def test_long_record_is_judged_on_its_whole_text(dream_workspace) -> None:
+    workspace, database = dream_workspace
+    pending = _append(
+        database, workspace.workspace_id, "d", "postgres migration pending", worked=None
+    )
+    _append_migration_evidence(database, workspace.workspace_id)
+    # The subject of this failed record only appears after the first page of text.
+    _append(
+        database,
+        workspace.workspace_id,
+        "a",
+        "x" * (_MCC + 100) + " postgres migration rollback",
+        worked=False,
+    )
+
+    await _run_pending_pass(workspace, dream_pending_dry_run=False)
+
+    assert _pending_state(database, pending) == (None, None)
+    assert _pending_candidate_context(database, pending)["classification"] == "mixed"
+
+
+@pytest.mark.asyncio
+async def test_cut_short_evidence_scan_does_not_name_partial_evidence(
+    dream_workspace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace, database = dream_workspace
+    pending = _append(
+        database, workspace.workspace_id, "d", "postgres migration pending", worked=None
+    )
+    for index in range(_EPR + 6):
+        _append(
+            database,
+            workspace.workspace_id,
+            f"{index + 1:064x}",
+            f"postgres migration note{index}",
+            worked=None,
+            record_type="observation",
+        )
+    # One page is read, then the row budget ends the scan.
+    monkeypatch.setattr(dreaming_runtime, "_MAX_EVIDENCE_SCAN_ROWS", _EPR)
+
+    await _run_pending_pass(workspace)
+
+    context = _pending_candidate_context(database, pending)
+    assert (context["classification"], context["evidence_count"]) == (
+        "insufficient",
+        0,
+    )
+    with sqlite3.connect(database) as connection:
+        provenance = connection.execute(
+            "SELECT provenance_json FROM memory_capture_candidates WHERE "
+            "json_extract(provenance_json,'$.strategy')='pending_outcome'"
+        ).fetchone()[0]
+    assert [item["record_id"] for item in json.loads(provenance)["sources"]] == [
+        pending
+    ]

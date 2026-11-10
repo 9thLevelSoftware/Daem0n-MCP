@@ -16,7 +16,7 @@ import time
 from _thread import LockType
 from collections.abc import Callable, Mapping, Sequence
 from contextlib import suppress
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from functools import partial
 from pathlib import Path
@@ -296,38 +296,64 @@ def _row_record(row: sqlite3.Row) -> _Record:
     )
 
 
+@dataclass(frozen=True, slots=True)
+class _Evidence:
+    """The related records of one decision, as far as the scan could tell."""
+
+    records: tuple[_Record, ...] = ()
+    complete: bool = False
+    # The best-ranked related record of each direction whose outcome was not
+    # inferred by dreaming, wherever it ranks among the related records.
+    positive: _Record | None = None
+    negative: _Record | None = None
+
+    def with_witnesses(self) -> tuple[_Record, ...]:
+        """The retained records plus any direction witness ranked below them."""
+
+        retained = {item.record_id for item in self.records}
+        return self.records + tuple(
+            item
+            for item in (self.positive, self.negative)
+            if item is not None and item.record_id not in retained
+        )
+
+
 def _related(
     connection: sqlite3.Connection,
     workspace_id: str,
     source: _Record,
     cancelled: threading.Event,
     deadline: float,
-) -> tuple[tuple[_Record, ...], bool]:
+) -> _Evidence:
     """Rank the live records related to ``source`` and say whether all were seen.
 
-    Every live record of the workspace is read, one bounded page at a time, so
-    the result is complete for a workspace of any size that fits the row and
-    time budgets.  Only the best ``_MAX_EVIDENCE`` records are retained.
+    Every live record of the workspace is read whole, one bounded page at a
+    time, so the result is complete for a workspace of any size that fits the
+    row and time budgets.  Only the best ``_MAX_EVIDENCE`` records are
+    retained, so the direction of every related outcome is tracked separately:
+    a contradicting record that ranks below the retained ones is still
+    reported.  A scan that was cut short names no records, because which ones
+    it reached depends on timing; the directions it did see remain valid.
     """
 
     source_terms = _terms(source.content)
     complete = not source.content_truncated
     if not source_terms:
-        return (), complete
+        return _Evidence(complete=complete)
     ranked: list[tuple[int, int, str, _Record]] = []
+    witnesses: dict[bool, tuple[int, int, str, _Record]] = {}
     scanned = 0
     rows = connection.execute(
-        "SELECT record_id,record_type,substr(content,1,?) AS content,"
-        "length(CAST(content AS BLOB)) AS content_bytes,content_hash,state_hash,"
+        "SELECT record_id,record_type,content,content_hash,state_hash,"
         "source_event_id,stream_version,created_at_us,updated_at_us,outcome,worked "
         "FROM memory_records WHERE workspace_id=? AND record_id<>? AND archived=0 "
         "AND deleted_at_us IS NULL",
-        (_MAX_CONTENT_CHARS, workspace_id, source.record_id),
+        (workspace_id, source.record_id),
     )
     try:
         while True:
             if cancelled.is_set():
-                return (), False
+                return _Evidence()
             if scanned >= _MAX_EVIDENCE_SCAN_ROWS or time.monotonic() >= deadline:
                 complete = complete and rows.fetchone() is None
                 break
@@ -336,23 +362,42 @@ def _related(
                 break
             scanned += len(page)
             for row in page:
-                candidate = _row_record(row)
-                complete = complete and not candidate.content_truncated
-                shared = _shared_terms(source_terms, _terms(candidate.content))
-                if shared:
-                    ranked.append(
-                        (
-                            -shared,
-                            -candidate.updated_at_us,
-                            candidate.record_id,
-                            candidate,
-                        )
-                    )
+                shared = _shared_terms(source_terms, _terms(str(row["content"])))
+                if not shared:
+                    continue
+                # Only the terms of the whole text were needed; keep a prefix.
+                candidate = replace(
+                    _row_record(row),
+                    content=str(row["content"])[:_MAX_CONTENT_CHARS],
+                )
+                entry = (
+                    -shared,
+                    -candidate.updated_at_us,
+                    candidate.record_id,
+                    candidate,
+                )
+                ranked.append(entry)
+                if candidate.worked is None:
+                    continue
+                witness = witnesses.get(candidate.worked)
+                if (
+                    witness is None or entry[:3] < witness[:3]
+                ) and not _outcome_is_inferred(
+                    connection, workspace_id, candidate.record_id
+                ):
+                    witnesses[candidate.worked] = entry
             ranked.sort(key=lambda item: item[:3])
             del ranked[_MAX_EVIDENCE:]
     finally:
         rows.close()
-    return tuple(item[3] for item in ranked), complete
+    positive = witnesses.get(True)
+    negative = witnesses.get(False)
+    return _Evidence(
+        records=tuple(item[3] for item in ranked) if complete else (),
+        complete=complete,
+        positive=None if positive is None else positive[3],
+        negative=None if negative is None else negative[3],
+    )
 
 
 def _scan_deadline(budget_end: float, remaining_sources: int) -> float:
@@ -981,19 +1026,24 @@ class V7DreamingCoordinator:
         for index, source in enumerate(selected):
             if cancelled.is_set():
                 break
-            evidence, complete = _related(
+            found = _related(
                 connection,
                 workspace.workspace_id,
                 source,
                 cancelled,
                 _scan_deadline(scan_budget, len(selected) - index),
             )
+            complete = found.complete
+            evidence = found.with_witnesses()
             successful = tuple(item for item in evidence if item.worked is True)
             if successful:
                 result = "successful_alternative"
                 wording = "A failed decision has related successful evidence and should be reviewed for revision."
             elif len(evidence) < 2 or not complete:
                 result = "insufficient_evidence"
+                if not complete:
+                    # A partial scan's records depend on timing; do not key on them.
+                    evidence = ()
                 wording = "A failed decision lacks enough related evidence for a reliable re-evaluation."
             else:
                 result = "confirmed_failure"
@@ -1042,13 +1092,15 @@ class V7DreamingCoordinator:
         for index, source in enumerate(selected):
             if cancelled.is_set():
                 break
-            evidence, complete = _related(
+            found = _related(
                 connection,
                 workspace.workspace_id,
                 source,
                 cancelled,
                 _scan_deadline(scan_budget, len(selected) - index),
             )
+            complete = found.complete
+            evidence = found.with_witnesses()
             # An outcome dreaming inferred is not evidence for another inference.
             verified = tuple(
                 item
@@ -1068,6 +1120,9 @@ class V7DreamingCoordinator:
                 classification = "unanimous_negative"
             else:
                 classification = "insufficient"
+                if not complete:
+                    # A partial scan's records depend on timing; do not key on them.
+                    evidence = ()
             directional = (
                 positive
                 if classification == "unanimous_positive"
@@ -1592,7 +1647,7 @@ class V7DreamingCoordinator:
         classification = "unanimous_positive" if action.worked else "unanimous_negative"
         committed = committed_source is not None
         wording = (
-            "Canonical outcome committed from unanimous verified evidence."
+            "Canonical outcome committed from unanimous related evidence."
             if committed
             else "Proposed outcome could not commit because authoritative evidence changed."
         )
