@@ -311,6 +311,19 @@ def has_canonical_v7_state(database_path: str | os.PathLike[str]) -> bool:
         return False
 
 
+# A pointerless store resolves as format 6.  When it holds format-7 state the
+# pointer was lost, and every opener that would run format-6 code refuses with
+# this detail instead.
+ACTIVE_POINTER_MISSING_CODE = "ACTIVE_POINTER_MISSING"
+ACTIVE_POINTER_MISSING_DETAIL = (
+    f"{DEFAULT_DATABASE_NAME} holds format-7 state but {POINTER_NAME} is "
+    "missing, so it is not opened as a format-6 store. Restore "
+    f"{POINTER_NAME} from a backup, or stop the server and run: "
+    "python -m daem0nmcp.cli --project-path <project root> "
+    "migrate-v7 --recover-pointer"
+)
+
+
 def _fsync_directory(path: Path) -> None:
     """Persist a directory entry where the platform exposes directory handles."""
 

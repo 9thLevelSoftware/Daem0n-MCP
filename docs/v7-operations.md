@@ -345,6 +345,30 @@ capped at the last v6 schema version while a store is still format 6 so it
 cannot rewrite what `migrate-v7` snapshots; use `migrate-v7 --apply` when
 retention, verification, atomic activation, and rollback are required.
 
+`active-db.json` is part of the store: back it up and copy it together with
+`daem0nmcp.db` and `migrations/`. A format 7 `daem0nmcp.db` found without it is
+never opened as a format 6 store, because format 6 writes bypass the event log.
+The legacy CLI commands, hooks and Python helpers, and `migrate-v7` itself, stop
+with `ACTIVE_POINTER_MISSING` before writing anything; the v7 tools keep
+answering `MIGRATION_REQUIRED`. Restore `active-db.json` from a backup, or stop
+the server and run:
+
+```bash
+python -m daem0nmcp.cli --project-path /srv/project-a migrate-v7 --recover-pointer
+```
+
+It republishes the generation-one pointer for `daem0nmcp.db`, which is right
+when that file is the whole store (a copy made without the pointer, or a store
+that never ran a schema upgrade or projection repair, or whose runs were all
+rolled back). If the schema is older than the build, follow it with
+`migrate-v7 --apply`. When `migrations/v7/` holds a candidate that was not
+rolled back, the lost pointer may have named that candidate and
+`daem0nmcp.db` may be its stale predecessor, so the command answers
+`POINTER_RECOVERY_AMBIGUOUS`, naming the candidate, and changes nothing: only
+the backed-up `active-db.json` settles which database was active. A brand-new,
+still empty database whose first start stopped before its pointer was written
+is the one case finished automatically on the next start.
+
 Stop the server before applying or rolling back: both commands take the
 storage lock, and a running server on the old pointer sees the generation
 change. Until a v6 workspace is migrated, `session_brief` answers

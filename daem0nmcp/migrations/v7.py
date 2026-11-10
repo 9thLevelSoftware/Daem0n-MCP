@@ -39,10 +39,13 @@ from ..event_store import (
 )
 from ..schema_version import CURRENT_SCHEMA_VERSION, REQUIRED_V7_SCHEMA_VERSIONS
 from ..storage_activation import (
+    ACTIVE_POINTER_MISSING_CODE,
+    ACTIVE_POINTER_MISSING_DETAIL,
     DEFAULT_DATABASE_NAME,
     ActiveDatabasePointer,
     DatabaseFileLock,
     PointerValidationError,
+    has_canonical_v7_state,
     resolve_active_database,
     validate_pointer,
     write_active_pointer,
@@ -1626,12 +1629,88 @@ class MigrationV7Service:
             validation=validation,
         )
 
+    @staticmethod
+    def _require_pointer_for_v7_state(resolved) -> None:
+        """Refuse to treat a format-7 database that lost its pointer as v6.
+
+        Without a pointer the store resolves as format 6, and migrating it
+        would import its retained v6 tables into a new candidate and leave
+        every record that exists only in the event log behind.
+        """
+
+        if resolved.pointer is None and has_canonical_v7_state(resolved.path):
+            raise MigrationV7Error(
+                ACTIVE_POINTER_MISSING_CODE, ACTIVE_POINTER_MISSING_DETAIL
+            )
+
+    def recover_pointer(
+        self, selector: str | os.PathLike[str] | None = None
+    ) -> MigrationResult:
+        """Republish the pointer of a format-7 store whose pointer was lost.
+
+        Only the generation-one pointer can name the default database as
+        format 7, so that is the one pointer this can prove.  A published
+        candidate that was not rolled back may be what the lost pointer named;
+        adopting the default database then would hide the candidate's newer
+        records, so recovery refuses and changes nothing.
+        """
+
+        workspace, storage = self._storage(selector)
+        with DatabaseFileLock(storage, "exclusive"):
+            resolved = resolve_active_database(storage)
+            if resolved.pointer is not None:
+                raise MigrationV7Error(
+                    "ACTIVE_POINTER_PRESENT",
+                    "active-db.json is present; there is nothing to recover",
+                )
+            if not has_canonical_v7_state(resolved.path):
+                raise MigrationV7Error(
+                    "POINTER_RECOVERY_UNAVAILABLE",
+                    f"{DEFAULT_DATABASE_NAME} holds no format-7 state; a "
+                    "format-6 store needs no pointer",
+                )
+            for candidate in _published_candidates(storage):
+                run_id = candidate.parent.name
+                try:
+                    connection = _readonly_connection(candidate)
+                    try:
+                        row = connection.execute(
+                            "SELECT status FROM v7_migration_runs "
+                            "WHERE migration_run_id=?",
+                            (run_id,),
+                        ).fetchone()
+                    finally:
+                        connection.close()
+                except (OSError, sqlite3.Error):
+                    row = None
+                if row is None or row[0] != "rolled_back":
+                    raise MigrationV7Error(
+                        "POINTER_RECOVERY_AMBIGUOUS",
+                        "the lost pointer may have named "
+                        f"{candidate.relative_to(storage).as_posix()}, which was "
+                        "not rolled back; restore active-db.json from a backup",
+                    )
+            write_active_pointer(
+                storage,
+                ActiveDatabasePointer(
+                    TARGET_FORMAT_VERSION, 1, DEFAULT_DATABASE_NAME, None, None
+                ),
+            )
+            return MigrationResult(
+                status="activated",
+                action="recover_pointer",
+                workspace_id=workspace.workspace_id,
+                source_format=TARGET_FORMAT_VERSION,
+                active_generation=1,
+            )
+
     def dry_run(
         self, selector: str | os.PathLike[str] | None = None
     ) -> MigrationResult:
         workspace, storage = self._storage(selector)
         with DatabaseFileLock(storage, "shared"):
             resolved = resolve_active_database(storage)
+            self._require_pointer_for_v7_state(resolved)
             if resolved.format_version == TARGET_FORMAT_VERSION:
                 from .v7_schema_upgrade import V7SchemaUpgradeService
 
@@ -1690,6 +1769,7 @@ class MigrationV7Service:
         workspace, storage = self._storage(selector)
         with DatabaseFileLock(storage, "exclusive"):
             resolved = resolve_active_database(storage)
+            self._require_pointer_for_v7_state(resolved)
             if resolved.format_version == TARGET_FORMAT_VERSION:
                 from .v7_schema_upgrade import V7SchemaUpgradeService
 
@@ -3513,6 +3593,7 @@ class MigrationV7Service:
         workspace, storage = self._storage(selector)
         with DatabaseFileLock(storage, "exclusive"):
             resolved = resolve_active_database(storage)
+            self._require_pointer_for_v7_state(resolved)
             requested = (
                 None if migration_run_id in (None, "latest") else migration_run_id
             )

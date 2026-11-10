@@ -22,9 +22,12 @@ from .models import (  # noqa: F401 - MemoryVersion imported for table creation
 )
 from .schema_version import CURRENT_SCHEMA_VERSION
 from .storage_activation import (
+    ACTIVE_POINTER_MISSING_CODE,
+    ACTIVE_POINTER_MISSING_DETAIL,
     LOCK_NAME,
     ActiveDatabasePointer,
     DatabaseFileLock,
+    has_canonical_v7_state,
     resolve_active_database,
     write_active_pointer,
 )
@@ -54,6 +57,15 @@ class SchemaUpgradeRequiredError(RuntimeError):
             "Stop the server, then run: python -m daem0nmcp.cli "
             "--project-path <project root> migrate-v7 --apply"
         )
+
+
+class ActivePointerMissingError(RuntimeError):
+    """A database holding format-7 state has lost its activation pointer."""
+
+    code = ACTIVE_POINTER_MISSING_CODE
+
+    def __init__(self) -> None:
+        super().__init__(f"{self.code}: {ACTIVE_POINTER_MISSING_DETAIL}")
 
 
 class DatabaseManager:
@@ -125,6 +137,16 @@ class DatabaseManager:
                 self.format_version = self._active_database.format_version
                 self.active_generation = self._active_database.generation
                 self.migration_run_id = self._active_database.migration_run_id
+                # A store without a pointer reads as format 6, where every
+                # write bypasses the event log.  Format-7 state in it means
+                # the pointer was lost, unless the database is a brand-new one
+                # whose creation stopped before publishing it.
+                if (
+                    self._active_database.pointer is None
+                    and has_canonical_v7_state(self.db_path)
+                    and not self._is_unpublished_fresh_database()
+                ):
+                    raise ActivePointerMissingError()
         except Exception:
             self._database_lock.release()
             raise
@@ -469,6 +491,40 @@ class DatabaseManager:
                 ):
                     return True
         return False
+
+    def _is_unpublished_fresh_database(self) -> bool:
+        """Whether a pointerless database can only be an unfinished first start.
+
+        Nothing was ever recorded in it and no migration run exists beside it,
+        so no pointer can have named another database and publishing the
+        generation-one pointer loses nothing.
+        """
+
+        migrations = self.storage_path / "migrations"
+        if migrations.exists() or migrations.is_symlink():
+            return False
+        if self._schema_version() < 16 or self._has_user_rows():
+            return False
+        with closing(sqlite3.connect(self.db_path)) as connection:
+            for table in (
+                "memory_events",
+                "governance_events",
+                "workspace_link_events",
+                "memory_capture_candidates",
+                "v7_migration_runs",
+            ):
+                exists = connection.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+                    (table,),
+                ).fetchone()
+                if (
+                    exists
+                    and connection.execute(
+                        f'SELECT 1 FROM "{table}" LIMIT 1'
+                    ).fetchone()
+                ):
+                    return False
+        return True
 
     def _validate_database(self, *, format_version: int) -> None:
         with closing(sqlite3.connect(self.db_path)) as connection:
