@@ -40,7 +40,9 @@ Code starts a user-scoped server inside whatever project is open, and `-m` puts
 that directory first on `sys.path`, so a repository containing its own
 `daem0nmcp/` directory would run instead of the installed server. The command
 above runs the same module after dropping the working directory from the import
-path.
+path. It leaves `PYTHONPATH` alone: an empty or relative element there (a
+leading or trailing `:`, or `.`) names the working directory again, so keep
+`PYTHONPATH` unset or absolute where the MCP host starts.
 
 For Streamable HTTP, start the launcher and point the Claude MCP configuration
 at its single MCP endpoint:

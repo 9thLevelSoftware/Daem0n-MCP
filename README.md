@@ -364,6 +364,11 @@ above runs the same module after dropping the working directory from the import
 path; it works on Python 3.10 and newer and with `--user`, virtualenv and
 editable installs. Use the full interpreter path rather than a bare `python`.
 
+The command leaves your own `PYTHONPATH` alone. An empty or relative element in
+it (a leading or trailing `:`, or `.`) names the working directory, which puts
+the opened project back on the import path: keep `PYTHONPATH` unset or absolute
+in the environment your MCP host starts from.
+
 ### Windows (HTTP transport required)
 
 Windows has a known bug where Python MCP servers using stdio transport hang indefinitely. Use HTTP transport instead:
@@ -650,7 +655,8 @@ contains its own `daem0nmcp/` directory cannot replace the installed hooks the
 way it could with `python -m`. Commands written by an earlier version keep the
 `-m` form until you re-run `install-claude-hooks`, which replaces them and
 reports how many it replaced; until then the `SessionStart` hook shows a
-one-line reminder inside every Daem0n project.
+one-line reminder in every session. The same `PYTHONPATH` limit as for the
+[registration command](#linux--macos-stdio-transport) applies.
 
 | Event (matcher) | Hook | What it does | Input | Reminds only |
 |-----------------|------|--------------|-------|--------------|
@@ -1080,10 +1086,13 @@ After updating, restart Claude Code to load the new MCP tools.
 python -m daem0nmcp.cli install-opencode --force
 ```
 
-This regenerates `opencode.json` and the plugin to match the latest version.
-Without `--force` the installer keeps existing files: it still rewrites a
-`python -m` server command in `opencode.json`, and reports a plugin that starts
-its hooks with `python -m` as outdated.
+This regenerates `opencode.json`, the plugin and the command files to match
+the latest version, discarding anything else you kept in them (other MCP
+servers in `opencode.json`, for example). Without `--force` the installer keeps
+existing files: it still rewrites a `python -m` server command in
+`opencode.json` (or reports one it cannot rewrite), and reports a plugin from an
+earlier version as outdated; delete `.opencode/plugins/daem0n.ts` and re-run to
+replace only the plugin.
 
 ### 5. Migrations
 
