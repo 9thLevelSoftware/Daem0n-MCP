@@ -27,6 +27,7 @@ from .lexical_config import (
     lexical_fts_table_name,
 )
 from .types import (
+    _MAX_CANDIDATE_LIMIT,
     Candidate,
     EvidenceRef,
     ProviderResult,
@@ -59,6 +60,20 @@ _FTS_QUESTION_STOP_WORDS = frozenset(
         "you",
     }
 )
+# Terminal escape sequences of a pasted log: CSI (7-bit and 8-bit introducer),
+# terminated OSC, and two-character escapes.  The parameter bytes of a CSI
+# sequence are word characters, so the sequence is removed whole; every other
+# control character is already a term separator for the word pattern below.
+_TERMINAL_ESCAPE = re.compile(
+    r"(?:\x1b\[|\x9b)[0-?]*[ -/]*[@-~]"
+    r"|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)"
+    r"|\x1b[@-Z\\-_]"
+)
+# Position of the any-single-term rung in a ladder of three or more terms.  One
+# shared word out of several is weak evidence, so its candidates are ranked
+# after a full page of stricter matches: rank fusion then cannot place them
+# above another provider's hit the way a complete lexical match would be.
+_SINGLE_TERM_RUNG = 2
 _WORKSPACE_ID = re.compile(r"^ws_[0-9a-f]{24}$")
 _RECORD_ID = re.compile(r"^mem_[0-9a-f]{64}$")
 _CONTENT_HASH = re.compile(r"^[0-9a-f]{64}$")
@@ -96,12 +111,12 @@ def _safe_fts_queries(text: str) -> tuple[str, ...] | None:
         text.encode("utf-8")
     except UnicodeEncodeError:
         return None
-    if any(ord(character) < 32 and not character.isspace() for character in text):
-        return None
     terms = tuple(
         dict.fromkeys(
             term
-            for term in re.findall(r"\w+", text, flags=re.UNICODE)
+            for term in re.findall(
+                r"\w+", _TERMINAL_ESCAPE.sub(" ", text), flags=re.UNICODE
+            )
             if term.casefold() not in _FTS_QUESTION_STOP_WORDS
         )
     )
@@ -127,7 +142,10 @@ def _safe_fts_queries(text: str) -> tuple[str, ...] | None:
         pairs = tuple(
             f"{quoted[index]} {quoted[index + 1]}" for index in range(len(quoted) - 1)
         )
-    return (conjunctive, " OR ".join(pairs))
+    # The last rung matches any single term, so a query whose other terms are
+    # absent from the corpus still reaches the documents about the one present.
+    # The provider ranks it as weak evidence (see _SINGLE_TERM_RUNG).
+    return (conjunctive, " OR ".join(pairs), " OR ".join(quoted))
 
 
 def _transaction_datetime(value: object) -> datetime | None:
@@ -259,7 +277,12 @@ class LexicalProvider:
                 )
             content_weight, rationale_weight, tags_weight = LEXICAL_BM25_WEIGHTS
             rows = []
-            for fts_query in fts_queries:
+            rank_offset = 0
+            for rung, fts_query in enumerate(fts_queries):
+                rung_limit = bounded_limit
+                if rung >= _SINGLE_TERM_RUNG:
+                    rank_offset = min(bounded_limit, _MAX_CANDIDATE_LIMIT // 2)
+                    rung_limit = min(bounded_limit, _MAX_CANDIDATE_LIMIT - rank_offset)
                 rows = connection.execute(
                     f"""
                     SELECT document.record_id, document.content_hash,
@@ -296,7 +319,7 @@ class LexicalProvider:
                         query.workspace_id,
                         generation,
                         fts_query,
-                        bounded_limit,
+                        rung_limit,
                     ),
                 ).fetchall()
                 if rows:
@@ -305,7 +328,7 @@ class LexicalProvider:
             return self._unavailable(started)
 
         candidates = []
-        for rank, row in enumerate(rows, 1):
+        for rank, row in enumerate(rows, rank_offset + 1):
             score = float(row[4])
             snippet = row[5]
             candidates.append(
