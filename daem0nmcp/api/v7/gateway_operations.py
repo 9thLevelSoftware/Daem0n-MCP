@@ -92,6 +92,9 @@ def bind_gateway_handlers(
                     category=spec.category,
                     covenant=spec.covenant.value,
                     read_only=spec.annotations["readOnlyHint"],
+                    destructive=spec.annotations["destructiveHint"],
+                    idempotent=spec.annotations["idempotentHint"],
+                    open_world=spec.annotations["openWorldHint"],
                     listed=listed_tools is None or spec.name in listed_tools,
                     input_schema=spec.input_schema,
                 )

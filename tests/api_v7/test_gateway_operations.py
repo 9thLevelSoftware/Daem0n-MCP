@@ -89,6 +89,71 @@ class GatewayOperationsTests(unittest.IsolatedAsyncioTestCase):
             )
             self.assertEqual([], empty.structured_content["data"]["tools"])
 
+    async def test_gateway_call_advertises_the_hints_of_what_it_can_dispatch(
+        self,
+    ) -> None:
+        # The gateway reaches destructive, non-idempotent and open-world tools,
+        # so a host that auto-approves on hints must not be told otherwise.
+        async with Client(self.server) as client:
+            listed = {tool.name: tool for tool in await client.list_tools()}
+        call = listed["daem0n_tool_call"].annotations
+        self.assertIs(call.readOnlyHint, False)
+        self.assertIs(call.destructiveHint, True)
+        self.assertIs(call.idempotentHint, False)
+        self.assertIs(call.openWorldHint, True)
+        search = listed["daem0n_tools_search"].annotations
+        self.assertIs(search.readOnlyHint, True)
+        self.assertIs(search.destructiveHint, False)
+        self.assertIs(search.idempotentHint, True)
+        self.assertIs(search.openWorldHint, False)
+
+    async def test_search_descriptors_carry_each_target_s_real_hints(self) -> None:
+        specs = {spec.name: spec for spec in self.surface.manifest.tools}
+        expected = {
+            "memory_prune": (False, True, True, False),
+            "memory_prune_preview": (True, False, True, False),
+            "sandbox_execute_python": (False, True, False, True),
+            "document_ingest_url": (False, False, True, True),
+        }
+        seen: dict[str, dict[str, object]] = {}
+        async with Client(self.server) as client:
+            for query in (
+                "prune old memories",
+                "sandbox execute python",
+                "document ingest url",
+            ):
+                result = await client.call_tool(
+                    "daem0n_tools_search", {"query": query, "limit": 10}
+                )
+                envelope = result.structured_content
+                self.assertTrue(envelope["ok"], envelope)
+                for descriptor in envelope["data"]["tools"]:
+                    seen[descriptor["name"]] = descriptor
+        for name, hints in expected.items():
+            with self.subTest(tool=name):
+                descriptor = seen[name]
+                self.assertEqual(
+                    hints,
+                    (
+                        descriptor["read_only"],
+                        descriptor["destructive"],
+                        descriptor["idempotent"],
+                        descriptor["open_world"],
+                    ),
+                )
+        for name, descriptor in seen.items():
+            with self.subTest(tool=name):
+                annotations = specs[name].annotations
+                self.assertEqual(
+                    {
+                        "readOnlyHint": descriptor["read_only"],
+                        "destructiveHint": descriptor["destructive"],
+                        "idempotentHint": descriptor["idempotent"],
+                        "openWorldHint": descriptor["open_world"],
+                    },
+                    dict(annotations),
+                )
+
     async def test_gateway_search_text_and_direct_hidden_call(self) -> None:
         async with Client(self.server) as client:
             result = await client.call_tool(

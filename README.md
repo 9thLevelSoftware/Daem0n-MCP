@@ -444,6 +444,12 @@ default core-plus-gateway listing is:
 | `daem0n_tools_search` | Discover other registered tools and their input schemas |
 | `daem0n_tool_call` | Call a discovered tool and relay its guidance or result |
 
+`daem0n_tool_call` can reach destructive, non-idempotent and open-world tools,
+so it advertises `destructiveHint: true`, `idempotentHint: false` and
+`openWorldHint: true`; a host that prompts on those hints prompts for every
+gateway call. Each `daem0n_tools_search` result carries the target's own
+`read_only`, `destructive`, `idempotent` and `open_world` hints.
+
 The read-only JSON resources are:
 
 - `memory://workspaces/{workspace_id}/warnings`

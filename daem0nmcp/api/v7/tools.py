@@ -1057,6 +1057,9 @@ class ToolDescriptor(WireModel):
     category: NameText
     covenant: Literal["exempt", "communion", "counsel", "destructive"]
     read_only: bool
+    destructive: bool
+    idempotent: bool
+    open_world: bool
     listed: bool
     input_schema: JsonObject
 
@@ -2279,12 +2282,35 @@ def _tags(name: str, category: str) -> tuple[str, ...]:
     return tuple(dict.fromkeys((category, *name.split("_"))))
 
 
-def _annotations(name: str) -> Mapping[str, bool]:
+_GATEWAY_CALL_TOOL = "daem0n_tool_call"
+_GATEWAY_TOOLS = frozenset({"daem0n_tools_search", _GATEWAY_CALL_TOOL})
+
+
+def _own_annotations(name: str) -> Mapping[str, bool]:
     return {
         "readOnlyHint": name in _READ_ONLY_TOOLS,
         "destructiveHint": name in _DESTRUCTIVE_TOOLS,
         "idempotentHint": name != "sandbox_execute_python",
         "openWorldHint": name in _OPEN_WORLD_TOOLS,
+    }
+
+
+def _annotations(name: str) -> Mapping[str, bool]:
+    if name != _GATEWAY_CALL_TOOL:
+        return _own_annotations(name)
+    # The gateway performs whatever its target performs, so its hints are the
+    # least favourable hint of any tool it can dispatch.  A host that decides
+    # on these hints whether to ask the user must never be told less.
+    targets = [
+        _own_annotations(target)
+        for target in _TOOL_MODELS
+        if target not in _GATEWAY_TOOLS
+    ]
+    return {
+        "readOnlyHint": all(target["readOnlyHint"] for target in targets),
+        "destructiveHint": any(target["destructiveHint"] for target in targets),
+        "idempotentHint": all(target["idempotentHint"] for target in targets),
+        "openWorldHint": any(target["openWorldHint"] for target in targets),
     }
 
 
