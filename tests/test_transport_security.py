@@ -82,6 +82,66 @@ class TransportSecurityTests(unittest.TestCase):
             },
         )
 
+    def test_proxied_loopback_listener_requires_production_authentication(self):
+        exposed_environments = (
+            {"DAEM0NMCP_ALLOWED_HOSTS": "mcp.example"},
+            {"DAEM0NMCP_ALLOWED_HOSTS": "localhost:8765,mcp.example:443"},
+            {"DAEM0NMCP_ALLOWED_HOSTS": "203.0.113.10:8765"},
+            {"DAEM0NMCP_ALLOWED_HOSTS": "not a host"},
+            {"DAEM0NMCP_TRUSTED_PROXY_IPS": "127.0.0.1"},
+            {"DAEM0NMCP_TRUSTED_PROXY_IPS": "10.0.0.5"},
+        )
+        for host in ("127.0.0.1", "::1", "localhost"):
+            for environ in exposed_environments:
+                with (
+                    self.subTest(host=host, environ=environ),
+                    self.assertRaisesRegex(
+                        TransportSecurityError, "PROXIED_LISTENER_REQUIRES_AUTH"
+                    ),
+                ):
+                    validate_transport_security(host, environ=environ)
+
+    def test_proxied_loopback_listener_rejects_development_verifiers(self):
+        class DevelopmentVerifier:
+            pass
+
+        with self.assertRaisesRegex(
+            TransportSecurityError, "INVALID_AUTH_CONFIGURATION"
+        ):
+            validate_transport_security(
+                "127.0.0.1",
+                auth_provider=DevelopmentVerifier(),
+                environ={"DAEM0NMCP_ALLOWED_HOSTS": "mcp.example"},
+            )
+
+    def test_proxied_loopback_listener_starts_with_production_authentication(self):
+        validate_transport_security(
+            "127.0.0.1",
+            environ={
+                "DAEM0NMCP_ALLOWED_HOSTS": "mcp.example",
+                "DAEM0NMCP_TRUSTED_PROXY_IPS": "127.0.0.1",
+                "FASTMCP_SERVER_AUTH": (
+                    "fastmcp.server.auth.providers.jwt.JWTVerifier"
+                ),
+                "FASTMCP_SERVER_AUTH_JWT_JWKS_URI": "https://issuer.example/jwks",
+                "FASTMCP_SERVER_AUTH_JWT_ISSUER": "https://issuer.example",
+                "FASTMCP_SERVER_AUTH_JWT_AUDIENCE": "daem0nmcp",
+            },
+        )
+
+    def test_loopback_only_allowed_hosts_do_not_require_authentication(self):
+        for allowed in (
+            "localhost",
+            "localhost:9876",
+            "127.0.0.1:9876",
+            "[::1]:9876",
+            "LOCALHOST:9876,127.0.0.1",
+        ):
+            with self.subTest(allowed=allowed):
+                validate_transport_security(
+                    "127.0.0.1", environ={"DAEM0NMCP_ALLOWED_HOSTS": allowed}
+                )
+
     def test_remote_browser_origins_are_default_deny_and_explicitly_allowlisted(self):
         middleware = build_http_origin_middleware(
             "0.0.0.0",

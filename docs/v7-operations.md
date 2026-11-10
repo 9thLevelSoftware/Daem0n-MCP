@@ -78,6 +78,12 @@ python -m daem0nmcp.server --transport streamable-http --host 127.0.0.1 --port 9
 
 It uses Streamable HTTP. Remote binds need the configured authentication and
 HTTP security layers. There is no redirect URL or URL-based pairing shortcut.
+Unauthenticated loopback HTTP trusts every process and user on the host, so use
+stdio or configure authentication on a shared machine. A loopback bind with
+`DAEM0NMCP_TRUSTED_PROXY_IPS`, or with a non-loopback name in
+`DAEM0NMCP_ALLOWED_HOSTS`, is treated as remotely reachable: without a
+production token verifier the server exits with
+`PROXIED_LISTENER_REQUIRES_AUTH`.
 
 For a remote HTTPS deployment, terminate TLS at a reverse proxy and make the
 backend listener and proxy addresses explicit. This is an environment example,

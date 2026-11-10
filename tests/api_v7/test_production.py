@@ -492,6 +492,28 @@ class ProductionCompositionTests(unittest.TestCase):
                 environ={},
             )
 
+    def test_proxied_loopback_http_fails_closed_without_authentication(self) -> None:
+        from daem0nmcp.api.v7.production import build_production_surface
+        from daem0nmcp.transport_security import TransportSecurityError
+
+        for environ in (
+            {"DAEM0NMCP_ALLOWED_HOSTS": "mcp.example"},
+            {"DAEM0NMCP_TRUSTED_PROXY_IPS": "127.0.0.1"},
+        ):
+            with (
+                self.subTest(environ=environ),
+                self.assertRaisesRegex(
+                    TransportSecurityError,
+                    "PROXIED_LISTENER_REQUIRES_AUTH",
+                ),
+            ):
+                build_production_surface(
+                    "streamable-http",
+                    host="127.0.0.1",
+                    settings=self.settings,
+                    environ=environ,
+                )
+
     def test_remote_http_requires_capability_authority_as_well_as_jwt(self) -> None:
         from daem0nmcp.api.v7.production import (
             ProductionConfigurationError,

@@ -681,14 +681,39 @@ def _provider_class_path(auth_provider: object) -> str:
     return f"{provider_type.__module__}.{provider_type.__qualname__}"
 
 
+def _reached_through_proxy(environ: Mapping[str, str]) -> bool:
+    """Whether the listener is configured to serve clients beyond this host.
+
+    A trusted proxy, or an allowed Host authority that is not loopback, means
+    requests arrive on behalf of remote clients even on a loopback bind.
+    """
+    if environ.get("DAEM0NMCP_TRUSTED_PROXY_IPS", ""):
+        return True
+    raw = environ.get("DAEM0NMCP_ALLOWED_HOSTS", "")
+    for value in raw.split(",") if raw else ():
+        try:
+            hostname = urlsplit("http://" + _normalized_authority(value)).hostname
+        except (UnicodeError, ValueError):
+            return True
+        if hostname is None or not _is_loopback_host(hostname):
+            return True
+    return False
+
+
 def validate_transport_security(
     host: str,
     *,
     auth_provider: object | None = None,
     environ: Mapping[str, str] | None = None,
 ) -> None:
-    """Reject non-loopback HTTP binds unless production auth is configured."""
-    if _is_loopback_host(host):
+    """Reject remotely reachable HTTP listeners without production auth.
+
+    A listener is remotely reachable when it binds a non-loopback address, or
+    when a loopback bind is configured to be served through a reverse proxy.
+    """
+    env = os.environ if environ is None else environ
+    loopback = _is_loopback_host(host)
+    if loopback and not _reached_through_proxy(env):
         return
 
     if auth_provider is not None:
@@ -703,6 +728,13 @@ def validate_transport_security(
     if configuration is not None:
         return
 
+    if loopback:
+        raise TransportSecurityError(
+            "PROXIED_LISTENER_REQUIRES_AUTH",
+            "DAEM0NMCP_TRUSTED_PROXY_IPS or a non-loopback DAEM0NMCP_ALLOWED_HOSTS "
+            "entry exposes this listener beyond the host; configure a production "
+            "FastMCP token verifier or remove those settings",
+        )
     raise TransportSecurityError(
         "REMOTE_BIND_REQUIRES_AUTH",
         "non-loopback listeners require a production FastMCP token verifier",

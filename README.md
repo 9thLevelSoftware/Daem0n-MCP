@@ -77,6 +77,16 @@ Start the stdio server with `python -m daem0nmcp.server`, or use
 9876` for loopback HTTP. A remote HTTP deployment requires configured transport
 authentication and security policy; it is not a redirect-based setup.
 
+Loopback HTTP without `FASTMCP_SERVER_AUTH` does not authenticate callers: every
+process and user that can reach the port on that host (other accounts,
+containers, WSL) acts as the server's own principal on every registered
+workspace. On a shared machine use stdio or configure authentication. A
+loopback listener behind a reverse proxy is not local: when
+`DAEM0NMCP_TRUSTED_PROXY_IPS` is set or `DAEM0NMCP_ALLOWED_HOSTS` names a host
+other than `localhost` or a loopback address, the server refuses to start with
+`PROXIED_LISTENER_REQUIRES_AUTH` unless a production token verifier is
+configured.
+
 `python -m` resolves `daem0nmcp` from the current directory first, so type these
 commands (and the `python -m daem0nmcp.cli` ones) from a directory you trust.
 Commands that a host launches for you inside a project never use `-m`: the
