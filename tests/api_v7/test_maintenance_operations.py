@@ -909,6 +909,317 @@ class MaintenanceOperationTests(unittest.IsolatedAsyncioTestCase):
             ).fetchone()
         self.assertEqual((2, int(NOW.timestamp() * 1_000_000)), row)
 
+    def _relationship_operations(self):
+        from daem0nmcp.api.v7.relationship_operations import (
+            RelationshipOperationDependencies,
+            build_relationship_operations,
+        )
+
+        # Links are written at NOW; reads happen after the maintenance run.
+        self.relationship_clock = NOW
+        dependencies = RelationshipOperationDependencies(
+            clock=lambda: self.relationship_clock
+        )
+        self.addCleanup(dependencies.close)
+        return build_relationship_operations(dependencies)
+
+    async def _link(
+        self,
+        relationships,
+        source: str,
+        target: str,
+        relationship_type: str,
+        key: str,
+    ) -> str:
+        receipt = await relationships["memory_link"](
+            workspace=self.workspace,
+            request=_request(
+                "memory_link",
+                workspace_id=self.workspace.workspace_id,
+                source_record_id=source,
+                target_record_id=target,
+                relationship_type=relationship_type,
+                idempotency_key=key,
+                preflight_token=PREFLIGHT_TOKEN,
+            ),
+        )
+        return next(item for item in receipt.affected_ids if item.startswith("rel_"))
+
+    async def _related(self, relationships, record_id: str):
+        self.relationship_clock = NOW + timedelta(seconds=1)
+        with self.assertNoLogs("daem0nmcp.api.v7.relationship_operations"):
+            return await relationships["memory_related"](
+                workspace=self.workspace,
+                request=_request(
+                    "memory_related",
+                    workspace_id=self.workspace.workspace_id,
+                    record_id=record_id,
+                    direction="both",
+                    max_depth=3,
+                ),
+            )
+
+    async def _chain(self, relationships, start: str, end: str):
+        self.relationship_clock = NOW + timedelta(seconds=1)
+        return await relationships["memory_chain_trace"](
+            workspace=self.workspace,
+            request=_request(
+                "memory_chain_trace",
+                workspace_id=self.workspace.workspace_id,
+                start_record_id=start,
+                end_record_id=end,
+            ),
+        )
+
+    def _live_edges(self) -> set[tuple[str, str, str]]:
+        now_us = int(NOW.timestamp() * 1_000_000)
+        with closing(sqlite3.connect(self.database)) as connection:
+            return {
+                (str(row[0]), str(row[1]), str(row[2]))
+                for row in connection.execute(
+                    "SELECT source_record_id,target_record_id,relationship_type "
+                    "FROM memory_relationship_versions "
+                    "WHERE workspace_id=? AND transaction_to_us IS NULL "
+                    "AND (valid_to_us IS NULL OR valid_to_us>?)",
+                    (self.workspace.workspace_id, now_us + 10),
+                )
+            }
+
+    def _assert_replay_reproduces_projections(self) -> None:
+        """The projections must be exactly what the canonical events replay to."""
+        from daem0nmcp.event_store import export_event_bundle, import_event_bundle
+
+        relationships_query = (
+            "SELECT relationship_version_id,relationship_id,version,"
+            "source_record_id,target_record_id,relationship_type,content_hash,"
+            "valid_from_us,valid_to_us,transaction_from_us,transaction_to_us,"
+            "asserted_by_event_id,retracted_by_event_id "
+            "FROM memory_relationship_versions ORDER BY relationship_version_id"
+        )
+        records_query = (
+            "SELECT record_id,state_hash,deleted_at_us FROM memory_records "
+            "ORDER BY record_id"
+        )
+        with closing(sqlite3.connect(self.database)) as connection:
+            bundle = export_event_bundle(connection, self.workspace.workspace_id)
+            expected = connection.execute(relationships_query).fetchall()
+            expected_records = connection.execute(records_query).fetchall()
+        with closing(sqlite3.connect(self.root / "replayed.db")) as replayed:
+            replayed.execute("PRAGMA foreign_keys=ON")
+            _apply_v7_schema(replayed)
+            import_event_bundle(replayed, bundle, self.workspace.workspace_id)
+            replayed.commit()
+            self.assertEqual(expected, replayed.execute(relationships_query).fetchall())
+            self.assertEqual(
+                expected_records, replayed.execute(records_query).fetchall()
+            )
+
+    async def test_prune_closes_relationships_of_pruned_records(self) -> None:
+        """A pruned endpoint must not degrade traversal for the whole workspace."""
+        old = NOW - timedelta(days=100)
+        recent = NOW - timedelta(days=1)
+        pruned_id = self._append_record("a", "Old linked decision.", created_at=old)
+        neighbour_id = self._append_record("b", "Linked neighbour.", created_at=recent)
+        other_id = self._append_record("c", "Unrelated first.", created_at=recent)
+        another_id = self._append_record("d", "Unrelated second.", created_at=recent)
+        relationships = self._relationship_operations()
+        outgoing = await self._link(
+            relationships, pruned_id, neighbour_id, "led_to", "prune-edge-ab-0001"
+        )
+        incoming = await self._link(
+            relationships, neighbour_id, pruned_id, "depends_on", "prune-edge-ba-0002"
+        )
+        kept = await self._link(
+            relationships, other_id, another_id, "related_to", "prune-edge-cd-0003"
+        )
+        operations = self._operations()
+        preview = await operations["memory_prune_preview"](
+            workspace=self.workspace,
+            request=_request(
+                "memory_prune_preview", workspace_id=self.workspace.workspace_id
+            ),
+        )
+        self.assertEqual([pruned_id], preview.sample_ids)
+        request = _request(
+            "memory_prune",
+            workspace_id=self.workspace.workspace_id,
+            selection_token=preview.selection_token,
+            preflight_token=PREFLIGHT_TOKEN,
+        )
+        receipt = await operations["memory_prune"](
+            workspace=self.workspace, request=request
+        )
+        replay = await operations["memory_prune"](
+            workspace=self.workspace, request=request
+        )
+
+        self.assertEqual([pruned_id], receipt.affected_ids)
+        self.assertTrue(replay.idempotent_replay)
+        self.assertEqual(receipt.event_ids, replay.event_ids)
+        self.assertEqual({(other_id, another_id, "related_to")}, self._live_edges())
+        unrelated = await self._related(relationships, other_id)
+        self.assertEqual([another_id], [item.record_id for item in unrelated.records])
+        self.assertEqual(
+            [kept], [item.relationship_id for item in unrelated.relationships]
+        )
+        neighbour = await self._related(relationships, neighbour_id)
+        self.assertEqual([], neighbour.records)
+        self.assertEqual([], neighbour.relationships)
+        chain = await self._chain(relationships, other_id, another_id)
+        self.assertEqual([[kept]], [path.relationship_ids for path in chain.paths])
+        with closing(sqlite3.connect(self.database)) as connection:
+            closing_events = connection.execute(
+                "SELECT stream_id,event_type FROM memory_events "
+                "WHERE stream_kind='relationship' AND stream_version=2 "
+                "ORDER BY stream_id"
+            ).fetchall()
+        self.assertEqual(
+            sorted(
+                [(outgoing, "relationship.removed"), (incoming, "relationship.removed")]
+            ),
+            closing_events,
+        )
+        self._assert_replay_reproduces_projections()
+
+    async def test_duplicate_cleanup_repoints_relationships_to_the_keeper(
+        self,
+    ) -> None:
+        """A merged duplicate's edges must follow the surviving record."""
+        duplicate_id = self._append_record(
+            "a", "Use the durable queue", created_at=NOW - timedelta(days=3)
+        )
+        keeper_id = self._append_record(
+            "b", "use the durable queue", created_at=NOW - timedelta(days=2)
+        )
+        cause_id = self._append_record(
+            "c", "Queue outage post-mortem.", created_at=NOW - timedelta(days=4)
+        )
+        effect_id = self._append_record(
+            "d", "Worker rollout.", created_at=NOW - timedelta(days=1)
+        )
+        relationships = self._relationship_operations()
+        # Moves to the keeper.
+        await self._link(
+            relationships, cause_id, duplicate_id, "led_to", "merge-edge-ca-0001"
+        )
+        # Would become a self-edge on the keeper: closed, not moved.
+        await self._link(
+            relationships, duplicate_id, keeper_id, "related_to", "merge-edge-ab-0002"
+        )
+        # The keeper already has this exact edge: closed, not duplicated.
+        await self._link(
+            relationships, duplicate_id, effect_id, "led_to", "merge-edge-ad-0003"
+        )
+        existing = await self._link(
+            relationships, keeper_id, effect_id, "led_to", "merge-edge-bd-0004"
+        )
+        operations = self._operations()
+        preview = await operations["memory_duplicates_preview"](
+            workspace=self.workspace,
+            request=_request(
+                "memory_duplicates_preview",
+                workspace_id=self.workspace.workspace_id,
+            ),
+        )
+        self.assertEqual([duplicate_id], preview.sample_ids)
+        request = _request(
+            "memory_duplicates_cleanup",
+            workspace_id=self.workspace.workspace_id,
+            selection_token=preview.selection_token,
+            preflight_token=PREFLIGHT_TOKEN,
+        )
+        receipt = await operations["memory_duplicates_cleanup"](
+            workspace=self.workspace, request=request
+        )
+        replay = await operations["memory_duplicates_cleanup"](
+            workspace=self.workspace, request=request
+        )
+
+        self.assertEqual([keeper_id, duplicate_id], receipt.affected_ids)
+        self.assertTrue(replay.idempotent_replay)
+        self.assertEqual(receipt.event_ids, replay.event_ids)
+        self.assertEqual(
+            {(cause_id, keeper_id, "led_to"), (keeper_id, effect_id, "led_to")},
+            self._live_edges(),
+        )
+        related = await self._related(relationships, keeper_id)
+        self.assertEqual(
+            {cause_id, effect_id}, {item.record_id for item in related.records}
+        )
+        self.assertEqual(2, len(related.relationships))
+        self.assertIn(
+            existing, {item.relationship_id for item in related.relationships}
+        )
+        chain = await self._chain(relationships, cause_id, effect_id)
+        self.assertEqual(
+            [[cause_id, keeper_id, effect_id]],
+            [path.record_ids for path in chain.paths],
+        )
+        self._assert_replay_reproduces_projections()
+
+    async def test_dream_purge_closes_relationships_of_purged_records(self) -> None:
+        """Purged dream duplicates must not leave dangling relationships."""
+        source_id = "mem_" + "f" * 64
+        tags = ["dream", "re-evaluation", f"source-decision:{source_id}"]
+        purged_id = self._append_record(
+            "a",
+            "Older dream re-evaluation.",
+            created_at=NOW - timedelta(days=3),
+            record_type="learning",
+            tags=tags,
+        )
+        self._append_record(
+            "b",
+            "Newer dream re-evaluation.",
+            created_at=NOW - timedelta(days=2),
+            record_type="learning",
+            tags=tags,
+        )
+        other_id = self._append_record(
+            "c", "Unrelated first.", created_at=NOW - timedelta(days=1)
+        )
+        another_id = self._append_record(
+            "d", "Unrelated second.", created_at=NOW - timedelta(days=1)
+        )
+        relationships = self._relationship_operations()
+        await self._link(
+            relationships, purged_id, other_id, "evidence_for", "dream-edge-ac-0001"
+        )
+        kept = await self._link(
+            relationships, other_id, another_id, "related_to", "dream-edge-cd-0002"
+        )
+        operations = self._operations()
+        preview = await operations["dream_duplicates_preview"](
+            workspace=self.workspace,
+            request=_request(
+                "dream_duplicates_preview", workspace_id=self.workspace.workspace_id
+            ),
+        )
+        self.assertEqual([purged_id], preview.sample_ids)
+        request = _request(
+            "dream_duplicates_purge",
+            workspace_id=self.workspace.workspace_id,
+            selection_token=preview.selection_token,
+            preflight_token=PREFLIGHT_TOKEN,
+        )
+        receipt = await operations["dream_duplicates_purge"](
+            workspace=self.workspace, request=request
+        )
+        replay = await operations["dream_duplicates_purge"](
+            workspace=self.workspace, request=request
+        )
+
+        self.assertEqual([purged_id], receipt.affected_ids)
+        self.assertTrue(replay.idempotent_replay)
+        self.assertEqual(receipt.event_ids, replay.event_ids)
+        self.assertEqual({(other_id, another_id, "related_to")}, self._live_edges())
+        related = await self._related(relationships, other_id)
+        self.assertEqual([another_id], [item.record_id for item in related.records])
+        self.assertEqual(
+            [kept], [item.relationship_id for item in related.relationships]
+        )
+        self._assert_replay_reproduces_projections()
+
 
 if __name__ == "__main__":
     unittest.main()

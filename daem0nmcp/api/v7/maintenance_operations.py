@@ -816,6 +816,149 @@ def _verified_payload(row: sqlite3.Row) -> dict[str, Any]:
         raise MaintenanceOperationError("CAPABILITY_DEGRADED") from None
 
 
+def _retire_relationships(
+    store: EventStore,
+    connection: sqlite3.Connection,
+    workspace_id: str,
+    record_id: str,
+    *,
+    recorded_at_us: int,
+    correlation_id: str,
+    causation_event_id: str,
+    maintenance: Mapping[str, Any],
+    successor_record_id: str | None = None,
+) -> None:
+    """Close every live relationship of a record that was just deleted.
+
+    A relationship left open on a deleted record is unreachable (it cannot be
+    listed) and breaks graph reads.  With ``successor_record_id`` the edge is
+    re-created on the surviving record, unless that would be a self-edge or
+    repeat an edge the survivor already has.
+    """
+
+    rows = connection.execute(
+        "SELECT relationship_id,version,source_record_id,target_record_id,"
+        "relationship_type,legacy_type,description,confidence,metadata_json,"
+        "valid_from_us,transaction_from_us "
+        "FROM memory_relationship_versions "
+        "WHERE workspace_id=? AND relationship_type<>'legacy' "
+        "AND transaction_to_us IS NULL "
+        "AND (valid_to_us IS NULL OR valid_to_us>?) "
+        "AND (source_record_id=? OR target_record_id=?) "
+        "ORDER BY relationship_id",
+        (workspace_id, recorded_at_us, record_id, record_id),
+    ).fetchall()
+    for row in rows:
+        relationship_id = str(row["relationship_id"])
+        metadata = _parse_json(row["metadata_json"], dict)
+        valid_from_us = int(row["valid_from_us"])
+        event_at_us = max(recorded_at_us, int(row["transaction_from_us"]) + 1)
+        relation = {
+            "source_record_id": str(row["source_record_id"]),
+            "target_record_id": str(row["target_record_id"]),
+            "relationship_type": str(row["relationship_type"]),
+            "legacy_type": row["legacy_type"],
+            "description": row["description"],
+            "confidence": row["confidence"],
+            "metadata": metadata,
+        }
+        removed = store.append_and_project(
+            EventCommand(
+                workspace_id=workspace_id,
+                stream_id=relationship_id,
+                stream_kind="relationship",
+                event_type="relationship.removed",
+                occurred_at_us=event_at_us,
+                recorded_at_us=event_at_us,
+                actor_type="client",
+                causation_event_id=causation_event_id,
+                correlation_id=correlation_id,
+                expected_stream_version=int(row["version"]) + 1,
+                payload={
+                    "relationship": {
+                        **relation,
+                        "valid_from_us": valid_from_us,
+                        "valid_to_us": max(event_at_us, valid_from_us + 1),
+                    },
+                    "maintenance": {
+                        **maintenance,
+                        "role": "relationship_closed",
+                        "deleted_record_id": record_id,
+                    },
+                },
+            )
+        )
+        if successor_record_id is None:
+            continue
+        source = (
+            successor_record_id
+            if relation["source_record_id"] == record_id
+            else relation["source_record_id"]
+        )
+        target = (
+            successor_record_id
+            if relation["target_record_id"] == record_id
+            else relation["target_record_id"]
+        )
+        if source == target:
+            continue
+        other = target if source == successor_record_id else source
+        if (
+            connection.execute(
+                "SELECT 1 FROM memory_records WHERE workspace_id=? "
+                "AND record_id=? AND deleted_at_us IS NULL",
+                (workspace_id, other),
+            ).fetchone()
+            is None
+        ):
+            continue
+        duplicate = connection.execute(
+            "SELECT 1 FROM memory_relationship_versions "
+            "WHERE workspace_id=? AND source_record_id=? AND target_record_id=? "
+            "AND relationship_type=? AND transaction_to_us IS NULL "
+            "AND (valid_to_us IS NULL OR valid_to_us>?) LIMIT 1",
+            (workspace_id, source, target, relation["relationship_type"], event_at_us),
+        ).fetchone()
+        if duplicate is not None:
+            continue
+        store.append_and_project(
+            EventCommand(
+                workspace_id=workspace_id,
+                stream_id=deterministic_id(
+                    "rel",
+                    "memory-duplicates-repoint",
+                    workspace_id,
+                    correlation_id,
+                    relationship_id,
+                    record_id,
+                ),
+                stream_kind="relationship",
+                event_type="relationship.created",
+                occurred_at_us=event_at_us,
+                recorded_at_us=event_at_us,
+                actor_type="client",
+                causation_event_id=removed.event_id,
+                correlation_id=correlation_id,
+                expected_stream_version=1,
+                payload={
+                    "relationship": {
+                        **relation,
+                        "source_record_id": source,
+                        "target_record_id": target,
+                        "valid_from_us": event_at_us,
+                        "valid_to_us": None,
+                    },
+                    "maintenance": {
+                        **maintenance,
+                        "role": "relationship_repointed",
+                        "deleted_record_id": record_id,
+                        "replaces_relationship_id": relationship_id,
+                    },
+                },
+            )
+        )
+
+
 def _prune_replay(
     connection: sqlite3.Connection,
     workspace_id: str,
@@ -825,7 +968,7 @@ def _prune_replay(
     rows = connection.execute(
         "SELECT event_id,stream_id,event_type,payload_json,payload_hash "
         "FROM memory_events WHERE workspace_id=? AND correlation_id=? "
-        "ORDER BY rowid",
+        "AND stream_kind='memory' ORDER BY rowid",
         (workspace_id, correlation_id),
     ).fetchall()
     if not rows:
@@ -1051,6 +1194,21 @@ def _prune_sync(
                             },
                         )
                     )
+                    _retire_relationships(
+                        store,
+                        connection,
+                        workspace.workspace_id,
+                        record.record_id,
+                        recorded_at_us=recorded_at_us,
+                        correlation_id=correlation_id,
+                        causation_event_id=event.event_id,
+                        maintenance={
+                            "criteria_hash": claims.criteria_hash,
+                            "operation": claims.target_tool,
+                            "selected_count": claims.selected_count,
+                            "selection_hash": claims.selection_hash,
+                        },
+                    )
                     affected_ids.append(record.record_id)
                     event_ids.append(event.event_id)
                 if cancelled.is_set():
@@ -1151,7 +1309,7 @@ def _duplicates_replay(
     rows = connection.execute(
         "SELECT event_id,stream_id,event_type,payload_json,payload_hash "
         "FROM memory_events WHERE workspace_id=? AND correlation_id=? "
-        "ORDER BY rowid",
+        "AND stream_kind='memory' ORDER BY rowid",
         (workspace_id, correlation_id),
     ).fetchall()
     if not rows:
@@ -1349,6 +1507,22 @@ def _duplicates_sync(
                                     },
                                 },
                             )
+                        )
+                        _retire_relationships(
+                            store,
+                            connection,
+                            workspace.workspace_id,
+                            candidate.record_id,
+                            recorded_at_us=recorded_at_us,
+                            correlation_id=correlation_id,
+                            causation_event_id=candidate_event.event_id,
+                            maintenance={
+                                "criteria_hash": claims.criteria_hash,
+                                "operation": claims.target_tool,
+                                "selected_count": claims.selected_count,
+                                "selection_hash": claims.selection_hash,
+                            },
+                            successor_record_id=group.keeper.record_id,
                         )
                         affected_ids.append(candidate.record_id)
                         event_ids.append(candidate_event.event_id)
@@ -1928,6 +2102,21 @@ def _dream_sync(
                                 },
                             },
                         )
+                    )
+                    _retire_relationships(
+                        store,
+                        connection,
+                        workspace.workspace_id,
+                        record.record_id,
+                        recorded_at_us=recorded_at_us,
+                        correlation_id=correlation_id,
+                        causation_event_id=event.event_id,
+                        maintenance={
+                            "criteria_hash": claims.criteria_hash,
+                            "operation": claims.target_tool,
+                            "selected_count": claims.selected_count,
+                            "selection_hash": claims.selection_hash,
+                        },
                     )
                     affected_ids.append(record.record_id)
                     event_ids.append(event.event_id)
