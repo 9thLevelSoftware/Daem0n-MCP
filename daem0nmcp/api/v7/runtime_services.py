@@ -127,7 +127,9 @@ class _WorkerCancelledError(RuntimeError):
     pass
 
 
-def _validated_workspace(workspace: Workspace) -> Workspace:
+def _validated_workspace(
+    workspace: Workspace, *, allow_unavailable_storage: bool = False
+) -> Workspace:
     if not isinstance(workspace, Workspace):
         raise RuntimeServiceError("INVALID_WORKSPACE")
     try:
@@ -135,6 +137,12 @@ def _validated_workspace(workspace: Workspace) -> Workspace:
         registered = WorkspaceRegistry([canonical], default_root=canonical).default
     except (OSError, RuntimeError, TypeError, ValueError) as exc:
         raise RuntimeServiceError("INVALID_WORKSPACE") from exc
+    if registered.identity_block is not None or (
+        registered.storage_unavailable and not allow_unavailable_storage
+    ):
+        # An offline migration can recover unreadable state, but a serving
+        # process must never write under a provisional identity before that.
+        raise RuntimeServiceError("ACTIVE_V7_UNAVAILABLE")
     if (
         registered.workspace_id != workspace.workspace_id
         or os.path.normcase(str(registered.root)) != os.path.normcase(str(canonical))
@@ -1967,7 +1975,9 @@ class BasicHealthService:
         include_components: bool,
     ) -> HealthData:
         if workspace is not None:
-            _validated_workspace(workspace)
+            # Health may report unreadable storage, but it still requires a
+            # valid scope and never permits an established identity block.
+            workspace = _validated_workspace(workspace, allow_unavailable_storage=True)
         if not isinstance(include_components, bool):
             raise RuntimeServiceError("INVALID_ARGUMENT")
         if workspace is None:
@@ -2003,6 +2013,7 @@ class BasicHealthService:
         if (
             include_components
             and workspace is not None
+            and not workspace.storage_unavailable
             and self._dreaming_provider is not None
         ):
             try:
@@ -2016,7 +2027,9 @@ class BasicHealthService:
             data = data.model_copy(
                 update={"capability_states": [], "dreaming": None}, deep=True
             )
-        elif self._runtime_diagnostics_provider is not None:
+        elif self._runtime_diagnostics_provider is not None and (
+            workspace is None or not workspace.storage_unavailable
+        ):
             diagnostics = await self._runtime_diagnostics_provider(workspace)
             data = HealthData.model_validate(
                 {

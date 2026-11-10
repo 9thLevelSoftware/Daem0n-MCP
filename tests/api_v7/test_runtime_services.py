@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import shutil
 import sqlite3
 import tempfile
 import threading
@@ -12,6 +13,7 @@ from contextlib import closing, contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
+from unittest import mock
 
 WORKED_AT = datetime(2026, 8, 8, 12, 0, tzinfo=timezone.utc)
 
@@ -104,6 +106,46 @@ class WriterServiceTests(
     _RuntimeServiceFixtures,
     unittest.IsolatedAsyncioTestCase,
 ):
+    async def test_unreadable_identity_cannot_write_fallback_id_into_a_relocated_store(
+        self,
+    ) -> None:
+        from daem0nmcp import workspace as workspace_module
+        from daem0nmcp.api.v7.runtime_services import RuntimeServiceError
+        from daem0nmcp.workspace import (
+            WorkspaceRegistry,
+            reset_workspace_identity_cache,
+        )
+
+        writer = self._writer()
+        await writer.store(self.workspace, self._store_command())
+        relocated = self.root / "relocated"
+        shutil.copytree(self.storage, relocated / ".daem0nmcp" / "storage")
+        database = relocated / ".daem0nmcp" / "storage" / "daem0nmcp.db"
+        original_reader = workspace_module._open_identity_reader
+
+        def unavailable_reader(root):
+            if root == relocated:
+                raise sqlite3.OperationalError("database is locked")
+            return original_reader(root)
+
+        reset_workspace_identity_cache()
+        with mock.patch.object(
+            workspace_module, "_open_identity_reader", unavailable_reader
+        ):
+            fallback = WorkspaceRegistry([relocated], default_root=relocated).default
+            self.assertNotEqual(self.workspace.workspace_id, fallback.workspace_id)
+            with self.assertRaisesRegex(RuntimeServiceError, "ACTIVE_V7_UNAVAILABLE"):
+                await writer.store(
+                    fallback,
+                    self._store_command(idempotency_key="unknown-identity-write"),
+                )
+
+        with closing(sqlite3.connect(database)) as connection:
+            identifiers = connection.execute(
+                "SELECT DISTINCT workspace_id FROM memory_events"
+            ).fetchall()
+        self.assertEqual([(self.workspace.workspace_id,)], identifiers)
+
     async def test_safe_resolver_requires_a_format_7_active_pointer(self) -> None:
         """Accepting pointerless format 6 storage would write the wrong authority."""
         from daem0nmcp.api.v7.runtime_services import (
@@ -1317,9 +1359,13 @@ class BasicServiceTests(
         from daem0nmcp.api.v7.runtime_services import BasicHealthService
 
         self.database.write_bytes(b"not a sqlite database")
+        dreaming = mock.AsyncMock()
+        diagnostics = mock.AsyncMock()
         service = BasicHealthService(
             auth_mode="process",
             task_support=CapabilityState(name="tasks", status="ready"),
+            dreaming_provider=dreaming,
+            runtime_diagnostics_provider=diagnostics,
         )
         self.health_services.append(service)
 
@@ -1331,6 +1377,45 @@ class BasicServiceTests(
         self.assertEqual(
             "STORAGE_UNAVAILABLE", result.capability_states[-1].reason_code
         )
+        dreaming.assert_not_awaited()
+        diagnostics.assert_not_awaited()
+
+    async def test_unavailable_health_still_rejects_a_forged_workspace_id(self) -> None:
+        from daem0nmcp.api.v7.models import CapabilityState
+        from daem0nmcp.api.v7.runtime_services import (
+            BasicHealthService,
+            RuntimeServiceError,
+        )
+        from daem0nmcp.workspace import Workspace
+
+        self.database.write_bytes(b"not a sqlite database")
+        service = BasicHealthService(
+            auth_mode="process",
+            task_support=CapabilityState(name="tasks", status="ready"),
+        )
+        self.health_services.append(service)
+
+        forged = Workspace("ws_" + "f" * 24, self.root)
+        with self.assertRaisesRegex(RuntimeServiceError, "^INVALID_WORKSPACE$"):
+            await service.inspect(forged, True)
+
+    async def test_unavailable_health_still_rejects_a_malformed_identity(self) -> None:
+        from daem0nmcp.api.v7.models import CapabilityState
+        from daem0nmcp.api.v7.runtime_services import (
+            BasicHealthService,
+            RuntimeServiceError,
+        )
+
+        self.database.write_bytes(b"not a sqlite database")
+        (self.root / ".daem0nmcp" / "workspace-id").write_text("{}", encoding="utf-8")
+        service = BasicHealthService(
+            auth_mode="process",
+            task_support=CapabilityState(name="tasks", status="ready"),
+        )
+        self.health_services.append(service)
+
+        with self.assertRaisesRegex(RuntimeServiceError, "^ACTIVE_V7_UNAVAILABLE$"):
+            await service.inspect(self.workspace, True)
 
     async def test_health_dreaming_is_workspace_scoped_and_component_suppressed(
         self,

@@ -23,7 +23,12 @@ from unittest import mock
 
 import pytest
 
-from daem0nmcp.storage_activation import DEFAULT_DATABASE_NAME
+from daem0nmcp.storage_activation import (
+    DEFAULT_DATABASE_NAME,
+    LOCK_NAME,
+    ActiveDatabasePointer,
+    write_active_pointer,
+)
 from daem0nmcp.workspace import (
     WORKSPACE_IDENTITY_AMBIGUOUS,
     WORKSPACE_IDENTITY_DUPLICATE,
@@ -105,6 +110,96 @@ def test_a_new_root_is_seeded_with_the_path_hash(tmp_path):
     assert _recorded(root)["id"] == path_hash_workspace_id(root)
 
 
+@pytest.mark.parametrize("with_marker", [False, True])
+def test_fresh_storage_directory_does_not_block_identity(tmp_path, with_marker):
+    root = _project(tmp_path, "fresh-storage")
+    storage = root / ".daem0nmcp" / "storage"
+    storage.mkdir(parents=True)
+    if with_marker:
+        (storage / LOCK_NAME).write_bytes(b"")
+
+    registry = WorkspaceRegistry([root], default_root=root)
+    assert registry.default.identity_block is None
+    assert registry.default.workspace_id == path_hash_workspace_id(root)
+    assert not _identity_file(root).exists()
+    assert not (storage / DEFAULT_DATABASE_NAME).exists()
+    ensure_workspace_identity([root])
+    assert _recorded(root)["id"] == registry.default.workspace_id
+
+
+@pytest.mark.parametrize("recorded", [False, True])
+def test_invalid_pointer_defers_to_storage_without_writing_identity(tmp_path, recorded):
+    root = _project(tmp_path, "invalid-pointer")
+    if recorded:
+        write_workspace_identity(root, workspace_id=FOREIGN)
+    storage = root / ".daem0nmcp" / "storage"
+    storage.mkdir(parents=True)
+    pointer = storage / "active-db.json"
+    pointer.write_bytes(b"invalid pointer")
+    before = _identity_file(root).read_bytes() if recorded else None
+
+    identity = workspace_identity(root)
+    assert identity.blocked is None
+    assert identity.workspace_id == (
+        FOREIGN if recorded else path_hash_workspace_id(root)
+    )
+    ensure_workspace_identity([root])
+    assert pointer.read_bytes() == b"invalid pointer"
+    if recorded:
+        assert _identity_file(root).read_bytes() == before
+    else:
+        assert not _identity_file(root).exists()
+    assert not (storage / DEFAULT_DATABASE_NAME).exists()
+
+
+def test_missing_pointer_target_does_not_seed_a_new_identity(tmp_path):
+    root = _project(tmp_path, "missing-active")
+    _seed_events(root, FOREIGN)
+    storage = root / ".daem0nmcp" / "storage"
+    write_active_pointer(
+        storage, ActiveDatabasePointer(7, 1, DEFAULT_DATABASE_NAME, None, None)
+    )
+    (storage / DEFAULT_DATABASE_NAME).unlink()
+    before = (storage / "active-db.json").read_bytes()
+
+    ensure_workspace_identity([root])
+    assert not _identity_file(root).exists()
+    assert (storage / "active-db.json").read_bytes() == before
+    assert not (storage / DEFAULT_DATABASE_NAME).exists()
+
+
+@pytest.mark.parametrize("linked_component", ["managed", "storage"])
+def test_empty_linked_storage_does_not_seed_identity_outside_root(
+    tmp_path, linked_component
+):
+    root = _project(tmp_path, "linked-empty")
+    outside = _project(tmp_path, "outside")
+    managed = root / ".daem0nmcp"
+    if linked_component == "managed":
+        (outside / "storage").mkdir()
+        link = managed
+    else:
+        managed.mkdir()
+        link = managed / "storage"
+    try:
+        link.symlink_to(outside, target_is_directory=True)
+    except (OSError, NotImplementedError):
+        if os.name != "nt":
+            pytest.skip("this environment cannot create directory symlinks")
+        result = subprocess.run(
+            ["cmd.exe", "/d", "/c", "mklink", "/J", str(link), str(outside)],
+            capture_output=True,
+        )
+        if result.returncode:
+            pytest.skip("this environment cannot create directory junctions")
+    before = sorted(path.relative_to(outside) for path in outside.rglob("*"))
+
+    ensure_workspace_identity([root])
+    assert workspace_identity(root).blocked == WORKSPACE_IDENTITY_AMBIGUOUS
+    assert not _identity_file(root).exists()
+    assert sorted(path.relative_to(outside) for path in outside.rglob("*")) == before
+
+
 def test_a_root_with_no_file_adopts_the_single_stored_id(tmp_path):
     root = _project(tmp_path, "adopting")
     _seed_events(root, FOREIGN, FOREIGN)
@@ -113,6 +208,35 @@ def test_a_root_with_no_file_adopts_the_single_stored_id(tmp_path):
     assert identity.blocked is None
     ensure_workspace_identity([root])
     assert _recorded(root)["id"] == FOREIGN
+
+
+def test_unavailable_identity_is_retried_after_a_transient_read_failure(
+    tmp_path, monkeypatch
+):
+    from daem0nmcp import workspace as workspace_module
+
+    root = _project(tmp_path, "temporarily-locked")
+    _seed_events(root, FOREIGN)
+    original = workspace_module._open_identity_reader
+    unavailable = True
+
+    def read(selected):
+        if unavailable:
+            raise sqlite3.OperationalError("database is locked")
+        return original(selected)
+
+    monkeypatch.setattr(workspace_module, "_open_identity_reader", read)
+    first = workspace_identity(root)
+    assert first.storage_unavailable
+    assert first.workspace_id == path_hash_workspace_id(root)
+    before = _database_digest(root)
+
+    unavailable = False
+    recovered = workspace_identity(root)
+    assert not recovered.storage_unavailable
+    assert recovered.workspace_id == FOREIGN
+    assert _database_digest(root) == before
+    assert not _identity_file(root).exists()
 
 
 def test_governance_events_alone_are_adopted(tmp_path):
@@ -637,12 +761,15 @@ def test_new_forks_from_the_id_that_blocked_the_folder(tmp_path):
 def test_an_unreadable_store_is_not_seeded_as_a_new_root(tmp_path):
     root = _project(tmp_path, "unread")
     _seed_events(root, FOREIGN)
-    (root / ".daem0nmcp" / "storage" / DEFAULT_DATABASE_NAME).unlink()
+    (root / ".daem0nmcp" / "storage" / DEFAULT_DATABASE_NAME).write_bytes(
+        b"not a SQLite database"
+    )
     identity = workspace_identity(root)
-    assert identity.blocked == WORKSPACE_IDENTITY_AMBIGUOUS
+    assert identity.blocked is None
+    assert identity.storage_unavailable
     ensure_workspace_identity([root])
     assert not _identity_file(root).exists()
-    assert workspace_identity(root).blocked == WORKSPACE_IDENTITY_AMBIGUOUS
+    assert workspace_identity(root).storage_unavailable
 
 
 def test_a_linked_identity_file_is_malformed_and_never_followed(tmp_path):

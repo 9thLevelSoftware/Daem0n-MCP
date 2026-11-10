@@ -17,6 +17,8 @@ from pathlib import Path, PurePath, PureWindowsPath
 from typing import Literal
 from urllib.parse import quote
 
+from .protected_files import ProtectedPathError, reject_linked_ancestry
+
 _WINDOWS_DRIVE = re.compile(r"^[A-Za-z]:")
 
 
@@ -67,6 +69,7 @@ class Workspace:
     workspace_id: str
     root: Path
     identity_block: str | None = None
+    storage_unavailable: bool = False
 
 
 def _canonical_root(root: str | os.PathLike[str]) -> Path:
@@ -207,6 +210,7 @@ class WorkspaceIdentity:
     has_file: bool = False
     sole_holder: bool = True
     stored_ids: frozenset[str] = field(default_factory=frozenset)
+    storage_unavailable: bool = False
 
     @property
     def root_key_matches(self) -> bool:
@@ -327,9 +331,32 @@ def _open_identity_reader(root: Path) -> sqlite3.Connection | None:
     """Open the root's own active database read-only, creating nothing."""
 
     storage = _identity_directory(root) / "storage"
+    reject_linked_ancestry(storage)
     if not storage.is_dir():
         return None
-    from .storage_activation import readonly_database_uri, resolve_active_database
+    from .storage_activation import (
+        DEFAULT_DATABASE_NAME,
+        LOCK_NAME,
+        POINTER_NAME,
+        readonly_database_uri,
+        resolve_active_database,
+    )
+
+    if (
+        _lstat(storage / POINTER_NAME) is None
+        and _lstat(storage / DEFAULT_DATABASE_NAME) is None
+    ):
+        # Bootstrap creates the directory and lock before publishing a DB.
+        # Neither an empty directory nor its plain lock marker is a store.
+        entries = list(storage.iterdir())
+        if not entries or (
+            len(entries) == 1
+            and entries[0].name == LOCK_NAME
+            and (status := _lstat(entries[0])) is not None
+            and stat.S_ISREG(status.st_mode)
+            and not _is_link_or_reparse(status)
+        ):
+            return None
 
     database = resolve_active_database(storage).path
     if not database.is_file():
@@ -344,24 +371,34 @@ def _open_identity_reader(root: Path) -> sqlite3.Connection | None:
 def _load_stored_workspace_ids(root: Path) -> frozenset[str] | None:
     """IDs in the store, or ``None`` if a store exists but could not be read."""
 
-    storage = _identity_directory(root) / "storage"
-    if not storage.is_dir():
-        return frozenset()
     try:
         connection = _open_identity_reader(root)
+    except ProtectedPathError:
+        raise
     except Exception:
         return None
     if connection is None:
         return frozenset()
     found: set[str] = set()
     with closing(connection):
+        try:
+            tables = {
+                row[0]
+                for row in connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                )
+            }
+        except sqlite3.Error:
+            return None
         for table in ("memory_events", "governance_events"):
+            if table not in tables:
+                continue
             try:
                 rows = connection.execute(
                     f"SELECT DISTINCT workspace_id FROM {table}"  # noqa: S608
                 ).fetchall()
             except sqlite3.Error:
-                continue
+                return None
             found.update(value for (value,) in rows if isinstance(value, str))
     return frozenset(found)
 
@@ -404,9 +441,9 @@ def _claim_identity(root: Path) -> WorkspaceIdentity:
     current = _identity_root_key(root)
     path_hash = _workspace_id(root)
     recorded, malformed = _read_identity_file(root)
-    stored = _load_stored_workspace_ids(root)
-    if stored is None:
-        # A store is present but unreadable: never treat that as empty.
+    try:
+        stored = _load_stored_workspace_ids(root)
+    except ProtectedPathError:
         return WorkspaceIdentity(
             workspace_id=path_hash,
             blocked=WORKSPACE_IDENTITY_AMBIGUOUS,
@@ -417,6 +454,11 @@ def _claim_identity(root: Path) -> WorkspaceIdentity:
             malformed=malformed,
             has_file=recorded is not None or malformed,
         )
+    # Storage owns unreadable databases and invalid pointers, including hot
+    # journal recovery. Unknown stored IDs must never seed or rebind an ID.
+    storage_unavailable = stored is None
+    if stored is None:
+        stored = frozenset()
     if malformed:
         # ``workspace-id`` still reports the stored counts, and ``--new`` can
         # still fork from them, so the operator is not left with nothing.
@@ -427,6 +469,7 @@ def _claim_identity(root: Path) -> WorkspaceIdentity:
             malformed=True,
             has_file=True,
             stored_ids=stored,
+            storage_unavailable=storage_unavailable,
         )
     if recorded is None:
         if not stored:
@@ -440,6 +483,7 @@ def _claim_identity(root: Path) -> WorkspaceIdentity:
             blocked=None if claimed else WORKSPACE_IDENTITY_AMBIGUOUS,
             current_root_key=current,
             stored_ids=stored,
+            storage_unavailable=storage_unavailable,
         )
     # A fork only hides ``forked_from``; adopt (no fork) hides every other ID.
     allowed = {recorded.workspace_id}
@@ -458,6 +502,7 @@ def _claim_identity(root: Path) -> WorkspaceIdentity:
         forked_from=recorded.forked_from,
         has_file=True,
         stored_ids=stored,
+        storage_unavailable=storage_unavailable,
     )
 
 
@@ -473,6 +518,7 @@ def _block(identity: WorkspaceIdentity, root: Path, code: str) -> WorkspaceIdent
         has_file=identity.has_file,
         sole_holder=False,
         stored_ids=identity.stored_ids,
+        storage_unavailable=identity.storage_unavailable,
     )
 
 
@@ -530,6 +576,7 @@ def _resolve_identities(canonical: Sequence[Path]) -> dict[str, WorkspaceIdentit
                     for other in holders[identity.workspace_id]
                 ),
                 stored_ids=identity.stored_ids,
+                storage_unavailable=identity.storage_unavailable,
             )
     return identities
 
@@ -583,6 +630,11 @@ def resolve_workspace_identities(
     if cached is not None and cached[0] == stamps:
         return cached[1]
     identities = _resolve_identities(canonical)
+    # A transient database lock need not change any file stamp when it clears.
+    # Recheck unknown identities instead of caching a provisional path hash.
+    if any(identity.storage_unavailable for identity in identities.values()):
+        _IDENTITY_CACHE.pop(key, None)
+        return identities
     if len(_IDENTITY_CACHE) >= _IDENTITY_CACHE_LIMIT:
         _IDENTITY_CACHE.clear()
     _IDENTITY_CACHE[key] = (stamps, identities)
@@ -732,7 +784,7 @@ def ensure_workspace_identity(
     for root in canonical:
         key = _root_key(root)
         identity = identities[key]
-        if identity.blocked is not None:
+        if identity.blocked is not None or identity.storage_unavailable:
             continue
         if not identity.has_file:
             landed = _write_identity_file(
@@ -797,7 +849,12 @@ class WorkspaceRegistry:
         for index, canonical in enumerate(canonical_roots):
             key = _root_key(canonical)
             identity = identities[key]
-            workspace = Workspace(identity.workspace_id, canonical, identity.blocked)
+            workspace = Workspace(
+                identity.workspace_id,
+                canonical,
+                identity.blocked,
+                identity.storage_unavailable,
+            )
             self._by_root[key] = workspace
             self._by_id.setdefault(workspace.workspace_id, workspace)
             if index == 0:
