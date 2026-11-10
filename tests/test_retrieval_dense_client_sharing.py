@@ -771,6 +771,46 @@ class SharedLocalClientRuntimeTests(_EmbeddedFolderRuntimeCase):
         self.assertEqual(("succeeded", 1, None), self._job("dense"))
         self.assertEqual(("ready", None, 2), await self._dense(service))
 
+    async def test_manual_rebuild_reports_a_folder_held_by_another_process(self):
+        from daem0nmcp.retrieval.operations import (
+            ProjectionOperationError,
+            rebuild_projection,
+        )
+        from daem0nmcp.retrieval.runtime import create_projection_builders
+
+        self._append("1", "durable dense evidence one")
+        self._enqueue("lexical", "dense")
+        await self._drain()
+        self._append("2", "durable dense evidence two")
+        self.folders.foreign.add(self.folder_key)
+
+        builders = create_projection_builders(
+            self.connection,
+            self.path,
+            config=self.config,
+            capability_statuses=STATUSES,
+        )
+        self.addCleanup(builders.close)
+        with self.assertRaises(ProjectionOperationError) as raised:
+            rebuild_projection(
+                self.connection,
+                workspace_id=WORKSPACE_ID,
+                projection="dense",
+                builders=builders,
+            )
+        self.assertEqual("DENSE_STORAGE_LOCKED", raised.exception.code)
+        self.assertEqual([(1, "active")], self._generations())
+
+        self.folders.foreign.clear()
+        self.monotonic[0] += 3_600.0
+        result = rebuild_projection(
+            self.connection,
+            workspace_id=WORKSPACE_ID,
+            projection="dense",
+            builders=builders,
+        )
+        self.assertEqual((2, "active"), (result["generation"], result["status"]))
+
     async def test_folder_held_by_another_process_defers_generation_gc(self):
         from daem0nmcp.event_store import canonical_json_bytes
         from daem0nmcp.retrieval.dense_generation_gc import (

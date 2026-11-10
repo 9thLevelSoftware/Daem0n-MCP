@@ -18,6 +18,7 @@ from typing import TypeVar
 
 from ..event_store import canonical_json_bytes, deterministic_id, sha256_json
 from .dense_generation_gc import enqueue_inactive_generation_gc
+from .projections import ProjectionBuildError
 from .providers import (
     DENSE_BUILDER_VERSION,
     QdrantStorageLockedError,
@@ -49,12 +50,12 @@ _DENSE_INFERENCE_BATCH_SIZE = 32
 _BatchValue = TypeVar("_BatchValue")
 
 
-class DenseProjectionBuildError(RuntimeError):
-    """A dense staging generation could not be validated or activated."""
+class DenseProjectionBuildError(ProjectionBuildError):
+    """A dense staging generation could not be validated or activated.
 
-    def __init__(self, code: str, message: str) -> None:
-        self.code = code
-        super().__init__(f"{code}: {message}")
+    It is a projection build error so that operator paths keep its code, for
+    example DENSE_STORAGE_LOCKED, when they report a failed manual rebuild.
+    """
 
 
 @dataclass(frozen=True, slots=True)
@@ -1382,7 +1383,7 @@ class DenseProjectionBuilder:
                     )
                 except QdrantStorageLockedError as exc:
                     raise DenseProjectionBuildError(
-                        exc.code, "dense storage is held by another process"
+                        exc.code, "dense storage is held by another Qdrant client"
                     ) from exc
             if not self._client_contract_ready(self.client):
                 raise DenseProjectionBuildError(
