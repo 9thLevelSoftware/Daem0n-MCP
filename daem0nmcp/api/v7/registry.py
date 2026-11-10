@@ -71,7 +71,7 @@ ANNOTATION_KEYS = frozenset(
     }
 )
 _NAME_RE = re.compile(r"^[a-z][a-z0-9_]{1,79}$")
-MAX_TOOL_TITLE_CHARACTERS = 80
+MAX_TOOL_TITLE_CHARACTERS = 48
 
 
 class ManifestError(ValueError):
@@ -156,7 +156,10 @@ class ToolSpec:
             or len(self.title) > MAX_TOOL_TITLE_CHARACTERS
             or not self.title.isprintable()
         ):
-            raise ManifestError("tool title must be short single-line text")
+            raise ManifestError(
+                "tool title must be single-line text of at most "
+                f"{MAX_TOOL_TITLE_CHARACTERS} characters"
+            )
         if not callable(self.handler):
             raise ManifestError("tool handler is missing")
         if not (

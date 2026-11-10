@@ -2515,9 +2515,10 @@ _TOOL_TEXT: Mapping[str, tuple[str, str]] = MappingProxyType(
         ),
         "code_impact_analyze": (
             "Analyze Code Impact",
-            "Show what breaks if you change a function, class or other code "
-            "entity: follows the indexed relationships outward and lists the "
-            "affected entities and paths. Needs a code_index run first.",
+            "Show what breaks if you change a function, class, method or other "
+            "code entity: lists everything that depends on it, such as what "
+            "calls, imports or inherits it, directly or through others up to "
+            "max_depth, with the paths. Needs a code_index run first.",
         ),
         "code_todos_scan": (
             "Scan for TODO Comments",
@@ -2541,9 +2542,10 @@ _TOOL_TEXT: Mapping[str, tuple[str, str]] = MappingProxyType(
         ),
         "rule_check": (
             "Check Rules for an Action",
-            "Before acting, ask which rules apply: matches a proposed action "
-            "against the enabled rules and returns what you must do, must not "
-            "do, should ask first and should be warned about. Read-only.",
+            "Before acting, ask whether it is allowed and which rules apply: "
+            "matches a proposed action against the enabled rules and returns "
+            "what you must do, must not do, should ask first and should be "
+            "warned about. Read-only.",
         ),
         "rule_create": (
             "Create a Rule",
@@ -2635,17 +2637,17 @@ _TOOL_TEXT: Mapping[str, tuple[str, str]] = MappingProxyType(
         ),
         "memory_prune_preview": (
             "Preview a Memory Prune",
-            "Dry run of memory_prune: counts and samples the old decisions and "
-            "learnings that would be deleted for the given age and filters, and "
-            "returns the selection_token memory_prune requires. Changes "
-            "nothing.",
+            "Dry run of memory_prune: counts and samples the old records, by "
+            "default decisions and learnings, that would be deleted for the "
+            "given age, categories and filters, and returns the "
+            "selection_token memory_prune requires. Changes nothing.",
         ),
         "memory_prune": (
             "Prune Old Memories",
-            "Remove old, stale memories for good: deletes decisions and "
-            "learnings older than older_than_days that are unpinned, "
-            "unarchived, have no outcome and informed no later work. Needs the "
-            "selection_token from memory_prune_preview. Destructive.",
+            "Remove old, stale memories for good: deletes records, by default "
+            "decisions and learnings, older than older_than_days that are "
+            "unpinned, unarchived, have no outcome and informed no later work. "
+            "Needs the selection_token from memory_prune_preview. Destructive.",
         ),
         "memory_archive_set": (
             "Archive or Restore a Memory",
@@ -2668,10 +2670,10 @@ _TOOL_TEXT: Mapping[str, tuple[str, str]] = MappingProxyType(
         ),
         "memory_compaction_preview": (
             "Preview a Memory Compaction",
-            "Dry run of memory_compact: selects the oldest unpinned decisions "
-            "and learnings, optionally those matching a query, that your "
-            "summary would replace, and returns the selection_token "
-            "memory_compact requires. Changes nothing.",
+            "Dry run of memory_compact: selects the oldest unpinned learnings "
+            "and decisions with a recorded outcome, optionally those matching "
+            "a query, that your summary would replace, and returns the "
+            "selection_token memory_compact requires. Changes nothing.",
         ),
         "memory_compact": (
             "Compact Memories into a Summary",

@@ -15,14 +15,18 @@ from daem0nmcp.api.v7.factory import (
 from daem0nmcp.api.v7.gateway_operations import GATEWAY_TOOL_NAMES
 from daem0nmcp.api.v7.policy import V7_TOOL_LEVELS
 from daem0nmcp.api.v7.production import build_production_surface
-from daem0nmcp.api.v7.registry import ManifestError, ToolSpec, V7Manifest
+from daem0nmcp.api.v7.registry import (
+    MAX_TOOL_TITLE_CHARACTERS,
+    ManifestError,
+    ToolSpec,
+    V7Manifest,
+)
 from daem0nmcp.api.v7.tools import ToolDescriptor
 from daem0nmcp.config import Settings
 from daem0nmcp.covenant import CovenantLevel
 from tests.api_v7.process_client import initialize_workspaces
 
 MAX_DESCRIPTION_CHARACTERS = 300
-MAX_TITLE_CHARACTERS = 48
 
 
 async def _unused(**arguments: object) -> object:
@@ -105,7 +109,7 @@ def test_every_tool_has_a_short_unique_title() -> None:
     for spec in manifest.tools:
         title = spec.title
         assert isinstance(title, str) and title.strip() == title, spec.name
-        assert 3 <= len(title) <= MAX_TITLE_CHARACTERS, (spec.name, title)
+        assert 3 <= len(title) <= MAX_TOOL_TITLE_CHARACTERS, (spec.name, title)
         assert "_" not in title and title != spec.name, spec.name
         assert not title.endswith("."), spec.name
         assert title[0].isupper(), spec.name
@@ -141,7 +145,9 @@ def test_a_title_is_bounded_single_line_text() -> None:
         )
 
     assert spec("Store Memory").title == "Store Memory"
-    for bad in (" padded ", "two\nlines", "x" * 81):
+    longest = "x" * MAX_TOOL_TITLE_CHARACTERS
+    assert spec(longest).title == longest
+    for bad in (" padded ", "two\nlines", "x" * (MAX_TOOL_TITLE_CHARACTERS + 1)):
         with pytest.raises(ManifestError, match="title"):
             spec(bad)
 
@@ -260,6 +266,10 @@ SEARCH_CASES: tuple[tuple[str, frozenset[str]], ...] = (
     ("start the session", frozenset({"session_brief"})),
     ("copy memories from another workspace", frozenset({"workspace_consolidate"})),
     ("vector index is stale", frozenset({"projection_rebuild"})),
+    ("find a class", frozenset({"code_search"})),
+    ("who calls this method", frozenset({"code_impact_analyze"})),
+    ("what depends on this function", frozenset({"code_impact_analyze"})),
+    ("am I allowed to do this", frozenset({"rule_check"})),
 )
 
 
