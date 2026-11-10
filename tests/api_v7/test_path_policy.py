@@ -863,12 +863,48 @@ async def _import_call(invoke, workspace_id: str, arguments: dict) -> dict[str, 
         contended.append(
             f"--- attempt {_attempt} at +{time.monotonic() - started:.1f}s\n"
             + _all_thread_stacks()
+            + "\nSQLITE OBJECTS\n"
+            + _live_sqlite_objects()
         )
         assert time.monotonic() < deadline, (result["error"], "\n".join(contended))
         await asyncio.sleep(0.5)
     raise AssertionError(
         "the import stayed contended for 8 attempts\n" + "\n".join(contended)
     )
+
+
+def _live_sqlite_objects() -> str:
+    import gc
+
+    lines = []
+    for item in gc.get_objects():
+        if isinstance(item, (sqlite3.Cursor, sqlite3.Connection)):
+            holders = []
+            for holder in gc.get_referrers(item):
+                if isinstance(holder, types.FrameType):
+                    holders.append(
+                        f"frame {holder.f_code.co_filename}:{holder.f_lineno}"
+                        f":{holder.f_code.co_name}"
+                    )
+                elif isinstance(holder, types.GeneratorType):
+                    holders.append(f"generator {holder.gi_code.co_qualname}")
+                elif isinstance(holder, dict):
+                    owners = [
+                        type(owner).__name__
+                        for owner in gc.get_referrers(holder)
+                        if not isinstance(owner, (dict, list, types.FrameType))
+                    ][:3]
+                    holders.append(f"dict of {owners} keys={list(holder)[:6]}")
+                elif not isinstance(holder, list):
+                    holders.append(type(holder).__name__)
+            extra = ""
+            if isinstance(item, sqlite3.Connection):
+                try:
+                    extra = f" in_transaction={item.in_transaction}"
+                except Exception as exc:  # noqa: BLE001
+                    extra = f" ({type(exc).__name__})"
+            lines.append(f"{type(item).__name__}@{id(item):x}{extra}: {holders}")
+    return "\n".join(lines)
 
 
 def _all_thread_stacks() -> str:
