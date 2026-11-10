@@ -131,6 +131,22 @@ def test_a_v7_store_that_lost_its_pointer_is_not_written_as_v6(tmp_path: Path):
     assert (_count(database, "memories"), _count(database, "memory_events")) == (2, 2)
 
 
+def test_pointer_recovery_is_not_blocked_by_a_crashed_pointer_temp(tmp_path: Path):
+    """A temp left by a write that died before its rename does not stop recovery."""
+    storage, database, registry = _workspace(tmp_path)
+    assert _remember(storage, "written while the pointer was present") == 7
+    published = _lose_the_pointer(storage)
+    (storage / "active-db.json.tmp").write_bytes(published[:10])
+
+    recovered = MigrationV7Service(registry).recover_pointer(tmp_path)
+
+    assert (recovered.status, recovered.action) == ("activated", "recover_pointer")
+    assert (storage / "active-db.json").read_bytes() == published
+    assert not (storage / "active-db.json.tmp").exists()
+    assert _remember(storage, "written after recovery") == 7
+    assert (_count(database, "memories"), _count(database, "memory_events")) == (2, 2)
+
+
 def test_a_server_written_store_that_lost_its_pointer_is_not_adopted_silently(
     tmp_path: Path,
 ):

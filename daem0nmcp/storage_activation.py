@@ -400,8 +400,8 @@ def _open_owned_file(
 
     ``O_NOFOLLOW`` supplies the atomic guarantee where available.  The identity
     comparison is also required because Windows' CRT does not expose that flag.
-    Exclusive creation is used for the pointer temp so an unowned stale name is
-    never truncated.
+    Exclusive creation is used for the pointer temp so a name this writer does
+    not own is never truncated.
     """
 
     if path.is_symlink() or (path.exists() and not path.is_file()):
@@ -425,6 +425,28 @@ def _open_owned_file(
     except Exception:
         os.close(descriptor)
         raise
+
+
+def _discard_crashed_pointer_temp(storage: Path, temporary: Path) -> None:
+    """Remove the pointer temp a process left when it died before the rename.
+
+    Only while this process holds the storage lock exclusively: no other
+    writer can then be alive, so a regular file under the temp name belongs to
+    nobody.  Under a shared lock, or none, it may be a live writer's and stays.
+    A link or any other non-regular entry is never touched and is refused by
+    the exclusive create that follows.
+    """
+
+    key = os.path.normcase(str((storage / LOCK_NAME).resolve(strict=False)))
+    with _PROCESS_LOCK_GUARD:
+        state = _PROCESS_LOCKS.get(key)
+        if state is None or state.mode != "exclusive":
+            return
+    try:
+        if stat.S_ISREG(os.lstat(temporary).st_mode):
+            os.unlink(temporary)
+    except OSError:
+        return
 
 
 def write_active_pointer(
@@ -452,6 +474,7 @@ def write_active_pointer(
     temporary = storage / POINTER_TEMP_NAME
     destination = storage / POINTER_NAME
     owned_temporary = False
+    _discard_crashed_pointer_temp(storage, temporary)
     try:
         with _open_owned_file(temporary, exclusive_create=True) as handle:
             owned_temporary = True

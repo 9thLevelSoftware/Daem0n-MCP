@@ -180,6 +180,74 @@ class StorageActivationTests(unittest.TestCase):
                 write_pointer(storage, pointer_type(7, 1, "daem0nmcp.db", None, None))
             self.assertEqual(b"do-not-touch", victim.read_bytes())
 
+    def test_crashed_pointer_temp_is_discarded_under_the_exclusive_lock(self):
+        """A temp a crash left behind must not block every later pointer write."""
+        pointer_type, pointer_error_type, resolve, write_pointer = self._api()
+        lock_type, _ = self._lock_api()
+        fresh = pointer_type(7, 1, "daem0nmcp.db", None, None)
+        with tempfile.TemporaryDirectory() as raw:
+            storage = Path(raw)
+            (storage / "daem0nmcp.db").write_bytes(b"fresh")
+            temporary = storage / "active-db.json.tmp"
+            temporary.write_bytes(b'{"active_db":"daem0')
+
+            # Without the lock that excludes every other writer the temp may
+            # belong to a live one, so it is neither removed nor reused.
+            with (
+                lock_type(storage, "shared"),
+                self.assertRaises(pointer_error_type),
+            ):
+                write_pointer(storage, fresh)
+            self.assertEqual(temporary.read_bytes(), b'{"active_db":"daem0')
+            self.assertFalse((storage / "active-db.json").exists())
+
+            with lock_type(storage, "exclusive"):
+                raw_pointer = write_pointer(storage, fresh)
+            self.assertEqual((storage / "active-db.json").read_bytes(), raw_pointer)
+            self.assertFalse(temporary.exists())
+            self.assertEqual(resolve(storage).pointer, fresh)
+
+    def test_unsafe_pointer_temp_is_refused_under_the_exclusive_lock(self):
+        """Only a regular file is a crash leftover; anything else is refused."""
+        pointer_type, pointer_error_type, _, write_pointer = self._api()
+        lock_type, _ = self._lock_api()
+        fresh = pointer_type(7, 1, "daem0nmcp.db", None, None)
+        with tempfile.TemporaryDirectory() as raw:
+            storage = Path(raw)
+            (storage / "daem0nmcp.db").write_bytes(b"fresh")
+            temporary = storage / "active-db.json.tmp"
+            temporary.mkdir()
+            (temporary / "kept").write_bytes(b"kept")
+            with (
+                lock_type(storage, "exclusive"),
+                self.assertRaises(pointer_error_type),
+            ):
+                write_pointer(storage, fresh)
+            self.assertEqual((temporary / "kept").read_bytes(), b"kept")
+            self.assertFalse((storage / "active-db.json").exists())
+
+        with (
+            tempfile.TemporaryDirectory() as raw,
+            tempfile.TemporaryDirectory() as outside,
+        ):
+            storage = Path(raw)
+            victim = Path(outside) / "victim.json"
+            victim.write_bytes(b"do-not-touch")
+            (storage / "daem0nmcp.db").write_bytes(b"fresh")
+            temporary = storage / "active-db.json.tmp"
+            try:
+                os.symlink(victim, temporary)
+            except (OSError, NotImplementedError):
+                self.skipTest("symlinks unavailable in this test environment")
+            with (
+                lock_type(storage, "exclusive"),
+                self.assertRaises(pointer_error_type),
+            ):
+                write_pointer(storage, fresh)
+            self.assertTrue(temporary.is_symlink())
+            self.assertEqual(b"do-not-touch", victim.read_bytes())
+            self.assertFalse((storage / "active-db.json").exists())
+
     def test_lock_rejects_non_regular_or_symlink_path_without_touching_target(self):
         """The advisory lock path is an untrusted filesystem boundary."""
         lock_type, pointer_error_type = self._lock_api()

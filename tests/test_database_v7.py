@@ -535,6 +535,47 @@ class DatabaseManagerDependencyIntegrationTests(unittest.IsolatedAsyncioTestCase
                     ),
                 )
 
+    async def test_first_start_that_died_writing_the_pointer_is_finished(self):
+        """The pointer temp a crash leaves behind does not block the next start."""
+        import daem0nmcp.database as database_module
+        from daem0nmcp.database import DatabaseManager
+        from daem0nmcp.storage_activation import resolve_active_database
+
+        with tempfile.TemporaryDirectory() as raw:
+            storage = Path(raw)
+            interrupted = DatabaseManager(raw)
+            try:
+                with (
+                    mock.patch.object(
+                        database_module,
+                        "write_active_pointer",
+                        side_effect=OSError("died writing the pointer"),
+                    ),
+                    self.assertRaises(OSError),
+                ):
+                    await interrupted.init_db()
+            finally:
+                await interrupted.close()
+            # What the process leaves when it dies between writing the temp
+            # and renaming it over the pointer.
+            (storage / "active-db.json.tmp").write_bytes(b'{"active_db":"daem0')
+            self.assertFalse((storage / "active-db.json").exists())
+
+            recovered = DatabaseManager(raw)
+            try:
+                await recovered.init_db()
+                self.assertEqual(7, recovered.format_version)
+                self.assertEqual(1, recovered.active_generation)
+            finally:
+                await recovered.close()
+
+            self.assertFalse((storage / "active-db.json.tmp").exists())
+            resolved = resolve_active_database(raw)
+            self.assertEqual(
+                (7, 1, "daem0nmcp.db"),
+                (resolved.format_version, resolved.generation, resolved.relative_path),
+            )
+
     async def test_invalid_pointer_fails_before_engine_construction(self):
         from daem0nmcp.database import DatabaseManager
         from daem0nmcp.storage_activation import PointerValidationError
