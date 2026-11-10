@@ -1954,6 +1954,196 @@ class MaintenanceOperationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual({newer, other_strategy, *captured, *hand_tagged}, live)
         self._assert_replay_reproduces_projections()
 
+    async def _preview_all_cleanups(self, operations):
+        """Preview prune, duplicates and compaction over the same fixture."""
+        previews = {}
+        for tool, arguments in (
+            ("memory_prune_preview", {}),
+            ("memory_duplicates_preview", {}),
+            (
+                "memory_compaction_preview",
+                {"summary": "Queue lessons in one place.", "query": "queue lesson"},
+            ),
+        ):
+            previews[tool] = await operations[tool](
+                workspace=self.workspace,
+                request=_request(
+                    tool, workspace_id=self.workspace.workspace_id, **arguments
+                ),
+            )
+        return previews
+
+    def _apply_request(self, tool: str, token: str) -> AdmittedRequest:
+        arguments: dict[str, object] = {}
+        if tool == "memory_compact":
+            arguments = {
+                "summary": "Queue lessons in one place.",
+                "query": "queue lesson",
+                "idempotency_key": "compact-queue-lessons-0001",
+            }
+        return _request(
+            tool,
+            workspace_id=self.workspace.workspace_id,
+            selection_token=token,
+            preflight_token=PREFLIGHT_TOKEN,
+            **arguments,
+        )
+
+    def _cleanup_fixture(self) -> dict[str, str]:
+        old = NOW - timedelta(days=100)
+        return {
+            "prunable": self._append_record("a", "Stale decision.", created_at=old),
+            "duplicate": self._append_record(
+                "b",
+                "Use the durable queue",
+                created_at=NOW - timedelta(days=3),
+                pinned=True,
+            ),
+            "keeper": self._append_record(
+                "c",
+                "use the durable queue",
+                created_at=NOW - timedelta(days=2),
+                pinned=True,
+            ),
+            "lesson": self._append_record(
+                "d",
+                "Queue lesson about retries.",
+                created_at=NOW - timedelta(days=1),
+                record_type="learning",
+            ),
+            "bystander": self._append_record(
+                "e", "Unrelated pinned note.", created_at=NOW, pinned=True
+            ),
+        }
+
+    async def test_unrelated_writes_do_not_invalidate_a_cleanup_preview(self) -> None:
+        """A preview stays valid while nothing it depended on has changed."""
+        ids = self._cleanup_fixture()
+        operations = self._operations()
+        relationships = self._relationship_operations()
+        previews = await self._preview_all_cleanups(operations)
+
+        # Unrelated activity: a new record, and a link between bystanders.
+        newcomer = self._append_record("f", "A brand new warning.", created_at=NOW)
+        await self._link(
+            relationships, ids["bystander"], newcomer, "related_to", "link-unrelated-01"
+        )
+
+        prune = await operations["memory_prune"](
+            workspace=self.workspace,
+            request=self._apply_request(
+                "memory_prune", previews["memory_prune_preview"].selection_token
+            ),
+        )
+        self.assertEqual([ids["prunable"]], prune.affected_ids)
+        # Each apply is itself unrelated to what the other previews selected.
+        duplicates = await operations["memory_duplicates_cleanup"](
+            workspace=self.workspace,
+            request=self._apply_request(
+                "memory_duplicates_cleanup",
+                previews["memory_duplicates_preview"].selection_token,
+            ),
+        )
+        self.assertEqual([ids["keeper"], ids["duplicate"]], duplicates.affected_ids)
+        compacted = await operations["memory_compact"](
+            workspace=self.workspace,
+            request=self._apply_request(
+                "memory_compact", previews["memory_compaction_preview"].selection_token
+            ),
+        )
+        self.assertEqual(1, compacted.receipt.changed_count)
+        self._assert_replay_reproduces_projections()
+
+    async def test_a_write_touching_a_selected_record_invalidates_the_preview(
+        self,
+    ) -> None:
+        """A selected record that gained a dependant must not be deleted blind."""
+        from daem0nmcp.api.v7.maintenance_operations import (
+            MaintenanceOperationError,
+        )
+
+        ids = self._cleanup_fixture()
+        operations = self._operations()
+        relationships = self._relationship_operations()
+        previews = await self._preview_all_cleanups(operations)
+
+        # None of these changes a selected record's own state.
+        await self._link(
+            relationships,
+            ids["bystander"],
+            ids["prunable"],
+            "depends_on",
+            "link-touching-01",
+        )
+        await self._link(
+            relationships,
+            ids["bystander"],
+            ids["duplicate"],
+            "depends_on",
+            "link-touching-02",
+        )
+        await self._link(
+            relationships,
+            ids["bystander"],
+            ids["lesson"],
+            "depends_on",
+            "link-touching-03",
+        )
+
+        for preview_tool, tool in (
+            ("memory_prune_preview", "memory_prune"),
+            ("memory_duplicates_preview", "memory_duplicates_cleanup"),
+            ("memory_compaction_preview", "memory_compact"),
+        ):
+            with self.subTest(tool=tool):
+                with self.assertRaises(MaintenanceOperationError) as stale:
+                    await operations[tool](
+                        workspace=self.workspace,
+                        request=self._apply_request(
+                            tool, previews[preview_tool].selection_token
+                        ),
+                    )
+                self.assertEqual("CONFLICT", stale.exception.code)
+        with closing(sqlite3.connect(self.database)) as connection:
+            deleted = connection.execute(
+                "SELECT count(*) FROM memory_records "
+                "WHERE deleted_at_us IS NOT NULL OR archived=1"
+            ).fetchone()[0]
+        self.assertEqual(0, deleted)
+
+    async def test_a_preview_too_far_behind_the_log_is_refused(self) -> None:
+        """Past the bounded look-back the apply cannot prove freshness."""
+        from unittest.mock import patch
+
+        from daem0nmcp.api.v7 import maintenance_operations
+
+        ids = self._cleanup_fixture()
+        operations = self._operations()
+        previews = await self._preview_all_cleanups(operations)
+        for suffix in "678":
+            self._append_record(suffix, f"Newcomer {suffix}.", created_at=NOW)
+
+        with (
+            patch.object(maintenance_operations, "_MAX_EVENTS_SINCE_PREVIEW", 2),
+            self.assertRaises(
+                maintenance_operations.MaintenanceOperationError
+            ) as stale,
+        ):
+            await operations["memory_prune"](
+                workspace=self.workspace,
+                request=self._apply_request(
+                    "memory_prune", previews["memory_prune_preview"].selection_token
+                ),
+            )
+        self.assertEqual("CONFLICT", stale.exception.code)
+        prune = await operations["memory_prune"](
+            workspace=self.workspace,
+            request=self._apply_request(
+                "memory_prune", previews["memory_prune_preview"].selection_token
+            ),
+        )
+        self.assertEqual([ids["prunable"]], prune.affected_ids)
+
     async def test_dream_purge_closes_relationships_of_purged_records(self) -> None:
         """Purged dream duplicates must not leave dangling relationships."""
         source_id = "mem_" + "f" * 64

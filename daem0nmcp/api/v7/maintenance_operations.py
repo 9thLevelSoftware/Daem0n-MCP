@@ -8,6 +8,7 @@ import hashlib
 import hmac
 import json
 import os
+import re
 import secrets
 import sqlite3
 import threading
@@ -57,6 +58,10 @@ _MAX_SELECTION = 500
 # selection needs, and is limited by the task's own deadline and cancellation.
 _MAX_GROUP_SCAN = 2_000
 _SCAN_BATCH = 500
+# An apply looks back at most this many events for its preview's position in
+# the log; a preview further behind is refused as stale.
+_MAX_EVENTS_SINCE_PREVIEW = 1_000
+_RECORD_ID = re.compile(r"mem_[0-9a-f]{64}")
 _REQUIRED_TABLES = frozenset({"memory_events", "memory_records", "schema_version"})
 _RECORD_COLUMNS = (
     "record.record_id,record.workspace_id,record.record_type,"
@@ -356,6 +361,87 @@ def _source_high_water(connection: sqlite3.Connection, workspace_id: str) -> str
             "max_recorded_at_us": int(row[1]),
         }
     )
+
+
+def _events_since_preview(
+    connection: sqlite3.Connection,
+    workspace_id: str,
+    high_water: str,
+) -> list[sqlite3.Row] | None:
+    """Return the events appended after the preview took ``high_water``.
+
+    The log is append-only, so the preview's watermark is the watermark of a
+    prefix of today's log.  ``None`` means that prefix does not end within the
+    last ``_MAX_EVENTS_SINCE_PREVIEW`` events, so freshness cannot be shown.
+    """
+
+    counted = connection.execute(
+        "SELECT count(*) FROM memory_events WHERE workspace_id=?",
+        (workspace_id,),
+    ).fetchone()
+    if counted is None:
+        raise MaintenanceOperationError("CAPABILITY_DEGRADED")
+    tail = connection.execute(
+        "SELECT event_id,recorded_at_us,stream_id,payload_json FROM memory_events "
+        "WHERE workspace_id=? ORDER BY rowid DESC LIMIT ?",
+        (workspace_id, _MAX_EVENTS_SINCE_PREVIEW),
+    ).fetchall()
+    tail.reverse()
+    event_count = int(counted[0]) - len(tail)
+    base = connection.execute(
+        "SELECT COALESCE(max(recorded_at_us),0),COALESCE(max(event_id),'') FROM ("
+        "SELECT recorded_at_us,event_id FROM memory_events WHERE workspace_id=? "
+        "ORDER BY rowid LIMIT ?)",
+        (workspace_id, event_count),
+    ).fetchone()
+    if base is None:
+        raise MaintenanceOperationError("CAPABILITY_DEGRADED")
+    max_recorded_at_us, max_event_id = int(base[0]), str(base[1])
+    for index in range(len(tail) + 1):
+        if index:
+            row = tail[index - 1]
+            event_count += 1
+            max_recorded_at_us = max(max_recorded_at_us, int(row["recorded_at_us"]))
+            max_event_id = max(max_event_id, str(row["event_id"]))
+        watermark = sha256_json(
+            {
+                "event_count": event_count,
+                "max_event_id": max_event_id,
+                "max_recorded_at_us": max_recorded_at_us,
+            }
+        )
+        if watermark == high_water:
+            return tail[index:]
+    return None
+
+
+def _require_untouched_since_preview(
+    connection: sqlite3.Connection,
+    workspace_id: str,
+    claims: _SelectionClaims,
+    records: Sequence[_RecordSnapshot],
+) -> None:
+    """Refuse the apply when a later write involves a record it depends on.
+
+    The apply has already re-run the selection and matched every selected
+    record and state to the preview, so a write that changed the selection is
+    refused before this point.  What that comparison cannot see is a write
+    that leaves a record's own state alone: a relationship, citation or
+    active-context entry naming it.  Every event appended since the preview
+    is therefore checked, and one on a depended-on record's stream or naming
+    its ID anywhere in its payload is a conflict.  Any other write is
+    unrelated and leaves the preview valid.
+    """
+
+    appended = _events_since_preview(connection, workspace_id, claims.source_high_water)
+    if appended is None:
+        raise MaintenanceOperationError("CONFLICT")
+    depended_on = {record.record_id for record in records}
+    for row in appended:
+        if str(row["stream_id"]) in depended_on or not depended_on.isdisjoint(
+            _RECORD_ID.findall(str(row["payload_json"]))
+        ):
+            raise MaintenanceOperationError("CONFLICT")
 
 
 def _selection_pairs(records: Sequence[_RecordSnapshot]) -> list[list[str]]:
@@ -1378,11 +1464,6 @@ def _prune_sync(
                 if replay is not None:
                     connection.commit()
                     return replay
-                if (
-                    _source_high_water(connection, workspace.workspace_id)
-                    != claims.source_high_water
-                ):
-                    raise MaintenanceOperationError("CONFLICT")
                 records, _eligible = _prune_candidates(
                     connection,
                     workspace.workspace_id,
@@ -1394,6 +1475,9 @@ def _prune_sync(
                     or sha256_json(_selection_pairs(records)) != claims.selection_hash
                 ):
                     raise MaintenanceOperationError("CONFLICT")
+                _require_untouched_since_preview(
+                    connection, workspace.workspace_id, claims, records
+                )
                 store = EventStore(connection, assume_transaction=True)
                 event_ids: list[str] = []
                 affected_ids: list[str] = []
@@ -1791,11 +1875,6 @@ def _duplicates_sync(
                 if replay is not None:
                     connection.commit()
                     return replay
-                if (
-                    _source_high_water(connection, workspace.workspace_id)
-                    != claims.source_high_water
-                ):
-                    raise MaintenanceOperationError("CONFLICT")
                 groups, _eligible, _duplicate_group_count = _duplicate_groups(
                     connection,
                     workspace.workspace_id,
@@ -1809,6 +1888,12 @@ def _duplicates_sync(
                     or sha256_json(_selection_pairs(records)) != claims.selection_hash
                 ):
                     raise MaintenanceOperationError("CONFLICT")
+                _require_untouched_since_preview(
+                    connection,
+                    workspace.workspace_id,
+                    claims,
+                    [*records, *(group.keeper for group in groups)],
+                )
                 store = EventStore(connection, assume_transaction=True)
                 affected_ids: list[str] = []
                 event_ids: list[str] = []
@@ -2175,11 +2260,6 @@ def _compaction_sync(
                     return replay
                 if claims.selected_count == 0:
                     raise MaintenanceOperationError("NOT_FOUND")
-                if (
-                    _source_high_water(connection, workspace.workspace_id)
-                    != claims.source_high_water
-                ):
-                    raise MaintenanceOperationError("CONFLICT")
                 records, _eligible = _compaction_candidates(
                     connection,
                     workspace.workspace_id,
@@ -2192,6 +2272,9 @@ def _compaction_sync(
                     or sha256_json(_selection_pairs(records)) != claims.selection_hash
                 ):
                     raise MaintenanceOperationError("CONFLICT")
+                _require_untouched_since_preview(
+                    connection, workspace.workspace_id, claims, records
+                )
                 source_event_ids = [record.source_event_id for record in records]
                 summary_id = deterministic_id(
                     "mem",
@@ -2432,11 +2515,6 @@ def _dream_sync(
                 if replay is not None:
                     connection.commit()
                     return replay
-                if (
-                    _source_high_water(connection, workspace.workspace_id)
-                    != claims.source_high_water
-                ):
-                    raise MaintenanceOperationError("CONFLICT")
                 records, *_counts = _dream_candidates(
                     connection, workspace.workspace_id, scan_limit, cancelled
                 )
@@ -2445,6 +2523,9 @@ def _dream_sync(
                     or sha256_json(_selection_pairs(records)) != claims.selection_hash
                 ):
                     raise MaintenanceOperationError("CONFLICT")
+                _require_untouched_since_preview(
+                    connection, workspace.workspace_id, claims, records
+                )
                 store = EventStore(connection, assume_transaction=True)
                 affected_ids: list[str] = []
                 event_ids: list[str] = []
