@@ -176,6 +176,13 @@ _TASK_FAILURE_MESSAGES = {
     "DEADLINE_EXCEEDED": "The operation exceeded its synchronous deadline.",
     "CANCELLED": "The operation was cancelled.",
 }
+# With durable tasks ready the caller has a second way out.  The gateway does
+# not relay tasks, so the path is the tool itself, listed or not.
+_TASK_REQUIRED_WITH_TASKS = (
+    "This request exceeds the bounded foreground profile; reduce its scope, "
+    "or send it as a task-augmented tools/call to this tool by its own name "
+    "(daem0n_tool_call does not relay tasks)."
+)
 
 
 def _tool_adapter(
@@ -185,6 +192,10 @@ def _tool_adapter(
     sync_timeout_seconds: float,
     foreground_policy: ForegroundExecutionPolicy | None = None,
 ):
+    failure_messages = dict(_TASK_FAILURE_MESSAGES)
+    if tasks_enabled:
+        failure_messages["TASK_REQUIRED"] = _TASK_REQUIRED_WITH_TASKS
+
     async def invoke(**arguments: Any) -> dict[str, Any]:
         try:
             request = spec.input_model.model_validate(arguments)
@@ -244,7 +255,7 @@ def _tool_adapter(
                 .begin(workspace_id)
                 .failure(
                     ErrorCode(error_code),
-                    _TASK_FAILURE_MESSAGES[error_code],
+                    failure_messages[error_code],
                 )
             )
         response = spec.output_model.model_validate(result)
@@ -252,13 +263,12 @@ def _tool_adapter(
         if (
             error is not None
             and getattr(error, "code", None) == ErrorCode.TASK_REQUIRED
-            and getattr(error, "message", None)
-            != _TASK_FAILURE_MESSAGES["TASK_REQUIRED"]
+            and getattr(error, "message", None) != failure_messages["TASK_REQUIRED"]
         ):
             response = response.model_copy(
                 update={
                     "error": error.model_copy(
-                        update={"message": _TASK_FAILURE_MESSAGES["TASK_REQUIRED"]}
+                        update={"message": failure_messages["TASK_REQUIRED"]}
                     )
                 }
             )
@@ -800,6 +810,19 @@ def _install_task_protocol(
 
         return await run_middleware(request, list_tasks)
 
+    original_list_tools = low_level.request_handlers[mcp.types.ListToolsRequest]
+
+    async def handle_list_tools(request: Any) -> Any:
+        # Every tool keeps FastMCP's forbidden TaskConfig, so its Docket
+        # submission path stays inert and the framework advertises nothing.
+        # The standard task mode is added to the listing itself.
+        result = await original_list_tools(request)
+        for tool in result.root.tools:
+            if tool.name in admission_specs:
+                tool.execution = mcp.types.ToolExecution(taskSupport="optional")
+        return result
+
+    low_level.request_handlers[mcp.types.ListToolsRequest] = handle_list_tools
     low_level.request_handlers[mcp.types.CallToolRequest] = handle_call
     low_level.request_handlers[mcp.types.GetTaskRequest] = handle_get
     low_level.request_handlers[mcp.types.GetTaskPayloadRequest] = handle_result
@@ -1084,13 +1107,7 @@ def build_fastmcp_server(
             "output_schema": spec.output_schema,
         }
         registration["task"] = False
-        registered = server.tool(**registration)(adapters[spec.name])
-        if spec.task_mode == "optional" and tasks_enabled:
-            import mcp.types
-
-            # Advertise the standard task mode while retaining FastMCP's
-            # forbidden TaskConfig, so its Docket submission path is inert.
-            registered.execution = mcp.types.ToolExecution(taskSupport="optional")
+        server.tool(**registration)(adapters[spec.name])
 
     for resource_spec in manifest.resources:
         server.resource(

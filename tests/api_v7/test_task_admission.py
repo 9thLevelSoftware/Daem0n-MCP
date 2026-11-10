@@ -171,6 +171,71 @@ async def test_task_metadata_is_ignored_when_tasks_are_not_offered(tmp_path):
     )
 
 
+@pytest.mark.parametrize("tasks", [True, False])
+async def test_tools_list_marks_task_support_only_when_tasks_are_offered(
+    tmp_path, tasks
+):
+    async with _client(tmp_path, tasks=tasks, tool_surface="full") as (client, _):
+        tools = await client.list_tools()
+
+    declared = {
+        tool.name
+        for tool in tools
+        if (tool.meta or {}).get("daem0nmcp/taskMode") == "optional"
+    }
+    advertised = {
+        tool.name: tool.execution.taskSupport
+        for tool in tools
+        if tool.execution is not None and tool.execution.taskSupport is not None
+    }
+    assert "memory_recall" in declared and "memory_store" not in declared
+    assert advertised == (dict.fromkeys(declared, "optional") if tasks else {})
+
+
+async def test_gateway_names_the_task_path_for_an_oversized_hidden_tool(tmp_path):
+    async with _client(tmp_path, tasks=True) as (client, workspace_id):
+        listed = {tool.name for tool in await client.list_tools()}
+        assert "code_todos_scan" not in listed
+        oversized = {"limit": 201}
+
+        relayed = await client.call_tool(
+            "daem0n_tool_call",
+            {
+                "workspace_id": workspace_id,
+                "tool": "code_todos_scan",
+                "arguments": oversized,
+            },
+            raise_on_error=False,
+        )
+        error = relayed.structured_content["error"]
+        assert error["code"] == "TASK_REQUIRED"
+        assert "task-augmented tools/call" in error["message"]
+        assert "by its own name" in error["message"]
+
+        # The path it names exists even though the tool is not listed.
+        accepted = await _call(
+            client, "code_todos_scan", {"workspace_id": workspace_id} | oversized
+        )
+        assert isinstance(accepted, mcp_types.CreateTaskResult)
+
+
+async def test_oversized_call_without_tasks_does_not_name_a_task_path(tmp_path):
+    async with _client(tmp_path, tasks=False) as (client, workspace_id):
+        refused = await client.call_tool(
+            "daem0n_tool_call",
+            {
+                "workspace_id": workspace_id,
+                "tool": "code_todos_scan",
+                "arguments": {"limit": 201},
+            },
+            raise_on_error=False,
+        )
+
+    error = refused.structured_content["error"]
+    assert error["code"] == "TASK_REQUIRED"
+    assert "tools/call" not in error["message"]
+
+
 async def test_task_refusals_are_told_apart_by_code_and_data(tmp_path):
     async with _client(tmp_path, tasks=True) as (client, workspace_id):
         scope = {"workspace_id": workspace_id}
