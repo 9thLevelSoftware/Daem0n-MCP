@@ -229,6 +229,25 @@ class CodingMemoryFixtureTests(unittest.TestCase):
             48, len([query for query in corpus.queries if query.family == "validity"])
         )
 
+    def test_validity_queries_share_no_word_with_sibling_records(self):
+        """Tied siblings would leave the cut at ten results to the record IDs."""
+
+        corpus = self._corpus(24)
+        contents = {
+            item.key: set(item.content.split())
+            for item in corpus.writes
+            if hasattr(item, "content")
+        }
+        for query in corpus.queries:
+            if query.family != "validity":
+                continue
+            words = set(query.text.split())
+            with self.subTest(query=query.key):
+                self.assertEqual(
+                    [query.relevant[0][0]],
+                    [key for key, content in contents.items() if words & content],
+                )
+
     def _retention(self, items: list[tuple[str, str]], context: str) -> float:
         """Score one retention query against a stubbed recall result."""
 

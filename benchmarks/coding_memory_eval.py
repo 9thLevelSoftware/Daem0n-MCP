@@ -262,11 +262,14 @@ def _corpus(root: Path, topics: int, symbols_available: bool) -> _Corpus:
             )
         key = f"validity-{t}-file"
         corpus.writes.append(
-            _Store(key, f"topic {t} runbook pointer", code_refs=((document, None),))
+            _Store(key, f"runbook_topic_{t} pointer", code_refs=((document, None),))
         )
         corpus.bindings[key] = (t % 3 == 0, False)
         corpus.queries.append(
-            _Query(key, "validity", f"where is the runbook for topic {t}", ((key, 3),))
+            # One identifier per topic, as for symbols: words shared by every
+            # pointer would tie the siblings and leave the cut at ten results
+            # to the path-derived record IDs.
+            _Query(key, "validity", f"where is runbook_topic_{t} kept", ((key, 3),))
         )
 
         component = _RETENTION_COMPONENTS[t]
