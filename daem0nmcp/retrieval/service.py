@@ -33,7 +33,7 @@ from .fusion import (
     MAX_RRF_K,
     weighted_reciprocal_rank_fusion,
 )
-from .planner import RetrievalPlan, RetrievalPlanner
+from .planner import ProviderRequest, RetrievalPlan, RetrievalPlanner
 from .policy import PolicyRecord, apply_retrieval_policy
 from .types import (
     EvidenceItem,
@@ -464,14 +464,24 @@ class RetrievalService:
 
         provider_results = {"lexical": lexical}
         graph_request = None
+        concurrent_requests = []
         for request in plan.requests[1:]:
             if request.provider == "graph":
                 graph_request = request
                 continue
-            result = await self._invoke_provider(
-                request.provider, provider_query, request.limit
+            concurrent_requests.append(request)
+        # Optional providers are independent of each other, so one slow or
+        # hung provider costs a single timeout rather than one per provider.
+        # Results are keyed by name and merged in plan order below, never in
+        # completion order.
+        provider_results.update(
+            zip(
+                (request.provider for request in concurrent_requests),
+                await self._invoke_providers_concurrently(
+                    concurrent_requests, provider_query
+                ),
             )
-            provider_results[request.provider] = result
+        )
 
         if graph_request is not None:
             seed_results = tuple(
@@ -759,6 +769,31 @@ class RetrievalService:
                 returned_count=returned_count,
             ),
         )
+
+    async def _invoke_providers_concurrently(
+        self,
+        requests: Iterable[ProviderRequest],
+        query: RetrievalQuery,
+    ) -> tuple[ProviderResult, ...]:
+        """Run independent provider requests together, in request order."""
+
+        tasks = [
+            asyncio.ensure_future(
+                self._invoke_provider(request.provider, query, request.limit)
+            )
+            for request in requests
+        ]
+        if not tasks:
+            return ()
+        try:
+            return tuple(await asyncio.gather(*tasks))
+        except BaseException:
+            # Cancellation of the recall, or of one provider from inside,
+            # must not leave sibling searches running unobserved.
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            raise
 
     async def _invoke_provider(
         self,

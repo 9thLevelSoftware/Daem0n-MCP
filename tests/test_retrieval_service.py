@@ -703,6 +703,240 @@ class RetrievalServiceProviderTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(_record_id("2"), result.items[0].evidence_refs[0].record_id)
 
 
+class DelayedProvider:
+    """Answer after a fixed delay and record when the search started/ended."""
+
+    def __init__(self, name, result, delay, log):
+        self.name = name
+        self._result = result
+        self._delay = delay
+        self._log = log
+
+    async def search(self, query, limit, **_seeds):
+        self._log.append(("start", self.name))
+        try:
+            await asyncio.sleep(self._delay)
+        except asyncio.CancelledError:
+            self._log.append(("cancelled", self.name))
+            raise
+        self._log.append(("end", self.name))
+        if isinstance(self._result, BaseException):
+            raise self._result
+        return self._result
+
+
+_OPTIONAL_INTENT_TEXT = "history of workflow steps decision result"
+_CONCURRENT_OPTIONAL = ("dense", "temporal", "procedure", "outcome")
+
+
+def _delayed_providers(log, delays, *, lexical_delay=0.0, overrides=None):
+    providers = {
+        "lexical": DelayedProvider(
+            "lexical",
+            _provider_result("lexical", _candidate("1", "lexical", 1)),
+            lexical_delay,
+            log,
+        )
+    }
+    for index, name in enumerate(_CONCURRENT_OPTIONAL):
+        digit = str(index + 2)
+        providers[name] = DelayedProvider(
+            name,
+            _provider_result(
+                name, _candidate(digit, name, 1), _candidate("1", name, 2)
+            ),
+            delays[name],
+            log,
+        )
+    providers.update(overrides or {})
+    return providers
+
+
+class RetrievalServiceProviderConcurrencyTests(unittest.IsolatedAsyncioTestCase):
+    async def test_optional_providers_run_concurrently_after_lexical(self):
+        log = []
+        delay = 0.5
+        service = _service(
+            providers=_delayed_providers(
+                log, dict.fromkeys(_CONCURRENT_OPTIONAL, delay), lexical_delay=0.05
+            ),
+            repository=CanonicalRepository(),
+            provider_timeout_seconds=30.0,
+        )
+
+        started = asyncio.get_running_loop().time()
+        result = await service.retrieve(_query(text=_OPTIONAL_INTENT_TEXT))
+        elapsed = asyncio.get_running_loop().time() - started
+
+        self.assertFalse(result.abstained)
+        # Four optional providers awaited one at a time need 4 * delay.
+        self.assertLess(elapsed, 3 * delay)
+        self.assertEqual([("start", "lexical"), ("end", "lexical")], log[:2])
+        self.assertEqual([("start", name) for name in _CONCURRENT_OPTIONAL], log[2:6])
+        self.assertEqual(
+            ("lexical", *_CONCURRENT_OPTIONAL),
+            tuple(d.provider for d in result.providers),
+        )
+        self.assertTrue(all(d.status == "ready" for d in result.providers))
+
+    async def test_each_hung_optional_provider_times_out_within_one_timeout(self):
+        calls = []
+        timeout = 0.4
+        providers = {
+            "lexical": StaticProvider(
+                "lexical",
+                _provider_result("lexical", _candidate("1", "lexical", 1)),
+                calls,
+            )
+        }
+        for name in _CONCURRENT_OPTIONAL:
+            providers[name] = HangingProvider(name, calls)
+        service = _service(
+            providers=providers,
+            repository=CanonicalRepository(),
+            provider_timeout_seconds=timeout,
+        )
+
+        started = asyncio.get_running_loop().time()
+        result = await service.retrieve(_query(text=_OPTIONAL_INTENT_TEXT))
+        elapsed = asyncio.get_running_loop().time() - started
+
+        self.assertFalse(result.abstained)
+        self.assertLess(elapsed, 3 * timeout)
+        self.assertEqual(
+            ["lexical", *_CONCURRENT_OPTIONAL], [name for name, _ in calls]
+        )
+        self.assertEqual(
+            tuple(
+                (name, "failed", f"{name.upper()}_PROVIDER_TIMEOUT")
+                for name in _CONCURRENT_OPTIONAL
+            ),
+            tuple((d.provider, d.status, d.reason) for d in result.providers[1:]),
+        )
+        self.assertEqual(_record_id("1"), result.items[0].evidence_refs[0].record_id)
+
+    async def test_fusion_is_independent_of_provider_completion_order(self):
+        outcomes = []
+        for delays in (
+            {"dense": 0.0, "temporal": 0.1, "procedure": 0.2, "outcome": 0.3},
+            {"dense": 0.3, "temporal": 0.2, "procedure": 0.1, "outcome": 0.0},
+        ):
+            log = []
+            result = await _service(
+                providers=_delayed_providers(log, delays),
+                repository=CanonicalRepository(),
+            ).retrieve(_query(text=_OPTIONAL_INTENT_TEXT))
+            self.assertFalse(result.abstained)
+            outcomes.append(
+                (
+                    tuple(d.provider for d in result.providers),
+                    tuple(
+                        (item.evidence_refs[0].record_id, item.score)
+                        for item in result.items
+                    ),
+                    tuple(
+                        tuple(ref.provider for ref in item.evidence_refs)
+                        for item in result.items
+                    ),
+                    result.context.text,
+                )
+            )
+            finished = [name for event, name in log if event == "end"][1:]
+            self.assertEqual(
+                sorted(_CONCURRENT_OPTIONAL, key=delays.__getitem__), finished
+            )
+
+        self.assertEqual(outcomes[0], outcomes[1])
+        self.assertEqual(("lexical", *_CONCURRENT_OPTIONAL), outcomes[0][0])
+
+    async def test_failing_provider_does_not_disturb_concurrent_providers(self):
+        log = []
+        delays = dict.fromkeys(_CONCURRENT_OPTIONAL, 0.05)
+        result = await _service(
+            providers=_delayed_providers(
+                log,
+                delays,
+                overrides={
+                    "temporal": DelayedProvider(
+                        "temporal", RuntimeError("temporal secret"), 0.0, log
+                    )
+                },
+            ),
+            repository=CanonicalRepository(),
+        ).retrieve(_query(text=_OPTIONAL_INTENT_TEXT))
+
+        self.assertFalse(result.abstained)
+        self.assertEqual(
+            (
+                ("lexical", "ready", None),
+                ("dense", "ready", None),
+                ("temporal", "failed", "TEMPORAL_PROVIDER_FAILED"),
+                ("procedure", "ready", None),
+                ("outcome", "ready", None),
+            ),
+            tuple((d.provider, d.status, d.reason) for d in result.providers),
+        )
+        self.assertNotIn("temporal secret", repr(result))
+        self.assertEqual([], [entry for entry in log if entry[0] == "cancelled"])
+        # The failure happened while the other providers were still running.
+        self.assertLess(log.index(("end", "temporal")), log.index(("end", "dense")))
+        self.assertLess(log.index(("start", "outcome")), log.index(("end", "temporal")))
+        self.assertEqual(
+            {_record_id(digit) for digit in "1245"},
+            {item.evidence_refs[0].record_id for item in result.items},
+        )
+
+    async def test_cancelling_recall_cancels_every_running_provider(self):
+        log = []
+        service = _service(
+            providers=_delayed_providers(
+                log, dict.fromkeys(_CONCURRENT_OPTIONAL, 30.0)
+            ),
+            repository=CanonicalRepository(),
+            provider_timeout_seconds=60.0,
+        )
+
+        task = asyncio.ensure_future(
+            service.retrieve(_query(text=_OPTIONAL_INTENT_TEXT))
+        )
+        for _ in range(500):
+            if len([entry for entry in log if entry[0] == "start"]) == 5:
+                break
+            await asyncio.sleep(0.01)
+        task.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await task
+
+        self.assertEqual(
+            {("cancelled", name) for name in _CONCURRENT_OPTIONAL},
+            {entry for entry in log if entry[0] == "cancelled"},
+        )
+
+    async def test_graph_is_seeded_after_concurrent_dense_completes(self):
+        log = []
+        graph = SeededGraphProvider(
+            _provider_result("graph", _candidate("6", "graph", 1))
+        )
+        delays = {"dense": 0.1, "temporal": 0.0, "procedure": 0.0, "outcome": 0.0}
+        result = await _service(
+            providers=_delayed_providers(log, delays, overrides={"graph": graph}),
+            repository=CanonicalRepository(),
+        ).retrieve(_query(text=_OPTIONAL_INTENT_TEXT + " because"))
+
+        self.assertFalse(result.abstained)
+        self.assertEqual(
+            ("lexical", "dense", "graph", "temporal", "procedure", "outcome"),
+            tuple(d.provider for d in result.providers),
+        )
+        self.assertEqual(
+            {_record_id("1"), _record_id("2")},
+            {seed.record_id for seed in graph.seeds},
+        )
+        self.assertTrue(
+            all(seed.channels <= {"lexical", "dense"} for seed in graph.seeds)
+        )
+
+
 class RetrievalServicePolicyTests(unittest.IsolatedAsyncioTestCase):
     async def test_one_aware_snapshot_drives_repository_and_ordered_policy(self):
         clock = FixedClock()
