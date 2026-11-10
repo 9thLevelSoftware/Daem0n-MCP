@@ -1337,7 +1337,11 @@ Reports expose all arm settings. Utility weight is **0.2 in the evaluation**
 (the product default stays 0.1). Retention distractors are same-category
 background procedure drafts with task tags: this prevents category diversity
 from automatically rescuing the actionable procedure and tests actual packing
-under a 256-token budget. These synthetic gains are not a competitor comparison.
+under a 256-token budget. Every arm uses the product default for lexical content
+tiering (off) except `tiering_apply` and `all_apply_tiering`, which turn it on:
+with the tier the procedure already ranks first, so those two arms retain the
+required fact without the retention policy and cannot show its effect. These
+synthetic gains are not a competitor comparison.
 The release-frozen retrieval corpus and its digest remain unchanged.
 
 `bash autoresearch.sh` runs the same offline lexical workload with 24 topics,

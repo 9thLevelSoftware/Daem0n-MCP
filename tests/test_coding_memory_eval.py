@@ -57,6 +57,39 @@ class CodingMemoryEvaluationTests(unittest.TestCase):
             arms["utility_single"]["ndcg_at_10"]["provenance_chain"],
         )
 
+    def test_retention_keeps_the_required_fact_that_baseline_drops(self):
+        arms = self.first["arms"]
+        self.assertEqual(0.0, arms["baseline"]["retention"]["required_fact_retention"])
+        for name in ("retention_apply", "all_apply"):
+            with self.subTest(arm=name):
+                self.assertEqual(
+                    1.0, arms[name]["retention"]["required_fact_retention"]
+                )
+        self.assertGreater(
+            arms["retention_apply"]["ndcg_at_10"]["overall"],
+            arms["baseline"]["ndcg_at_10"]["overall"],
+        )
+
+    def test_content_tiering_hides_the_retention_difference(self):
+        """With the content tier the runbook ranks first, so packing is moot."""
+
+        arms = self.first["arms"]
+        overrides = self.first["metadata"]["arm_overrides"]
+        for name, settings in overrides.items():
+            with self.subTest(arm=name):
+                self.assertEqual(
+                    name in {"tiering_apply", "all_apply_tiering"},
+                    settings["lexical_content_tiering"],
+                )
+        self.assertEqual("off", overrides["tiering_apply"]["retrieval_retention_mode"])
+        self.assertEqual(
+            1.0, arms["tiering_apply"]["retention"]["required_fact_retention"]
+        )
+        self.assertEqual(
+            arms["tiering_apply"]["retention"],
+            arms["all_apply_tiering"]["retention"],
+        )
+
     def test_validity_detects_file_edits_even_without_symbol_parsing(self):
         validity = self.first["arms"]["validity_apply"]["validity"]
         self.assertEqual(1.0, validity["stale_flag_recall"])
@@ -88,6 +121,8 @@ class CodingMemoryEvaluationTests(unittest.TestCase):
                 "validity_apply",
                 "retention_apply",
                 "all_apply",
+                "tiering_apply",
+                "all_apply_tiering",
             },
             set(self.first["arms"]),
         )

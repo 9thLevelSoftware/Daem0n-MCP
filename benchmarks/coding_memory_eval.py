@@ -398,9 +398,10 @@ def _arms(mode: Mode, statuses: dict[str, str]) -> dict[str, dict[str, Any]]:
         "retrieval_retention_mode": "off",
         "retrieval_rerank_enabled": False,
         "retrieval_reranker": "embedding",
-        # The reported numbers were measured with the content tier enabled;
-        # it is off by default in the product.
-        "lexical_content_tiering": True,
+        # The product default. With the content tier on, the runbook outranks
+        # its tag-heavy drafts and the retention arm has nothing left to do, so
+        # the tier is measured in arms of its own.
+        "lexical_content_tiering": False,
     }
     overrides: dict[str, dict[str, Any]] = {
         "baseline": {},
@@ -415,6 +416,13 @@ def _arms(mode: Mode, statuses: dict[str, str]) -> dict[str, dict[str, Any]]:
             "retrieval_utility_mode": "apply",
             "memory_validity_mode": "apply",
             "retrieval_retention_mode": "apply",
+        },
+        "tiering_apply": {"lexical_content_tiering": True},
+        "all_apply_tiering": {
+            "retrieval_utility_mode": "apply",
+            "memory_validity_mode": "apply",
+            "retrieval_retention_mode": "apply",
+            "lexical_content_tiering": True,
         },
     }
     if mode == "fully_enabled":
