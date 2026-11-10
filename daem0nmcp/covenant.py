@@ -1185,13 +1185,14 @@ class CovenantGate:
                 )
         except TokenValidationError as exc:
             return CovenantViolation.build(exc.code, operation, workspace)
-        if not admitted:
-            return CovenantViolation.build("TOKEN_REPLAYED", operation, workspace)
-        if consume_capability:
-            # A spent capability must stop holding issuance capacity.
+        if consume_capability or not admitted:
+            # A spent capability, or one whose grant is gone and can never be
+            # redeemed, must stop holding issuance capacity.
             release = getattr(self.authority, "release_consumed", None)
             if callable(release):
                 release(preflight_token)
+        if not admitted:
+            return CovenantViolation.build("TOKEN_REPLAYED", operation, workspace)
         return None
 
 

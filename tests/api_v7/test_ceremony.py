@@ -733,6 +733,25 @@ class CapacityTests(unittest.IsolatedAsyncioTestCase):
         retried = await self.admit(scope, token=token)
         self.assertIsNone(retried.violation)
 
+    async def test_capability_of_a_recycled_scope_stops_holding_capacity(
+        self,
+    ) -> None:
+        self.build(store={"max_scopes_per_principal": 1}, max_handles_per_session=1)
+        self.challenge_everything()
+        first = self.scope("process:shared", "session-first")
+        second = self.scope("process:shared", "session-second")
+        token = (await self.admit(first)).challenge.preflight_token
+        # Another session of the principal recycles the first session's scope,
+        # which takes the grant behind the outstanding capability with it.
+        self.assertIsNotNone((await self.admit(second)).challenge)
+
+        again = await self.admit(first, token=token)
+        self.assertEqual("COUNSEL_REQUIRED", again.violation["violation"])
+        self.assertIsNotNone(again.notice.auto_brief)
+        self.assertIsNone(
+            (await self.admit(first, token=again.challenge.preflight_token)).violation
+        )
+
     async def test_session_at_its_quota_is_refused_alone_and_honestly(self) -> None:
         self.build(max_handles_per_session=2)
         self.challenge_everything()
