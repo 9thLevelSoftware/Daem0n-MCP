@@ -1104,6 +1104,12 @@ def test_normalized_binding_path_still_refuses_symlink_escape(
     outside.write_text("VALUE = 1\n", encoding="utf-8")
     (workspace.root / "src").mkdir()
     (workspace.root / "src" / "link.py").symlink_to(outside)
+    (workspace.root / "src" / "real.py").write_text("VALUE = 2\n", encoding="utf-8")
+    # The same spellings reach a regular file, so the refusals below are of
+    # the resolved link and not of a path that was never found.
+    for relative in ("src/real.py", "./src//real.py", "src\\real.py"):
+        (binding,) = capture_bindings(workspace, [(relative, None)])
+        assert binding.relative_file_path == "src/real.py"
     for relative in ("src/link.py", "./src//link.py", "src\\link.py"):
         with pytest.raises(CodeBindingError, match="outside the workspace"):
             capture_bindings(workspace, [(relative, None)])
