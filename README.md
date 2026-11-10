@@ -830,6 +830,7 @@ All settings are configurable via environment variables with `DAEM0NMCP_` prefix
 | `DAEM0NMCP_BM25_K1` | `1.5` | BM25 term frequency saturation |
 | `DAEM0NMCP_BM25_B` | `0.75` | BM25 document length normalization |
 | `DAEM0NMCP_RRF_K` | `60` | RRF fusion dampening constant |
+| `DAEM0NMCP_LEXICAL_CONTENT_TIERING` | `false` | Rank content/rationale matches ahead of tag-assisted matches in lexical recall |
 | `DAEM0NMCP_SEARCH_DIVERSITY_MAX_PER_FILE` | `3` | Max results from same file |
 
 ### Auto-Zoom Routing
@@ -1096,8 +1097,13 @@ replace only the plugin.
 
 ### 5. Migrations
 
-Within a storage format, schema migrations are applied automatically when any
-MCP tool runs, and no manual step is required.
+A format 7 database is never upgraded in place. When a newer build needs a
+newer schema, the server and the legacy commands answer `MIGRATION_REQUIRED`
+until `migrate-v7 --apply` has run; that command snapshots the store first and
+can be rolled back. A retained format 6 database only receives format 6 schema
+migrations. If `active-db.json` is lost, commands answer
+`ACTIVE_POINTER_MISSING`; see `docs/v7-operations.md` for
+`migrate-v7 --recover-pointer`.
 
 Moving an existing v6 workspace to the v7 storage format is **not** automatic.
 It is an offline, reversible command, and a v6 workspace answers
