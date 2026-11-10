@@ -872,6 +872,19 @@ def _disable_upstream_task_protocol(server: Any) -> None:
         low_level.request_handlers.pop(request_type, None)
     _set_owned_capabilities(low_level, tasks_enabled=False)
 
+    original_call = low_level.request_handlers[mcp.types.CallToolRequest]
+
+    async def handle_call(request: Any) -> Any:
+        # No task capability is declared, and the task specification has such
+        # a receiver "process requests of that type normally, ignoring any
+        # task-augmentation metadata if present".  The framework reads that
+        # metadata from the request context and would refuse the call.
+        if request.params.task is not None:
+            low_level.request_context.experimental.task_metadata = None
+        return await original_call(request)
+
+    low_level.request_handlers[mcp.types.CallToolRequest] = handle_call
+
 
 _COVENANT_INSTRUCTIONS = {
     "guided": (

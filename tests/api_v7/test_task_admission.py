@@ -152,6 +152,25 @@ async def test_strict_task_refusals_name_the_explicit_ceremony(tmp_path):
         assert unadvised.data["error"]["counsel"] is None
 
 
+async def test_task_metadata_is_ignored_when_tasks_are_not_offered(tmp_path):
+    async with _client(tmp_path, tasks=False) as (client, workspace_id):
+        assert client.initialize_result.capabilities.tasks is None
+        arguments = {"workspace_id": workspace_id, "query": "plain recall"}
+
+        augmented = await _call(client, "memory_recall", arguments)
+        plain = await _call(client, "memory_recall", arguments, task=False)
+
+    # A receiver without the task capability processes the request normally.
+    assert isinstance(augmented, mcp_types.CallToolResult)
+    assert augmented.isError is False
+    assert augmented.structuredContent["ok"] is True
+    assert plain.structuredContent["ok"] is True
+    assert (
+        augmented.structuredContent["data"]["items"]
+        == plain.structuredContent["data"]["items"]
+    )
+
+
 async def test_task_refusals_are_told_apart_by_code_and_data(tmp_path):
     async with _client(tmp_path, tasks=True) as (client, workspace_id):
         scope = {"workspace_id": workspace_id}
