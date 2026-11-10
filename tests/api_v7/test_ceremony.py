@@ -714,6 +714,25 @@ class CapacityTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual("TOKEN_TAMPERED", forged["violation"])
 
+    async def test_replay_stays_recoverable_however_busy_the_session_was(
+        self,
+    ) -> None:
+        self.build(max_handles_per_session=2)
+        self.challenge_everything()
+        scope = self.scope("oauth-sub:honest")
+        token = (await self.admit(scope)).challenge.preflight_token
+        self.assertIsNone((await self.admit(scope, token=token)).violation)
+
+        self.service.value = PreflightGuidance()
+        for index in range(8):
+            with self.subTest(write=index):
+                self.assertIsNone(
+                    (await self.admit(scope, f"routine write {index}")).violation
+                )
+        # The response to the first write was lost and the client retries it.
+        retried = await self.admit(scope, token=token)
+        self.assertIsNone(retried.violation)
+
     async def test_session_at_its_quota_is_refused_alone_and_honestly(self) -> None:
         self.build(max_handles_per_session=2)
         self.challenge_everything()

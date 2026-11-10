@@ -103,45 +103,61 @@ class OpaqueCapabilityAuthorityTests(unittest.TestCase):
         self.now += self.delegate.ttl_seconds
         authority.issue(self.scope, "memory_store", "a" * 64)
         self.assertEqual({}, authority._consumed)
-        self.assertEqual({}, authority._session_consumed)
+        self.assertEqual([], authority._consumed_by_expiry)
         with self.assertRaises(TokenValidationError) as raised:
             authority.verify(spent[0])
         self.assertEqual("TOKEN_TAMPERED", raised.exception.code)
 
-    def test_replay_markers_are_bounded_per_session(self) -> None:
+    def test_replay_markers_last_the_lifetime_within_a_global_bound(self) -> None:
         from daem0nmcp.api.v7.opaque_capabilities import (
             OpaqueCapabilityAuthority,
         )
         from daem0nmcp.covenant import TokenValidationError
 
+        def code(authority: OpaqueCapabilityAuthority, token: str) -> str:
+            with self.assertRaises(TokenValidationError) as raised:
+                authority.verify(token)
+            return raised.exception.code
+
+        def spend(authority: OpaqueCapabilityAuthority, count: int) -> list[str]:
+            spent = []
+            for index in range(count):
+                issued = authority.issue(self.scope, "memory_store", f"{index:064x}")
+                authority.release_consumed(issued.token)
+                spent.append(issued.token)
+            return spent
+
+        # Far more consumed writes than the session's live-handle bound: every
+        # one of them is still a replay until it would have expired.
         authority = OpaqueCapabilityAuthority(
             self.delegate, max_handles_per_session=2, clock=lambda: self.now
         )
-        other = InvocationScope("oauth-sub:other", "mcp-session:other", "tests/w")
-        kept = authority.issue(other, "memory_store", "c" * 64)
-        authority.release_consumed(kept.token)
-        spent = []
-        for index in range(4):
-            issued = authority.issue(self.scope, "memory_store", f"{index:064x}")
-            authority.release_consumed(issued.token)
-            spent.append(issued.token)
+        spent = spend(authority, 40)
+        self.assertEqual({"TOKEN_REPLAYED"}, {code(authority, t) for t in spent})
+        forged = "cap_" + "f" * 40
+        self.assertEqual("TOKEN_TAMPERED", code(authority, forged))
+        self.now += 300
+        authority.issue(self.scope, "memory_store", "c" * 64)
+        self.assertEqual(0, len(authority._consumed))
+        self.assertEqual({"TOKEN_TAMPERED"}, {code(authority, t) for t in spent})
 
-        self.assertEqual(3, len(authority._consumed))
-        codes = []
-        for token in [*spent, kept.token]:
-            with self.assertRaises(TokenValidationError) as raised:
-                authority.verify(token)
-            codes.append(raised.exception.code)
-        self.assertEqual(
-            [
-                "TOKEN_TAMPERED",
-                "TOKEN_TAMPERED",
-                "TOKEN_REPLAYED",
-                "TOKEN_REPLAYED",
-                "TOKEN_REPLAYED",
-            ],
-            codes,
+        # At the marker bound nothing grows, and a marker that had to be
+        # dropped early still reads as a replay, never as a forgery.
+        bounded = OpaqueCapabilityAuthority(
+            self.delegate, max_consumed_markers=3, clock=lambda: self.now
         )
+        early = spend(bounded, 2)
+        self.now += 100
+        late = spend(bounded, 4)
+        self.assertEqual(3, len(bounded._consumed))
+        self.assertEqual(
+            {"TOKEN_REPLAYED"}, {code(bounded, t) for t in [*early, *late]}
+        )
+        self.assertEqual("TOKEN_REPLAYED", code(bounded, forged))
+        self.now += 300
+        self.assertEqual("TOKEN_TAMPERED", code(bounded, forged))
+        with self.assertRaises(ValueError):
+            OpaqueCapabilityAuthority(self.delegate, max_consumed_markers=0)
 
     def test_quotas_refuse_the_caller_without_evicting_anyone(self) -> None:
         from daem0nmcp.api.v7.opaque_capabilities import (

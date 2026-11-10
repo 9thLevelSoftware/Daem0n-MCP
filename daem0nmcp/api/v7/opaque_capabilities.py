@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import heapq
 import re
 import secrets
 import threading
@@ -67,9 +68,16 @@ class OpaqueCapabilityAuthority:
     """Keep signed claims server-side and expose only random lookup handles.
 
     Only unconsumed handles hold capacity: the gate releases a handle as soon
-    as its nonce is consumed, leaving a claim-free marker so a replay keeps
-    its ``TOKEN_REPLAYED`` code.  Live handles are bounded per transport
-    session, per principal and globally, and a caller at its own bound is
+    as its nonce is consumed, leaving a claim-free marker until the
+    capability would have expired so a replay keeps its ``TOKEN_REPLAYED``
+    code for its whole lifetime.  Retained state is bounded by ``max_handles``
+    live handles plus ``max_consumed_markers`` markers.  Markers lapse by
+    expiry; if that bound is ever reached the marker closest to expiry is
+    dropped and, until it would have expired, an unknown handle is answered
+    ``TOKEN_REPLAYED`` rather than ``TOKEN_TAMPERED``, so an honest retry
+    stays recoverable and nothing is admitted.  Live handles are bounded per
+    transport session, per principal and globally, and a caller at its own
+    bound is
     refused without touching anyone else's handles.  Clients that share one
     principal (stdio and unauthenticated loopback HTTP use the process
     principal) are told apart only by session, so there the per-session bound
@@ -84,6 +92,7 @@ class OpaqueCapabilityAuthority:
         max_handles: int = 4096,
         max_handles_per_principal: int = 1024,
         max_handles_per_session: int = 256,
+        max_consumed_markers: int = 65_536,
         clock: Callable[[], int | float] = steady_clock,
     ) -> None:
         if not isinstance(delegate, CapabilityAuthority):
@@ -103,13 +112,16 @@ class OpaqueCapabilityAuthority:
         self._max_per_session = _bound(
             "max_handles_per_session", max_handles_per_session
         )
+        self._max_markers = _bound("max_consumed_markers", max_consumed_markers)
         self._clock = clock
         self._handles: OrderedDict[str, _StoredCapability] = OrderedDict()
         self._principal_live: dict[str, int] = {}
         self._session_live: dict[tuple[str, str], int] = {}
         # Consumed handles keep no claims, only what a replay answer needs.
-        self._consumed: dict[str, tuple[int, tuple[str, str]]] = {}
-        self._session_consumed: dict[tuple[str, str], OrderedDict[str, None]] = {}
+        self._consumed: dict[str, int] = {}
+        self._consumed_by_expiry: list[tuple[int, str]] = []
+        # Until this time a dropped marker may still be replayed.
+        self._replay_unknown_until = 0
         self._lock = threading.Lock()
 
     @property
@@ -135,16 +147,6 @@ class OpaqueCapabilityAuthority:
             _decrement(self._session_live, stored.session)
         return stored
 
-    def _drop_consumed_locked(self, handle: str) -> None:
-        marker = self._consumed.pop(handle, None)
-        if marker is None:
-            return
-        owned = self._session_consumed.get(marker[1])
-        if owned is not None:
-            owned.pop(handle, None)
-            if not owned:
-                del self._session_consumed[marker[1]]
-
     def _prune_locked(self, now: int) -> None:
         for handle in [
             handle
@@ -152,10 +154,8 @@ class OpaqueCapabilityAuthority:
             if stored.expires_at <= now
         ]:
             self._drop_live_locked(handle)
-        for handle in [
-            handle for handle, marker in self._consumed.items() if marker[0] <= now
-        ]:
-            self._drop_consumed_locked(handle)
+        while self._consumed_by_expiry and self._consumed_by_expiry[0][0] <= now:
+            del self._consumed[heapq.heappop(self._consumed_by_expiry)[1]]
 
     def issue(
         self,
@@ -212,6 +212,11 @@ class OpaqueCapabilityAuthority:
         with self._lock:
             stored = self._handles.get(validated)
             replayed = stored is None and validated in self._consumed
+            if stored is None and not replayed and self._replay_unknown_until:
+                try:
+                    replayed = int(self._clock()) < self._replay_unknown_until
+                except (OverflowError, TypeError, ValueError):
+                    replayed = False
         if replayed:
             raise TokenValidationError("TOKEN_REPLAYED")
         if stored is None:
@@ -236,8 +241,8 @@ class OpaqueCapabilityAuthority:
 
         The signed claims are dropped.  A marker without claims stays until
         the capability would have expired so a replay is still answered with
-        ``TOKEN_REPLAYED``; markers are bounded per session, and a replay of
-        one that was pushed out is rejected as an unknown handle.
+        ``TOKEN_REPLAYED``.  A handle that can no longer be redeemed for any
+        other reason is released the same way.
         """
 
         validated = self._validate_handle(token)
@@ -245,11 +250,12 @@ class OpaqueCapabilityAuthority:
             stored = self._drop_live_locked(validated)
             if stored is None:
                 return
-            self._consumed[validated] = (stored.expires_at, stored.session)
-            owned = self._session_consumed.setdefault(stored.session, OrderedDict())
-            owned[validated] = None
-            while len(owned) > self._max_per_session:
-                self._drop_consumed_locked(next(iter(owned)))
+            self._consumed[validated] = stored.expires_at
+            heapq.heappush(self._consumed_by_expiry, (stored.expires_at, validated))
+            while len(self._consumed) > self._max_markers:
+                expires_at, dropped = heapq.heappop(self._consumed_by_expiry)
+                del self._consumed[dropped]
+                self._replay_unknown_until = max(self._replay_unknown_until, expires_at)
 
 
 __all__ = [
