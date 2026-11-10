@@ -9,7 +9,7 @@ import unittest
 from contextlib import closing
 from dataclasses import replace
 from datetime import timedelta
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from unittest.mock import patch
 
 from pydantic import ValidationError
@@ -502,6 +502,35 @@ class MemoryLearningWriteTests(unittest.IsolatedAsyncioTestCase):
                 _outcome_command(stored.record.record_id, rebind_code=True),
             )
         self.assertEqual(before, self._payloads())
+
+    async def test_binding_path_spellings_are_stored_normalized(self) -> None:
+        source = self.fixture.root / "src" / "handler.py"
+        source.parent.mkdir()
+        source.write_text("VALUE = 1\n", encoding="utf-8")
+        command = _store_command(
+            code_refs=(
+                (str(PureWindowsPath("src", "handler.py")), None),
+                ("./src//handler.py", None),
+            )
+        )
+        stored = await self.writer.store(self.fixture.workspace, command)
+        bindings = self._payloads()[0]["record"]["context"]["code_bindings"]
+        self.assertEqual(
+            ["src/handler.py", "src/handler.py"],
+            [binding["relative_file_path"] for binding in bindings],
+        )
+        replay = await self.writer.store(self.fixture.workspace, command)
+        self.assertEqual(stored.record.record_id, replay.record.record_id)
+        self.assertEqual(1, len(self._payloads()))
+        with self.assertRaisesRegex(RuntimeServiceError, "INVALID_ARGUMENT"):
+            await self.writer.store(
+                self.fixture.workspace,
+                _store_command(
+                    idempotency_key="learning-store-0002",
+                    code_refs=((str(PureWindowsPath("C:/src/handler.py")), None),),
+                ),
+            )
+        self.assertEqual(1, len(self._payloads()))
 
     async def test_unsupported_symbol_rebind_is_a_client_error(self) -> None:
         if not default_code_indexer_factory().available:

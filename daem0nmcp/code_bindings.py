@@ -85,7 +85,14 @@ def _validate_ref(relative: object, name: object) -> tuple[str, str | None]:
         or (name is not None and (not isinstance(name, str) or not name.strip()))
     ):
         raise CodeBindingError("code binding reference is invalid")
-    return relative, name
+    # One spelling per file, whichever platform typed it: ``src\x``, ``./src/x``
+    # and ``src//x`` are the same workspace-relative path.  Rooted, drive and
+    # UNC spellings were refused above on the text as typed.  Bindings stored
+    # before this normalization pass through here again when they are read.
+    parts = [
+        part for part in relative.replace("\\", "/").split("/") if part not in ("", ".")
+    ]
+    return "/".join(parts) or ".", name
 
 
 def _bindings_from_context(context: Mapping[str, object]) -> tuple[CodeBinding, ...]:

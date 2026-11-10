@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import os
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import PureWindowsPath
 from threading import Barrier
 from types import SimpleNamespace
 
@@ -114,7 +115,9 @@ def test_capture_shared_source_is_consistent_and_next_capture_is_fresh(
     monkeypatch.setattr(producer_type, "index_source_strict", parse_then_replace)
     captured = capture_bindings(workspace, refs)
     assert path.read_bytes() == replacement
-    assert [(b.relative_file_path, b.qualified_name) for b in captured] == refs
+    assert [(b.relative_file_path, b.qualified_name) for b in captured] == [
+        ("sample.py", name) for _, name in refs
+    ]
     assert captured == old_bindings
     assert capture_bindings(workspace, refs) == new_bindings
 
@@ -949,6 +952,105 @@ def test_legacy_decorated_binding_requires_revalidation(workspace, monkeypatch):
 def test_capture_rejects_workspace_escape(workspace):
     with pytest.raises(CodeBindingError):
         capture_bindings(workspace, [("../outside.py", None)])
+
+
+_PATH_SPELLINGS = [
+    str(PureWindowsPath("src", "auth", "login.py")),
+    "./src/auth/login.py",
+    ".\\src\\auth\\login.py",
+    "src//auth/login.py",
+    "src/./auth/login.py",
+    "src\\auth//./login.py",
+]
+
+
+@pytest.mark.parametrize("spelling", _PATH_SPELLINGS)
+def test_capture_normalizes_binding_path_spelling(workspace, spelling):
+    path = workspace.root / "src" / "auth" / "login.py"
+    path.parent.mkdir(parents=True)
+    path.write_text("VALUE = 1\n", encoding="utf-8")
+    (canonical,) = capture_bindings(workspace, [("src/auth/login.py", None)])
+    (binding,) = capture_bindings(workspace, [(spelling, None)])
+    assert binding == canonical
+    assert binding.relative_file_path == "src/auth/login.py"
+
+
+@pytest.mark.parametrize("spelling", _PATH_SPELLINGS)
+@pytest.mark.parametrize("name", [None, "target"])
+def test_stored_binding_path_spelling_does_not_change_validity(
+    workspace, spelling, name
+):
+    if name is not None:
+        require_parser()
+    path = workspace.root / "src" / "auth" / "login.py"
+    path.parent.mkdir(parents=True)
+    original = "def target():\n    return 1\n"
+    path.write_text(original, encoding="utf-8")
+    (canonical,) = capture_bindings(workspace, [("src/auth/login.py", name)])
+    # A binding captured before paths were normalized keeps the typed spelling.
+    stored = {
+        "code_bindings": [{**canonical.to_json(), "relative_file_path": spelling}]
+    }
+    assert binding_refs_from_context(stored) == (("src/auth/login.py", name),)
+    evaluator = BindingEvaluator()
+    result = evaluator.evaluate(workspace.root, stored)
+    assert result.applicability == "current"
+    assert result.changed == ()
+    edit(path, original.replace("return 1", "return 2"))
+    result = evaluator.evaluate(workspace.root, stored)
+    assert result.applicability == "needs_revalidation"
+    label = "src/auth/login.py" + ("" if name is None else "::target")
+    assert result.changed == (label,)
+    (rebound,) = capture_bindings(workspace, binding_refs_from_context(stored))
+    assert rebound.relative_file_path == "src/auth/login.py"
+
+
+@pytest.mark.parametrize(
+    "relative",
+    [
+        str(PureWindowsPath("C:/proj/login.py")),
+        "C:/proj/login.py",
+        "C:login.py",
+        str(PureWindowsPath("//server/share/login.py")),
+        "//server/share/login.py",
+        "\\login.py",
+        "/login.py",
+        str(PureWindowsPath("src", "..", "..", "login.py")),
+        "src/../login.py",
+        "./../login.py",
+    ],
+)
+def test_rooted_and_escaping_binding_paths_stay_rejected(workspace, relative):
+    (workspace.root / "login.py").write_text("VALUE = 1\n", encoding="utf-8")
+    with pytest.raises(CodeBindingError, match="reference is invalid"):
+        capture_bindings(workspace, [(relative, None)])
+    context = {
+        "code_bindings": [
+            {
+                "relative_file_path": relative,
+                "qualified_name": None,
+                "fingerprint": "0" * 64,
+                "head_commit": None,
+            }
+        ]
+    }
+    with pytest.raises(CodeBindingError, match="reference is invalid"):
+        binding_refs_from_context(context)
+    with pytest.raises(CodeBindingError, match="reference is invalid"):
+        BindingEvaluator().evaluate(workspace.root, context)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="symlink creation needs privileges")
+def test_normalized_binding_path_still_refuses_symlink_escape(
+    workspace, tmp_path_factory
+):
+    outside = tmp_path_factory.mktemp("outside") / "secret.py"
+    outside.write_text("VALUE = 1\n", encoding="utf-8")
+    (workspace.root / "src").mkdir()
+    (workspace.root / "src" / "link.py").symlink_to(outside)
+    for relative in ("src/link.py", "./src//link.py", "src\\link.py"):
+        with pytest.raises(CodeBindingError, match="outside the workspace"):
+            capture_bindings(workspace, [(relative, None)])
 
 
 def test_capture_rejects_oversized_file(workspace):
