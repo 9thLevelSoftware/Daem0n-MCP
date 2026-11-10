@@ -43,6 +43,7 @@ from daem0nmcp.event_store import (
 )
 from daem0nmcp.retrieval.runtime import drain_projection_jobs
 from daem0nmcp.retrieval.types import RetrievalQuery
+from daem0nmcp.workspace import ensure_workspace_identity
 
 from .test_local_state_operations import NOW, _apply_v7_schema, _Fixture
 
@@ -198,6 +199,8 @@ class MemoryLearningWriteTests(unittest.IsolatedAsyncioTestCase):
         self,
     ) -> None:
         target_id = self.fixture.add_record(1)
+        # Settle the local identity before adding the foreign provenance record.
+        ensure_workspace_identity([self.fixture.root])
         foreign_id = "mem_" + "2" * 64
         with closing(sqlite3.connect(self.fixture.database)) as connection:
             record = json.loads(
