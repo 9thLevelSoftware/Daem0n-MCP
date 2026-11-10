@@ -9,7 +9,7 @@ from becoming an alternate path around the v7 policy boundary.
 from __future__ import annotations
 
 import inspect
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable, Iterable, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Annotated, Generic, Literal, Protocol, TypeVar, cast
@@ -19,8 +19,10 @@ from pydantic import Field, StringConstraints, TypeAdapter
 from ...workspace import Workspace
 from .dashboard_resources import build_dashboard_resource_specs
 from .models import (
+    RECORD_CONTENT_NOTICE,
     ActiveContextId,
     AwareDateTime,
+    BoundedText,
     RecordSummary,
     RuleView,
     UserText,
@@ -83,6 +85,7 @@ class ActiveContextItem(WireModel):
 
 
 T = TypeVar("T", bound=WireModel)
+R_co = TypeVar("R_co")
 
 
 class ResourceDocument(WireModel, Generic[T]):
@@ -95,11 +98,18 @@ class ResourceDocument(WireModel, Generic[T]):
     truncated: bool
 
 
-class WarningResourceDocument(ResourceDocument[RecordSummary]):
+class RecordResourceDocument(ResourceDocument[T], Generic[T]):
+    """A document of record text: data for the reader, never instructions."""
+
+    withheld_untrusted: Annotated[int, Field(strict=True, ge=0)] = 0
+    content_notice: BoundedText = RECORD_CONTENT_NOTICE
+
+
+class WarningResourceDocument(RecordResourceDocument[RecordSummary]):
     """Newest non-archived warning summaries."""
 
 
-class FailureResourceDocument(ResourceDocument[RecordSummary]):
+class FailureResourceDocument(RecordResourceDocument[RecordSummary]):
     """Newest non-archived failed-outcome summaries."""
 
 
@@ -107,7 +117,7 @@ class RuleResourceDocument(ResourceDocument[RuleView]):
     """Highest-priority enabled rule views."""
 
 
-class ActiveContextResourceDocument(ResourceDocument[ActiveContextItem]):
+class ActiveContextResourceDocument(RecordResourceDocument[ActiveContextItem]):
     """Highest-priority, unexpired active-context entries."""
 
 
@@ -126,6 +136,9 @@ class ResourceReadRequest:
     include_deleted: bool = False
     include_expired: bool = False
     enabled_only: bool | None = None
+    # Records whose text came from a code scan or a fetched page rather than
+    # from the session's agent or user.  Withheld unless a caller opts in.
+    include_untrusted_origin: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -134,6 +147,25 @@ class ResourceRow(Generic[T]):
 
     item: T
     deleted: bool = False
+
+
+class ResourceRows(list[R_co]):
+    """Reader rows plus the number of untrusted-origin rows left out."""
+
+    withheld_untrusted: int = 0
+
+    def __init__(self, rows: Iterable[R_co] = (), *, withheld_untrusted: int = 0):
+        super().__init__(rows)
+        self.withheld_untrusted = withheld_untrusted
+
+
+def withheld_untrusted_count(rows: object) -> int:
+    """Return how many untrusted-origin rows a reader left out of ``rows``."""
+
+    value = getattr(rows, "withheld_untrusted", 0)
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise TypeError("withheld row count must be a non-negative integer")
+    return value
 
 
 class WorkspaceResolver(Protocol):
@@ -292,6 +324,7 @@ class ResourceHandlers:
                 generated_at=generated_at,
                 items=items[:MAX_RESOURCE_ITEMS],
                 truncated=len(items) > MAX_RESOURCE_ITEMS,
+                withheld_untrusted=withheld_untrusted_count(rows),
             )
 
         captured = _capture(build)
@@ -321,6 +354,7 @@ class ResourceHandlers:
                 generated_at=generated_at,
                 items=items[:MAX_RESOURCE_ITEMS],
                 truncated=len(items) > MAX_RESOURCE_ITEMS,
+                withheld_untrusted=withheld_untrusted_count(rows),
             )
 
         captured = _capture(build)
@@ -407,6 +441,7 @@ class ResourceHandlers:
                 generated_at=generated_at,
                 items=items[:MAX_RESOURCE_ITEMS],
                 truncated=len(items) > MAX_RESOURCE_ITEMS,
+                withheld_untrusted=withheld_untrusted_count(rows),
             )
 
         captured = _capture(build)
@@ -482,9 +517,11 @@ __all__ = [
     "ResourceReadRequest",
     "ResourceReader",
     "ResourceRow",
+    "ResourceRows",
     "RuleResourceDocument",
     "WARNING_RESOURCE_URI_TEMPLATE",
     "WarningResourceDocument",
     "WorkspaceResolver",
     "build_resource_specs",
+    "withheld_untrusted_count",
 ]

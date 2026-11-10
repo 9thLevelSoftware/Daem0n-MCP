@@ -40,6 +40,7 @@ from .resources import (
     ResourceReader,
     ResourceReadRequest,
     ResourceRow,
+    ResourceRows,
 )
 
 
@@ -237,6 +238,13 @@ _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _PROJECTION_NAMES = RETRIEVAL_PROJECTION_NAMES
 _PROJECTION_NAME_PLACEHOLDERS = ",".join("?" * len(_PROJECTION_NAMES))
 _PROJECTION_NAME_PARAMETERS = tuple(sorted(_PROJECTION_NAMES))
+# Stored markers of records whose text was not written by the session's agent
+# or user: ``context.code_todo`` (TODO scan) and ``context.document`` (URL
+# ingest).  Tags are not used: any caller can add or omit a tag.
+_UNTRUSTED_ORIGIN_SQL = (
+    "(json_type(context_json,'$.code_todo') IS NOT NULL "
+    "OR json_type(context_json,'$.document') IS NOT NULL)"
+)
 _REQUIRED_TABLES = frozenset(
     {
         "active_context",
@@ -426,6 +434,7 @@ def _validate_request(
         request.include_archived,
         request.include_deleted,
         request.include_expired,
+        request.include_untrusted_origin,
     ):
         if type(value) is not bool:
             raise ValueError("resource inclusion flags must be boolean")
@@ -547,12 +556,17 @@ class SQLiteResourceRepository:
         rule_limit: int = 50,
         active_context_limit: int = 50,
         include_git_changes: bool = True,
+        include_untrusted_origin: bool = False,
     ) -> ResourceRepositorySnapshot:
         """Read all briefing resources without a pointer-generation gap.
 
         Git changes cost two ``git`` subprocesses per read (plus a system-wide
         thread walk on Windows); callers that never show them skip them.
+        Records of untrusted origin are left out and counted unless the
+        caller opts in.
         """
+
+        untrusted = include_untrusted_origin is True
 
         if not isinstance(workspace, Workspace):
             raise ValueError("workspace must be a registered Workspace")
@@ -573,18 +587,31 @@ class SQLiteResourceRepository:
         warning_request = (
             None
             if warning_limit == 0
-            else ResourceReadRequest("warnings", warning_limit, "updated_at_desc")
+            else ResourceReadRequest(
+                "warnings",
+                warning_limit,
+                "updated_at_desc",
+                include_untrusted_origin=untrusted,
+            )
         )
         failure_request = (
             None
             if failure_limit == 0
-            else ResourceReadRequest("failures", failure_limit, "updated_at_desc")
+            else ResourceReadRequest(
+                "failures",
+                failure_limit,
+                "updated_at_desc",
+                include_untrusted_origin=untrusted,
+            )
         )
         rule_request = ResourceReadRequest(
             "rules", rule_limit, "priority_desc", enabled_only=True
         )
         active_request = ResourceReadRequest(
-            "active_context", active_context_limit, "priority_desc"
+            "active_context",
+            active_context_limit,
+            "priority_desc",
+            include_untrusted_origin=untrusted,
         )
         return await self._run(
             lambda: self._read_briefing_snapshot_sync(
@@ -644,7 +671,12 @@ class SQLiteResourceRepository:
             )
             decisions = self._read_records_sync(
                 workspace,
-                ResourceReadRequest("warnings", 50, "updated_at_desc"),
+                ResourceReadRequest(
+                    "warnings",
+                    50,
+                    "updated_at_desc",
+                    include_untrusted_origin=(active_request.include_untrusted_origin),
+                ),
                 record_type="decision",
                 failed_only=False,
                 _connection=connection,
@@ -1074,6 +1106,15 @@ class SQLiteResourceRepository:
                 predicates.append("archived=0")
             if not request.include_deleted:
                 predicates.append("deleted_at_us IS NULL")
+            withheld = 0
+            if not request.include_untrusted_origin:
+                counted = connection.execute(
+                    "SELECT COUNT(*) FROM memory_records WHERE "
+                    + " AND ".join([*predicates, _UNTRUSTED_ORIGIN_SQL]),
+                    tuple(parameters),
+                ).fetchone()
+                withheld = 0 if counted is None else _plain_int(counted[0])
+                predicates.append("NOT " + _UNTRUSTED_ORIGIN_SQL)
             parameters.append(request.limit)
             rows = connection.execute(
                 "SELECT record_id,workspace_id,record_type,content,content_hash,"
@@ -1083,7 +1124,9 @@ class SQLiteResourceRepository:
                 + " ORDER BY updated_at_us DESC, record_id DESC LIMIT ?",
                 tuple(parameters),
             ).fetchall()
-            values: list[ResourceRow[RecordSummary]] = []
+            values: ResourceRows[ResourceRow[RecordSummary]] = ResourceRows(
+                withheld_untrusted=withheld
+            )
             for row in rows:
                 if failed_only and _plain_int(row["worked"]) != 0:
                     raise ValueError("failed record state is invalid")
@@ -1362,6 +1405,28 @@ class SQLiteResourceRepository:
                     request.limit,
                 ),
             ).fetchall()
+            untrusted_record_ids: set[object] = set()
+            if not request.include_untrusted_origin:
+                record_ids = sorted(
+                    {
+                        str(row["record_id"])
+                        for rows in (canonical_rows, legacy_rows)
+                        for row in rows
+                    }
+                )
+                if record_ids:
+                    untrusted_record_ids = {
+                        row[0]
+                        for row in connection.execute(
+                            "SELECT record_id FROM memory_records "
+                            "WHERE workspace_id=? AND record_id IN ("
+                            + ",".join("?" * len(record_ids))
+                            + ") AND "
+                            + _UNTRUSTED_ORIGIN_SQL,
+                            (workspace.workspace_id, *record_ids),
+                        )
+                    }
+            withheld = 0
             public_ids = PublicObjectIdRepository(connection)
             ordered_values: list[
                 tuple[int, datetime, str, ResourceRow[ActiveContextItem]]
@@ -1371,6 +1436,9 @@ class SQLiteResourceRepository:
                 (False, legacy_rows),
             ):
                 for row in rows:
+                    if row["record_id"] in untrusted_record_ids:
+                        withheld += 1
+                        continue
                     record, deleted = self._record_summary(row, workspace)
                     if canonical:
                         active_context_id = row["active_id"]
@@ -1415,7 +1483,10 @@ class SQLiteResourceRepository:
                 key=lambda value: (value[0], value[1], value[2]),
                 reverse=True,
             )
-            return [value[3] for value in ordered_values[: request.limit]]
+            return ResourceRows(
+                (value[3] for value in ordered_values[: request.limit]),
+                withheld_untrusted=withheld,
+            )
         finally:
             if owns_connection:
                 try:

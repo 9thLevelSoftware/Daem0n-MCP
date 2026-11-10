@@ -83,7 +83,13 @@ from .maintenance_operations import (
     MaintenanceOperationDependencies,
     build_maintenance_operations,
 )
-from .models import CapabilityState, RecordSummary, RuleView, WireModel
+from .models import (
+    RECORD_CONTENT_NOTICE,
+    CapabilityState,
+    RecordSummary,
+    RuleView,
+    WireModel,
+)
 from .opaque_capabilities import OpaqueCapabilityAuthority
 from .operations import CoreOperationDependencies, build_core_operations
 from .pinned import PinnedDependencies
@@ -105,6 +111,8 @@ from .resources import (
     ResourceReader,
     ResourceReadRequest,
     ResourceRow,
+    ResourceRows,
+    withheld_untrusted_count,
 )
 from .responses import ResponseFactory
 from .rule_trigger_operations import (
@@ -390,7 +398,9 @@ PublicItem = TypeVar("PublicItem", bound=WireModel)
 def _public_items(rows: object, expected: type[PublicItem]) -> list[PublicItem]:
     if not isinstance(rows, list):
         raise TypeError("resource reader returned an invalid result")
-    values: list[PublicItem] = []
+    values: list[PublicItem] = ResourceRows(
+        withheld_untrusted=withheld_untrusted_count(rows)
+    )
     for row in rows:
         if isinstance(row, ResourceRow):
             if row.deleted:
@@ -497,6 +507,13 @@ def _unique_text(values: list[str], *, limit: int) -> list[str]:
     return result
 
 
+def _withheld_untrusted(**sections: object) -> dict[str, int]:
+    """Count, per brief section, the untrusted-origin rows a reader left out."""
+
+    counts = {name: withheld_untrusted_count(rows) for name, rows in sections.items()}
+    return {name: count for name, count in counts.items() if count}
+
+
 def _compact_brief_reader(readers: ResourceRepositoryReaders):
     async def read(workspace: Workspace) -> dict[str, object]:
         try:
@@ -555,6 +572,10 @@ def _compact_brief_reader(readers: ResourceRepositoryReaders):
             "workspace_statistics": statistics,
             "warnings": warnings,
             "failed_records": failures,
+            "withheld_untrusted": _withheld_untrusted(
+                warnings=warnings, failed_records=failures
+            ),
+            "content_notice": RECORD_CONTENT_NOTICE,
             "must_not": _unique_text(
                 [value for rule in rules for value in rule.must_not],
                 limit=20,
@@ -595,11 +616,8 @@ def _briefing_reader(readers: ResourceRepositoryReaders):
             failures = _public_items(snapshot.failures, RecordSummary)
             rules = _public_items(snapshot.rules, RuleView)
             active_context = _public_items(snapshot.active_context, ActiveContextItem)
-            decisions = _rank_relevant(
-                _public_items(snapshot.decisions, RecordSummary),
-                focus_tokens,
-                limit=50,
-            )
+            all_decisions = _public_items(snapshot.decisions, RecordSummary)
+            decisions = _rank_relevant(all_decisions, focus_tokens, limit=50)
             git_changes = list(snapshot.git_changes)[:200]
             projection_freshness = list(snapshot.projection_freshness)[:7]
             statistics = dict(snapshot.workspace_statistics)
@@ -633,7 +651,7 @@ def _briefing_reader(readers: ResourceRepositoryReaders):
                 ResourceReadRequest("active_context", 50, "priority_desc"),
                 ActiveContextItem,
             )
-            decisions = []
+            all_decisions = decisions = []
             git_changes = []
             projection_freshness = []
             statistics = {
@@ -696,6 +714,13 @@ def _briefing_reader(readers: ResourceRepositoryReaders):
             "git_changes": git_changes,
             "projection_freshness": projection_freshness,
             "covenant_next_steps": next_steps,
+            "withheld_untrusted": _withheld_untrusted(
+                recent_decisions=all_decisions,
+                warnings=warnings,
+                failed_outcomes=failures,
+                active_context=active_context,
+            ),
+            "content_notice": RECORD_CONTENT_NOTICE,
         }
 
     return read
@@ -722,6 +747,9 @@ def _guidance_reader(readers: ResourceRepositoryReaders):
                 rule_limit=50,
                 active_context_limit=1,
                 include_git_changes=False,
+                # Counsel still weighs every stored warning and failure,
+                # whatever its origin; only the briefs withhold them.
+                include_untrusted_origin=True,
             )
             candidate_records = [
                 *_public_items(snapshot.failures, RecordSummary),
@@ -732,13 +760,17 @@ def _guidance_reader(readers: ResourceRepositoryReaders):
             warnings = await _read_items(
                 readers.warning_reader,
                 workspace,
-                ResourceReadRequest("warnings", 20, "updated_at_desc"),
+                ResourceReadRequest(
+                    "warnings", 20, "updated_at_desc", include_untrusted_origin=True
+                ),
                 RecordSummary,
             )
             failures = await _read_items(
                 readers.failure_reader,
                 workspace,
-                ResourceReadRequest("failures", 20, "updated_at_desc"),
+                ResourceReadRequest(
+                    "failures", 20, "updated_at_desc", include_untrusted_origin=True
+                ),
                 RecordSummary,
             )
             candidate_records = [*failures, *warnings]

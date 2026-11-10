@@ -11,7 +11,11 @@ from contextlib import closing
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from daem0nmcp.api.v7.resources import ResourceReadRequest, ResourceRow
+from daem0nmcp.api.v7.resources import (
+    ResourceReadRequest,
+    ResourceRow,
+    withheld_untrusted_count,
+)
 from daem0nmcp.schema_version import CURRENT_SCHEMA_VERSION
 from daem0nmcp.storage_activation import ResolvedActiveDatabase
 from daem0nmcp.workspace import Workspace
@@ -105,7 +109,8 @@ class _DatabaseFixture:
                 worked INTEGER,
                 created_at_us INTEGER NOT NULL,
                 updated_at_us INTEGER NOT NULL,
-                deleted_at_us INTEGER
+                deleted_at_us INTEGER,
+                context_json TEXT NOT NULL DEFAULT '{{}}'
             );
 
             CREATE TABLE rules (
@@ -185,12 +190,13 @@ class _DatabaseFixture:
         created_at: datetime | None = None,
         updated_at: datetime | None = None,
         deleted_at: datetime | None = None,
+        context_json: str = "{}",
     ) -> str:
         record_id = f"mem_{index:064x}"
         created = created_at or NOW - timedelta(days=1)
         updated = updated_at or NOW + timedelta(minutes=index)
         self.connection.execute(
-            "INSERT INTO memory_records VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "INSERT INTO memory_records VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (
                 record_id,
                 workspace_id,
@@ -205,6 +211,7 @@ class _DatabaseFixture:
                 _microseconds(created),
                 _microseconds(updated),
                 None if deleted_at is None else _microseconds(deleted_at),
+                context_json,
             ),
         )
         self.connection.commit()
@@ -445,6 +452,126 @@ class SQLiteResourceRepositoryTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertNotIn(str(self.fixture.workspace_root), rendered)
         self.assertNotRegex(rendered, r'"record_id"\s*:\s*\d')
+
+    async def test_untrusted_origin_records_are_withheld_and_counted(self) -> None:
+        # Catches tag-based detection, post-limit filtering (scanned text
+        # crowding authored warnings out of the brief) and a silent omission.
+        authored = self.fixture.add_record(1)
+        tagged_only = self.fixture.add_record(2, tags_json='["code-todo", "document"]')
+        for index in range(3, 9):
+            self.fixture.add_record(
+                index,
+                context_json='{"code_todo": {"line": 1}}',
+                updated_at=NOW + timedelta(hours=index),
+            )
+        self.fixture.add_record(
+            9,
+            context_json='{"document": null}',
+            updated_at=NOW + timedelta(hours=9),
+        )
+        self.fixture.add_record(
+            10,
+            record_type="learning",
+            worked=0,
+            context_json='{"document": {"url": "https://example.test/"}}',
+        )
+        self.fixture.add_record(
+            11,
+            workspace_id=OTHER_WORKSPACE_ID,
+            context_json='{"code_todo": {}}',
+        )
+        self.fixture.add_record(12, archived=1, context_json='{"code_todo": {}}')
+        repository = self._repository()
+
+        warnings = await repository.read_warnings(
+            self.fixture.workspace,
+            ResourceReadRequest(kind="warnings", limit=2, order_by="updated_at_desc"),
+        )
+        failures = await repository.read_failures(
+            self.fixture.workspace,
+            ResourceReadRequest(kind="failures", limit=2, order_by="updated_at_desc"),
+        )
+        everything = await repository.read_warnings(
+            self.fixture.workspace,
+            ResourceReadRequest(
+                kind="warnings",
+                limit=20,
+                order_by="updated_at_desc",
+                include_untrusted_origin=True,
+            ),
+        )
+        snapshot = await repository.read_briefing_snapshot(
+            self.fixture.workspace, warning_limit=2, failure_limit=2
+        )
+        opted_in = await repository.read_briefing_snapshot(
+            self.fixture.workspace,
+            warning_limit=20,
+            failure_limit=2,
+            include_untrusted_origin=True,
+        )
+
+        self.assertEqual(
+            [row.item.record_id for row in warnings], [tagged_only, authored]
+        )
+        self.assertEqual(withheld_untrusted_count(warnings), 7)
+        self.assertEqual(failures, [])
+        self.assertEqual(withheld_untrusted_count(failures), 1)
+        self.assertEqual(len(everything), 9)
+        self.assertEqual(withheld_untrusted_count(everything), 0)
+        self.assertEqual(
+            [row.item.record_id for row in snapshot.warnings],
+            [tagged_only, authored],
+        )
+        self.assertEqual(withheld_untrusted_count(snapshot.warnings), 7)
+        self.assertEqual(withheld_untrusted_count(snapshot.failures), 1)
+        self.assertEqual(len(opted_in.warnings), 9)
+        self.assertEqual(len(opted_in.failures), 1)
+        with self.assertRaises(ValueError):
+            await repository.read_warnings(
+                self.fixture.workspace,
+                ResourceReadRequest(
+                    kind="warnings",
+                    limit=2,
+                    order_by="updated_at_desc",
+                    include_untrusted_origin=None,
+                ),
+            )
+
+    async def test_untrusted_origin_active_context_is_withheld_and_counted(
+        self,
+    ) -> None:
+        authored = self.fixture.add_record(31, record_type="decision")
+        scanned = self.fixture.add_record(32, context_json='{"code_todo": {}}')
+        ingested = self.fixture.add_record(
+            33, record_type="learning", context_json='{"document": {}}'
+        )
+        kept = self.fixture.add_active_context(41, 301, authored, priority=1)
+        self.fixture.add_active_context(42, 302, scanned, priority=8)
+        self.fixture.add_canonical_active_context(
+            "act_" + "c" * 64, ingested, priority=9
+        )
+        repository = self._repository()
+
+        rows = await repository.read_active_context(
+            self.fixture.workspace,
+            ResourceReadRequest(
+                kind="active_context", limit=10, order_by="priority_desc"
+            ),
+        )
+        everything = await repository.read_active_context(
+            self.fixture.workspace,
+            ResourceReadRequest(
+                kind="active_context",
+                limit=10,
+                order_by="priority_desc",
+                include_untrusted_origin=True,
+            ),
+        )
+
+        self.assertEqual([row.item.active_context_id for row in rows], [kept])
+        self.assertEqual(withheld_untrusted_count(rows), 2)
+        self.assertEqual(len(everything), 3)
+        self.assertEqual(withheld_untrusted_count(everything), 0)
 
     async def test_memory_flags_are_honored_without_losing_row_state(self) -> None:
         # Catches hard-coded active-only predicates that ignore an explicit request.
@@ -885,7 +1012,7 @@ class SQLiteResourceRepositoryTests(unittest.IsolatedAsyncioTestCase):
             if calls == 1:
                 with closing(sqlite3.connect(self.fixture.database_path)) as writer:
                     writer.execute(
-                        "INSERT INTO memory_records VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                        "INSERT INTO memory_records VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                         (
                             f"mem_{112:064x}",
                             WORKSPACE_ID,
@@ -900,6 +1027,7 @@ class SQLiteResourceRepositoryTests(unittest.IsolatedAsyncioTestCase):
                             _microseconds(NOW - timedelta(days=1)),
                             _microseconds(NOW + timedelta(minutes=112)),
                             None,
+                            "{}",
                         ),
                     )
                     writer.commit()

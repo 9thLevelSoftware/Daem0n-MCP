@@ -24,9 +24,11 @@ from pydantic import (
 from ...covenant import CovenantLevel
 from .mapping import V6_TO_V7_MAPPINGS
 from .models import (
+    RECORD_CONTENT_NOTICE,
     ActiveContextId,
     ApiResponse,
     AwareDateTime,
+    BoundedText,
     CapabilityState,
     CodeEntityId,
     CommunityId,
@@ -385,6 +387,8 @@ class SessionBriefData(WireModel):
     covenant_next_steps: list[CovenantNextStep] = Field(
         default_factory=list, max_length=10
     )
+    withheld_untrusted: CountMap = Field(default_factory=dict)
+    content_notice: BoundedText = RECORD_CONTENT_NOTICE
 
 
 class PreflightData(WireModel):
