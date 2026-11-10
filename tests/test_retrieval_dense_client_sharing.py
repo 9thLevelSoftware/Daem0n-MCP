@@ -13,6 +13,7 @@ import tempfile
 import threading
 import time
 import unittest
+from collections.abc import Callable
 from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
@@ -36,6 +37,7 @@ class _EmbeddedFolders:
         self.foreign: set[str] = set()
         self.attempts = 0
         self.call_seconds = 0.0
+        self.before_count: Callable[[], None] | None = None
 
     def open(self, **kwargs: object) -> _EmbeddedClient:
         if set(kwargs) != {"path"}:
@@ -68,6 +70,7 @@ class _EmbeddedClient:
         self.overlapped = False
         self.foreign_thread_calls = 0
         self.closed_while_active = False
+        self.mutations = 0
         self.block_queries: threading.Event | None = None
         self.query_started = threading.Event()
 
@@ -98,10 +101,12 @@ class _EmbeddedClient:
     ) -> None:
         del vectors_config
         with self._call() as collections:
+            self.mutations += 1
             collections[collection_name] = {}
 
     def delete_collection(self, collection_name: str) -> None:
         with self._call() as collections:
+            self.mutations += 1
             collections.pop(collection_name, None)
 
     def upsert(
@@ -109,6 +114,7 @@ class _EmbeddedClient:
     ) -> None:
         del wait
         with self._call() as collections:
+            self.mutations += 1
             for point in points:
                 collections[collection_name][str(point["id"])] = {
                     "id": point["id"],
@@ -132,6 +138,8 @@ class _EmbeddedClient:
     def count(self, *, collection_name: str, exact: bool) -> dict[str, int]:
         del exact
         with self._call() as collections:
+            if self._folders.before_count is not None:
+                self._folders.before_count()
             return {"count": len(collections[collection_name])}
 
     def query_points(
@@ -419,14 +427,14 @@ class SharedLocalClientTests(unittest.TestCase):
         self.assertEqual(1, len(self.folders.opened))
 
 
-def _apply_schema(connection: sqlite3.Connection) -> None:
+def _apply_schema(connection: sqlite3.Connection, versions: tuple[int, ...]) -> None:
     from daem0nmcp.migrations.schema import MIGRATIONS
 
     connection.execute(
         "CREATE TABLE schema_version(version INTEGER PRIMARY KEY, applied_at TEXT)"
     )
     for version, _description, statements in MIGRATIONS:
-        if version not in (16, 17, 18, 31, 32, 33):
+        if version not in versions:
             continue
         for statement in statements:
             connection.execute(statement)
@@ -465,6 +473,8 @@ def _record(content: str) -> dict[str, object]:
 class _Encoder:
     """Deterministic encoder that carries the configured embedding contract."""
 
+    encoded: list[tuple[str, str]] = []
+
     def __init__(self, prefix: str) -> None:
         self.model_id = MODEL_ID
         self.dimension = 3
@@ -476,6 +486,7 @@ class _Encoder:
         return self.artifact_fingerprint
 
     def encode(self, text: str) -> list[float]:
+        self.encoded.append((self.prefix, text))
         return [
             float(len(text)),
             float(sum(text.encode("utf-8")) % 997) + 1.0,
@@ -534,6 +545,8 @@ def _qdrant_dependency_probe(name: str, package: str | None = None) -> object:
 class _DenseRuntimeCase(unittest.IsolatedAsyncioTestCase):
     """A v7 database driven through the production retrieval assembly."""
 
+    schema_versions: tuple[int, ...] = (16, 17, 18, 31, 32, 33)
+
     def setUp(self) -> None:
         from daem0nmcp.retrieval import runtime
 
@@ -544,7 +557,8 @@ class _DenseRuntimeCase(unittest.IsolatedAsyncioTestCase):
         self.connection = sqlite3.connect(self.path)
         self.addCleanup(self.connection.close)
         self.connection.execute("PRAGMA foreign_keys=ON")
-        _apply_schema(self.connection)
+        _apply_schema(self.connection, self.schema_versions)
+        _Encoder.encoded = []
         self.config = _settings()
         self._clock = 1_000
         self.monotonic = [1_000.0]
@@ -600,7 +614,7 @@ class _DenseRuntimeCase(unittest.IsolatedAsyncioTestCase):
             )
         self.connection.commit()
 
-    async def _drain(self) -> dict[str, tuple[str, str | None]]:
+    async def _drain(self, max_jobs: int = 5) -> dict[str, tuple[str, str | None]]:
         from daem0nmcp.retrieval.runtime import drain_projection_jobs
 
         self.connection.execute(
@@ -615,7 +629,7 @@ class _DenseRuntimeCase(unittest.IsolatedAsyncioTestCase):
         runs = await drain_projection_jobs(
             self.path,
             config=self.config,
-            max_jobs=5,
+            max_jobs=max_jobs,
             include_optional=True,
             capability_statuses=STATUSES,
         )
@@ -657,7 +671,9 @@ class _DenseRuntimeCase(unittest.IsolatedAsyncioTestCase):
         return diagnostic.status, diagnostic.reason, diagnostic.returned_count
 
 
-class SharedLocalClientRuntimeTests(_DenseRuntimeCase):
+class _EmbeddedFolderRuntimeCase(_DenseRuntimeCase):
+    """The runtime assembly over the folder-exclusive Qdrant double."""
+
     def setUp(self) -> None:
         super().setUp()
         self.folders = _EmbeddedFolders()
@@ -675,6 +691,8 @@ class SharedLocalClientRuntimeTests(_DenseRuntimeCase):
             self.addCleanup(patcher.stop)
         self.folder_key = os.path.normcase(os.path.realpath(self.folder))
 
+
+class SharedLocalClientRuntimeTests(_EmbeddedFolderRuntimeCase):
     async def test_rebuild_and_gc_reuse_the_client_held_by_dense_recall(self):
         self._append("1", "durable dense evidence one")
         self._enqueue("lexical", "dense")

@@ -1270,7 +1270,7 @@ class DenseProvider:
                 generation=generation,
             )
         try:
-            current_source = self._event_snapshot(connection, query.workspace_id)
+            current_source = self._event_cursor(connection, query.workspace_id)
         except (sqlite3.Error, TypeError, ValueError):
             return self._result(
                 started,
@@ -1278,7 +1278,7 @@ class DenseProvider:
                 reason="DENSE_MANIFEST_MISMATCH",
                 generation=generation,
             )
-        if manifest_source != current_source:
+        if (manifest_source[0], *manifest_source[2:]) != current_source:
             return self._result(
                 started,
                 status="degraded",
@@ -1467,19 +1467,23 @@ class DenseProvider:
         )
 
     @staticmethod
-    def _event_snapshot(
+    def _event_cursor(
         connection: sqlite3.Connection,
         workspace_id: str,
-    ) -> tuple[int, str, int | None, str | None]:
-        digest = hashlib.sha256()
-        count = 0
-        for row in connection.execute(
-            "SELECT event_hash FROM memory_events WHERE workspace_id=? "
-            "ORDER BY event_id",
-            (workspace_id,),
-        ):
-            digest.update(bytes.fromhex(str(row[0])))
-            count += 1
+    ) -> tuple[int, int | None, str | None]:
+        """Return the event count and newest event of the append-only log.
+
+        Every append changes the count, so this detects a generation that is
+        behind without rehashing the log on each query.  The repository still
+        verifies the full event root before any dense candidate is used.
+        """
+
+        count = int(
+            connection.execute(
+                "SELECT COUNT(*) FROM memory_events WHERE workspace_id=?",
+                (workspace_id,),
+            ).fetchone()[0]
+        )
         cursor = connection.execute(
             "SELECT recorded_at_us,event_id FROM memory_events "
             "WHERE workspace_id=? "
@@ -1487,8 +1491,8 @@ class DenseProvider:
             (workspace_id,),
         ).fetchone()
         if cursor is None:
-            return count, digest.hexdigest(), None, None
-        return count, digest.hexdigest(), int(cursor[0]), str(cursor[1])
+            return count, None, None
+        return count, int(cursor[0]), str(cursor[1])
 
     def _manifest_matches(
         self,

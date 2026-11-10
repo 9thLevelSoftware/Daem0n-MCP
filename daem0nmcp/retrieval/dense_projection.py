@@ -44,6 +44,7 @@ _CLIENT_METHODS = (
     "count",
 )
 _DENSE_PROVIDER_BATCH_SIZE = 128
+_REBUILD_MARKERS = ("rebuild_required_at_us", "rebuild_required_event_id")
 _DENSE_INFERENCE_BATCH_SIZE = 32
 _BatchValue = TypeVar("_BatchValue")
 
@@ -302,34 +303,35 @@ class DenseProjectionBuilder:
                     cursor,
                     active,
                 )
-                active_details = self._projection_details(
-                    workspace_id=workspace_id,
-                    generation=active[1],
-                    content_digest=content_digest,
+                return self._reused_result(
+                    workspace_id,
+                    records,
+                    event_count,
+                    event_root,
+                    content_digest,
+                    active,
                 )
-                return DenseProjectionBuildResult(
-                    projection_name="dense",
-                    generation=active[1],
-                    status="active",
-                    row_count=len(records),
-                    source_event_count=event_count,
-                    source_event_root_hash=event_root,
-                    content_digest=content_digest,
-                    build_config_hash=str(active_details["build_config_hash"]),
-                    builder_contract_hash=str(active_details["builder_contract_hash"]),
-                    collection_name=str(active_details["collection_name"]),
-                    staging_manifest_id=active[0],
-                    provider_key=self.provider_key,
-                    model_id=self.model_id,
-                    dimension=self.dimension,
-                    active_manifest_id=active[0],
-                    active_generation=active[1],
-                    active_status=active[2],
-                    active_row_count=active[3],
-                    active_content_digest=active[4],
-                    row_count_delta=0,
-                    content_digest_changed=False,
-                    reused=True,
+            if (
+                not dry_run
+                and capability_ready
+                and active is not None
+                and self._advance_active(
+                    workspace_id,
+                    records,
+                    event_count,
+                    event_root,
+                    cursor,
+                    content_digest,
+                    active,
+                )
+            ):
+                return self._reused_result(
+                    workspace_id,
+                    records,
+                    event_count,
+                    event_root,
+                    content_digest,
+                    active,
                 )
             if dry_run:
                 return result
@@ -410,6 +412,288 @@ class DenseProjectionBuilder:
             raise DenseProjectionBuildError(
                 "DENSE_BUILD_FAILED", "dense projection build failed"
             ) from exc
+
+    def _reused_result(
+        self,
+        workspace_id: str,
+        records: Sequence[_DenseRecord],
+        event_count: int,
+        event_root: str,
+        content_digest: str,
+        active: tuple[str, int, str, int, str | None],
+    ) -> DenseProjectionBuildResult:
+        active_details = self._projection_details(
+            workspace_id=workspace_id,
+            generation=active[1],
+            content_digest=content_digest,
+        )
+        return DenseProjectionBuildResult(
+            projection_name="dense",
+            generation=active[1],
+            status="active",
+            row_count=len(records),
+            source_event_count=event_count,
+            source_event_root_hash=event_root,
+            content_digest=content_digest,
+            build_config_hash=str(active_details["build_config_hash"]),
+            builder_contract_hash=str(active_details["builder_contract_hash"]),
+            collection_name=str(active_details["collection_name"]),
+            staging_manifest_id=active[0],
+            provider_key=self.provider_key,
+            model_id=self.model_id,
+            dimension=self.dimension,
+            active_manifest_id=active[0],
+            active_generation=active[1],
+            active_status=active[2],
+            active_row_count=active[3],
+            active_content_digest=active[4],
+            row_count_delta=0,
+            content_digest_changed=False,
+            reused=True,
+        )
+
+    def _advance_active(
+        self,
+        workspace_id: str,
+        records: Sequence[_DenseRecord],
+        event_count: int,
+        event_root: str,
+        cursor: tuple[int, str] | None,
+        content_digest: str,
+        active: tuple[str, int, str, int, str | None],
+    ) -> bool:
+        """Bring an active generation with unchanged content up to the event log.
+
+        An event that leaves every record's content hash and the record set
+        alone cannot change a vector or a point payload, so the generation is
+        still exact: only its source cursor, and the source event of the
+        records such an event touched, have moved.  Recording that needs no
+        provider write.  Returns False when a real build is required.
+        """
+
+        manifest_id, generation = active[0], active[1]
+        expected = self._projection_details(
+            workspace_id=workspace_id,
+            generation=generation,
+            content_digest=content_digest,
+        )
+        row = self.connection.execute(
+            "SELECT row_count,details_json,source_event_count,"
+            "source_event_root_hash FROM projection_manifests "
+            "WHERE manifest_id=? AND status='active'",
+            (manifest_id,),
+        ).fetchone()
+        if row is None:
+            return False
+        try:
+            stored = json.loads(str(row[1]))
+        except (TypeError, ValueError, RecursionError):
+            return False
+        if not isinstance(stored, dict):
+            return False
+        behind = (int(row[2]), str(row[3])) != (event_count, event_root)
+        for marker in _REBUILD_MARKERS:
+            if marker in stored:
+                behind = True
+                del stored[marker]
+        # A generation already at this event root was just found inexact by
+        # the full check; only a real build repairs that.
+        if not behind or int(row[0]) != len(records) or stored != expected:
+            return False
+        references = self.connection.execute(
+            "SELECT record_id,content_hash,model_id,dimension,state,updated_event_id,"
+            "vector_format,vector_sha256 FROM dense_projection_refs "
+            "WHERE workspace_id=? AND provider_key=? AND projection_generation=? "
+            "ORDER BY record_id",
+            (workspace_id, self.provider_key, generation),
+        ).fetchall()
+        if len(references) != len(records):
+            return False
+        vector_space_hash = expected.get("vector_space_hash")
+        moved: list[tuple[_DenseRecord, str, object]] = []
+        for reference, record in zip(references, records, strict=True):
+            values = tuple(reference)
+            if values[:5] != (
+                record.record_id,
+                record.content_hash,
+                self.model_id,
+                self.dimension,
+                "ready",
+            ):
+                return False
+            if isinstance(vector_space_hash, str):
+                if (
+                    values[6] != VECTOR_ATTESTATION_FORMAT
+                    or not isinstance(values[7], str)
+                    or len(values[7]) != 64
+                ):
+                    return False
+            elif values[6:] != (None, None):
+                return False
+            if values[5] != record.source_event_id:
+                moved.append((record, str(values[5]), values[7]))
+        collection_name = str(expected["collection_name"])
+        try:
+            self._validate_collection_count(collection_name, len(records))
+            attestations = self._moved_attestations(
+                workspace_id, generation, collection_name, moved, vector_space_hash
+            )
+        except DenseProjectionBuildError as exc:
+            if exc.code == "PROJECTION_CANCELLED":
+                raise
+            return False
+        except Exception:
+            return False
+        if attestations is None:
+            return False
+        now = self._clock_value()
+        self._reject_external_transaction()
+        self.connection.execute("BEGIN IMMEDIATE")
+        try:
+            self._check_cancelled()
+            self._validate_source_snapshot(
+                workspace_id,
+                records,
+                event_count,
+                event_root,
+                cursor,
+                content_digest,
+            )
+            current = self._active_manifest(workspace_id)
+            if current is None or current[:2] != active[:2]:
+                raise DenseProjectionBuildError(
+                    "PROJECTION_VALIDATION_FAILED",
+                    "active dense generation changed during validation",
+                )
+            for record, previous_event_id, digest in attestations:
+                changed = self.connection.execute(
+                    "UPDATE dense_projection_refs SET updated_event_id=?,"
+                    "vector_sha256=?,updated_at_us=? WHERE workspace_id=? "
+                    "AND provider_key=? AND projection_generation=? AND record_id=? "
+                    "AND state='ready' AND content_hash=? AND updated_event_id=?",
+                    (
+                        record.source_event_id,
+                        digest,
+                        now,
+                        workspace_id,
+                        self.provider_key,
+                        generation,
+                        record.record_id,
+                        record.content_hash,
+                        previous_event_id,
+                    ),
+                ).rowcount
+                if changed != 1:
+                    raise DenseProjectionBuildError(
+                        "PROJECTION_VALIDATION_FAILED", "dense reference differs"
+                    )
+            changed = self.connection.execute(
+                "UPDATE projection_manifests SET source_event_count=?,"
+                "source_event_root_hash=?,cursor_recorded_at_us=?,cursor_event_id=?,"
+                "details_json=? WHERE manifest_id=? AND status='active'",
+                (
+                    event_count,
+                    event_root,
+                    cursor[0] if cursor is not None else None,
+                    cursor[1] if cursor is not None else None,
+                    canonical_json_bytes(expected).decode("utf-8"),
+                    manifest_id,
+                ),
+            ).rowcount
+            if changed != 1:
+                raise DenseProjectionBuildError(
+                    "PROJECTION_VALIDATION_FAILED", "dense manifest differs"
+                )
+            self.connection.commit()
+        except Exception:
+            self.connection.rollback()
+            raise
+        return True
+
+    def _moved_attestations(
+        self,
+        workspace_id: str,
+        generation: int,
+        collection_name: str,
+        moved: Sequence[tuple[_DenseRecord, str, object]],
+        vector_space_hash: object,
+    ) -> list[tuple[_DenseRecord, str, str | None]] | None:
+        """Re-attest the stored vectors of records whose source event moved.
+
+        An attestation binds a vector to its record's source event.  The stored
+        vector must still carry the old attestation before it receives the new
+        one; None means the provider data cannot be trusted as it stands.
+        """
+
+        attestations: list[tuple[_DenseRecord, str, str | None]] = []
+        for batch in self._provider_batches(moved):
+            self._check_cancelled()
+            expected: dict[str, tuple[_DenseRecord, str, object, object]] = {}
+            for record, previous_event_id, previous_digest in batch:
+                point_id, payload = build_dense_point_payload(
+                    workspace_id=workspace_id,
+                    record_id=record.record_id,
+                    content_hash=record.content_hash,
+                    projection_generation=generation,
+                    model_id=self.model_id,
+                )
+                expected[point_id] = (
+                    record,
+                    previous_event_id,
+                    previous_digest,
+                    payload,
+                )
+            retrieved = self._get_client().retrieve(
+                collection_name=collection_name,
+                ids=list(expected),
+                with_payload=True,
+                with_vectors=True,
+            )
+            self._check_cancelled()
+            actual: dict[str, object] = {}
+            for point in retrieved:
+                point_id = _point_field(point, "id")
+                if not isinstance(point_id, str) or point_id in actual:
+                    return None
+                actual[point_id] = point
+            if set(actual) != set(expected):
+                return None
+            for point_id, wanted in expected.items():
+                record, previous_event_id, previous_digest, payload = wanted
+                vector = _point_field(actual[point_id], "vector")
+                if (
+                    _point_field(actual[point_id], "payload") != payload
+                    or not isinstance(vector, Sequence)
+                    or isinstance(vector, (str, bytes, Mapping))
+                    or len(vector) != self.dimension
+                ):
+                    return None
+                if not isinstance(vector_space_hash, str):
+                    attestations.append((record, previous_event_id, None))
+                    continue
+                try:
+                    digests = [
+                        provider_vector_sha256(
+                            vector,
+                            workspace_id=workspace_id,
+                            provider_key=self.provider_key,
+                            vector_space_hash=vector_space_hash,
+                            record_id=record.record_id,
+                            content_hash=record.content_hash,
+                            source_event_id=source_event_id,
+                            dimension=self.dimension,
+                        )
+                        for source_event_id in (
+                            previous_event_id,
+                            record.source_event_id,
+                        )
+                    ]
+                except ValueError:
+                    return None
+                if digests[0] != previous_digest:
+                    return None
+                attestations.append((record, previous_event_id, digests[1]))
+        return attestations
 
     @staticmethod
     def _content_digest(records: Sequence[_DenseRecord]) -> str:
