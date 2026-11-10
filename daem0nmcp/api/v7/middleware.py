@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Any, Literal, Protocol, TypeVar, cast
 from urllib.parse import urlsplit
 
 from pydantic import TypeAdapter
+from pydantic import ValidationError as _PydanticValidationError
 
 from ...covenant import (
     CovenantGate,
@@ -25,6 +26,7 @@ from ...covenant import (
     workspace_resolver_var,
 )
 from ...workspace import Workspace
+from .gateway_operations import argument_rejection_text, model_argument_problems
 from .models import WorkspaceId
 from .registry import V7_DASHBOARD_RESOURCE_URIS
 
@@ -32,16 +34,25 @@ if TYPE_CHECKING:
     FASTMCP_MIDDLEWARE_AVAILABLE: bool
     from fastmcp.exceptions import ResourceError as _BaseResourceError
     from fastmcp.exceptions import ToolError as _BaseToolError
+    from fastmcp.exceptions import ValidationError as _BaseValidationError
     from fastmcp.server.middleware import Middleware as _MiddlewareBase
+    from mcp import McpError as _McpError
+    from mcp.types import INVALID_PARAMS as _INVALID_PARAMS
+    from mcp.types import ErrorData as _ErrorData
 else:
     try:  # Keep the model-free boundary importable without FastMCP.
         from fastmcp.exceptions import ResourceError as _BaseResourceError
         from fastmcp.exceptions import ToolError as _BaseToolError
+        from fastmcp.exceptions import ValidationError as _BaseValidationError
         from fastmcp.server.middleware import Middleware as _MiddlewareBase
+        from mcp import McpError as _McpError
+        from mcp.types import INVALID_PARAMS as _INVALID_PARAMS
+        from mcp.types import ErrorData as _ErrorData
 
         FASTMCP_MIDDLEWARE_AVAILABLE = True
     except ImportError:
         FASTMCP_MIDDLEWARE_AVAILABLE = False
+        _INVALID_PARAMS = -32602
 
         class _MiddlewareBase:
             pass
@@ -51,6 +62,19 @@ else:
 
         class _BaseResourceError(RuntimeError):
             pass
+
+        class _BaseValidationError(RuntimeError):
+            pass
+
+        class _ErrorData:
+            def __init__(self, *, code: int, message: str) -> None:
+                self.code = code
+                self.message = message
+
+        class _McpError(RuntimeError):
+            def __init__(self, error: _ErrorData) -> None:
+                super().__init__(error.message)
+                self.error = error
 
 
 TransportMode = Literal["stdio", "streamable-http"]
@@ -69,11 +93,44 @@ class ToolInvocationContextError(_BaseToolError):
         super().__init__("Invocation unavailable")
 
 
-class ResourceInvocationContextError(_BaseResourceError):
-    """Sanitized failure to establish a resource invocation scope."""
+# MCP's "resource not found" code.  The ``mcp`` package has no constant for
+# it; FastMCP answers an unregistered URI with the same literal.
+RESOURCE_NOT_FOUND = -32002
+
+
+class ResourceUnavailableError(_McpError):
+    """The one refusal a resource read puts on the wire.
+
+    An unknown workspace, one the caller may not read and one that has not
+    been briefed all produce this exact code and message, so a resource read
+    cannot be used to learn which workspaces exist.  (A read that fails for
+    an unexpected internal reason is answered separately, as an internal
+    error.)
+    """
 
     def __init__(self) -> None:
-        super().__init__("Resource unavailable")
+        super().__init__(
+            _ErrorData(code=RESOURCE_NOT_FOUND, message="Resource unavailable")
+        )
+
+
+class ResourceInvocationContextError(ResourceUnavailableError):
+    """Sanitized failure to establish a resource invocation scope."""
+
+
+class ResourceAdmissionLimitError(_McpError):
+    """A resource read refused because too many requests are in flight."""
+
+    def __init__(self) -> None:
+        # The same code the task endpoints use for this refusal.
+        super().__init__(
+            _ErrorData(
+                code=_INVALID_PARAMS,
+                message=(
+                    "ADMISSION_LIMIT_REACHED: retry after an active request completes"
+                ),
+            )
+        )
 
 
 class ResourceAuthorizationError(_BaseResourceError):
@@ -144,6 +201,60 @@ class ListedToolsMiddleware(_MiddlewareBase):
         self, context: Any, call_next: Callable[[Any], Awaitable[Any]]
     ) -> Any:
         return [tool for tool in await call_next(context) if tool.name in self._listed]
+
+
+class EnvelopeErrorMiddleware(_MiddlewareBase):
+    """Make the protocol's ``isError`` flag mirror the envelope's ``ok``.
+
+    Handlers report failures as ordinary ``ok: false`` envelopes.  The content
+    and structured content are passed through untouched so a client can still
+    read ``error.counsel`` and ``error.remedy``; only the flag changes.
+
+    Arguments the framework refuses never reach a handler and have no
+    envelope.  Its error text is pydantic's, which quotes the refused value,
+    so that one failure is restated as field paths and fixed rule names.
+    """
+
+    def __init__(
+        self, declared_argument_names: Mapping[str, frozenset[str]] | None = None
+    ) -> None:
+        if FASTMCP_MIDDLEWARE_AVAILABLE:
+            super().__init__()
+        # Per tool, the names its input schema declares: the only names a
+        # restated rejection may contain.
+        self._declared = dict(declared_argument_names or {})
+
+    async def on_call_tool(self, context: Any, call_next: Callable[[Any], Any]) -> Any:
+        try:
+            result = await _resolve_awaitable(call_next(context))
+        except _BaseValidationError as exc:
+            cause = exc.__cause__
+            declared = self._declared.get(
+                str(getattr(context.message, "name", "")), frozenset()
+            )
+            problems = (
+                model_argument_problems(cause, declared)
+                if isinstance(cause, _PydanticValidationError)
+                else []
+            )
+            raise _BaseToolError(
+                argument_rejection_text(problems or [("arguments", "invalid")])
+            ) from None
+        structured = getattr(result, "structured_content", None)
+        if (
+            not isinstance(structured, dict)
+            or structured.get("ok") is not False
+            or getattr(result, "is_error", False)
+        ):
+            return result
+        from fastmcp.tools import ToolResult
+
+        return ToolResult(
+            content=getattr(result, "content", None),
+            structured_content=structured,
+            meta=getattr(result, "meta", None),
+            is_error=True,
+        )
 
 
 class V7InvocationMiddleware(_MiddlewareBase):
@@ -353,6 +464,17 @@ class V7InvocationMiddleware(_MiddlewareBase):
             principal, session_id = await self._remote_identity(context)
         return principal, session_id
 
+    async def _principal_or_none(self, context: Any) -> str | None:
+        identity = await _capture_async(lambda: self.identity(context))
+        if identity is _ADMISSION_FAILURE:
+            return None
+        return cast("tuple[str, str]", identity)[0]
+
+    def _workspace_quota(self, scope: InvocationScope | None) -> bool:
+        # Only a caller allowed to use the workspace may learn that its
+        # bucket is full; to anyone else that would confirm it exists.
+        return scope is None or self._gate.workspace_authorized(scope)
+
     async def _admit_tool(self, context: Any) -> InvocationScope | None:
         message = context.message
         name = message.name
@@ -390,11 +512,14 @@ class V7InvocationMiddleware(_MiddlewareBase):
         scope: InvocationScope | None,
         *,
         principal_id: str | None = None,
+        workspace_quota: bool = True,
     ) -> Any:
         # All admission accounting runs on the server event loop before the
         # first await. No waiting queue or permanent per-principal entries grow.
         principal = principal_id if scope is None else scope.principal_id
-        workspace = None if scope is None else scope.canonical_workspace
+        workspace = (
+            scope.canonical_workspace if scope is not None and workspace_quota else None
+        )
         principal_count = (
             self._principal_inflight.get(principal, 0) if principal is not None else 0
         )
@@ -406,12 +531,9 @@ class V7InvocationMiddleware(_MiddlewareBase):
             or principal_count >= self._max_inflight_per_principal
             or workspace_count >= self._max_inflight_per_workspace
         ):
-            error_type = (
-                _BaseResourceError
-                if hasattr(context.message, "uri")
-                else _BaseToolError
-            )
-            raise error_type(
+            if hasattr(context.message, "uri"):
+                raise ResourceAdmissionLimitError()
+            raise _BaseToolError(
                 "ADMISSION_LIMIT_REACHED: retry after an active request completes"
             )
         self._inflight += 1
@@ -449,7 +571,14 @@ class V7InvocationMiddleware(_MiddlewareBase):
             # Tool handlers own the typed v7 error envelope.  Dispatch with no
             # scope so Covenant admission returns IDENTITY_UNAVAILABLE instead
             # of turning an authentication failure into a framework exception.
-            return await self._dispatch(context, call_next, None)
+            # The caller is still charged, as for a workspace that resolved,
+            # so a full limit answers every workspace ID alike.
+            return await self._dispatch(
+                context,
+                call_next,
+                None,
+                principal_id=await self._principal_or_none(context),
+            )
         scope = cast(InvocationScope | None, captured)
         workspace = (
             None
@@ -462,7 +591,12 @@ class V7InvocationMiddleware(_MiddlewareBase):
             except Exception:
                 workspace = None
         try:
-            return await self._dispatch(context, call_next, scope)
+            return await self._dispatch(
+                context,
+                call_next,
+                scope,
+                workspace_quota=self._workspace_quota(scope),
+            )
         finally:
             if workspace is not None and self._activity_callback is not None:
                 with suppress(Exception):
@@ -477,12 +611,25 @@ class V7InvocationMiddleware(_MiddlewareBase):
 
         captured = await _capture_async(lambda: self._admit_resource(context))
         if captured is _ADMISSION_FAILURE:
-            raise ResourceInvocationContextError()
+            # A full limit must answer the same whether or not the workspace
+            # resolved, so the refusal passes through the same accounting.
+            return await self._dispatch(
+                context,
+                _refuse_resource,
+                None,
+                principal_id=await self._principal_or_none(context),
+            )
+        scope = cast(InvocationScope | None, captured)
         return await self._dispatch(
             context,
             call_next,
-            cast(InvocationScope | None, captured),
+            scope,
+            workspace_quota=self._workspace_quota(scope),
         )
+
+
+def _refuse_resource(_context: Any) -> Any:
+    raise ResourceInvocationContextError()
 
 
 class ResourceCommunionAuthorizer:
@@ -530,12 +677,16 @@ class ResourceCommunionAuthorizer:
 
 
 __all__ = [
+    "EnvelopeErrorMiddleware",
     "FASTMCP_MIDDLEWARE_AVAILABLE",
     "ListedToolsMiddleware",
+    "RESOURCE_NOT_FOUND",
     "RESOURCE_SUFFIXES",
+    "ResourceAdmissionLimitError",
     "ResourceAuthorizationError",
     "ResourceCommunionAuthorizer",
     "ResourceInvocationContextError",
+    "ResourceUnavailableError",
     "ToolInvocationContextError",
     "TransportMode",
     "V7InvocationMiddleware",

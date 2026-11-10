@@ -9,7 +9,7 @@ import unittest
 from contextlib import closing
 from dataclasses import replace
 from datetime import timedelta
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from unittest.mock import patch
 
 from pydantic import ValidationError
@@ -269,6 +269,63 @@ class MemoryLearningWriteTests(unittest.IsolatedAsyncioTestCase):
                 )
         self.assertEqual(1, len(self._payloads()))
 
+    async def test_committed_bound_store_replays_after_its_file_changes(self) -> None:
+        """Re-reading the bound file before the lookup failed a finished write."""
+        bound = self.fixture.root / "bound.txt"
+        bound.write_bytes(b"first version")
+        command = _store_command(code_refs=(("bound.txt", None),))
+        stored = await self.writer.store(self.fixture.workspace, command)
+        committed = self._payloads()
+
+        bound.write_bytes(b"second version")
+        changed = await self.writer.store(self.fixture.workspace, command)
+        bound.unlink()
+        missing = await self.writer.store(self.fixture.workspace, command)
+
+        for replay in (changed, missing):
+            self.assertTrue(replay.idempotent_replay)
+            self.assertEqual(stored.event, replay.event)
+            self.assertEqual(stored.record, replay.record)
+        self.assertFalse(stored.idempotent_replay)
+        self.assertEqual(committed, self._payloads())
+        # The key still names one request: other arguments stay a conflict,
+        # and a new write to the missing file is still refused.
+        with self.assertRaises(IdempotencyConflict):
+            await self.writer.store(
+                self.fixture.workspace,
+                replace(command, content="A different request under the same key."),
+            )
+        with self.assertRaises(IdempotencyConflict):
+            await self.writer.store(
+                self.fixture.workspace, replace(command, code_refs=())
+            )
+        with self.assertRaisesRegex(RuntimeServiceError, "INVALID_ARGUMENT"):
+            await self.writer.store(
+                self.fixture.workspace,
+                replace(command, idempotency_key="store-after-file-removed-0001"),
+            )
+        self.assertEqual(committed, self._payloads())
+
+    async def test_committed_rebinding_outcome_replays_after_its_file_changes(
+        self,
+    ) -> None:
+        """The outcome retry must not re-read the file it already rebound."""
+        bound = self.fixture.root / "bound.txt"
+        bound.write_bytes(b"first version")
+        stored = await self.writer.store(
+            self.fixture.workspace, _store_command(code_refs=(("bound.txt", None),))
+        )
+        outcome = _outcome_command(stored.record.record_id, rebind_code=True)
+        recorded = await self.writer.record_outcome(self.fixture.workspace, outcome)
+        committed = self._payloads()
+
+        bound.unlink()
+        replay = await self.writer.record_outcome(self.fixture.workspace, outcome)
+
+        self.assertTrue(replay.idempotent_replay)
+        self.assertEqual(recorded.event, replay.event)
+        self.assertEqual(committed, self._payloads())
+
     async def test_environmental_code_ref_failure_is_atomic_and_restorable(
         self,
     ) -> None:
@@ -470,6 +527,67 @@ class MemoryLearningWriteTests(unittest.IsolatedAsyncioTestCase):
             _outcome_command(stored.record.record_id, rebind_code=True),
         )
         self.assertEqual(2, len(self._payloads()))
+
+    async def test_class_qualified_symbol_binds_and_ambiguous_one_is_rejected(
+        self,
+    ) -> None:
+        if not default_code_indexer_factory().available:
+            self.skipTest("code parser is unavailable")
+        source = self.fixture.root / "runtime.py"
+        single = "class Runtime:\n    def start(self):\n        return 1\n"
+        source.write_text(single, encoding="utf-8")
+        command = _store_command(code_refs=(("runtime.py", "Runtime.start"),))
+        stored = await self.writer.store(self.fixture.workspace, command)
+        (binding,) = self._payloads()[0]["record"]["context"]["code_bindings"]
+        self.assertEqual("Runtime.start", binding["qualified_name"])
+        nested = (
+            "class A:\n    class Runtime:\n        def start(self):\n"
+            "            return 1\n\n"
+            "class B:\n    class Runtime:\n        def start(self):\n"
+            "            return 2\n"
+        )
+        source.write_text(nested, encoding="utf-8")
+        before = self._payloads()
+        with self.assertRaisesRegex(RuntimeServiceError, "INVALID_ARGUMENT"):
+            await self.writer.store(
+                self.fixture.workspace,
+                replace(command, idempotency_key="learning-store-0002"),
+            )
+        with self.assertRaisesRegex(RuntimeServiceError, "INVALID_ARGUMENT"):
+            await self.writer.record_outcome(
+                self.fixture.workspace,
+                _outcome_command(stored.record.record_id, rebind_code=True),
+            )
+        self.assertEqual(before, self._payloads())
+
+    async def test_binding_path_spellings_are_stored_normalized(self) -> None:
+        source = self.fixture.root / "src" / "handler.py"
+        source.parent.mkdir()
+        source.write_text("VALUE = 1\n", encoding="utf-8")
+        command = _store_command(
+            code_refs=(
+                (str(PureWindowsPath("src", "handler.py")), None),
+                ("./src//handler.py", None),
+            )
+        )
+        stored = await self.writer.store(self.fixture.workspace, command)
+        bindings = self._payloads()[0]["record"]["context"]["code_bindings"]
+        self.assertEqual(
+            ["src/handler.py", "src/handler.py"],
+            [binding["relative_file_path"] for binding in bindings],
+        )
+        replay = await self.writer.store(self.fixture.workspace, command)
+        self.assertEqual(stored.record.record_id, replay.record.record_id)
+        self.assertEqual(1, len(self._payloads()))
+        with self.assertRaisesRegex(RuntimeServiceError, "INVALID_ARGUMENT"):
+            await self.writer.store(
+                self.fixture.workspace,
+                _store_command(
+                    idempotency_key="learning-store-0002",
+                    code_refs=((str(PureWindowsPath("C:/src/handler.py")), None),),
+                ),
+            )
+        self.assertEqual(1, len(self._payloads()))
 
     async def test_unsupported_symbol_rebind_is_a_client_error(self) -> None:
         if not default_code_indexer_factory().available:

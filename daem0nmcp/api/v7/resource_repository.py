@@ -40,6 +40,7 @@ from .resources import (
     ResourceReader,
     ResourceReadRequest,
     ResourceRow,
+    ResourceRows,
 )
 
 
@@ -237,6 +238,29 @@ _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _PROJECTION_NAMES = RETRIEVAL_PROJECTION_NAMES
 _PROJECTION_NAME_PLACEHOLDERS = ",".join("?" * len(_PROJECTION_NAMES))
 _PROJECTION_NAME_PARAMETERS = tuple(sorted(_PROJECTION_NAMES))
+
+
+def _untrusted_origin_sql(table: str = "memory_records") -> str:
+    """Match records whose text was not written by the session's agent or user.
+
+    The stored markers are ``context.code_todo`` (TODO scan) and
+    ``context.document`` (URL ingest).  Rows migrated from v6 predate both:
+    its URL ingest wrote ``context.source_url`` and its TODO scan wrote no
+    context at all, only the ``auto_scanned`` tag.  That tag is the single
+    one consulted; the v7 tags are not, since any caller can add or omit one.
+    """
+
+    return (
+        f"(json_type({table}.context_json,'$.code_todo') IS NOT NULL "
+        f"OR json_type({table}.context_json,'$.document') IS NOT NULL "
+        f"OR json_type({table}.context_json,'$.source_url') IS NOT NULL "
+        f"OR EXISTS (SELECT 1 FROM json_each({table}.tags_json) AS tag "
+        "WHERE tag.value='auto_scanned'))"
+    )
+
+
+_UNTRUSTED_ORIGIN_SQL = _untrusted_origin_sql()
+_UNTRUSTED_ACTIVE_RECORD_SQL = _untrusted_origin_sql("record")
 _REQUIRED_TABLES = frozenset(
     {
         "active_context",
@@ -426,6 +450,7 @@ def _validate_request(
         request.include_archived,
         request.include_deleted,
         request.include_expired,
+        request.include_untrusted_origin,
     ):
         if type(value) is not bool:
             raise ValueError("resource inclusion flags must be boolean")
@@ -547,12 +572,17 @@ class SQLiteResourceRepository:
         rule_limit: int = 50,
         active_context_limit: int = 50,
         include_git_changes: bool = True,
+        include_untrusted_origin: bool = False,
     ) -> ResourceRepositorySnapshot:
         """Read all briefing resources without a pointer-generation gap.
 
         Git changes cost two ``git`` subprocesses per read (plus a system-wide
         thread walk on Windows); callers that never show them skip them.
+        Records of untrusted origin are left out and counted unless the
+        caller opts in.
         """
+
+        untrusted = include_untrusted_origin is True
 
         if not isinstance(workspace, Workspace):
             raise ValueError("workspace must be a registered Workspace")
@@ -573,18 +603,31 @@ class SQLiteResourceRepository:
         warning_request = (
             None
             if warning_limit == 0
-            else ResourceReadRequest("warnings", warning_limit, "updated_at_desc")
+            else ResourceReadRequest(
+                "warnings",
+                warning_limit,
+                "updated_at_desc",
+                include_untrusted_origin=untrusted,
+            )
         )
         failure_request = (
             None
             if failure_limit == 0
-            else ResourceReadRequest("failures", failure_limit, "updated_at_desc")
+            else ResourceReadRequest(
+                "failures",
+                failure_limit,
+                "updated_at_desc",
+                include_untrusted_origin=untrusted,
+            )
         )
         rule_request = ResourceReadRequest(
             "rules", rule_limit, "priority_desc", enabled_only=True
         )
         active_request = ResourceReadRequest(
-            "active_context", active_context_limit, "priority_desc"
+            "active_context",
+            active_context_limit,
+            "priority_desc",
+            include_untrusted_origin=untrusted,
         )
         return await self._run(
             lambda: self._read_briefing_snapshot_sync(
@@ -644,7 +687,12 @@ class SQLiteResourceRepository:
             )
             decisions = self._read_records_sync(
                 workspace,
-                ResourceReadRequest("warnings", 50, "updated_at_desc"),
+                ResourceReadRequest(
+                    "warnings",
+                    50,
+                    "updated_at_desc",
+                    include_untrusted_origin=(active_request.include_untrusted_origin),
+                ),
                 record_type="decision",
                 failed_only=False,
                 _connection=connection,
@@ -1074,6 +1122,15 @@ class SQLiteResourceRepository:
                 predicates.append("archived=0")
             if not request.include_deleted:
                 predicates.append("deleted_at_us IS NULL")
+            withheld = 0
+            if not request.include_untrusted_origin:
+                counted = connection.execute(
+                    "SELECT COUNT(*) FROM memory_records WHERE "
+                    + " AND ".join([*predicates, _UNTRUSTED_ORIGIN_SQL]),
+                    tuple(parameters),
+                ).fetchone()
+                withheld = 0 if counted is None else _plain_int(counted[0])
+                predicates.append("NOT " + _UNTRUSTED_ORIGIN_SQL)
             parameters.append(request.limit)
             rows = connection.execute(
                 "SELECT record_id,workspace_id,record_type,content,content_hash,"
@@ -1083,7 +1140,9 @@ class SQLiteResourceRepository:
                 + " ORDER BY updated_at_us DESC, record_id DESC LIMIT ?",
                 tuple(parameters),
             ).fetchall()
-            values: list[ResourceRow[RecordSummary]] = []
+            values: ResourceRows[ResourceRow[RecordSummary]] = ResourceRows(
+                withheld_untrusted=withheld
+            )
             for row in rows:
                 if failed_only and _plain_int(row["worked"]) != 0:
                     raise ValueError("failed record state is invalid")
@@ -1287,6 +1346,25 @@ class SQLiteResourceRepository:
                 canonical_predicates.append("record.archived=0")
             if not request.include_deleted:
                 canonical_predicates.append("record.deleted_at_us IS NULL")
+            canonical_source = (
+                "FROM active_context_entries ac JOIN memory_records record "
+                "ON record.workspace_id=ac.workspace_id "
+                "AND record.record_id=ac.record_id WHERE "
+            )
+            # Untrusted entries are excluded before the limit, so they cannot
+            # crowd authored ones out, and are counted in full.
+            withheld = 0
+            if not request.include_untrusted_origin:
+                counted = connection.execute(
+                    "SELECT COUNT(*) "
+                    + canonical_source
+                    + " AND ".join(
+                        [*canonical_predicates, _UNTRUSTED_ACTIVE_RECORD_SQL]
+                    ),
+                    tuple(canonical_parameters),
+                ).fetchone()
+                withheld += 0 if counted is None else _plain_int(counted[0])
+                canonical_predicates.append("NOT " + _UNTRUSTED_ACTIVE_RECORD_SQL)
             canonical_rows = connection.execute(
                 "SELECT ac.active_context_id AS active_id,"
                 "ac.priority AS active_priority,ac.reason AS active_reason,"
@@ -1296,9 +1374,7 @@ class SQLiteResourceRepository:
                 "record.content_hash,record.tags_json,record.file_path_relative,"
                 "record.archived,record.worked,record.created_at_us,"
                 "record.updated_at_us,record.deleted_at_us "
-                "FROM active_context_entries ac JOIN memory_records record "
-                "ON record.workspace_id=ac.workspace_id "
-                "AND record.record_id=ac.record_id WHERE "
+                + canonical_source
                 + " AND ".join(canonical_predicates)
                 + " ORDER BY ac.priority DESC,ac.added_at_us DESC,"
                 "ac.active_context_id DESC LIMIT ?",
@@ -1325,6 +1401,31 @@ class SQLiteResourceRepository:
                 "AND canonical.record_id=record.record_id)"
             )
             legacy_parameters.append(workspace.workspace_id)
+            legacy_source = (
+                "FROM active_context ac "
+                "JOIN v7_migration_runs run ON run.workspace_id=? "
+                "AND run.status='active' "
+                "JOIN legacy_id_map map ON map.migration_run_id=run.migration_run_id "
+                "AND map.workspace_id=? AND map.source_table='memories' "
+                "AND map.target_kind='memory' "
+                "AND map.legacy_id=CAST(ac.memory_id AS TEXT) "
+                "JOIN memory_records record ON record.workspace_id=? "
+                "AND record.record_id=map.target_id WHERE "
+            )
+            legacy_source_parameters = (
+                workspace.workspace_id,
+                workspace.workspace_id,
+                workspace.workspace_id,
+            )
+            if not request.include_untrusted_origin:
+                counted = connection.execute(
+                    "SELECT COUNT(DISTINCT record.record_id) "
+                    + legacy_source
+                    + " AND ".join([*legacy_predicates, _UNTRUSTED_ACTIVE_RECORD_SQL]),
+                    (*legacy_source_parameters, *legacy_parameters),
+                ).fetchone()
+                withheld += 0 if counted is None else _plain_int(counted[0])
+                legacy_predicates.append("NOT " + _UNTRUSTED_ACTIVE_RECORD_SQL)
             legacy_rows = connection.execute(
                 "WITH ranked_legacy AS (SELECT ac.id AS active_id,"
                 "ac.priority AS active_priority,ac.reason AS active_reason,"
@@ -1337,15 +1438,7 @@ class SQLiteResourceRepository:
                 "ROW_NUMBER() OVER (PARTITION BY record.record_id "
                 "ORDER BY ac.priority DESC,julianday(ac.added_at) DESC,"
                 "ac.id DESC) AS duplicate_rank "
-                "FROM active_context ac "
-                "JOIN v7_migration_runs run ON run.workspace_id=? "
-                "AND run.status='active' "
-                "JOIN legacy_id_map map ON map.migration_run_id=run.migration_run_id "
-                "AND map.workspace_id=? AND map.source_table='memories' "
-                "AND map.target_kind='memory' "
-                "AND map.legacy_id=CAST(ac.memory_id AS TEXT) "
-                "JOIN memory_records record ON record.workspace_id=? "
-                "AND record.record_id=map.target_id WHERE "
+                + legacy_source
                 + " AND ".join(legacy_predicates)
                 + ") SELECT active_id,active_priority,active_reason,"
                 "active_added_at,active_expires_at,record_id,workspace_id,"
@@ -1354,13 +1447,7 @@ class SQLiteResourceRepository:
                 "FROM ranked_legacy WHERE duplicate_rank=1 "
                 "ORDER BY active_priority DESC,julianday(active_added_at) DESC,"
                 "active_id DESC LIMIT ?",
-                (
-                    workspace.workspace_id,
-                    workspace.workspace_id,
-                    workspace.workspace_id,
-                    *legacy_parameters,
-                    request.limit,
-                ),
+                (*legacy_source_parameters, *legacy_parameters, request.limit),
             ).fetchall()
             public_ids = PublicObjectIdRepository(connection)
             ordered_values: list[
@@ -1415,7 +1502,10 @@ class SQLiteResourceRepository:
                 key=lambda value: (value[0], value[1], value[2]),
                 reverse=True,
             )
-            return [value[3] for value in ordered_values[: request.limit]]
+            return ResourceRows(
+                (value[3] for value in ordered_values[: request.limit]),
+                withheld_untrusted=withheld,
+            )
         finally:
             if owns_connection:
                 try:

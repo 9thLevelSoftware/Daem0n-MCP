@@ -71,6 +71,7 @@ ANNOTATION_KEYS = frozenset(
     }
 )
 _NAME_RE = re.compile(r"^[a-z][a-z0-9_]{1,79}$")
+MAX_TOOL_TITLE_CHARACTERS = 48
 
 
 class ManifestError(ValueError):
@@ -142,6 +143,7 @@ class ToolSpec:
     annotations: Mapping[str, bool]
     pinned: bool = False
     version: str = __version__
+    title: str = ""
     _meta: Mapping[str, Any] = field(default_factory=dict, repr=False)
 
     def __post_init__(self) -> None:
@@ -149,6 +151,15 @@ class ToolSpec:
             raise ManifestError("tool name is invalid")
         if not isinstance(self.description, str) or not self.description.strip():
             raise ManifestError("tool description is required")
+        if not isinstance(self.title, str) or (
+            self.title != self.title.strip()
+            or len(self.title) > MAX_TOOL_TITLE_CHARACTERS
+            or not self.title.isprintable()
+        ):
+            raise ManifestError(
+                "tool title must be single-line text of at most "
+                f"{MAX_TOOL_TITLE_CHARACTERS} characters"
+            )
         if not callable(self.handler):
             raise ManifestError("tool handler is missing")
         if not (
@@ -280,6 +291,8 @@ class V7Manifest:
                 )
             if set(names) != set(V7_TOOL_LEVELS):
                 raise ManifestError("full v7 manifest tool set is incomplete")
+            if not all(tool.title for tool in tools):
+                raise ManifestError("full v7 manifest tools must each have a title")
             if set(resource_uris) != FULL_V7_RESOURCE_URI_TEMPLATES:
                 raise ManifestError("full v7 manifest resource set is incomplete")
         object.__setattr__(self, "tools", tools)
@@ -317,6 +330,7 @@ class InspectableV7Server:
         return [
             {
                 "name": spec.name,
+                "title": spec.title or None,
                 "description": spec.description,
                 "inputSchema": spec.input_schema,
                 "outputSchema": spec.output_schema,

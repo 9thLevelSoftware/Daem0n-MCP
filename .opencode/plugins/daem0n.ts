@@ -77,6 +77,18 @@ Rules:
 
 type HookResult = { exitCode: number; stdout: string; stderr: string };
 
+// The interpreter that runs the hooks. The installer writes the one it ran
+// under into its copy of this file; it is never read from opencode.json or any
+// other file or variable the opened project can supply.
+const PYTHON_EXECUTABLE = "python";
+
+// Hooks start inside the opened project, where "python -m" would import the
+// project's own "daem0nmcp" directory first. This runs the module the same way
+// after dropping the working directory from sys.path.
+function hookLaunchCode(module: string): string {
+  return `import sys; sys.path = [p for p in sys.path if p]; import runpy; runpy.run_module('daem0nmcp.claude_hooks.${module}', run_name='__main__', alter_sys=True)`;
+}
+
 const BRIDGE_ENV_KEYS = new Set([
   "DAEM0NMCP_EDIT_BRIDGE_CREDENTIAL_FILE",
   "DAEM0NMCP_EDIT_BRIDGE_MODE",
@@ -88,7 +100,6 @@ const BRIDGE_ENV_KEYS = new Set([
   "DAEM0NMCP_EDIT_HOST_STATE_FILE",
   "DAEM0NMCP_PROJECT_ROOT",
   "DAEM0NMCP_STORAGE_PATH",
-  "DAEM0NMCP_PYTHON_EXECUTABLE",
 ]);
 
 async function loadBridgeEnvironment(directory: string): Promise<Record<string, string>> {
@@ -130,9 +141,7 @@ async function runHook(
   let timer: ReturnType<typeof setTimeout> | undefined;
   let timedOut = false;
   try {
-    const mod = `daem0nmcp.claude_hooks.${module}`;
-    const python = bridgeEnvironment.DAEM0NMCP_PYTHON_EXECUTABLE || "python";
-    child = Bun.spawn([python, "-m", mod], {
+    child = Bun.spawn([PYTHON_EXECUTABLE, "-c", hookLaunchCode(module)], {
       cwd: directory,
       env: {
         ...process.env,

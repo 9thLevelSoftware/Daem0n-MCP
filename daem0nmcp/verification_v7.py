@@ -46,6 +46,7 @@ from .storage_activation import (
     resolve_active_database,
     write_active_pointer,
 )
+from .workspace import sqlite_file_uri
 
 _DERIVED_TABLES = (
     "memory_records",
@@ -126,7 +127,7 @@ def _check(ok: bool, **details: Any) -> dict[str, Any]:
 
 def _database_backup(source: Path, destination: Path) -> None:
     destination.parent.mkdir(parents=True, exist_ok=True)
-    source_connection = sqlite3.connect(f"file:{source.as_posix()}?mode=ro", uri=True)
+    source_connection = sqlite3.connect(sqlite_file_uri(source, mode="ro"), uri=True)
     destination_connection = sqlite3.connect(destination)
     try:
         source_connection.backup(destination_connection)
@@ -945,7 +946,7 @@ def _verify_database(
 ) -> dict[str, Any]:
     checks: dict[str, dict[str, Any]] = {}
     authority = {"memory_events": 0, "governance_events": 0, "federation_events": 0}
-    source = sqlite3.connect(f"file:{path.as_posix()}?mode=ro", uri=True)
+    source = sqlite3.connect(sqlite_file_uri(path, mode="ro"), uri=True)
     source.row_factory = sqlite3.Row
     replay: sqlite3.Connection | None = None
     roots: dict[str, tuple[int, str]] = {}
@@ -1373,7 +1374,7 @@ def _resumable_candidate(
     _require_owned_regular(snapshot, run_dir)
     _require_owned_regular(candidate, run_dir)
     try:
-        connection = sqlite3.connect(f"file:{candidate.as_posix()}?mode=ro", uri=True)
+        connection = sqlite3.connect(sqlite_file_uri(candidate, mode="ro"), uri=True)
         try:
             row = connection.execute(
                 "SELECT workspace_id,source_db_sha256,status,source_inventory_json "
@@ -1426,7 +1427,7 @@ def _active_pointer_check(active: Any, workspace_id: str) -> dict[str, Any]:
         )
     expected = f"migrations/v7/{active.migration_run_id}/candidate.db"
     try:
-        connection = sqlite3.connect(f"file:{active.path.as_posix()}?mode=ro", uri=True)
+        connection = sqlite3.connect(sqlite_file_uri(active.path, mode="ro"), uri=True)
         try:
             row = connection.execute(
                 "SELECT workspace_id,source_db_sha256,status,target_format_version,"

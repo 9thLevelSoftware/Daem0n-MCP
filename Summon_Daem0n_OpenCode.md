@@ -14,11 +14,25 @@ Install the package for a stdio connection:
 python -m pip install -e "/path/to/Daem0n-MCP"
 ```
 
-Then configure the OpenCode MCP entry to run:
+Then configure the OpenCode MCP entry, replacing `<PYTHON_PATH>` with the full
+path printed by `python -c "import sys; print(sys.executable)"`:
 
-```text
-python -m daem0nmcp.server
+```json
+{
+  "mcp": {
+    "daem0nmcp": {
+      "type": "local",
+      "command": ["<PYTHON_PATH>", "-c", "import sys; sys.path = [p for p in sys.path if p]; import runpy; runpy.run_module('daem0nmcp', run_name='__main__', alter_sys=True)"],
+      "enabled": true
+    }
+  }
+}
 ```
+
+Use that command rather than `python -m daem0nmcp`. OpenCode starts the server
+inside the opened project, and `-m` puts that directory first on `sys.path`, so
+a repository containing its own `daem0nmcp/` directory would run instead of the
+installed server.
 
 For Streamable HTTP, start:
 

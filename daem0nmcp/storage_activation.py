@@ -18,11 +18,10 @@ from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from pathlib import Path, PurePosixPath
 from typing import BinaryIO, Literal
-from urllib.parse import quote
 
 from .event_store import canonical_json_bytes
 from .protected_files import reject_linked_ancestry
-from .workspace import normalize_resolved_path
+from .workspace import normalize_resolved_path, sqlite_file_uri
 
 POINTER_NAME = "active-db.json"
 POINTER_TEMP_NAME = "active-db.json.tmp"
@@ -181,7 +180,7 @@ def readonly_database_uri(path: str | os.PathLike[str]) -> str:
         parameters = "&immutable=1"
     else:
         parameters = ""
-    return "file:" + quote(resolved.as_posix(), safe="/:") + f"?mode=ro{parameters}"
+    return sqlite_file_uri(resolved, mode="ro") + parameters
 
 
 def validate_pointer(pointer: ActiveDatabasePointer) -> ActiveDatabasePointer:
@@ -293,49 +292,186 @@ def resolve_active_database(
     )
 
 
+def canonical_v7_state_in(connection: sqlite3.Connection) -> bool:
+    """Whether an open database holds format-7 canonical state.
+
+    Only reads; a failure to read is raised, not answered as "no".
+    """
+
+    tables = {
+        str(row[0])
+        for row in connection.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        )
+    }
+    if "schema_version" not in tables:
+        return False
+    try:
+        version = int(
+            connection.execute(
+                "SELECT COALESCE(MAX(version),0) FROM schema_version"
+            ).fetchone()[0]
+        )
+    except (TypeError, ValueError):
+        return False
+    if version < _V7_FORMAT_MIN_SCHEMA_VERSION:
+        return False
+    required_tables = _V7_FORMAT_TABLES
+    if version < 33:
+        required_tables = required_tables - {
+            "memory_provenance_edges",
+            "memory_outcome_signals",
+        }
+    if not tables >= required_tables:
+        return False
+    return any(
+        connection.execute(f'SELECT 1 FROM "{table}" LIMIT 1').fetchone() is not None
+        for table in (
+            "memory_events",
+            "memory_records",
+            "projection_manifests",
+            "v7_migration_runs",
+        )
+    )
+
+
 def has_canonical_v7_state(database_path: str | os.PathLike[str]) -> bool:
     """Recognize copied v7 canonical state when its activation pointer is absent."""
 
     try:
         connection = sqlite3.connect(Path(database_path))
         try:
-            tables = {
-                str(row[0])
-                for row in connection.execute(
-                    "SELECT name FROM sqlite_master WHERE type='table'"
-                )
-            }
-            if "schema_version" not in tables:
-                return False
-            version = int(
-                connection.execute(
-                    "SELECT COALESCE(MAX(version),0) FROM schema_version"
-                ).fetchone()[0]
-            )
-            if version < _V7_FORMAT_MIN_SCHEMA_VERSION:
-                return False
-            required_tables = _V7_FORMAT_TABLES
-            if version < 33:
-                required_tables = required_tables - {
-                    "memory_provenance_edges",
-                    "memory_outcome_signals",
-                }
-            if not tables >= required_tables:
-                return False
-            return any(
-                connection.execute(f'SELECT 1 FROM "{table}" LIMIT 1').fetchone()
-                is not None
-                for table in (
-                    "memory_events",
-                    "memory_records",
-                    "projection_manifests",
-                    "v7_migration_runs",
-                )
-            )
+            return canonical_v7_state_in(connection)
         finally:
             connection.close()
     except (OSError, sqlite3.DatabaseError, TypeError, ValueError):
         return False
+
+
+# A pointerless store resolves as format 6.  When it holds format-7 state the
+# pointer was lost, and every opener that would run format-6 code refuses with
+# this detail instead.
+ACTIVE_POINTER_MISSING_CODE = "ACTIVE_POINTER_MISSING"
+ACTIVE_POINTER_MISSING_DETAIL = (
+    f"{DEFAULT_DATABASE_NAME} holds format-7 state but {POINTER_NAME} is "
+    "missing, so it is not opened as a format-6 store. Restore "
+    f"{POINTER_NAME} from a backup, or stop the server and run: "
+    "python -m daem0nmcp.cli --project-path <project root> "
+    "migrate-v7 --recover-pointer"
+)
+
+
+class CandidateUnreadableError(RuntimeError):
+    """A published candidate of a pointerless store could not be inspected.
+
+    The message is the operator text; ``candidate`` is storage-relative and
+    names the candidate, or the migration root when that cannot be listed.
+    """
+
+    def __init__(self, candidate: str, *, unlistable: bool = False) -> None:
+        self.candidate = candidate
+        if unlistable:
+            message = (
+                f"{POINTER_NAME} is missing and {candidate} cannot be listed, so "
+                "it may hold the active format-7 database and "
+                f"{DEFAULT_DATABASE_NAME} is not opened in its place. Make that "
+                f"directory readable and retry, or restore {POINTER_NAME} from "
+                "a backup"
+            )
+        else:
+            message = (
+                f"{POINTER_NAME} is missing and {candidate} cannot be read, so it "
+                f"may be the active format-7 database and {DEFAULT_DATABASE_NAME} "
+                "is not opened in its place. If another process is using that "
+                f"file, stop it and retry. Otherwise restore {POINTER_NAME} from a "
+                "backup, or, if that migration run was never activated, move its "
+                "directory out of the storage directory"
+            )
+        super().__init__(message)
+
+
+def active_candidate_without_pointer(storage: Path) -> str | None:
+    """The migration candidate a pointerless store still records as active.
+
+    A store migrated from format 6 keeps that file as ``daem0nmcp.db`` and runs
+    on a candidate only the pointer names.  With the pointer lost the retained
+    format-6 file would be opened and written instead, so a candidate whose own
+    run is still ``active`` is reported by its storage-relative name.  Links
+    are skipped: no pointer can have named one.
+
+    A published candidate that cannot be read (locked, damaged, I/O error) may
+    be that active database, so when no readable one is active it raises
+    ``CandidateUnreadableError`` instead of answering "none".  Only a published
+    ``candidate.db`` counts: a run directory without one, a partial candidate,
+    and a readable file that holds no run table were never named by a pointer.
+    A migration root that exists but cannot be listed, or a run directory that
+    cannot be looked into, may hide that database and is refused the same way.
+    """
+
+    root = storage / "migrations" / "v7"
+    try:
+        if (storage / "migrations").is_symlink() or root.is_symlink():
+            return None
+        run_dirs = sorted(root.iterdir(), key=lambda path: path.name)
+    except (FileNotFoundError, NotADirectoryError):
+        return None
+    except OSError as exc:
+        raise CandidateUnreadableError("migrations/v7", unlistable=True) from exc
+    unreadable: str | None = None
+    for run_dir in run_dirs:
+        name = run_dir.name
+        if not _valid_prefixed_hash(name, "mig"):
+            continue
+        candidate = run_dir / "candidate.db"
+        relative = f"migrations/v7/{name}/candidate.db"
+        try:
+            if (
+                run_dir.is_symlink()
+                or candidate.is_symlink()
+                or not candidate.is_file()
+            ):
+                continue
+        except OSError:
+            if unreadable is None:
+                unreadable = relative
+            continue
+        try:
+            # Read-only: inspecting a candidate must not checkpoint or
+            # otherwise change a database this process does not own.
+            connection = sqlite3.connect(
+                sqlite_file_uri(candidate, mode="ro"), uri=True
+            )
+            try:
+                row = None
+                if connection.execute(
+                    "SELECT 1 FROM sqlite_master "
+                    "WHERE type='table' AND name='v7_migration_runs'"
+                ).fetchone():
+                    row = connection.execute(
+                        "SELECT status FROM v7_migration_runs WHERE migration_run_id=?",
+                        (name,),
+                    ).fetchone()
+            finally:
+                connection.close()
+        except (OSError, sqlite3.Error):
+            if unreadable is None:
+                unreadable = relative
+            continue
+        if row is not None and row[0] == "active":
+            return relative
+    if unreadable is not None:
+        raise CandidateUnreadableError(unreadable)
+    return None
+
+
+def active_candidate_pointer_missing_detail(candidate: str) -> str:
+    """Operator text for a store whose lost pointer named ``candidate``."""
+
+    return (
+        f"{POINTER_NAME} is missing and {candidate} is still recorded as the "
+        f"active format-7 database, so {DEFAULT_DATABASE_NAME}, its retained "
+        f"predecessor, is not opened. Restore {POINTER_NAME} from a backup"
+    )
 
 
 def _fsync_directory(path: Path) -> None:
@@ -361,8 +497,8 @@ def _open_owned_file(
 
     ``O_NOFOLLOW`` supplies the atomic guarantee where available.  The identity
     comparison is also required because Windows' CRT does not expose that flag.
-    Exclusive creation is used for the pointer temp so an unowned stale name is
-    never truncated.
+    Exclusive creation is used for the pointer temp so a name this writer does
+    not own is never truncated.
     """
 
     if path.is_symlink() or (path.exists() and not path.is_file()):
@@ -386,6 +522,32 @@ def _open_owned_file(
     except Exception:
         os.close(descriptor)
         raise
+
+
+def _discard_crashed_pointer_temp(storage: Path, temporary: Path) -> None:
+    """Remove the pointer temp a process left when it died before the rename.
+
+    Only while this process holds the storage lock exclusively: no other
+    writer can then be alive, so a regular file under the temp name belongs to
+    nobody.  Under a shared lock, or none, it may be a live writer's and stays.
+    A link or any other non-regular entry is never touched and is refused by
+    the exclusive create that follows.
+
+    The lock is looked up for the process, not for the caller: pointer writes
+    are made by the one holder of the exclusive lock, never by a second thread
+    of the same process beside it.
+    """
+
+    key = os.path.normcase(str((storage / LOCK_NAME).resolve(strict=False)))
+    with _PROCESS_LOCK_GUARD:
+        state = _PROCESS_LOCKS.get(key)
+        if state is None or state.mode != "exclusive":
+            return
+    try:
+        if stat.S_ISREG(os.lstat(temporary).st_mode):
+            os.unlink(temporary)
+    except OSError:
+        return
 
 
 def write_active_pointer(
@@ -413,6 +575,7 @@ def write_active_pointer(
     temporary = storage / POINTER_TEMP_NAME
     destination = storage / POINTER_NAME
     owned_temporary = False
+    _discard_crashed_pointer_temp(storage, temporary)
     try:
         with _open_owned_file(temporary, exclusive_create=True) as handle:
             owned_temporary = True
@@ -522,8 +685,64 @@ def _windows_file_unlock(handle: BinaryIO) -> None:
         raise DatabaseInUseError()
 
 
+def _lock_file_handle(handle: BinaryIO, *, exclusive: bool, nonblocking: bool) -> None:
+    if os.name == "nt":
+        _windows_file_lock(handle, exclusive=exclusive, nonblocking=nonblocking)
+        return
+    try:
+        import fcntl
+    except ImportError as exc:
+        raise RuntimeError("UNSUPPORTED_FILE_LOCK") from exc
+    operation = fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH
+    if nonblocking:
+        operation |= fcntl.LOCK_NB
+    try:
+        fcntl.flock(handle.fileno(), operation)
+    except (BlockingIOError, OSError) as exc:
+        raise DatabaseInUseError() from exc
+
+
+def _convert_file_lock(handle: BinaryIO, *, exclusive: bool) -> None:
+    """Change the mode of the lock this process holds through ``handle``.
+
+    No platform converts a held lock both atomically and without giving it up
+    when the conversion is refused, so a refused or interrupted conversion is
+    followed by taking the shared lock again, waiting for it if a locker in
+    another process got in between: the holders registered on the handle never
+    go on believing in a lock the process no longer has.  Raises
+    ``DatabaseInUseError``, holding the shared lock, when the exclusive lock
+    is refused.
+    """
+
+    if os.name == "nt":
+        # LockFileEx stacks a second lock on the handle rather than converting.
+        _windows_file_unlock(handle)
+    refused: DatabaseInUseError | None = None
+    if exclusive:
+        try:
+            _lock_file_handle(handle, exclusive=True, nonblocking=True)
+            return
+        except DatabaseInUseError as exc:
+            refused = exc
+    try:
+        _lock_file_handle(handle, exclusive=False, nonblocking=True)
+    except DatabaseInUseError:
+        _lock_file_handle(handle, exclusive=False, nonblocking=False)
+    if refused is not None:
+        raise refused
+
+
 class DatabaseFileLock:
-    """Lifetime shared or exclusive advisory lock for a storage generation."""
+    """Lifetime shared or exclusive advisory lock for a storage generation.
+
+    The operating-system lock is held once per process and counted here, so
+    locks taken in one process exclude each other by this registry alone.
+    ``over_process_holders`` is for the short exclusive lock under which a
+    store is created: it is granted over shared holders in this same process,
+    which keep their registration and get the shared lock back when it is
+    released or demoted.  It still excludes every other process, and every
+    further lock in this one, for as long as it is held.
+    """
 
     def __init__(
         self,
@@ -531,12 +750,16 @@ class DatabaseFileLock:
         mode: Literal["shared", "exclusive"],
         *,
         nonblocking: bool = True,
+        over_process_holders: bool = False,
     ) -> None:
         if mode not in {"shared", "exclusive"}:
             raise ValueError("lock mode must be shared or exclusive")
+        if over_process_holders and mode != "exclusive":
+            raise ValueError("only an exclusive lock is taken over process holders")
         self.path = Path(storage_path) / LOCK_NAME
         self.mode = mode
         self.nonblocking = nonblocking
+        self.over_process_holders = over_process_holders
         self._key: str | None = None
         self._registered = False
 
@@ -562,8 +785,13 @@ class DatabaseFileLock:
         with _PROCESS_LOCK_GUARD:
             state = _PROCESS_LOCKS.get(key)
             if state is not None:
-                if self.mode != "shared" or state.mode != "shared":
+                if state.mode != "shared":
                     raise DatabaseInUseError()
+                if self.mode != "shared":
+                    if not self.over_process_holders:
+                        raise DatabaseInUseError()
+                    _convert_file_lock(state.handle, exclusive=True)
+                    state.mode = "exclusive"
                 state.count += 1
                 self._key = key
                 self._registered = True
@@ -586,24 +814,28 @@ class DatabaseFileLock:
             return self
 
     def _lock_handle(self, handle: BinaryIO) -> None:
-        if os.name == "nt":
-            _windows_file_lock(
-                handle,
-                exclusive=self.mode == "exclusive",
-                nonblocking=self.nonblocking,
-            )
+        _lock_file_handle(
+            handle,
+            exclusive=self.mode == "exclusive",
+            nonblocking=self.nonblocking,
+        )
+
+    def demote(self) -> None:
+        """Turn the exclusive lock held through this object into a shared one.
+
+        The process never stops holding the storage, so nothing registered on
+        it is left without a lock; where the platform cannot convert in place
+        this waits out a locker that got in between.
+        """
+
+        if not self._registered or self._key is None or self.mode != "exclusive":
             return
-        try:
-            import fcntl
-        except ImportError as exc:
-            raise RuntimeError("UNSUPPORTED_FILE_LOCK") from exc
-        operation = fcntl.LOCK_SH if self.mode == "shared" else fcntl.LOCK_EX
-        if self.nonblocking:
-            operation |= fcntl.LOCK_NB
-        try:
-            fcntl.flock(handle.fileno(), operation)
-        except (BlockingIOError, OSError) as exc:
-            raise DatabaseInUseError() from exc
+        with _PROCESS_LOCK_GUARD:
+            state = _PROCESS_LOCKS.get(self._key)
+            if state is not None and state.mode == "exclusive":
+                _convert_file_lock(state.handle, exclusive=False)
+                state.mode = "shared"
+            self.mode = "shared"
 
     def release(self) -> None:
         if not self._registered or self._key is None:
@@ -614,6 +846,10 @@ class DatabaseFileLock:
                 self._registered = False
                 self._key = None
                 return
+            if state.count > 1 and self.mode == "exclusive":
+                # Taken over shared holders in this process: they stay.
+                self.demote()
+                self.mode = "exclusive"
             state.count -= 1
             if state.count == 0:
                 handle = state.handle

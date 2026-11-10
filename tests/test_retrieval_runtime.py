@@ -173,6 +173,216 @@ class RetrievalRuntimeTests(unittest.IsolatedAsyncioTestCase):
             ),
         )
 
+    def test_factory_passes_the_content_tiering_setting_to_lexical(self):
+        from daem0nmcp.retrieval.runtime import create_retrieval_service
+
+        default = create_retrieval_service(self.path, config=_settings())
+        self.services.append(default)
+        self.assertFalse(default._providers["lexical"]._content_tiering)
+
+        config = _settings()
+        config.lexical_content_tiering = True
+        tiered = create_retrieval_service(self.path, config=config)
+        self.services.append(tiered)
+        self.assertTrue(tiered._providers["lexical"]._content_tiering)
+
+    def test_content_tiering_setting_is_in_the_service_cache_fingerprint(self):
+        from daem0nmcp.api.v7.runtime_services import _retrieval_config_fingerprint
+
+        config = _settings()
+        tiered = _settings()
+        tiered.lexical_content_tiering = True
+        self.assertNotEqual(
+            _retrieval_config_fingerprint(config, {}),
+            _retrieval_config_fingerprint(tiered, {}),
+        )
+
+    def _seed_filtered_corpus(self) -> tuple[str, str]:
+        """Sixty strong unfiltered matches above two weak filtered ones."""
+
+        from daem0nmcp.event_store import EventCommand, EventStore
+        from daem0nmcp.retrieval.projections import LexicalProjectionBuilder
+
+        connection = sqlite3.connect(self.path)
+        connection.execute("PRAGMA foreign_keys=ON")
+
+        def append(number: int, content: str, record_type: str, tags: list[str]):
+            record_id = f"mem_{number:064x}"
+            record = _record(content)
+            record.update(record_type=record_type, tags=tags)
+            EventStore(connection).append_and_project(
+                EventCommand(
+                    workspace_id=WORKSPACE_ID,
+                    stream_id=record_id,
+                    stream_kind="memory",
+                    event_type="memory.created",
+                    occurred_at_us=1_000 + number,
+                    recorded_at_us=1_000 + number,
+                    actor_type="system",
+                    payload={"record": record},
+                )
+            )
+            return record_id
+
+        for number in range(0x100, 0x100 + 60):
+            append(number, "deploy rollback deploy rollback", "decision", ["noise"])
+        filler = " ".join(f"filler{index}" for index in range(120))
+        older = append(0x200, f"deploy {filler} older", "warning", ["scoped"])
+        newer = append(0x201, f"deploy {filler} newer", "warning", ["scoped"])
+        LexicalProjectionBuilder(connection, clock_us=lambda: 5_000).rebuild(
+            WORKSPACE_ID
+        )
+        connection.execute("DELETE FROM background_jobs")
+        connection.commit()
+        connection.close()
+        return older, newer
+
+    async def test_filters_select_candidates_before_the_candidate_limit(self):
+        from daem0nmcp.retrieval.runtime import create_retrieval_service
+        from daem0nmcp.retrieval.types import RetrievalQuery
+
+        older, newer = self._seed_filtered_corpus()
+        service = create_retrieval_service(self.path, config=_settings())
+        self.services.append(service)
+
+        for name, filters in (
+            ("categories", {"categories": frozenset({"warning"})}),
+            ("tags", {"tags": frozenset({"scoped"})}),
+            ("record_ids", {"record_ids": frozenset({older, newer})}),
+        ):
+            with self.subTest(filter=name):
+                result = await service.retrieve(
+                    RetrievalQuery(
+                        workspace_id=WORKSPACE_ID,
+                        text="deploy",
+                        token_budget=4_000,
+                        **filters,
+                    )
+                )
+                self.assertFalse(result.abstained, result.reason)
+                self.assertEqual(
+                    {older, newer},
+                    {item.evidence_refs[0].record_id for item in result.items},
+                )
+                self.assertEqual((), result.policy_rejection_counts)
+
+    async def test_archived_records_do_not_exhaust_a_filtered_recall(self):
+        from daem0nmcp.event_store import EventCommand, EventStore
+        from daem0nmcp.retrieval.projections import LexicalProjectionBuilder
+        from daem0nmcp.retrieval.runtime import create_retrieval_service
+        from daem0nmcp.retrieval.types import RetrievalQuery
+
+        older, newer = self._seed_filtered_corpus()
+        connection = sqlite3.connect(self.path)
+        connection.execute("PRAGMA foreign_keys=ON")
+        # Sixty archived records of the same scope, newer and stronger matches.
+        for number in range(0x300, 0x300 + 60):
+            record = _record("deploy deploy deploy")
+            record.update(record_type="warning", tags=["scoped"], archived=True)
+            EventStore(connection).append_and_project(
+                EventCommand(
+                    workspace_id=WORKSPACE_ID,
+                    stream_id=f"mem_{number:064x}",
+                    stream_kind="memory",
+                    event_type="memory.created",
+                    occurred_at_us=1_000 + number,
+                    recorded_at_us=1_000 + number,
+                    actor_type="system",
+                    payload={"record": record},
+                )
+            )
+        LexicalProjectionBuilder(connection, clock_us=lambda: 6_000).rebuild(
+            WORKSPACE_ID
+        )
+        connection.execute("DELETE FROM background_jobs")
+        connection.commit()
+        connection.close()
+        service = create_retrieval_service(self.path, config=_settings())
+        self.services.append(service)
+
+        for name, text, filters in (
+            ("category search", "deploy", {"categories": frozenset({"warning"})}),
+            ("tag search", "deploy", {"tags": frozenset({"scoped"})}),
+            ("category listing", "", {"categories": frozenset({"warning"})}),
+            ("unfiltered search", "older newer", {}),
+        ):
+            with self.subTest(case=name):
+                result = await service.retrieve(
+                    RetrievalQuery(
+                        workspace_id=WORKSPACE_ID,
+                        text=text,
+                        token_budget=4_000,
+                        **filters,
+                    )
+                )
+                self.assertFalse(result.abstained, result.reason)
+                self.assertEqual(
+                    {older, newer},
+                    {item.evidence_refs[0].record_id for item in result.items},
+                )
+                self.assertEqual((), result.policy_rejection_counts)
+
+        included = await service.retrieve(
+            RetrievalQuery(
+                workspace_id=WORKSPACE_ID,
+                text="",
+                limit=100,
+                candidate_limit=100,
+                token_budget=100_000,
+                categories=frozenset({"warning"}),
+                include_archived=True,
+            )
+        )
+        self.assertTrue(
+            {item.evidence_refs[0].record_id for item in included.items}
+            - {older, newer}
+        )
+
+    async def test_empty_query_with_a_filter_lists_filtered_records(self):
+        from daem0nmcp.retrieval.runtime import create_retrieval_service
+        from daem0nmcp.retrieval.types import RetrievalQuery
+
+        older, newer = self._seed_filtered_corpus()
+        service = create_retrieval_service(self.path, config=_settings())
+        self.services.append(service)
+
+        for name, text, filters in (
+            ("categories", "", {"categories": frozenset({"warning"})}),
+            ("tags", "   ", {"tags": frozenset({"scoped"})}),
+            ("record_ids", "?", {"record_ids": frozenset({older, newer})}),
+            ("stop words", "what is the", {"tags": frozenset({"scoped"})}),
+        ):
+            with self.subTest(filter=name):
+                result = await service.retrieve(
+                    RetrievalQuery(
+                        workspace_id=WORKSPACE_ID,
+                        text=text,
+                        token_budget=4_000,
+                        **filters,
+                    )
+                )
+                self.assertFalse(result.abstained, result.reason)
+                # Most recently changed first, as the listing operations order.
+                self.assertEqual(
+                    [newer, older],
+                    [item.evidence_refs[0].record_id for item in result.items],
+                )
+
+        unfiltered = await service.retrieve(
+            RetrievalQuery(workspace_id=WORKSPACE_ID, text="")
+        )
+        self.assertTrue(unfiltered.abstained)
+        self.assertEqual("NO_CANDIDATES", unfiltered.reason)
+        unmatched = await service.retrieve(
+            RetrievalQuery(
+                workspace_id=WORKSPACE_ID,
+                text="",
+                categories=frozenset({"absent-category"}),
+            )
+        )
+        self.assertTrue(unmatched.abstained)
+        self.assertEqual("NO_CANDIDATES", unmatched.reason)
+
     async def test_new_write_is_recalled_from_stale_active_lexical_delta(self):
         from daem0nmcp.retrieval.runtime import create_retrieval_service
         from daem0nmcp.retrieval.types import RetrievalQuery

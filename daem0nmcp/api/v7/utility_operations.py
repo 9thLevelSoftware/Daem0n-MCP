@@ -27,7 +27,12 @@ from .runtime_protocols import WorkerPool
 from .tasks import await_task_terminal
 from .tools import ContextCompressData, RefactorProposalData, TodoFinding
 
-_TODO_RE = re.compile(r"\b(TODO|FIXME|HACK|XXX|NOTE)\b", re.IGNORECASE)
+# "note" is an ordinary English word, so unlike the other markers it counts
+# only in annotation form: followed by ":" or "(", or written NOTE in capitals.
+_TODO_RE = re.compile(
+    r"\b(?:(TODO|FIXME|HACK|XXX)\b|(NOTE)(?=[:(])|((?-i:NOTE))\b)",
+    re.IGNORECASE,
+)
 _CURSOR_RE = re.compile(r"^cur_v1_([A-Za-z0-9_-]+)_([0-9a-f]{64})$")
 _CODE_SUFFIXES = frozenset(
     {
@@ -274,7 +279,7 @@ def _findings(
             match = _TODO_RE.search(line)
             if match is None:
                 continue
-            todo_type = match.group(1).casefold()
+            todo_type = str(match.group(match.lastindex or 0)).casefold()
             if todo_type not in selected_types:
                 continue
             rendered = line.strip()[:2000]
@@ -347,7 +352,9 @@ def _cursor_offset(secret: bytes, cursor: str, selector_digest: str) -> int:
         or decoded.get("selector") != selector_digest
         or isinstance(decoded.get("offset"), bool)
         or not isinstance(decoded.get("offset"), int)
-        or not 0 < decoded["offset"] <= _MAX_SOURCE_FILES
+        # An offset counts findings, at most one per scanned line, so it is
+        # bounded by the bytes a scan reads and not by the number of files.
+        or not 0 < decoded["offset"] <= _MAX_SOURCE_BYTES
     ):
         raise UtilityOperationError("INVALID_ARGUMENT")
     return int(decoded["offset"])

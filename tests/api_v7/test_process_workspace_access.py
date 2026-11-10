@@ -122,7 +122,7 @@ async def test_real_jwt_workspace_access_and_revocation(tmp_path, issuer):
             {"workspace_id": alpha.workspace_id, "query": "revoked"},
         )
         assert denied["error"]["code"] == "UNAUTHORIZED_WORKSPACE"
-        with pytest.raises(McpError, match="Error reading resource"):
+        with pytest.raises(McpError, match="^Resource unavailable$"):
             await session.read_resource(
                 f"memory://workspaces/{alpha.workspace_id}/warnings"
             )

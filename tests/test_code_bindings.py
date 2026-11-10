@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import os
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import PureWindowsPath
 from threading import Barrier
 from types import SimpleNamespace
 
@@ -114,7 +115,9 @@ def test_capture_shared_source_is_consistent_and_next_capture_is_fresh(
     monkeypatch.setattr(producer_type, "index_source_strict", parse_then_replace)
     captured = capture_bindings(workspace, refs)
     assert path.read_bytes() == replacement
-    assert [(b.relative_file_path, b.qualified_name) for b in captured] == refs
+    assert [(b.relative_file_path, b.qualified_name) for b in captured] == [
+        ("sample.py", name) for _, name in refs
+    ]
     assert captured == old_bindings
     assert capture_bindings(workspace, refs) == new_bindings
 
@@ -320,6 +323,186 @@ def test_exact_identity_takes_precedence_over_short_name_match(workspace):
         evaluator.evaluate(workspace.root, context).applicability
         == "needs_revalidation"
     )
+
+
+_QUALIFIED = (
+    "class AuthService:\n"
+    "    def refresh(self):\n"
+    "        return 1\n"
+    "\n"
+    "    class Token:\n"
+    "        def rotate(self):\n"
+    "            return 2\n"
+    "\n"
+    "class Session:\n"
+    "    def refresh(self):\n"
+    "        return 3\n"
+)
+
+
+@pytest.mark.parametrize(
+    ("name", "exact", "bound_edit"),
+    [
+        ("AuthService.refresh", "login.AuthService.refresh", "return 1"),
+        ("Session.refresh", "login.Session.refresh", "return 3"),
+        ("Token.rotate", "login.AuthService.Token.rotate", "return 2"),
+        ("AuthService.Token.rotate", "login.AuthService.Token.rotate", "return 2"),
+        ("AuthService.Token", "login.AuthService.Token", "return 2"),
+    ],
+)
+def test_qualified_name_without_module_prefix_resolves(
+    workspace, name, exact, bound_edit
+):
+    require_parser()
+    path = workspace.root / "login.py"
+    path.write_text(_QUALIFIED, encoding="utf-8")
+    (binding,) = capture_bindings(workspace, [("login.py", name)])
+    (expected,) = capture_bindings(workspace, [("login.py", exact)])
+    assert binding.qualified_name == name
+    assert binding.fingerprint == expected.fingerprint
+    context = {"code_bindings": [binding.to_json()]}
+    evaluator = BindingEvaluator()
+    assert evaluator.evaluate(workspace.root, context).applicability == "current"
+    for other in ("return 1", "return 2", "return 3"):
+        edit(path, _QUALIFIED.replace(other, "return 9"))
+        result = evaluator.evaluate(workspace.root, context)
+        if other == bound_edit:
+            assert result.applicability == "needs_revalidation"
+            assert result.changed == (f"login.py::{name}",)
+        else:
+            assert result.applicability == "current"
+
+
+def test_ambiguous_qualified_suffix_is_rejected(workspace):
+    require_parser()
+    path = workspace.root / "dup.py"
+    original = (
+        "class A:\n    class Inner:\n        def run(self):\n            return 1\n\n"
+        "class B:\n    class Inner:\n        def run(self):\n            return 2\n"
+    )
+    path.write_text(original, encoding="utf-8")
+    for name in ("Inner.run", "Inner"):
+        with pytest.raises(CodeBindingReferenceError, match="ambiguous"):
+            capture_bindings(workspace, [("dup.py", name)])
+    context = context_for(workspace, [("dup.py", "A.Inner.run")])
+    evaluator = BindingEvaluator()
+    edit(path, original.replace("return 2", "return 3"))
+    assert evaluator.evaluate(workspace.root, context).applicability == "current"
+    edit(path, original.replace("return 1", "return 4"))
+    result = evaluator.evaluate(workspace.root, context)
+    assert result.applicability == "needs_revalidation"
+    assert result.changed == ("dup.py::A.Inner.run",)
+
+
+def test_unique_qualified_suffix_becoming_ambiguous_is_unverifiable(workspace):
+    require_parser()
+    path = workspace.root / "dup.py"
+    original = (
+        "class A:\n    class Inner:\n        def run(self):\n            return 1\n"
+    )
+    path.write_text(original, encoding="utf-8")
+    context = context_for(workspace, [("dup.py", "Inner.run")])
+    edit(
+        path,
+        original
+        + "\nclass B:\n    class Inner:\n        def run(self):\n            return 2\n",
+    )
+    result = BindingEvaluator().evaluate(workspace.root, context)
+    assert result.applicability == "unverifiable"
+    assert result.changed == ()
+
+
+@pytest.mark.parametrize(
+    "name",
+    ["Service.refresh", "Missing.refresh", "AuthService.missing", "login.refresh"],
+)
+def test_qualified_suffix_matches_whole_components_only(workspace, name):
+    require_parser()
+    (workspace.root / "login.py").write_text(_QUALIFIED, encoding="utf-8")
+    with pytest.raises(CodeBindingError, match="bound symbol is missing") as caught:
+        capture_bindings(workspace, [("login.py", name)])
+    assert not isinstance(
+        caught.value, (CodeBindingReferenceError, CodeBindingUnavailableError)
+    )
+
+
+@pytest.mark.parametrize(
+    ("filename", "source"),
+    [
+        (
+            "Server.py",
+            "class Server:\n    def start(self):\n        return 1\n\n"
+            "def start():\n    return 2\n",
+        ),
+        (
+            "Server.ts",
+            "class Server {\n  start() { return 1; }\n}\n"
+            "function start() { return 2; }\n",
+        ),
+    ],
+    ids=["python", "typescript"],
+)
+def test_qualified_name_matching_exact_and_suffix_identities_is_ambiguous(
+    workspace, filename, source
+):
+    require_parser()
+    if not filename.endswith(".py"):
+        producer = discovery_operations.default_code_indexer_factory()
+        if ".ts" not in producer.get_supported_extensions():
+            pytest.skip("typescript parser unavailable")
+    path = workspace.root / filename
+    path.write_text(source, encoding="utf-8")
+    # ``Server.start`` is the identity of the top-level function and also
+    # names the method ``Server.Server.start`` without its module prefix.
+    with pytest.raises(CodeBindingReferenceError, match="ambiguous"):
+        capture_bindings(workspace, [(filename, "Server.start")])
+    context = context_for(workspace, [(filename, "Server.Server.start")])
+    evaluator = BindingEvaluator()
+    edit(path, source.replace("return 2", "return 8"))
+    assert evaluator.evaluate(workspace.root, context).applicability == "current"
+    edit(path, source.replace("return 1", "return 9"))
+    result = evaluator.evaluate(workspace.root, context)
+    assert result.applicability == "needs_revalidation"
+    assert result.changed == (f"{filename}::Server.Server.start",)
+
+
+def test_exact_identity_gaining_a_suffix_namesake_is_unverifiable(workspace):
+    require_parser()
+    path = workspace.root / "Server.py"
+    original = "def start():\n    return 2\n"
+    path.write_text(original, encoding="utf-8")
+    context = context_for(workspace, [("Server.py", "Server.start")])
+    evaluator = BindingEvaluator()
+    assert evaluator.evaluate(workspace.root, context).applicability == "current"
+    edit(path, original + "\nclass Server:\n    def start(self):\n        return 1\n")
+    result = evaluator.evaluate(workspace.root, context)
+    assert result.applicability == "unverifiable"
+    assert result.changed == ()
+
+
+def test_entity_name_keeps_precedence_over_qualified_suffix(workspace, monkeypatch):
+    path = workspace.root / "sample.py"
+    path.write_text("first\nsecond\n", encoding="utf-8")
+    entities = [
+        {"name": "a.b", "qualified_name": "sample.x", "line_start": 1, "line_end": 1},
+        {"name": "c", "qualified_name": "sample.a.b", "line_start": 2, "line_end": 2},
+    ]
+    monkeypatch.setattr(
+        discovery_operations,
+        "default_code_indexer_factory",
+        lambda: SimpleNamespace(
+            available=True,
+            get_supported_extensions=lambda: {".py"},
+            index_source_strict=lambda *_: entities,
+        ),
+    )
+    # An entity literally named ``a.b`` and another whose identity ends in
+    # ``.a.b`` compete for the same reference; the name tier is consulted first.
+    (named,) = capture_bindings(workspace, [("sample.py", "a.b")])
+    assert named.fingerprint == hashlib.sha256(b"first").hexdigest()
+    del entities[0]
+    (suffix,) = capture_bindings(workspace, [("sample.py", "a.b")])
+    assert suffix.fingerprint == hashlib.sha256(b"second").hexdigest()
 
 
 @pytest.mark.parametrize("nested_first", [False, True])
@@ -534,6 +717,174 @@ def test_typescript_decorator_owns_intervening_comment(
     assert evaluator.evaluate(workspace.root, ordinary).applicability == "current"
 
 
+_RUST_ATTRIBUTED = (
+    "pub struct Service;\n"
+    "\n"
+    "impl Service {\n"
+    "    #[inline]\n"
+    "    pub fn target(&self) -> i32 {\n"
+    "        #![allow(unused)]\n"
+    "        1\n"
+    "    }\n"
+    "\n"
+    "    #[cfg(test)]\n"
+    "    // attached comment\n"
+    "    fn gated(&self) -> i32 {\n"
+    "        2\n"
+    "    }\n"
+    "\n"
+    "    #[inline]\n"
+    "    fn sibling(&self) -> i32 {\n"
+    "        3\n"
+    "    }\n"
+    "}\n"
+    "\n"
+    "#[derive(Debug)]\n"
+    "/// A point.\n"
+    "#[repr(C)]\n"
+    "pub struct Point {\n"
+    "    x: i32,\n"
+    "}\n"
+)
+
+
+@pytest.mark.parametrize(
+    ("name", "old", "new"),
+    [
+        (
+            "sample.Service.target",
+            "    #[inline]\n    pub fn",
+            "    #[cold]\n    pub fn",
+        ),
+        ("sample.Service.target", "    #[inline]\n    pub fn", "    pub fn"),
+        ("sample.Service.gated", "#[cfg(test)]", "#[cfg(not(test))]"),
+        ("sample.Service.gated", "attached comment", "changed attached comment"),
+        ("sample.Point", "#[derive(Debug)]", "#[derive(Debug, Clone)]"),
+        ("sample.Point", "#[repr(C)]", "#[repr(packed)]"),
+        ("Point", "#[derive(Debug)]\n", ""),
+        ("sample.Service.target", "#![allow(unused)]", "#![allow(dead_code)]"),
+    ],
+)
+def test_rust_attribute_changes_revalidate_binding(workspace, name, old, new):
+    require_parser()
+    path = workspace.root / "sample.rs"
+    assert _RUST_ATTRIBUTED.count(old) == 1
+    path.write_text(_RUST_ATTRIBUTED, encoding="utf-8")
+    context = context_for(workspace, [("sample.rs", name)])
+    evaluator = BindingEvaluator()
+    assert evaluator.evaluate(workspace.root, context).applicability == "current"
+    edit(path, _RUST_ATTRIBUTED.replace(old, new))
+    result = evaluator.evaluate(workspace.root, context)
+    assert result.applicability == "needs_revalidation"
+    assert result.changed == (f"sample.rs::{name}",)
+
+
+def test_rust_sibling_attribute_does_not_revalidate_binding(workspace):
+    require_parser()
+    path = workspace.root / "sample.rs"
+    original = (
+        "#![allow(dead_code)]\n"
+        "// ordinary comment\n"
+        "fn target() -> i32 {\n"
+        "    1\n"
+        "}\n"
+        "\n"
+        "#[inline]\n"
+        "fn sibling() -> i32 {\n"
+        "    2\n"
+        "}\n"
+        "\n"
+        "mod inner {\n"
+        "    #![allow(unused)]\n"
+        "}\n"
+        "\n"
+        "fn after() -> i32 {\n"
+        "    3\n"
+        "}\n"
+    )
+    path.write_text(original, encoding="utf-8")
+    refs = [("sample.rs", "sample.target"), ("sample.rs", "sample.after")]
+    context = context_for(workspace, refs)
+    evaluator = BindingEvaluator()
+    for old, new in [
+        ("#[inline]", "#[cold]"),
+        ("#![allow(dead_code)]", "#![allow(unused_variables)]"),
+        ("#![allow(unused)]", "#![allow(unused_imports)]"),
+        ("ordinary comment", "changed ordinary comment"),
+    ]:
+        edit(path, original.replace(old, new))
+        assert evaluator.evaluate(workspace.root, context).applicability == "current"
+    edit(path, original.replace("    1\n", "    4\n"))
+    result = evaluator.evaluate(workspace.root, context)
+    assert result.changed == ("sample.rs::sample.target",)
+
+
+def test_rust_attribute_revalidates_fallback_binding(workspace, monkeypatch):
+    # Without the entity query the tree walk still names enums, traits and impls.
+    require_parser()
+    monkeypatch.delitem(code_indexer.ENTITY_QUERIES, "rust")
+    path = workspace.root / "sample.rs"
+    original = (
+        "#[derive(Debug)]\n"
+        "/* attached */\n"
+        "pub enum Mode {\n"
+        "    On,\n"
+        "}\n"
+        "\n"
+        "#[derive(Debug)]\n"
+        "pub enum Other {\n"
+        "    Off,\n"
+        "}\n"
+    )
+    path.write_text(original, encoding="utf-8")
+    context = context_for(workspace, [("sample.rs", "sample.Mode")])
+    evaluator = BindingEvaluator()
+    edit(path, original.replace("#[derive(Debug)]\npub enum Other", "pub enum Other"))
+    assert evaluator.evaluate(workspace.root, context).applicability == "current"
+    edit(path, original.replace("#[derive(Debug)]\n/*", "#[derive(Clone)]\n/*"))
+    result = evaluator.evaluate(workspace.root, context)
+    assert result.applicability == "needs_revalidation"
+    assert result.changed == ("sample.rs::sample.Mode",)
+
+
+def test_legacy_attributed_rust_binding_requires_revalidation_once(workspace):
+    require_parser()
+    path = workspace.root / "sample.rs"
+    path.write_text(
+        "#[inline]\nfn target() -> i32 {\n    1\n}\n\nfn plain() -> i32 {\n    2\n}\n",
+        encoding="utf-8",
+    )
+    refs = [("sample.rs", "sample.target"), ("sample.rs", "sample.plain")]
+    legacy = {
+        "code_bindings": [
+            {
+                "relative_file_path": "sample.rs",
+                "qualified_name": "sample.target",
+                "fingerprint": hashlib.sha256(
+                    b"fn target() -> i32 {\n    1\n}"
+                ).hexdigest(),
+                "head_commit": None,
+            },
+            {
+                "relative_file_path": "sample.rs",
+                "qualified_name": "sample.plain",
+                "fingerprint": hashlib.sha256(
+                    b"fn plain() -> i32 {\n    2\n}"
+                ).hexdigest(),
+                "head_commit": None,
+            },
+        ]
+    }
+    result = BindingEvaluator().evaluate(workspace.root, legacy)
+    assert result.applicability == "needs_revalidation"
+    assert result.changed == ("sample.rs::sample.target",)
+    rebound = context_for(workspace, refs)
+    assert (
+        BindingEvaluator().evaluate(workspace.root, rebound).applicability == "current"
+    )
+    assert rebound["code_bindings"][1] == legacy["code_bindings"][1]
+
+
 @pytest.mark.parametrize("extension", ["py", "ts"])
 def test_query_and_fallback_bindings_are_interchangeable(
     workspace, monkeypatch, extension
@@ -657,6 +1008,111 @@ def test_legacy_decorated_binding_requires_revalidation(workspace, monkeypatch):
 def test_capture_rejects_workspace_escape(workspace):
     with pytest.raises(CodeBindingError):
         capture_bindings(workspace, [("../outside.py", None)])
+
+
+_PATH_SPELLINGS = [
+    str(PureWindowsPath("src", "auth", "login.py")),
+    "./src/auth/login.py",
+    ".\\src\\auth\\login.py",
+    "src//auth/login.py",
+    "src/./auth/login.py",
+    "src\\auth//./login.py",
+]
+
+
+@pytest.mark.parametrize("spelling", _PATH_SPELLINGS)
+def test_capture_normalizes_binding_path_spelling(workspace, spelling):
+    path = workspace.root / "src" / "auth" / "login.py"
+    path.parent.mkdir(parents=True)
+    path.write_text("VALUE = 1\n", encoding="utf-8")
+    (canonical,) = capture_bindings(workspace, [("src/auth/login.py", None)])
+    (binding,) = capture_bindings(workspace, [(spelling, None)])
+    assert binding == canonical
+    assert binding.relative_file_path == "src/auth/login.py"
+
+
+@pytest.mark.parametrize("spelling", _PATH_SPELLINGS)
+@pytest.mark.parametrize("name", [None, "target"])
+def test_stored_binding_path_spelling_does_not_change_validity(
+    workspace, spelling, name
+):
+    if name is not None:
+        require_parser()
+    path = workspace.root / "src" / "auth" / "login.py"
+    path.parent.mkdir(parents=True)
+    original = "def target():\n    return 1\n"
+    path.write_text(original, encoding="utf-8")
+    (canonical,) = capture_bindings(workspace, [("src/auth/login.py", name)])
+    # A binding captured before paths were normalized keeps the typed spelling.
+    stored = {
+        "code_bindings": [{**canonical.to_json(), "relative_file_path": spelling}]
+    }
+    assert binding_refs_from_context(stored) == (("src/auth/login.py", name),)
+    evaluator = BindingEvaluator()
+    result = evaluator.evaluate(workspace.root, stored)
+    assert result.applicability == "current"
+    assert result.changed == ()
+    edit(path, original.replace("return 1", "return 2"))
+    result = evaluator.evaluate(workspace.root, stored)
+    assert result.applicability == "needs_revalidation"
+    label = "src/auth/login.py" + ("" if name is None else "::target")
+    assert result.changed == (label,)
+    (rebound,) = capture_bindings(workspace, binding_refs_from_context(stored))
+    assert rebound.relative_file_path == "src/auth/login.py"
+
+
+@pytest.mark.parametrize(
+    "relative",
+    [
+        str(PureWindowsPath("C:/proj/login.py")),
+        "C:/proj/login.py",
+        "C:login.py",
+        str(PureWindowsPath("//server/share/login.py")),
+        "//server/share/login.py",
+        "\\login.py",
+        "/login.py",
+        str(PureWindowsPath("src", "..", "..", "login.py")),
+        "src/../login.py",
+        "./../login.py",
+    ],
+)
+def test_rooted_and_escaping_binding_paths_stay_rejected(workspace, relative):
+    (workspace.root / "login.py").write_text("VALUE = 1\n", encoding="utf-8")
+    with pytest.raises(CodeBindingError, match="reference is invalid"):
+        capture_bindings(workspace, [(relative, None)])
+    context = {
+        "code_bindings": [
+            {
+                "relative_file_path": relative,
+                "qualified_name": None,
+                "fingerprint": "0" * 64,
+                "head_commit": None,
+            }
+        ]
+    }
+    with pytest.raises(CodeBindingError, match="reference is invalid"):
+        binding_refs_from_context(context)
+    with pytest.raises(CodeBindingError, match="reference is invalid"):
+        BindingEvaluator().evaluate(workspace.root, context)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="symlink creation needs privileges")
+def test_normalized_binding_path_still_refuses_symlink_escape(
+    workspace, tmp_path_factory
+):
+    outside = tmp_path_factory.mktemp("outside") / "secret.py"
+    outside.write_text("VALUE = 1\n", encoding="utf-8")
+    (workspace.root / "src").mkdir()
+    (workspace.root / "src" / "link.py").symlink_to(outside)
+    (workspace.root / "src" / "real.py").write_text("VALUE = 2\n", encoding="utf-8")
+    # The same spellings reach a regular file, so the refusals below are of
+    # the resolved link and not of a path that was never found.
+    for relative in ("src/real.py", "./src//real.py", "src\\real.py"):
+        (binding,) = capture_bindings(workspace, [(relative, None)])
+        assert binding.relative_file_path == "src/real.py"
+    for relative in ("src/link.py", "./src//link.py", "src\\link.py"):
+        with pytest.raises(CodeBindingError, match="outside the workspace"):
+            capture_bindings(workspace, [(relative, None)])
 
 
 def test_capture_rejects_oversized_file(workspace):

@@ -15,7 +15,12 @@ from pydantic import ValidationError
 
 from ...covenant import CovenantGate, InvocationScope
 from ...workspace import Workspace
-from .ceremony import CovenantCeremony
+from .ceremony import (
+    CAPACITY_MESSAGE,
+    CAPACITY_RETRY_AFTER_MS,
+    CovenantCeremony,
+    is_capacity_violation,
+)
 from .errors import (
     DATABASE_IN_USE_RETRY_AFTER_MS,
     ErrorCode,
@@ -288,6 +293,13 @@ class V7ToolRouter:
                             },
                             counsel=outcome.challenge,
                         )
+            if is_capacity_violation(violation):
+                return response.failure(
+                    ErrorCode.CAPABILITY_DEGRADED,
+                    CAPACITY_MESSAGE,
+                    retryable=True,
+                    retry_after_ms=CAPACITY_RETRY_AFTER_MS,
+                )
             if violation is not None:
                 code = str(violation.get("violation", "INTERNAL_ERROR"))
                 if code not in _VIOLATION_MESSAGES:

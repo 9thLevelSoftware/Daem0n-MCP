@@ -34,7 +34,44 @@ from .specialized import (
     TemporalProvider,
 )
 
-_TOKEN = re.compile(r"\w+|[^\w\s]", re.UNICODE)
+# Scripts written without spaces between words.  A whole unbroken run of them
+# is one ``\w+`` match, yet a model tokenizer spends about one token or more
+# per character, so each of these characters counts as its own token.
+# Over-counting is safe for a budget; under-counting is not.
+_UNSEGMENTED_SCRIPT_CHARS = (
+    "\u0e00-\u0eff"  # Thai, Lao
+    "\u0f00-\u0fff"  # Tibetan
+    "\u1000-\u109f"  # Myanmar
+    "\u1100-\u11ff"  # Hangul Jamo
+    "\u1780-\u17ff"  # Khmer
+    "\u1950-\u19df"  # Tai Le, New Tai Lue
+    "\u1a20-\u1aaf"  # Tai Tham
+    "\u1b00-\u1b7f"  # Balinese
+    "\u3005-\u3007"  # CJK iteration mark, closing mark, zero
+    "\u3040-\u30ff"  # Hiragana, Katakana
+    "\u3100-\u312f"  # Bopomofo
+    "\u3130-\u318f"  # Hangul compatibility Jamo
+    "\u31a0-\u31bf"  # Bopomofo extended
+    "\u31f0-\u31ff"  # Katakana phonetic extensions
+    "\u3400-\u4dbf"  # CJK unified ideographs extension A
+    "\u4e00-\u9fff"  # CJK unified ideographs
+    "\ua000-\ua4cf"  # Yi
+    "\ua960-\ua97f"  # Hangul Jamo extended A
+    "\ua980-\ua9df"  # Javanese
+    "\uaa80-\uaadf"  # Tai Viet
+    "\uac00-\ud7ff"  # Hangul syllables, Jamo extended B
+    "\uf900-\ufaff"  # CJK compatibility ideographs
+    "\uff66-\uff9f"  # Halfwidth Katakana
+    "\uffa0-\uffdc"  # Halfwidth Hangul
+    "\U00016fe0-\U00018dff"  # Tangut, Khitan small script
+    "\U0001aff0-\U0001b2ff"  # Kana extensions, Nushu
+    "\U00020000-\U0003ffff"  # CJK unified ideographs extensions B and later
+)
+# Text in every other script tokenizes exactly as ``\w+|[^\w\s]`` does.
+_TOKEN = re.compile(
+    f"[{_UNSEGMENTED_SCRIPT_CHARS}]|[^\\W{_UNSEGMENTED_SCRIPT_CHARS}]+|[^\\w\\s]",
+    re.UNICODE,
+)
 _WORKSPACE_ID = re.compile(r"^ws_[0-9a-f]{24}$")
 _RUNTIME_JOB_WORKERS = BoundedWorkerPool(
     max_workers=1,
@@ -101,6 +138,22 @@ def _effective_capability_statuses(
 
 def _profile_ready(statuses: Mapping[str, str], name: str) -> bool:
     return statuses.get(name) == "ready"
+
+
+def _defer_due_dense_gc(connection: sqlite3.Connection, error_code: str) -> None:
+    """Keep due cleanup durable and give the scheduler a bounded retry deadline."""
+
+    deferred_at_us = time.time_ns() // 1_000
+    retry_at_us = deferred_at_us + int(_PROJECTION_RETRY_MAX_SECONDS * 1_000_000)
+    connection.execute(
+        "UPDATE dense_generation_gc_jobs SET status='queued',"
+        "available_at_us=?,claim_owner=NULL,claim_token=NULL,"
+        "claim_expires_at_us=NULL,last_error_code=?,updated_at_us=? WHERE "
+        "(status='queued' AND available_at_us<=?) OR "
+        "(status='running' AND claim_expires_at_us<=?)",
+        (retry_at_us, error_code, deferred_at_us, deferred_at_us, deferred_at_us),
+    )
+    connection.commit()
 
 
 def _dense_gc_schema_available(connection: sqlite3.Connection) -> bool:
@@ -451,6 +504,7 @@ def create_retrieval_service(
         "lexical": LexicalProvider(
             connection_factory=connection_factory,
             timeout_seconds=min(float(timeout), 60.0),
+            content_tiering=bool(getattr(config, "lexical_content_tiering", False)),
         ),
         "temporal": TemporalProvider(connection_factory=connection_factory),
         "procedure": ProcedureProvider(connection_factory=connection_factory),
@@ -686,34 +740,28 @@ def _drain_projection_jobs_sync(
             get_client = getattr(dense_builder, "_get_client", None)
             if not callable(get_client):
                 raise RuntimeError("dense projection provider is unavailable")
-            DenseGenerationGarbageCollector(
-                connection,
-                client=get_client(),
-                cancelled=(
-                    cancellation_event.is_set
-                    if cancellation_event is not None
-                    else None
-                ),
-            ).run_slice(max_generations=max_jobs)
+            try:
+                client = get_client()
+            except Exception as exc:
+                if getattr(exc, "code", None) != "DENSE_STORAGE_LOCKED":
+                    raise
+                # Another process holds the local folder; cleanup waits for it.
+                _defer_due_dense_gc(connection, "DENSE_GENERATION_GC_STORAGE_LOCKED")
+            else:
+                DenseGenerationGarbageCollector(
+                    connection,
+                    client=client,
+                    cancelled=(
+                        cancellation_event.is_set
+                        if cancellation_event is not None
+                        else None
+                    ),
+                ).run_slice(max_generations=max_jobs)
         elif include_optional and gc_due is not None:
             # The configured profile cannot currently construct the provider.
             # Preserve the durable job and give the scheduler a bounded retry
             # deadline instead of spinning on an immediately-due row.
-            deferred_at_us = time.time_ns() // 1_000
-            retry_at_us = deferred_at_us + int(
-                _PROJECTION_RETRY_MAX_SECONDS * 1_000_000
-            )
-            connection.execute(
-                "UPDATE dense_generation_gc_jobs SET status='queued',"
-                "available_at_us=?,claim_owner=NULL,claim_token=NULL,"
-                "claim_expires_at_us=NULL,"
-                "last_error_code='DENSE_GENERATION_GC_CAPABILITY_DISABLED',"
-                "updated_at_us=? WHERE "
-                "(status='queued' AND available_at_us<=?) OR "
-                "(status='running' AND claim_expires_at_us<=?)",
-                (retry_at_us, deferred_at_us, deferred_at_us, deferred_at_us),
-            )
-            connection.commit()
+            _defer_due_dense_gc(connection, "DENSE_GENERATION_GC_CAPABILITY_DISABLED")
         return tuple(runs)
     finally:
         close = getattr(builders, "close", None)

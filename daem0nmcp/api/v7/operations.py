@@ -258,7 +258,9 @@ def _portable_failure_code(error: BaseException, operation: str) -> str:
     while cause is not None and id(cause) not in seen:
         seen.add(id(cause))
         if is_database_busy(cause):
-            _LOGGER.warning("%s deferred: %s", operation, cause)
+            # The text, not the exception: a log record that keeps the error
+            # keeps its traceback, and with it every frame's open cursors.
+            _LOGGER.warning("%s deferred: %s", operation, str(cause))
             return "DATABASE_IN_USE"
         cause = cause.__cause__
     _LOGGER.warning(
@@ -273,6 +275,9 @@ def _verify_schema(connection: sqlite3.Connection) -> None:
             "SELECT COALESCE(MAX(version),0) FROM schema_version"
         ).fetchone()
     except sqlite3.Error as exc:
+        if is_database_busy(exc):
+            # A writer holding the database is transient; say so.
+            raise CoreOperationError("DATABASE_IN_USE") from exc
         raise CoreOperationError("CAPABILITY_DEGRADED") from exc
     if row is None or type(row[0]) is not int or row[0] != _SCHEMA_VERSION:
         raise CoreOperationError("CAPABILITY_DEGRADED")
@@ -309,6 +314,8 @@ def _active_connection(
     except PointerValidationError as exc:
         raise CoreOperationError("CAPABILITY_DEGRADED") from exc
     except sqlite3.Error as exc:
+        if is_database_busy(exc):
+            raise CoreOperationError("DATABASE_IN_USE") from exc
         raise CoreOperationError("CAPABILITY_DEGRADED") from exc
 
 
@@ -746,6 +753,43 @@ def _first_occurred_at(
     return row[0]
 
 
+def _earliest_later_occurrence(
+    connection: sqlite3.Connection,
+    workspace_id: str,
+    record_id: str,
+    events: Sequence[Mapping[str, Any]],
+) -> dict[int, int | None]:
+    """Map each loaded version to the earliest occurrence recorded after it.
+
+    Every event carries the whole record, so a version stops being valid at
+    the earliest occurrence time among the events appended after it, however
+    many versions later that event is.  The events after the loaded ones are
+    reduced to their minimum by one aggregate, so no further row is fetched.
+    """
+
+    if not events:
+        return {}
+    last_version = int(events[-1]["stream_version"])
+    minimum, count, highest, untyped = connection.execute(
+        "SELECT MIN(occurred_at_us),COUNT(*),MAX(stream_version),"
+        "COALESCE(SUM(typeof(occurred_at_us)<>'integer'),0) "
+        "FROM memory_events WHERE workspace_id=? AND stream_id=? "
+        "AND stream_kind='memory' AND stream_version>?",
+        (workspace_id, record_id, last_version),
+    ).fetchone()
+    running: int | None = None
+    if count:
+        if untyped or type(minimum) is not int or highest != last_version + count:
+            raise CoreOperationError("IMPORT_INVALID")
+        running = minimum
+    earliest: dict[int, int | None] = {}
+    for event in reversed(events):
+        earliest[int(event["stream_version"])] = running
+        occurred_at_us = int(event["occurred_at_us"])
+        running = occurred_at_us if running is None else min(running, occurred_at_us)
+    return earliest
+
+
 def _versions_sync(
     dependencies: CoreOperationDependencies,
     workspace: Workspace,
@@ -792,14 +836,23 @@ def _versions_sync(
             expected_version += 1
         truncated = len(events) > request.limit
         selected = events[: request.limit]
+        later_occurred = _earliest_later_occurrence(
+            connection, workspace.workspace_id, request.record_id, events
+        )
         items: list[MemoryVersionView] = []
         for index, event in enumerate(selected):
             next_event = events[index + 1] if index + 1 < len(events) else None
             valid_to = None
-            if next_event is not None:
-                if next_event["occurred_at_us"] <= event["occurred_at_us"]:
-                    raise CoreOperationError("IMPORT_INVALID")
-                valid_to = _utc_from_us(next_event["occurred_at_us"])
+            superseded_from = later_occurred[int(event["stream_version"])]
+            if superseded_from is not None:
+                # Versions are listed in the order they were recorded, and a
+                # later one may carry an earlier occurrence time (a backdated
+                # outcome, or a record first stored with a future time).  It
+                # then replaces this version from before it began, which
+                # leaves this version an empty validity interval.
+                valid_to = _utc_from_us(
+                    max(superseded_from, int(event["occurred_at_us"]))
+                )
             items.append(
                 MemoryVersionView(
                     version_id=_version_id(event),
@@ -850,7 +903,11 @@ def _at_time_sync(
             f"SELECT {_EVENT_COLUMNS} FROM memory_events "
             "WHERE workspace_id=? AND stream_id=? AND stream_kind='memory' "
             "AND occurred_at_us<=? AND recorded_at_us<=? "
-            "ORDER BY occurred_at_us DESC,stream_version DESC LIMIT 1",
+            # Among the versions that had occurred and were known by then,
+            # the one recorded last is the state: every event carries the
+            # whole record, so an earlier-recorded version with a later
+            # occurrence time would drop what was recorded after it.
+            "ORDER BY stream_version DESC LIMIT 1",
             (
                 workspace.workspace_id,
                 request.record_id,
@@ -1771,10 +1828,7 @@ def _covenant_status(
             raw_briefed_at = status.get("briefed_at")
             briefed = status.get("briefed") is True
             if briefed and type(raw_briefed_at) is int:
-                briefed_at = datetime.fromtimestamp(
-                    raw_briefed_at,
-                    tz=timezone.utc,
-                )
+                briefed_at = dependencies.covenant_gate.wall_instant(raw_briefed_at)
             elif briefed:
                 briefed = False
         except Exception:

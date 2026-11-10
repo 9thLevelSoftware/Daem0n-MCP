@@ -326,11 +326,7 @@ class LexicalProjectionTests(unittest.IsolatedAsyncioTestCase):
         self.connection.commit()
 
         result = await LexicalProvider(self.connection).search(
-            RetrievalQuery(
-                workspace_id=WORKSPACE_ID,
-                text="ssrf controls",
-                tags=frozenset({"ssrf"}),
-            ),
+            RetrievalQuery(workspace_id=WORKSPACE_ID, text="ssrf controls"),
             10,
         )
 
@@ -338,6 +334,21 @@ class LexicalProjectionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             {tag_match, content_match},
             {candidate.evidence.record_id for candidate in result.candidates},
+        )
+
+        # A tag filter scopes the candidates themselves; the record without
+        # the tag would only be rejected by the policy afterwards.
+        scoped = await LexicalProvider(self.connection).search(
+            RetrievalQuery(
+                workspace_id=WORKSPACE_ID,
+                text="ssrf controls",
+                tags=frozenset({"ssrf"}),
+            ),
+            10,
+        )
+        self.assertEqual(
+            [tag_match],
+            [candidate.evidence.record_id for candidate in scoped.candidates],
         )
 
     async def test_multi_term_queries_prefer_complete_matches_before_or_fallback(self):
@@ -367,6 +378,7 @@ class LexicalProjectionTests(unittest.IsolatedAsyncioTestCase):
             RetrievalQuery(
                 workspace_id=WORKSPACE_ID,
                 text="deprecated TF-IDF fallback",
+                include_archived=True,
             ),
             10,
         )
@@ -376,6 +388,181 @@ class LexicalProjectionTests(unittest.IsolatedAsyncioTestCase):
             [complete],
             [candidate.evidence.record_id for candidate in result.candidates],
         )
+
+        # Excluded from the candidates, the archived complete match still ends
+        # the ladder before the one-token hit.
+        excluded = await LexicalProvider(self.connection).search(
+            RetrievalQuery(
+                workspace_id=WORKSPACE_ID,
+                text="deprecated TF-IDF fallback",
+            ),
+            10,
+        )
+        self.assertEqual("ready", excluded.status)
+        self.assertEqual((), excluded.candidates)
+
+    async def test_archived_documents_do_not_take_candidate_slots(self):
+        """Archived records must not crowd out or hide the live matches."""
+
+        from daem0nmcp.retrieval.projections import LexicalProjectionBuilder
+        from daem0nmcp.retrieval.providers import LexicalProvider
+        from daem0nmcp.retrieval.types import RetrievalQuery
+
+        # The live record is the weakest match of the scope.
+        live = self._append_record(
+            "a", "alpha " + "filler " * 40, "", ["scoped"], record_type="warning"
+        )
+        archived = [
+            self._append_record(
+                suffix,
+                "alpha alpha",
+                "",
+                ["scoped"],
+                record_type="warning",
+                archived=True,
+            )
+            for suffix in "bcdef"
+        ]
+        archived_only = self._append_record(
+            "9", "Postgres pooling notes", "", ["database"], archived=True
+        )
+        LexicalProjectionBuilder(self.connection).rebuild(WORKSPACE_ID)
+        self.connection.commit()
+        provider = LexicalProvider(self.connection)
+
+        for name, text, filters in (
+            ("search", "alpha", {}),
+            ("tag search", "alpha", {"tags": frozenset({"scoped"})}),
+            ("tag listing", "", {"tags": frozenset({"scoped"})}),
+            ("category listing", "  ", {"categories": frozenset({"warning"})}),
+        ):
+            with self.subTest(case=name):
+                result = await provider.search(
+                    RetrievalQuery(
+                        workspace_id=WORKSPACE_ID,
+                        text=text,
+                        limit=3,
+                        candidate_limit=3,
+                        **filters,
+                    ),
+                    3,
+                )
+                self.assertEqual("ready", result.status)
+                self.assertEqual(
+                    [live],
+                    [candidate.evidence.record_id for candidate in result.candidates],
+                )
+                included = await provider.search(
+                    RetrievalQuery(
+                        workspace_id=WORKSPACE_ID,
+                        text=text,
+                        limit=3,
+                        candidate_limit=3,
+                        include_archived=True,
+                        **filters,
+                    ),
+                    3,
+                )
+                self.assertEqual(3, len(included.candidates))
+                self.assertTrue(
+                    {candidate.evidence.record_id for candidate in included.candidates}
+                    & set(archived)
+                )
+
+        # An archived match is not reached through any rung of the ladder.
+        for text in ("postgres", "postgres timeout errors"):
+            with self.subTest(text=text):
+                result = await provider.search(
+                    RetrievalQuery(workspace_id=WORKSPACE_ID, text=text), 10
+                )
+                self.assertEqual("ready", result.status)
+                self.assertEqual((), result.candidates)
+                included = await provider.search(
+                    RetrievalQuery(
+                        workspace_id=WORKSPACE_ID, text=text, include_archived=True
+                    ),
+                    10,
+                )
+                self.assertEqual(
+                    [archived_only],
+                    [candidate.evidence.record_id for candidate in included.candidates],
+                )
+
+    async def test_default_ranking_is_weighted_bm25_including_tags(self):
+        """An off-topic body match must not outrank the record tagged for it."""
+
+        from daem0nmcp.retrieval.projections import LexicalProjectionBuilder
+        from daem0nmcp.retrieval.providers import LexicalProvider
+        from daem0nmcp.retrieval.types import RetrievalQuery
+
+        off_topic = self._append_record(
+            "a",
+            "Cafeteria rotation policy for the lunch shift is reviewed by "
+            "facilities each quarter",
+            "",
+            [],
+        )
+        tagged = self._append_record(
+            "b",
+            "Refresh signing keys every ninety days",
+            "",
+            ["jwt", "token-rotation"],
+        )
+        self._append_record("c", "Graph traversal is bounded", "", ["graph"])
+        self._append_record("d", "SQLite WAL transactions", "", ["storage"])
+        self._append_record("e", "Dense vectors are rebuilt", "", ["vectors"])
+        LexicalProjectionBuilder(self.connection).rebuild(WORKSPACE_ID)
+        self.connection.commit()
+        query = RetrievalQuery(workspace_id=WORKSPACE_ID, text="jwt rotation policy")
+
+        result = await LexicalProvider(self.connection).search(query, 10)
+
+        self.assertEqual("ready", result.status)
+        self.assertEqual(
+            [tagged, off_topic],
+            [candidate.evidence.record_id for candidate in result.candidates],
+        )
+        self.assertGreater(
+            result.candidates[0].raw_score, result.candidates[1].raw_score
+        )
+
+        explicit_off = await LexicalProvider(
+            self.connection, content_tiering=False
+        ).search(query, 10)
+        self.assertEqual(result.candidates, explicit_off.candidates)
+
+        tiered = await LexicalProvider(self.connection, content_tiering=True).search(
+            query, 10
+        )
+        self.assertEqual(
+            [off_topic, tagged],
+            [candidate.evidence.record_id for candidate in tiered.candidates],
+        )
+        self.assertEqual(
+            {item.evidence.record_id: item.raw_score for item in result.candidates},
+            {item.evidence.record_id: item.raw_score for item in tiered.candidates},
+        )
+
+    def test_content_tiering_defaults_off_and_follows_the_setting(self):
+        from unittest.mock import patch
+
+        from daem0nmcp.config import Settings, settings
+        from daem0nmcp.retrieval.providers import LexicalProvider
+
+        self.assertFalse(Settings.model_fields["lexical_content_tiering"].default)
+        with patch.dict(
+            "os.environ", {"DAEM0NMCP_LEXICAL_CONTENT_TIERING": "true"}, clear=False
+        ):
+            self.assertTrue(Settings(_env_file=None).lexical_content_tiering)
+        with patch.object(settings, "lexical_content_tiering", True):
+            self.assertTrue(LexicalProvider(self.connection)._content_tiering)
+            self.assertFalse(
+                LexicalProvider(self.connection, content_tiering=False)._content_tiering
+            )
+        with patch.object(settings, "lexical_content_tiering", False):
+            self.assertFalse(LexicalProvider(self.connection)._content_tiering)
+        with self.assertRaises(ValueError):
+            LexicalProvider(self.connection, content_tiering="yes")
 
     async def test_content_and_rationale_matches_precede_tag_only_matches(self):
         from daem0nmcp.retrieval.projections import LexicalProjectionBuilder
@@ -402,7 +589,7 @@ class LexicalProjectionTests(unittest.IsolatedAsyncioTestCase):
         )
         LexicalProjectionBuilder(self.connection).rebuild(WORKSPACE_ID)
         self.connection.commit()
-        provider = LexicalProvider(self.connection)
+        provider = LexicalProvider(self.connection, content_tiering=True)
         query = RetrievalQuery(
             workspace_id=WORKSPACE_ID, text="checkpoint journal recovery"
         )
@@ -451,7 +638,7 @@ class LexicalProjectionTests(unittest.IsolatedAsyncioTestCase):
         LexicalProjectionBuilder(self.connection).rebuild(WORKSPACE_ID)
         self.connection.commit()
 
-        result = await LexicalProvider(self.connection).search(
+        result = await LexicalProvider(self.connection, content_tiering=True).search(
             RetrievalQuery(workspace_id=WORKSPACE_ID, text="rotate signing keys"),
             10,
         )
@@ -502,7 +689,7 @@ class LexicalProjectionTests(unittest.IsolatedAsyncioTestCase):
         LexicalProjectionBuilder(self.connection).rebuild(WORKSPACE_ID)
         self.connection.commit()
 
-        result = await LexicalProvider(self.connection).search(
+        result = await LexicalProvider(self.connection, content_tiering=True).search(
             RetrievalQuery(workspace_id=WORKSPACE_ID, text="retention"),
             10,
         )
@@ -528,7 +715,7 @@ class LexicalProjectionTests(unittest.IsolatedAsyncioTestCase):
         LexicalProjectionBuilder(self.connection).rebuild(WORKSPACE_ID)
         self.connection.commit()
 
-        result = await LexicalProvider(self.connection).search(
+        result = await LexicalProvider(self.connection, content_tiering=True).search(
             RetrievalQuery(workspace_id=WORKSPACE_ID, text="snapshot retention"),
             10,
         )
@@ -1041,8 +1228,15 @@ class LexicalProjectionTests(unittest.IsolatedAsyncioTestCase):
         self.connection.commit()
         provider = LexicalProvider(self.connection)
         result = await provider.search(
+            RetrievalQuery(
+                workspace_id=WORKSPACE_ID, text="newterm", include_archived=True
+            ),
+            10,
+        )
+        excluded = await provider.search(
             RetrievalQuery(workspace_id=WORKSPACE_ID, text="newterm"), 10
         )
+        self.assertEqual((), excluded.candidates)
         document = self.connection.execute(
             "SELECT content,rationale,tags_text,archived,source_event_id "
             "FROM retrieval_documents WHERE workspace_id=? AND record_id=?",
@@ -1393,15 +1587,234 @@ class LexicalProjectionTests(unittest.IsolatedAsyncioTestCase):
         self.connection.commit()
         provider = LexicalProvider(self.connection)
 
-        for malformed in ("bad\x00query", "bad\ud800query"):
-            with self.subTest(malformed=repr(malformed)):
+        result = await provider.search(
+            RetrievalQuery(workspace_id=WORKSPACE_ID, text="bad\ud800query"),
+            10,
+        )
+        self.assertEqual("ready", result.status)
+        self.assertEqual("INVALID_FTS_QUERY", result.reason)
+        self.assertEqual((), result.candidates)
+
+    async def test_control_characters_in_a_query_are_separators_not_errors(self):
+        """A pasted log with ANSI colours or other controls is a normal query."""
+
+        from daem0nmcp.retrieval.projections import LexicalProjectionBuilder
+        from daem0nmcp.retrieval.providers import LexicalProvider
+        from daem0nmcp.retrieval.types import RetrievalQuery
+
+        target = self._append_record(
+            "a", "Postgres pooling notes", "Connection reuse", ["database"]
+        )
+        self._append_record("b", "Graph traversal", "Bounded walks", ["graph"])
+        LexicalProjectionBuilder(self.connection).rebuild(WORKSPACE_ID)
+        self.connection.commit()
+        provider = LexicalProvider(self.connection)
+
+        for text in (
+            "\x1b[31mpostgres\x1b[0m pooling",
+            "\x1b[1;38;5;196mpostgres\x1b[0mpooling",
+            "\x9b31mpostgres\x9b0m pooling",
+            "\x1b]0;window title\x07postgres pooling",
+            "\x1b]unterminated postgres pooling",
+            "postgres\x1b(B\x1b[m pooling",
+            "\x1b(Bpostgres\x1b)0 pooling",
+            "\x1b7postgres\x1b8 pooling\x1b=",
+            "\x1bPq#0;2;0;0;0\x1b\\postgres pooling",
+            "\x1b_private payload\x1b\\postgres\x1b^note\x1b\\ pooling",
+            "postgres\x00pooling",
+            "postgres\tpooling\r\nnotes",
+            "postgres\x07\x08\x0b\x0c\x1f\x7f\x85pooling",
+        ):
+            with self.subTest(text=repr(text)):
                 result = await provider.search(
-                    RetrievalQuery(workspace_id=WORKSPACE_ID, text=malformed),
-                    10,
+                    RetrievalQuery(workspace_id=WORKSPACE_ID, text=text), 10
                 )
                 self.assertEqual("ready", result.status)
-                self.assertEqual("INVALID_FTS_QUERY", result.reason)
+                self.assertIsNone(result.reason)
+                self.assertEqual(
+                    [target],
+                    [candidate.evidence.record_id for candidate in result.candidates],
+                )
+
+        for text in (
+            "\x00",
+            "\x1b[0m\x07\x00\x1f",
+            "\t\r\n",
+            '"*():^-+{}[]',
+            '\x1b[31m"*\x1b[0m',
+        ):
+            with self.subTest(text=repr(text)):
+                result = await provider.search(
+                    RetrievalQuery(workspace_id=WORKSPACE_ID, text=text), 10
+                )
+                self.assertEqual("ready", result.status)
+                self.assertIsNone(result.reason)
                 self.assertEqual((), result.candidates)
+
+    async def test_two_character_escapes_with_any_final_byte_are_removed(self):
+        """ESC plus a final byte 0x30-0x7E (except ``[``) is one sequence."""
+
+        from daem0nmcp.retrieval.projections import LexicalProjectionBuilder
+        from daem0nmcp.retrieval.providers import LexicalProvider
+        from daem0nmcp.retrieval.types import RetrievalQuery, without_terminal_escapes
+
+        for final in range(0x30, 0x7F):
+            if final == 0x5B:
+                continue  # ``ESC [`` introduces a control sequence, below
+            with self.subTest(final=hex(final)):
+                # ``ESC ]`` and the string introducers open longer sequences
+                # only when a terminator follows; none does here.
+                self.assertEqual(
+                    "a  b", without_terminal_escapes(f"a\x1b{chr(final)} b")
+                )
+        # The longer forms still win over the two-character one.
+        self.assertEqual(" x", without_terminal_escapes("\x1b[31mx"))
+        self.assertEqual("a ", without_terminal_escapes("a\x1b[ b"))
+        self.assertEqual("a \n", without_terminal_escapes("a\x1b[\n"))
+        self.assertEqual(" x", without_terminal_escapes("\x1b]0;title\x07x"))
+        self.assertEqual(" x", without_terminal_escapes("\x1bPq#0\x1b\\x"))
+        self.assertEqual(" x", without_terminal_escapes("\x1b(Bx"))
+
+        target = self._append_record(
+            "a", "Postgres pooling notes", "Connection reuse", ["database"]
+        )
+        self._append_record("b", "Graph traversal", "Bounded walks", ["graph"])
+        LexicalProjectionBuilder(self.connection).rebuild(WORKSPACE_ID)
+        self.connection.commit()
+        provider = LexicalProvider(self.connection)
+
+        for text in (
+            "\x1bcpostgres",
+            "\x1bnpostgres\x1bo",
+            "\x1b|postgres\x1b}\x1b~",
+            "\x1b`postgres",
+        ):
+            with self.subTest(text=repr(text)):
+                result = await provider.search(
+                    RetrievalQuery(workspace_id=WORKSPACE_ID, text=text), 10
+                )
+                self.assertEqual("ready", result.status)
+                self.assertIsNone(result.reason)
+                self.assertEqual(
+                    [target],
+                    [candidate.evidence.record_id for candidate in result.candidates],
+                )
+
+    async def test_three_term_query_falls_back_to_single_term_matches(self):
+        """One relevant term must not be erased by two absent ones."""
+
+        from daem0nmcp.retrieval.projections import LexicalProjectionBuilder
+        from daem0nmcp.retrieval.providers import LexicalProvider
+        from daem0nmcp.retrieval.types import RetrievalQuery
+
+        single = self._append_record(
+            "a", "Postgres pooling notes", "Connection reuse", ["database"]
+        )
+        self._append_record("b", "Graph traversal", "Bounded walks", ["graph"])
+        LexicalProjectionBuilder(self.connection).rebuild(WORKSPACE_ID)
+        self.connection.commit()
+        provider = LexicalProvider(self.connection)
+
+        for text in (
+            "postgres timeout errors",
+            "postgres timeout errors during nightly batch import",
+            " ".join(["postgres", *(f"absent{index}" for index in range(20))]),
+        ):
+            with self.subTest(text=text):
+                result = await provider.search(
+                    RetrievalQuery(workspace_id=WORKSPACE_ID, text=text), 10
+                )
+                self.assertEqual("ready", result.status)
+                self.assertEqual(
+                    [single],
+                    [candidate.evidence.record_id for candidate in result.candidates],
+                )
+
+    async def test_single_term_fallback_runs_only_after_stricter_rungs_miss(self):
+        from daem0nmcp.retrieval.projections import LexicalProjectionBuilder
+        from daem0nmcp.retrieval.providers import LexicalProvider
+        from daem0nmcp.retrieval.types import RetrievalQuery
+
+        pair = self._append_record("a", "Postgres timeout tuning", "", [])
+        for suffix in "bcdef":
+            self._append_record(suffix, "Postgres " + "pooling " * 3, "", [])
+        LexicalProjectionBuilder(self.connection).rebuild(WORKSPACE_ID)
+        self.connection.commit()
+        provider = LexicalProvider(self.connection)
+
+        result = await provider.search(
+            RetrievalQuery(workspace_id=WORKSPACE_ID, text="postgres timeout errors"),
+            10,
+        )
+        self.assertEqual(
+            [pair], [candidate.evidence.record_id for candidate in result.candidates]
+        )
+
+        fallback = await provider.search(
+            RetrievalQuery(
+                workspace_id=WORKSPACE_ID,
+                text="postgres latency errors",
+                limit=3,
+                candidate_limit=3,
+            ),
+            10,
+        )
+        self.assertEqual("ready", fallback.status)
+        self.assertEqual(3, len(fallback.candidates))
+        # One shared term out of three is weak evidence: it is ranked after a
+        # full page of stricter matches, so fusion keeps it below a hit that
+        # another provider ranks anywhere in its own page.
+        self.assertEqual([4, 5, 6], [item.rank for item in fallback.candidates])
+        scores = [item.raw_score for item in fallback.candidates]
+        self.assertEqual(sorted(scores, reverse=True), scores)
+
+        from daem0nmcp.retrieval.fusion import weighted_reciprocal_rank_fusion
+        from daem0nmcp.retrieval.types import Candidate, EvidenceRef, ProviderResult
+
+        default = await provider.search(
+            RetrievalQuery(workspace_id=WORKSPACE_ID, text="postgres latency errors"),
+            50,
+        )
+        self.assertEqual(
+            [51, 52, 53, 54, 55, 56], [item.rank for item in default.candidates]
+        )
+        strongest = default.candidates[0]
+        semantic = "mem_" + "9" * 64
+        dense = ProviderResult(
+            provider="dense",
+            candidates=(
+                Candidate(
+                    evidence=EvidenceRef(
+                        record_id=semantic,
+                        event_id=strongest.evidence.event_id,
+                        content_hash=strongest.evidence.content_hash,
+                        version_id=None,
+                        provider="dense",
+                    ),
+                    rank=25,
+                    raw_score=0.1,
+                    channels=frozenset({"dense"}),
+                ),
+            ),
+        )
+        fused = weighted_reciprocal_rank_fusion((default, dense))
+        self.assertEqual(
+            [semantic, strongest.evidence.record_id],
+            [item.record_id for item in fused[:2]],
+        )
+
+        wide = await provider.search(
+            RetrievalQuery(
+                workspace_id=WORKSPACE_ID,
+                text="postgres latency errors",
+                limit=100,
+                candidate_limit=1000,
+            ),
+            1000,
+        )
+        self.assertEqual(
+            [501, 502, 503, 504, 505, 506], [item.rank for item in wide.candidates]
+        )
 
     async def test_lexical_sql_runs_off_loop_under_a_total_timeout(self):
         from daem0nmcp.retrieval.projections import LexicalProjectionBuilder

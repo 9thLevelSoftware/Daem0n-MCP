@@ -30,6 +30,9 @@ still require their own explicit `session_brief`; task submission stays strict.
 Run long-running targets directly as MCP tasks, using the full listing if
 needed; the gateway does not submit tasks. Use `system_health` for diagnostics.
 
+The server states this protocol itself: the MCP initialize result carries
+`instructions` generated for the active covenant mode and tool listing.
+
 Each scoped call uses an opaque `workspace_id`. The supported transports are
 stdio and Streamable HTTP at `/mcp`. Read-only warnings, failures, rules, and
 active context use the `memory://workspaces/{workspace_id}/...` resources. See
@@ -63,6 +66,12 @@ root and provide it in the protected client configuration or pairing flow;
 `session_brief` then confirms that ID. Clients do not choose filesystem paths. Leave
 `DAEM0NMCP_STORAGE_PATH` unset when serving multiple registered workspaces.
 
+A workspace ID is an identifier, not a secret. It is a truncated SHA-256 of the
+canonical root path, so anyone who knows or guesses the path can compute it.
+"Opaque" means only that it is not a path and carries no meaning for clients.
+Access is decided by the authenticated principal and its grants, never by
+knowledge of the ID.
+
 For authenticated remote principals, set `DAEM0NMCP_WORKSPACE_ACCESS_FILE` to
 the server-managed grants file. If unset, the server uses
 `<managed-storage>/v7-workspace-access.json`. The file and its parent directory
@@ -76,6 +85,26 @@ Start the stdio server with `python -m daem0nmcp.server`, or use
 `python -m daem0nmcp.server --transport streamable-http --host 127.0.0.1 --port
 9876` for loopback HTTP. A remote HTTP deployment requires configured transport
 authentication and security policy; it is not a redirect-based setup.
+
+Loopback HTTP without `FASTMCP_SERVER_AUTH` does not authenticate callers: every
+process and user that can reach the port on that host (other accounts,
+containers, WSL) acts as the server's own principal on every registered
+workspace. On a shared machine use stdio or configure authentication. A
+loopback listener behind a reverse proxy is not local: when
+`DAEM0NMCP_TRUSTED_PROXY_IPS` is set or `DAEM0NMCP_ALLOWED_HOSTS` names a host
+other than `localhost` or a loopback address, the server refuses to start with
+`PROXIED_LISTENER_REQUIRES_AUTH` unless a production token verifier is
+configured. That check sees a proxy only through those two settings. A proxy
+that forwards the loopback authority as `Host` (for example nginx without
+`proxy_set_header Host $host`) needs neither, is not detected, and exposes the
+unauthenticated listener to its clients, so configure authentication for every
+proxied deployment.
+
+`python -m` resolves `daem0nmcp` from the current directory first, so type these
+commands (and the `python -m daem0nmcp.cli` ones) from a directory you trust.
+Commands that a host launches for you inside a project never use `-m`: the
+installers and the [registration command](#linux--macos-stdio-transport) drop
+the current directory from the import path first.
 
 The complete setup, exact preflight examples, migrations, native client
 installers, diagnostics, and all **75** registered v7 tools are in
@@ -345,10 +374,23 @@ python ~/Daem0n-MCP/start_server.py --port 9876
 python3 -c "import sys; print(sys.executable)"
 
 # Register with Claude Code (replace <PYTHON_PATH>)
-claude mcp add daem0nmcp --scope user -- <PYTHON_PATH> -m daem0nmcp.server
+claude mcp add daem0nmcp --scope user -- <PYTHON_PATH> -c "import sys; sys.path = [p for p in sys.path if p]; import runpy; runpy.run_module('daem0nmcp.server', run_name='__main__', alter_sys=True)"
 
 # Restart Claude Code
 ```
+
+Do not register `<PYTHON_PATH> -m daem0nmcp.server` at user scope. Claude Code
+starts a user-scoped server inside whatever project you open, and `python -m`
+puts that directory first on `sys.path`, so a repository that contains its own
+`daem0nmcp/` directory would run in place of the installed server. The command
+above runs the same module after dropping the working directory from the import
+path; it works on Python 3.10 and newer and with `--user`, virtualenv and
+editable installs. Use the full interpreter path rather than a bare `python`.
+
+The command leaves your own `PYTHONPATH` alone. An empty or relative element in
+it (a leading or trailing `:`, or `.`) names the working directory, which puts
+the opened project back on the import path: keep `PYTHONPATH` unset or absolute
+in the environment your MCP host starts from.
 
 ### Windows (HTTP transport required)
 
@@ -381,6 +423,11 @@ Or use `start_daem0nmcp_server.bat`
 | `python -m daem0nmcp.server` | `stdio` | n/a | Local process channel |
 | `python start_server.py` | Streamable HTTP at `/mcp` | 9876 | Windows HTTP, remote access |
 
+`python -m daem0nmcp.server` is for a terminal you started yourself. When an MCP
+host launches the stdio server for you, register the command from
+[Linux / macOS](#linux--macos-stdio-transport) instead: hosts start it inside
+whatever project is open.
+
 For OpenCode setup, see the [OpenCode Integration](#opencode-integration) section below, or run `python -m daem0nmcp.cli install-opencode` for automated setup.
 
 ## v7 MCP API
@@ -400,12 +447,23 @@ default core-plus-gateway listing is:
 | `daem0n_tools_search` | Discover other registered tools and their input schemas |
 | `daem0n_tool_call` | Call a discovered tool and relay its guidance or result |
 
+`daem0n_tool_call` can reach destructive, non-idempotent and open-world tools,
+so it advertises `destructiveHint: true`, `idempotentHint: false` and
+`openWorldHint: true`; a host that prompts on those hints prompts for every
+gateway call. Each `daem0n_tools_search` result carries the target's own
+`read_only`, `destructive`, `idempotent` and `open_world` hints.
+
 The read-only JSON resources are:
 
 - `memory://workspaces/{workspace_id}/warnings`
 - `memory://workspaces/{workspace_id}/failures`
 - `memory://workspaces/{workspace_id}/rules`
 - `memory://workspaces/{workspace_id}/active-context`
+
+A read returns `application/json`. Every refusal (an unknown workspace, one the
+caller may not read, or one this session has not briefed) is the same JSON-RPC
+error, code `-32002` with the message `Resource unavailable`; brief the
+workspace first.
 
 See [`docs/v6-to-v7-tools.json`](docs/v6-to-v7-tools.json) for the generated
 mapping of every v6 operation to its v7 replacement.
@@ -582,6 +640,11 @@ If the response is `COUNSEL_REQUIRED`, review `error.counsel`, then call
 includes its pre-minted token. `memory_preflight` remains available for advance
 planning and is required in strict mode. Keep the idempotency key on retries.
 
+Every failed call, `COUNSEL_REQUIRED` included, is an `ok: false` envelope and
+sets the MCP result's `isError: true`. The envelope is still delivered in full,
+as `structuredContent` and as JSON text; a client library that raises on
+`isError` must be told to return the result instead so the remedy can be read.
+
 ### Track Outcomes
 
 ```text
@@ -618,12 +681,21 @@ python -m daem0nmcp.cli install-claude-hooks
 ```
 
 This writes six hook entries to the user-level `~/.claude/settings.json`, so
-they run in every project; each runs `"<python>" -m daem0nmcp.claude_hooks.<hook>`
+they run in every project; each runs `daem0nmcp.claude_hooks.<hook>`
 with the interpreter you installed from. A hook only acts inside a Daem0n
 project: the session directory, `CLAUDE_PROJECT_DIR`, or one of their parent
 directories contains `.daem0nmcp/` (your home directory does not count, since
 Daem0n keeps its own state in `~/.daem0nmcp/`). Other hooks in that file are kept, and any old
 `hooks/daem0n_*.py` entries are removed.
+
+Each command is `"<python>" -c "<bootstrap>"`: the bootstrap drops the working
+directory from `sys.path` and then runs the hook module, so a repository that
+contains its own `daem0nmcp/` directory cannot replace the installed hooks the
+way it could with `python -m`. Commands written by an earlier version keep the
+`-m` form until you re-run `install-claude-hooks`, which replaces them and
+reports how many it replaced; until then the `SessionStart` hook shows a
+one-line reminder in every session. The same `PYTHONPATH` limit as for the
+[registration command](#linux--macos-stdio-transport) applies.
 
 | Event (matcher) | Hook | What it does | Input | Reminds only |
 |-----------------|------|--------------|-------|--------------|
@@ -677,7 +749,7 @@ Create `opencode.json` at your project root:
   "mcp": {
     "daem0nmcp": {
       "type": "local",
-      "command": ["python", "-m", "daem0nmcp"],
+      "command": ["python", "-c", "import sys; sys.path = [p for p in sys.path if p]; import runpy; runpy.run_module('daem0nmcp', run_name='__main__', alter_sys=True)"],
       "enabled": true,
       "environment": {
         "PYTHONUNBUFFERED": "1"
@@ -686,6 +758,12 @@ Create `opencode.json` at your project root:
   }
 }
 ```
+
+The command is the cwd-free equivalent of `python -m daem0nmcp`: OpenCode starts
+the server inside the opened project, and `-m` would import a `daem0nmcp/`
+directory found there. `install-opencode` writes the same command with the full
+path of the interpreter it ran under, and fixes that interpreter in the plugin
+it installs; the plugin never reads an interpreter from `opencode.json`.
 
 For Windows (where HTTP transport is required), use:
 
@@ -771,6 +849,27 @@ See `docs/v7-operations.md` for the full rules.
 
 All settings are configurable via environment variables with `DAEM0NMCP_` prefix.
 
+A `.env` file in the working directory is not read: the server is usually
+launched inside a project, so that file belongs to the repository, not to the
+operator. To keep settings in a file, set `DAEM0NMCP_ENV_FILE` to its absolute
+path in the server's environment. A relative path or a missing file is refused
+at startup, and real environment variables override values from the file.
+
+That file may hold only the settings listed in the tables below. Any other
+line stops startup, including variables the server reads straight from its
+environment: the transport and proxy settings (`DAEM0NMCP_ALLOWED_HOSTS`,
+`DAEM0NMCP_ALLOWED_ORIGINS`, `DAEM0NMCP_TRUSTED_PROXY_IPS`),
+`DAEM0NMCP_WORKSPACE_ACCESS_FILE`, `DAEM0NMCP_TOKEN_SECRET`, the
+`DAEM0NMCP_EDIT_BRIDGE_*` and task variables, and every `FASTMCP_*` variable.
+Keep those in the process environment.
+
+The FastMCP library has its own `.env` loading for `FASTMCP_*` settings. The
+server turns it off by setting `FASTMCP_ENV_FILE` to the null device when it is
+unset, so a project's `.env` cannot change them either. To load `FASTMCP_*`
+settings from a file, set `FASTMCP_ENV_FILE` yourself to an absolute path; a
+relative value is resolved against the working directory. Authentication
+variables (`FASTMCP_SERVER_AUTH*`) are read only from the process environment.
+
 ### Core Settings
 
 | Variable | Default | Description |
@@ -798,6 +897,7 @@ All settings are configurable via environment variables with `DAEM0NMCP_` prefix
 | `DAEM0NMCP_BM25_K1` | `1.5` | BM25 term frequency saturation |
 | `DAEM0NMCP_BM25_B` | `0.75` | BM25 document length normalization |
 | `DAEM0NMCP_RRF_K` | `60` | RRF fusion dampening constant |
+| `DAEM0NMCP_LEXICAL_CONTENT_TIERING` | `false` | Rank content/rationale matches ahead of tag-assisted matches in lexical recall |
 | `DAEM0NMCP_SEARCH_DIVERSITY_MAX_PER_FILE` | `3` | Max results from same file |
 
 ### Auto-Zoom Routing
@@ -851,8 +951,6 @@ daem0nmcp/
 ├── rules.py             # Rule engine with BM25 matching
 ├── similarity.py        # TF-IDF index, decay, conflict detection
 ├── vectors.py           # ModernBERT embeddings (ONNX/torch, asymmetric encoding)
-├── bm25_index.py        # BM25 Okapi keyword retrieval
-├── fusion.py            # Reciprocal Rank Fusion for hybrid search
 ├── surprise.py          # Titans-inspired novelty detection
 ├── recall_planner.py    # TiMem-style complexity classification
 ├── retrieval_router.py  # Auto-Zoom query-aware search dispatch
@@ -1035,6 +1133,15 @@ python -m daem0nmcp.cli rebuild-projection --projection dense --workspace-id <wo
 python -m daem0nmcp.cli install-claude-hooks
 ```
 
+Re-run this after upgrading. It replaces the hook commands earlier versions
+wrote, including the `python -m` form that imports a `daem0nmcp/` directory
+from any project you open. If you registered the stdio server at user scope as
+`<PYTHON_PATH> -m daem0nmcp.server`, remove it with
+`claude mcp remove daem0nmcp --scope user` and register the command under
+[Installation by Platform](#installation-by-platform) instead. In repositories
+where you ran `install-hooks`, re-run it as well: the git pre-commit hook it
+wrote used `python -m` too.
+
 ### 4. Restart Claude Code
 
 After updating, restart Claude Code to load the new MCP tools.
@@ -1045,12 +1152,23 @@ After updating, restart Claude Code to load the new MCP tools.
 python -m daem0nmcp.cli install-opencode --force
 ```
 
-This regenerates `opencode.json` and the plugin to match the latest version.
+This regenerates `opencode.json`, the plugin and the command files to match
+the latest version, discarding anything else you kept in them (other MCP
+servers in `opencode.json`, for example). Without `--force` the installer keeps
+existing files: it still rewrites a `python -m` server command in
+`opencode.json` (or reports one it cannot rewrite), and reports a plugin from an
+earlier version as outdated; delete `.opencode/plugins/daem0n.ts` and re-run to
+replace only the plugin.
 
 ### 5. Migrations
 
-Within a storage format, schema migrations are applied automatically when any
-MCP tool runs, and no manual step is required.
+A format 7 database is never upgraded in place. When a newer build needs a
+newer schema, the server and the legacy commands answer `MIGRATION_REQUIRED`
+until `migrate-v7 --apply` has run; that command snapshots the store first and
+can be rolled back. A retained format 6 database only receives format 6 schema
+migrations. If `active-db.json` is lost, commands answer
+`ACTIVE_POINTER_MISSING`; see `docs/v7-operations.md` for
+`migrate-v7 --recover-pointer`.
 
 Moving an existing v6 workspace to the v7 storage format is **not** automatic.
 It is an offline, reversible command, and a v6 workspace answers
@@ -1101,6 +1219,9 @@ DAEM0NMCP_RETRIEVAL_UTILITY_CREDIT=trace
 discounted credit through explicit provenance. The default ranking weight is
 0.1. Set `DAEM0NMCP_RETRIEVAL_UTILITY_MODE=off` to disable computation. Failed
 decisions remain warnings rather than being demoted by their own failures.
+Utility only reorders candidates whose rank prior and fused score are within 5%
+of each other, so outcome history breaks near-ties and never outranks a clearly
+better match.
 
 ### Bind guidance to repository code
 
@@ -1231,16 +1352,23 @@ python -m benchmarks.coding_memory_eval --mode fully_enabled --topics 24 --seed 
 This isolated synthetic workload exercises outcome reuse, multi-hop provenance,
 symbol/file validity and budgeted procedure retention through the production
 writer and recall service. The lexical mode requires no model downloads.
-Insertion order and event times are fixed; latency measurements are wall-clock
-and excluded from deterministic comparisons. The fixture uses an exclusively
-created deterministic temporary directory; concurrent identical runs fail
-closed rather than sharing storage.
+Event times are assigned in write order, not read from the wall clock, and the
+seed only shuffles the order of the writes: every
+seed reports the same metrics, so repeating a run with other seeds adds no
+evidence. Latency measurements are wall-clock and excluded from deterministic
+comparisons. Each run creates its own temporary directory and removes it when
+it ends, so concurrent runs never share storage and a directory left by a
+killed run does not block the next one.
 
 Reports expose all arm settings. Utility weight is **0.2 in the evaluation**
 (the product default stays 0.1). Retention distractors are same-category
 background procedure drafts with task tags: this prevents category diversity
 from automatically rescuing the actionable procedure and tests actual packing
-under a 256-token budget. These synthetic gains are not a competitor comparison.
+under a 256-token budget. Every arm uses the product default for lexical content
+tiering (off) except `tiering_apply` and `all_apply_tiering`, which turn it on:
+with the tier the procedure already ranks first, so those two arms retain the
+required fact without the retention policy and cannot show its effect. These
+synthetic gains are not a competitor comparison.
 The release-frozen retrieval corpus and its digest remain unchanged.
 
 `bash autoresearch.sh` runs the same offline lexical workload with 24 topics,

@@ -23,7 +23,14 @@ from ...covenant import (
 from ...event_store import AppendedEvent, EventStreamConflict
 from ...retrieval import RetrievalQuery
 from ...workspace import Workspace
-from .ceremony import ArgumentNormalizer, CovenantCeremony, PreflightService
+from .ceremony import (
+    CAPACITY_MESSAGE,
+    CAPACITY_RETRY_AFTER_MS,
+    ArgumentNormalizer,
+    CovenantCeremony,
+    PreflightService,
+    is_capacity_violation,
+)
 from .errors import (
     DATABASE_IN_USE_RETRY_AFTER_MS,
     MIGRATION_REQUIRED_MESSAGE,
@@ -520,6 +527,13 @@ class PinnedHandlers:
             )
             response = response.with_covenant(outcome.notice)
             violation = outcome.violation
+        if is_capacity_violation(violation):
+            return response.failure(
+                ErrorCode.CAPABILITY_DEGRADED,
+                CAPACITY_MESSAGE,
+                retryable=True,
+                retry_after_ms=CAPACITY_RETRY_AFTER_MS,
+            )
         if violation is not None:
             code = violation.get("violation")
             if code == ErrorCode.COMMUNION_REQUIRED.value:
@@ -597,7 +611,7 @@ class PinnedHandlers:
                 target_call_arguments,
             )
             claims = self._dependencies.covenant_gate.authority.verify(token)
-            expires_at = datetime.fromtimestamp(claims["exp"], timezone.utc)
+            expires_at = self._dependencies.covenant_gate.wall_instant(claims["exp"])
             data = PreflightData(
                 guidance=guidance,
                 preflight_token=token,
@@ -703,6 +717,13 @@ class PinnedHandlers:
             )
             response = response.with_covenant(outcome.notice)
             violation = outcome.violation
+        if is_capacity_violation(violation):
+            return response.failure(
+                ErrorCode.CAPABILITY_DEGRADED,
+                CAPACITY_MESSAGE,
+                retryable=True,
+                retry_after_ms=CAPACITY_RETRY_AFTER_MS,
+            )
         if violation is not None:
             code = violation.get("violation")
             if code == ErrorCode.COMMUNION_REQUIRED.value:
@@ -899,6 +920,13 @@ class PinnedHandlers:
                     },
                     counsel=outcome.challenge,
                 )
+        if is_capacity_violation(violation):
+            return response.failure(
+                ErrorCode.CAPABILITY_DEGRADED,
+                CAPACITY_MESSAGE,
+                retryable=True,
+                retry_after_ms=CAPACITY_RETRY_AFTER_MS,
+            )
         if violation is not None:
             code = violation.get("violation")
             try:
@@ -1055,6 +1083,13 @@ class PinnedHandlers:
             )
             response = response.with_covenant(outcome.notice)
             violation = outcome.violation
+        if is_capacity_violation(violation):
+            return response.failure(
+                ErrorCode.CAPABILITY_DEGRADED,
+                CAPACITY_MESSAGE,
+                retryable=True,
+                retry_after_ms=CAPACITY_RETRY_AFTER_MS,
+            )
         if violation is not None:
             code = violation.get("violation")
             if code == ErrorCode.COMMUNION_REQUIRED.value:

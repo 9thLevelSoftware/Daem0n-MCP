@@ -8,8 +8,16 @@ import math
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest import mock
 
-from benchmarks.coding_memory_eval import run_evaluation
+from benchmarks.coding_memory_eval import (
+    _Corpus,
+    _corpus,
+    _metrics,
+    _Query,
+    run_evaluation,
+)
 from daem0nmcp.api.v7.discovery_operations import default_code_indexer_factory
 from daem0nmcp.schema_version import CURRENT_SCHEMA_VERSION
 
@@ -20,9 +28,10 @@ class CodingMemoryEvaluationTests(unittest.TestCase):
         async def evaluate_twice():
             first = await run_evaluation(mode="lexical_only", topics=6, seed=20261004)
             second = await run_evaluation(mode="lexical_only", topics=6, seed=20261004)
-            return first, second
+            reordered = await run_evaluation(mode="lexical_only", topics=6, seed=7)
+            return first, second, reordered
 
-        cls.first, cls.second = asyncio.run(evaluate_twice())
+        cls.first, cls.second, cls.reordered = asyncio.run(evaluate_twice())
 
     def test_non_latency_report_is_identical_across_real_runs(self):
         first, second = copy.deepcopy(self.first), copy.deepcopy(self.second)
@@ -30,6 +39,16 @@ class CodingMemoryEvaluationTests(unittest.TestCase):
             for arm in report["arms"].values():
                 del arm["latency_ms"]
         self.assertEqual(first, second)
+
+    def test_seed_only_reorders_writes_and_is_reported_as_such(self):
+        """Another seed is not another sample: every metric stays the same."""
+
+        first, reordered = copy.deepcopy(self.first), copy.deepcopy(self.reordered)
+        for report in (first, reordered):
+            for arm in report["arms"].values():
+                del arm["latency_ms"]
+        self.assertEqual(first["arms"], reordered["arms"])
+        self.assertEqual("write_order_only", self.first["metadata"]["seed_scope"])
 
     def test_baseline_has_graded_outcome_headroom(self):
         self.assertLess(
@@ -48,6 +67,39 @@ class CodingMemoryEvaluationTests(unittest.TestCase):
         self.assertGreater(
             arms["utility_trace"]["ndcg_at_10"]["provenance_chain"],
             arms["utility_single"]["ndcg_at_10"]["provenance_chain"],
+        )
+
+    def test_retention_keeps_the_required_fact_that_baseline_drops(self):
+        arms = self.first["arms"]
+        self.assertEqual(0.0, arms["baseline"]["retention"]["required_fact_retention"])
+        for name in ("retention_apply", "all_apply"):
+            with self.subTest(arm=name):
+                self.assertEqual(
+                    1.0, arms[name]["retention"]["required_fact_retention"]
+                )
+        self.assertGreater(
+            arms["retention_apply"]["ndcg_at_10"]["overall"],
+            arms["baseline"]["ndcg_at_10"]["overall"],
+        )
+
+    def test_content_tiering_hides_the_retention_difference(self):
+        """With the content tier the runbook ranks first, so packing is moot."""
+
+        arms = self.first["arms"]
+        overrides = self.first["metadata"]["arm_overrides"]
+        for name, settings in overrides.items():
+            with self.subTest(arm=name):
+                self.assertEqual(
+                    name in {"tiering_apply", "all_apply_tiering"},
+                    settings["lexical_content_tiering"],
+                )
+        self.assertEqual("off", overrides["tiering_apply"]["retrieval_retention_mode"])
+        self.assertEqual(
+            1.0, arms["tiering_apply"]["retention"]["required_fact_retention"]
+        )
+        self.assertEqual(
+            arms["tiering_apply"]["retention"],
+            arms["all_apply_tiering"]["retention"],
         )
 
     def test_validity_detects_file_edits_even_without_symbol_parsing(self):
@@ -81,6 +133,8 @@ class CodingMemoryEvaluationTests(unittest.TestCase):
                 "validity_apply",
                 "retention_apply",
                 "all_apply",
+                "tiering_apply",
+                "all_apply_tiering",
             },
             set(self.first["arms"]),
         )
@@ -135,12 +189,163 @@ class CodingMemoryEvaluationTests(unittest.TestCase):
                 )
                 self.assertTrue(math.isfinite(arm["latency_ms"]["p95"]))
 
-    def test_exclusively_owned_workspace_is_removed_after_runs(self):
-        scratch = (
-            Path(tempfile.gettempdir())
-            / "daem0nmcp-coding-eval-lexical_only-6-20261004"
+
+class CodingMemoryFixtureTests(unittest.TestCase):
+    def _corpus(self, topics: int):
+        with tempfile.TemporaryDirectory() as root:
+            return _corpus(Path(root), topics, True)
+
+    def test_no_query_text_is_shared_by_two_goldens(self):
+        corpus = self._corpus(24)
+        goldens: dict[str, set[tuple[tuple[str, int], ...]]] = {}
+        for query in corpus.queries:
+            goldens.setdefault(query.text, set()).add(query.relevant)
+        self.assertEqual(
+            {}, {text: keys for text, keys in goldens.items() if len(keys) > 1}
         )
-        self.assertFalse(scratch.exists())
+        self.assertEqual(
+            24, len({q.text for q in corpus.queries if q.family == "retention"})
+        )
+
+    def test_no_query_repeats_a_golden_record_verbatim(self):
+        corpus = self._corpus(24)
+        contents = {
+            item.key: item.content for item in corpus.writes if hasattr(item, "content")
+        }
+        verbatim = [
+            query.key
+            for query in corpus.queries
+            if query.family == "validity"
+            and any(contents[key] == query.text for key, _ in query.relevant)
+        ]
+        self.assertEqual([], verbatim)
+        self.assertEqual(
+            48, len([query for query in corpus.queries if query.family == "validity"])
+        )
+
+    def test_validity_queries_share_no_word_with_sibling_records(self):
+        """Tied siblings would leave the cut at ten results to the record IDs."""
+
+        corpus = self._corpus(24)
+        contents = {
+            item.key: set(item.content.split())
+            for item in corpus.writes
+            if hasattr(item, "content")
+        }
+        for query in corpus.queries:
+            if query.family != "validity":
+                continue
+            words = set(query.text.split())
+            with self.subTest(query=query.key):
+                self.assertEqual(
+                    [query.relevant[0][0]],
+                    [key for key, content in contents.items() if words & content],
+                )
+
+    def _retention(self, items: list[tuple[str, str]], context: str) -> float:
+        """Score one retention query against a stubbed recall result."""
+
+        corpus = _Corpus(
+            queries=[
+                _Query("reuse", "outcome_reuse", "reuse", (("good", 3),)),
+                _Query("chain", "provenance_chain", "chain", (("background", 3),)),
+                _Query(
+                    "retention",
+                    "retention",
+                    "deploy release rollout",
+                    (("expected", 3),),
+                    "freeze release writes",
+                ),
+            ]
+        )
+
+        def result(pairs: list[tuple[str, str]], rendered: str) -> SimpleNamespace:
+            return SimpleNamespace(
+                items=[
+                    SimpleNamespace(
+                        citation=citation, record=SimpleNamespace(record_id=record)
+                    )
+                    for citation, record in pairs
+                ],
+                rendered_context=rendered,
+                token_usage=SimpleNamespace(rendered=1),
+            )
+
+        results = {
+            "reuse": result([("[E1]", "mem_good")], "[E1] decision\nreuse"),
+            "chain": result([("[E1]", "mem_background")], "[E1] note\nchain"),
+            "retention": result(items, context),
+        }
+        record_ids = {
+            "good": "mem_good",
+            "background": "mem_background",
+            "expected": "mem_expected",
+            "other": "mem_other",
+        }
+        report = _metrics(corpus, record_ids, results, [1.0], False)
+        return report["retention"]["required_fact_retention"]
+
+    def test_required_fact_in_another_record_is_not_retention(self):
+        steps = "Steps: freeze release writes | apply release rollout"
+        self.assertEqual(
+            0.0,
+            self._retention(
+                [("[E1]", "mem_other")],
+                f"[E1] procedure\ndeploy release rollout\n{steps}",
+            ),
+        )
+        self.assertEqual(
+            0.0,
+            self._retention(
+                [("[E1]", "mem_expected"), ("[E2]", "mem_other")],
+                "[E1] procedure\ndeploy release rollout\n\n"
+                f"[E2] procedure\ndeploy release rollout\n{steps}",
+            ),
+        )
+
+    def test_required_fact_in_the_expected_record_is_retention(self):
+        steps = "Steps: freeze release writes | apply release rollout"
+        self.assertEqual(
+            1.0,
+            self._retention(
+                [("[E1]", "mem_other"), ("[E2]", "mem_expected")],
+                "[E1] procedure\ndeploy release rollout\n\n"
+                f"[E2] procedure\ndeploy release rollout\n{steps}",
+            ),
+        )
+
+
+class CodingMemoryScratchDirectoryTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self) -> None:
+        scratch = tempfile.TemporaryDirectory()
+        self.addCleanup(scratch.cleanup)
+        self.scratch = Path(scratch.name)
+        patcher = mock.patch.object(tempfile, "tempdir", scratch.name)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    async def test_leftover_directory_of_a_killed_run_does_not_block_a_run(self):
+        leftover = self.scratch / "daem0nmcp-coding-eval-lexical_only-1-20261004"
+        (leftover / "workspace").mkdir(parents=True)
+
+        report = await run_evaluation(mode="lexical_only", topics=1, seed=20261004)
+
+        self.assertEqual(1, report["metadata"]["topics"])
+        self.assertEqual([leftover], list(self.scratch.iterdir()))
+        self.assertEqual([leftover / "workspace"], list(leftover.iterdir()))
+
+    async def test_scratch_directory_is_removed_on_failure_and_interruption(self):
+        for error in (RuntimeError("seed failed"), asyncio.CancelledError()):
+            with self.subTest(error=type(error).__name__):
+                with (
+                    mock.patch(
+                        "benchmarks.coding_memory_eval._seed", side_effect=error
+                    ) as seed,
+                    self.assertRaises(type(error)),
+                ):
+                    await run_evaluation(mode="lexical_only", topics=1, seed=1)
+                seed.assert_called_once()
+                self.assertEqual([], list(self.scratch.iterdir()))
 
 
 class CodingMemoryEvaluationInputTests(unittest.IsolatedAsyncioTestCase):
@@ -149,6 +354,7 @@ class CodingMemoryEvaluationInputTests(unittest.IsolatedAsyncioTestCase):
             {"mode": "scripted"},
             {"topics": 0},
             {"topics": True},
+            {"topics": 25},
             {"seed": True},
         ):
             with self.subTest(arguments=arguments), self.assertRaises(ValueError):

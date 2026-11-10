@@ -63,6 +63,11 @@ protected bridge pairing. A remote client must not derive it from a filesystem
 path or enumerate roots. `session_brief(workspace_id="ws_<opaque>")` confirms
 the configured selection after connection.
 
+The ID is not a credential. It is a truncated SHA-256 of the canonical root
+path and can be computed by anyone who knows that path; do not rely on keeping
+it private. What protects a workspace is the authenticated principal and the
+grants file below.
+
 `DAEM0NMCP_SYNC_TIMEOUT_SECONDS` controls foreground work and accepts 1–60
 seconds, defaulting to 15. Calls which exceed their foreground admission limits
 need the durable-task capability. To enable it, install the `tasks` profile and
@@ -78,6 +83,14 @@ python -m daem0nmcp.server --transport streamable-http --host 127.0.0.1 --port 9
 
 It uses Streamable HTTP. Remote binds need the configured authentication and
 HTTP security layers. There is no redirect URL or URL-based pairing shortcut.
+Unauthenticated loopback HTTP trusts every process and user on the host, so use
+stdio or configure authentication on a shared machine. A loopback bind with
+`DAEM0NMCP_TRUSTED_PROXY_IPS`, or with a non-loopback name in
+`DAEM0NMCP_ALLOWED_HOSTS`, is treated as remotely reachable: without a
+production token verifier the server exits with
+`PROXIED_LISTENER_REQUIRES_AUTH`. Those two settings are the only signal: a
+proxy that forwards the loopback authority as `Host` needs neither and is not
+detected, so configure authentication for every proxied deployment.
 
 For a remote HTTPS deployment, terminate TLS at a reverse proxy and make the
 backend listener and proxy addresses explicit. This is an environment example,
@@ -94,6 +107,10 @@ export DAEM0NMCP_TRUSTED_PROXY_IPS=127.0.0.1
 export DAEM0NMCP_WORKSPACE_ACCESS_FILE=/secure/daem0n/workspace-access.json
 python -m daem0nmcp.server --transport streamable-http --host 127.0.0.1 --port 8765
 ```
+
+`FASTMCP_SERVER_AUTH_JWT_JWKS_URI` must be an `https://` URL; plain `http://` is
+accepted only for a loopback host. Any other value stops startup with
+`INVALID_AUTH_CONFIGURATION`.
 
 The access file and its parent directory must be owner-only. Its exact JSON
 shape is `{"schema_version":1,"grants":{"oauth-sub:<subject>":["ws_<opaque>"]}}`.
@@ -175,13 +192,15 @@ idempotency key. For authorized federation, `memory_recall` accepts
 `linked_workspace_ids`; returned evidence remains attributed to its source
 workspace.
 
-Lexical recall first ranks records whose content or rationale satisfy the
-selected full-text expression, then tag-assisted matches. Content-tier ordering
-uses the existing content/rationale BM25 weights without a tag contribution;
-tag-assisted matches use ordinary weighted BM25. Record IDs break ties. Original
-weighted scores remain diagnostics, not a guarantee of rank order. Tags remain
-searchable, and the precision-first query ladder remains unchanged; no projection
-rebuild is required for this query-side ordering change.
+Lexical recall ranks by weighted BM25 over content, rationale and tags by
+default; record IDs break ties and the reported score does not increase with
+rank. Set `DAEM0NMCP_LEXICAL_CONTENT_TIERING=true` to opt in to content-tier
+ordering: records whose content or rationale satisfy the selected full-text
+expression rank first, ordered by the content/rationale BM25 weights without a
+tag contribution, then tag-assisted matches by ordinary weighted BM25. With the
+tier on, the weighted scores remain diagnostics, not a guarantee of rank order.
+Tags are searchable either way, and no projection rebuild is required for this
+query-side ordering setting.
 Direct and linked-workspace recall expose provider channels in canonical sorted
 order, including retained contexts, so equivalent evidence does not acquire
 different channel-array order after a server restart.
@@ -258,8 +277,10 @@ capability/access before obtaining fresh counsel and retrying with the same
 idempotency key; an immediate retry cannot fix unchanged malformed source.
 Missing symbols, unsupported symbol-file extensions, and sources above the
 5 MiB raw-file limit remain `INVALID_ARGUMENT`.
-Fully qualified symbol identities take precedence. A short name is accepted only
-when it identifies one canonical symbol; ambiguous names are `INVALID_ARGUMENT`,
+Fully qualified symbol identities take precedence. A dotted name that is one
+symbol's full identity and also names another symbol without its module prefix
+is ambiguous. A short name is accepted only when it identifies one canonical
+symbol; ambiguous names are `INVALID_ARGUMENT`,
 not a binding to every same-named definition. If an existing short binding
 becomes ambiguous, recall reports `unverifiable` until it is rebound explicitly.
 Multiple definition spans belonging to the same qualified identity remain grouped.
@@ -343,6 +364,14 @@ one generation. The source database and a SQLite snapshot remain in
 rewritten in place. Running `migrate-v7 --apply` again recovers a stopped run or
 reports `already_active` when the active schema is current.
 
+Opening a format 7 database never upgrades its schema as a side effect. After
+a Daem0nMCP upgrade that raises the schema version, `system_health` reports
+`STORAGE_SCHEMA_OUTDATED`, and the legacy CLI commands (`status`, `check`,
+`briefing`, `pre-commit`, `remember`, `record-outcome`, `index`, `watch`,
+`migrate`) and
+Python helpers stop with `MIGRATION_REQUIRED`, naming this command, before
+they write anything to the database.
+
 Keep enough free space for the retained source, snapshot, and candidate shown by
 the dry-run inventory. `FUTURE_V7_SCHEMA`, `UNSUPPORTED_V7_SCHEMA`, and
 `SCHEMA_UPGRADE_AUTHORITY_INVALID` require operator inspection or a newer
@@ -351,11 +380,69 @@ repeat the same `migrate-v7 --apply` command. Use `migrate-v7 --rollback latest`
 to return to the retained predecessor and `--apply` to reactivate its verified
 candidate. Rollback refuses with `ROLLBACK_WOULD_HIDE_WRITES`, naming the count
 and the candidate that retains them, when events were recorded after
-activation; `--discard-v7-writes` proceeds and reports what stayed behind. The
-generic `migrate` command remains an in-place additive migration entry point,
-capped at the last v6 schema version while a store is still format 6 so it
-cannot rewrite what `migrate-v7` snapshots; use `migrate-v7 --apply` when
-retention, verification, atomic activation, and rollback are required.
+activation; `--discard-v7-writes` proceeds and reports what stayed behind.
+
+Rolling back to a format 7 predecessor (after a schema upgrade or a
+`verify-v7 --repair-projections` activation) republishes the exact
+`active-db.json` that predecessor had, so the reported generation returns to
+the predecessor's. A schema upgrade's predecessor is still on its older schema:
+the Daem0nMCP build that wrote it serves it again, and a newer build answers
+`MIGRATION_REQUIRED` until `--apply` reactivates the candidate. Repeating
+`--rollback latest` reports `already_rolled_back` instead of unwinding a second
+run; pass a migration ID to roll back the run underneath, which works while
+that database is still on its older schema. A reactivation that stops after
+writing the pointer leaves the start failing with `V7_ACTIVATION_INCOMPLETE`
+until `migrate-v7 --apply` (or `--rollback`) is run again. A workspace that an
+earlier development build left failing with `V7_ACTIVATION_INCOMPLETE` or
+`ACTIVE_V7_INVALID` after such a rollback is repaired by running
+`migrate-v7 --apply` or `migrate-v7 --rollback` once. The
+generic `migrate` command remains an in-place additive migration entry point
+for format 6 only, capped at the last v6 schema version so it cannot rewrite
+what `migrate-v7` snapshots. On a format 7 store whose schema is older than
+the build it changes nothing and answers `MIGRATION_REQUIRED`, like every
+other legacy command: `migrate-v7 --apply` is the one command that upgrades a
+format 7 schema, with retention, verification, atomic activation, and rollback.
+
+`active-db.json` is part of the store: back it up and copy it together with
+`daem0nmcp.db` and `migrations/`. A format 7 `daem0nmcp.db` found without it is
+never opened as a format 6 store, because format 6 writes bypass the event log.
+The legacy CLI commands, hooks and Python helpers, and `migrate-v7` itself, stop
+with `ACTIVE_POINTER_MISSING` before writing anything; the v7 tools keep
+answering `MIGRATION_REQUIRED`. Restore `active-db.json` from a backup, or stop
+the server and run:
+
+```bash
+python -m daem0nmcp.cli --project-path /srv/project-a migrate-v7 --recover-pointer
+```
+
+It republishes the generation-one pointer for `daem0nmcp.db`, which is right
+when that file is the whole store (a copy made without the pointer, or a store
+that never ran a schema upgrade or projection repair, or whose runs were all
+rolled back). If the schema is older than the build, follow it with
+`migrate-v7 --apply`. When `migrations/v7/` holds a candidate that was not
+rolled back, the lost pointer may have named that candidate and
+`daem0nmcp.db` may be its stale predecessor, so the command answers
+`POINTER_RECOVERY_AMBIGUOUS`, naming the candidate, and changes nothing: only
+the backed-up `active-db.json` settles which database was active. A store
+that was migrated from format 6 keeps the format 6 file as `daem0nmcp.db` and
+runs on the candidate. Without the pointer that file is not opened or migrated
+again while the candidate's run is still recorded as active: every command
+answers `ACTIVE_POINTER_MISSING`, naming the candidate, `--recover-pointer`
+answers `POINTER_RECOVERY_AMBIGUOUS`, and the pointer has to come from a
+backup. A published `candidate.db` that cannot be read at all (in use by
+another process, or damaged) is treated the same way, because it may be that
+active database: stop the process holding it and retry, restore the pointer
+from a backup, or, when that run was never activated, move its
+`migrations/v7/<migration-id>/` directory out of the storage directory. A
+`migrations/v7/` directory that exists but cannot be listed is refused too,
+until it is made readable or the pointer is restored. When `daem0nmcp.db`
+itself cannot be read without a pointer (not a database, held by another
+process, or left with an unfinished `daem0nmcp.db-journal`), `migrate-v7`
+answers `SOURCE_UNREADABLE` rather than guess its format; the dry run and
+`--rollback` never write that file, while `--apply` rolls an unfinished
+journal back and continues. A brand-new,
+still empty database whose first start stopped before its pointer was written
+is the one case finished automatically on the next start.
 
 Stop the server before applying or rolling back: both commands take the
 storage lock, and a running server on the old pointer sees the generation
@@ -547,8 +634,10 @@ and the desktop CA file must trust its issuer. Pairing pins the server authority
 Origin, CA path and bytes, workspace, and desktop directory identity. Editing
 project configuration cannot change that recipient; intentional changes require
 operator reprovisioning. A workspace grant in the server's access file is still
-required. The current bridge configuration provisions one credential identity
-per application server. See the [bridge implementation and verification
+required. The desktop client connects to that authority directly: it ignores
+`HTTPS_PROXY` and other proxy settings and treats any redirect as a failed
+call, so the bearer is never sent to another host. The current bridge
+configuration provisions one credential identity per application server. See the [bridge implementation and verification
 report](release/v7/p6-edit-capture.md) for enforcement boundaries.
 
 ## Durable-task lifecycle

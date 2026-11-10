@@ -24,7 +24,7 @@ import sys
 
 BLOCKED = {
     "sentence_transformers", "onnxruntime", "numpy", "qdrant_client",
-    "rank_bm25", "tree_sitter", "tree_sitter_language_pack", "networkx",
+    "tree_sitter", "tree_sitter_language_pack", "networkx",
     "igraph", "leidenalg", "langgraph", "llmlingua", "tiktoken",
     "e2b_code_interpreter", "opentelemetry.sdk", "opentelemetry.exporter",
     "bs4", "watchdog", "plyer",

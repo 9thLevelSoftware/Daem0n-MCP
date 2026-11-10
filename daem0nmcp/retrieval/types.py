@@ -34,6 +34,27 @@ _MAX_FILTER_VALUE_CHARS = 256
 MAX_LEGACY_RATIONALE_CHARS = 4_096
 MAX_LEGACY_TAGS = 32
 MAX_LEGACY_TAG_CHARS = 128
+# Terminal escape sequences of a pasted log: CSI (7-bit and 8-bit introducer),
+# terminated OSC and DCS/SOS/PM/APC strings, charset and other escapes with
+# intermediate bytes, and two-character escapes.  The parameter and final
+# bytes of a sequence are word characters, so the sequence is removed whole.
+_TERMINAL_ESCAPE = re.compile(
+    r"(?:\x1b\[|\x9b)[0-?]*[ -/]*[@-~]"
+    r"|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)"
+    r"|\x1b[PX^_][^\x1b]*\x1b\\"
+    r"|\x1b[ -/]+[0-~]"
+    r"|\x1b[0-~]"
+)
+
+
+def without_terminal_escapes(text: str) -> str:
+    """Return ``text`` with each terminal escape sequence replaced by a space.
+
+    Every other control character is left in place: the term patterns of the
+    query builders already treat it as a separator.
+    """
+
+    return _TERMINAL_ESCAPE.sub(" ", text)
 
 
 def _plain_positive_int(
@@ -147,9 +168,11 @@ def _legacy_metadata(
 class RetrievalQuery:
     """One policy-scoped retrieval request.
 
-    Empty or whitespace-only query text is deliberately permitted.  The
-    lexical provider reports it as an explicit no-results result instead of
-    changing ranking semantics through a hidden fallback.
+    Empty or whitespace-only query text is deliberately permitted.  Without a
+    category, tag or record-ID filter the lexical provider reports it as an
+    explicit no-results result instead of changing ranking semantics through
+    a hidden fallback.  With such a filter it lists the filtered records,
+    most recently changed first.
     """
 
     workspace_id: str

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import sqlite3
 import threading
@@ -45,6 +46,9 @@ from .tools import (
     RelationshipPath,
     RelationshipView,
 )
+
+logger = logging.getLogger(__name__)
+_MAX_LOGGED_DANGLING = 20
 
 _EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
 _REQUIRED_TABLES = frozenset(
@@ -412,46 +416,70 @@ def _live_relationships(
     workspace_id: str,
     now_us: int,
 ) -> list[sqlite3.Row]:
-    invalid = connection.execute(
-        "SELECT 1 FROM memory_relationship_versions AS relation "
+    # A relationship whose asserting event is missing or belongs to another
+    # stream is corruption and fails closed.  A relationship whose endpoint was
+    # deleted is not: stores written before deletions closed their
+    # relationships still hold such rows, so they are skipped (and reported in
+    # the log) instead of degrading every traversal in the workspace.
+    live = (
+        "relation.workspace_id=? "
+        "AND relation.relationship_type<>'legacy' "
+        "AND relation.transaction_to_us IS NULL "
+        "AND relation.valid_from_us<=? "
+        "AND (relation.valid_to_us IS NULL OR relation.valid_to_us>?) "
+    )
+    endpoints = (
         "LEFT JOIN memory_records AS source "
         "ON source.workspace_id=relation.workspace_id "
         "AND source.record_id=relation.source_record_id "
+        "AND source.deleted_at_us IS NULL "
         "LEFT JOIN memory_records AS target "
         "ON target.workspace_id=relation.workspace_id "
         "AND target.record_id=relation.target_record_id "
+        "AND target.deleted_at_us IS NULL "
+    )
+    invalid = connection.execute(
+        "SELECT 1 FROM memory_relationship_versions AS relation "
         "LEFT JOIN memory_events AS event "
         "ON event.event_id=relation.asserted_by_event_id "
-        "WHERE relation.workspace_id=? "
-        "AND relation.relationship_type<>'legacy' "
-        "AND relation.transaction_to_us IS NULL "
-        "AND relation.valid_from_us<=? "
-        "AND (relation.valid_to_us IS NULL OR relation.valid_to_us>?) "
-        "AND (source.record_id IS NULL OR source.deleted_at_us IS NOT NULL "
-        "OR target.record_id IS NULL OR target.deleted_at_us IS NOT NULL) "
-        "OR (relation.workspace_id=? "
-        "AND relation.relationship_type<>'legacy' "
-        "AND relation.transaction_to_us IS NULL "
-        "AND relation.valid_from_us<=? "
-        "AND (relation.valid_to_us IS NULL OR relation.valid_to_us>?) "
+        f"WHERE {live}"
         "AND (event.event_id IS NULL OR event.workspace_id<>relation.workspace_id "
         "OR event.stream_id<>relation.relationship_id "
-        "OR event.stream_kind<>'relationship')) "
+        "OR event.stream_kind<>'relationship') "
         "LIMIT 1",
-        (workspace_id, now_us, now_us, workspace_id, now_us, now_us),
+        (workspace_id, now_us, now_us),
     ).fetchone()
     if invalid is not None:
         raise RelationshipOperationError("CAPABILITY_DEGRADED")
+    dangling = connection.execute(
+        "SELECT count(*) FROM memory_relationship_versions AS relation "
+        f"{endpoints}WHERE {live}"
+        "AND (source.record_id IS NULL OR target.record_id IS NULL)",
+        (workspace_id, now_us, now_us),
+    ).fetchone()
+    if dangling is not None and int(dangling[0]):
+        listed = connection.execute(
+            "SELECT relation.relationship_id "
+            "FROM memory_relationship_versions AS relation "
+            f"{endpoints}WHERE {live}"
+            "AND (source.record_id IS NULL OR target.record_id IS NULL) "
+            "ORDER BY relation.relationship_id LIMIT ?",
+            (workspace_id, now_us, now_us, _MAX_LOGGED_DANGLING),
+        ).fetchall()
+        logger.warning(
+            "Skipped %d live relationship(s) whose endpoint record is deleted "
+            "or missing; remove them with memory_unlink (first %d: %s).",
+            int(dangling[0]),
+            len(listed),
+            ", ".join(str(row[0]) for row in listed),
+        )
     rows = connection.execute(
         f"SELECT {_RELATIONSHIP_COLUMNS} "
         "FROM memory_relationship_versions AS relation "
         "JOIN memory_events AS event "
         "ON event.event_id=relation.asserted_by_event_id "
-        "WHERE relation.workspace_id=? "
-        "AND relation.relationship_type<>'legacy' "
-        "AND relation.transaction_to_us IS NULL "
-        "AND relation.valid_from_us<=? "
-        "AND (relation.valid_to_us IS NULL OR relation.valid_to_us>?) "
+        f"{endpoints}WHERE {live}"
+        "AND source.record_id IS NOT NULL AND target.record_id IS NOT NULL "
         "ORDER BY relation.relationship_id LIMIT ?",
         (workspace_id, now_us, now_us, _MAX_TRAVERSAL_EDGES + 1),
     ).fetchall()

@@ -807,7 +807,7 @@
             <div class="ritual-code">
 <pre><span class="command">git clone</span> https://github.com/DasBluEyedDevil/Daem0n-MCP.git ~/Daem0nMCP
 <span class="command">pip install</span> -e ~/Daem0nMCP
-<span class="command">claude mcp add</span> daem0nmcp --scope user -- python -m daem0nmcp.server
+<span class="command">claude mcp add</span> daem0nmcp --scope user -- python -c "import sys; sys.path = [p for p in sys.path if p]; import runpy; runpy.run_module('daem0nmcp.server', run_name='__main__', alter_sys=True)"
 <span class="command">python -m daem0nmcp.cli install-hooks</span>        <span class="comment"># Git enforcement wards</span>
 <span class="command">python -m daem0nmcp.cli install-claude-hooks</span> <span class="comment"># Native Claude wards</span>
 <span class="command">python -m daem0nmcp.cli index</span>                <span class="comment"># Grant code sight</span>

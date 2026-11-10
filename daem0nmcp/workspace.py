@@ -13,7 +13,9 @@ import stat
 from collections.abc import Iterable, Mapping, Sequence
 from contextlib import closing, suppress
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PurePath, PureWindowsPath
+from typing import Literal
+from urllib.parse import quote
 
 _WINDOWS_DRIVE = re.compile(r"^[A-Za-z]:")
 
@@ -112,6 +114,48 @@ def normalize_resolved_path(path: Path) -> Path:
     if value.startswith("\\\\?\\"):
         return Path(value[4:])
     return path
+
+
+def sqlite_file_uri(
+    path: str | os.PathLike[str],
+    *,
+    mode: Literal["ro", "rw", "rwc"] | None = None,
+) -> str:
+    """Return the SQLite URI filename that opens exactly ``path``.
+
+    SQLite reads ``?`` as the start of the query, ``#`` as a fragment and
+    ``%HH`` as an escaped byte, so a path pasted into ``file:...`` unescaped
+    can name a different file, or none.  Every byte outside the unreserved
+    set is percent-encoded here.  The path is made absolute first, and the
+    URI always carries an empty authority: ``file:///dir/x.db`` on POSIX,
+    ``file:///C:/dir/x.db`` for a drive path and ``file:////server/share/x.db``
+    for a UNC path, whose server SQLite would otherwise reject as an authority.
+    """
+
+    pure = path if isinstance(path, PurePath) else Path(path)
+    if not pure.is_absolute():
+        if not isinstance(pure, Path):
+            raise ValueError("a path of another platform must be absolute")
+        # POSIX resolves ``link/..`` through the link, so the path is joined
+        # to the working directory as written; collapsing ``..`` first could
+        # name another file.  Windows collapses it the same way itself.
+        pure = Path(
+            os.path.abspath(pure)
+            if os.name == "nt"
+            else os.path.join(os.getcwd(), pure)
+        )
+    text = pure.as_posix()
+    if isinstance(pure, PureWindowsPath):
+        # SQLite's Windows VFS accepts forward slashes only outside the
+        # extended-length spelling, which names the same file without it.
+        if text[:8].upper() == "//?/UNC/":
+            text = "//" + text[8:]
+        elif text.startswith("//?/"):
+            text = text[4:]
+    if not text.startswith("/"):
+        text = "/" + text
+    uri = "file://" + quote(text, safe="/:", errors="surrogateescape")
+    return uri if mode is None else f"{uri}?mode={mode}"
 
 
 def _workspace_id(root: Path) -> str:
@@ -490,16 +534,30 @@ def _resolve_identities(canonical: Sequence[Path]) -> dict[str, WorkspaceIdentit
     return identities
 
 
-def _identity_stamp(root: Path) -> tuple[int, int, int] | None:
-    status = _lstat(_identity_path(root))
+def _file_stamp(path: Path) -> tuple[int, int, int] | None:
+    status = _lstat(path)
     if status is None:
         return None
     return (status.st_mtime_ns, status.st_size, status.st_ino)
 
 
+def _identity_stamp(
+    root: Path,
+) -> tuple[tuple[int, int, int] | None, ...]:
+    storage = _identity_directory(root) / "storage"
+    return (
+        _file_stamp(_identity_path(root)),
+        _file_stamp(storage / "active-db.json"),
+        _file_stamp(storage / "daem0nmcp.db"),
+    )
+
+
 _IDENTITY_CACHE: dict[
     tuple[str, ...],
-    tuple[tuple[tuple[int, int, int] | None, ...], dict[str, WorkspaceIdentity]],
+    tuple[
+        tuple[tuple[tuple[int, int, int] | None, ...], ...],
+        dict[str, WorkspaceIdentity],
+    ],
 ] = {}
 
 

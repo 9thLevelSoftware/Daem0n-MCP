@@ -446,10 +446,19 @@ class TreeSitterIndexer:
         start = node.start_point[0] + 1
         current = node
         previous = current.prev_named_sibling
-        while previous is not None and previous.type in {"decorator", "comment"}:
+        # Rust outer attributes (``#[inline]``, ``#[cfg(test)]``) precede the
+        # item as siblings and its comments are line_comment/block_comment.
+        # Inner attributes (``#![...]``) already sit inside the item's span.
+        while previous is not None and previous.type in {
+            "decorator",
+            "attribute_item",
+            "comment",
+            "line_comment",
+            "block_comment",
+        }:
             if source[previous.end_byte : current.start_byte].strip():
                 break
-            if previous.type == "decorator":
+            if previous.type in {"decorator", "attribute_item"}:
                 start = previous.start_point[0] + 1
             current = previous
             previous = current.prev_named_sibling

@@ -249,6 +249,74 @@ class ActiveContextOperationTests(unittest.IsolatedAsyncioTestCase):
                     ).fetchone()[0],
                 )
 
+    async def test_add_refuses_a_deleted_record_but_replays_an_earlier_add(
+        self,
+    ) -> None:
+        """A tombstoned record must not gain or change an active-context entry."""
+        import json
+
+        from daem0nmcp.api.v7.local_state_operations import LocalStateOperationError
+        from daem0nmcp.event_store import EventCommand, EventStore
+
+        deleted_at_us = int(NOW.timestamp() * 1_000_000)
+        never_added = self.fixture.add_record(1, deleted_at_us=deleted_at_us)
+        added_first = self.fixture.add_record(2)
+        operation = self._operations()["active_context_add"]
+        request = self._add_request(added_first, priority=4)
+        created = await operation(workspace=self.fixture.workspace, request=request)
+        with closing(sqlite3.connect(self.fixture.database)) as connection:
+            connection.execute("PRAGMA foreign_keys=ON")
+            payload_json = connection.execute(
+                "SELECT payload_json FROM memory_events WHERE stream_id=?",
+                (added_first,),
+            ).fetchone()[0]
+            state = dict(json.loads(payload_json)["record"])
+            state["deleted_at_us"] = deleted_at_us
+            EventStore(connection).append_and_project(
+                EventCommand(
+                    workspace_id=self.fixture.workspace.workspace_id,
+                    stream_id=added_first,
+                    stream_kind="memory",
+                    event_type="memory.deleted",
+                    occurred_at_us=deleted_at_us,
+                    recorded_at_us=deleted_at_us,
+                    actor_type="client",
+                    payload={"record": state},
+                    expected_stream_version=2,
+                )
+            )
+            connection.commit()
+            events_before = connection.execute(
+                "SELECT (SELECT count(*) FROM memory_events),"
+                "(SELECT count(*) FROM governance_events)"
+            ).fetchone()
+
+        for refused in (
+            self._add_request(never_added),
+            self._add_request(added_first, reason="Changed focus", priority=9),
+        ):
+            with self.assertRaises(LocalStateOperationError) as caught:
+                await operation(workspace=self.fixture.workspace, request=refused)
+            self.assertEqual("NOT_FOUND", caught.exception.code)
+        replay = await operation(workspace=self.fixture.workspace, request=request)
+
+        self.assertEqual(created.active_context_id, replay.active_context_id)
+        self.assertEqual(4, replay.priority)
+        with closing(sqlite3.connect(self.fixture.database)) as connection:
+            self.assertEqual(
+                events_before,
+                connection.execute(
+                    "SELECT (SELECT count(*) FROM memory_events),"
+                    "(SELECT count(*) FROM governance_events)"
+                ).fetchone(),
+            )
+            self.assertEqual(
+                [(added_first, 4)],
+                connection.execute(
+                    "SELECT record_id,priority FROM active_context_entries"
+                ).fetchall(),
+            )
+
     async def test_mutations_append_canonical_observable_events(self) -> None:
         """State changes must be discoverable without polling projection tables."""
         operations = self._operations()
@@ -549,6 +617,87 @@ class ActiveContextOperationTests(unittest.IsolatedAsyncioTestCase):
                     "WHERE active_context_id=?",
                     (third.active_context_id,),
                 ).fetchone()[0]
+            )
+
+    async def test_committed_clear_replays_after_a_restart_or_token_expiry(
+        self,
+    ) -> None:
+        """A retry of a committed clear must get its receipt, not a token error."""
+        from daem0nmcp.api.v7.local_state_operations import (
+            LocalStateOperationError,
+        )
+
+        workspace = self.fixture.workspace
+        operations = self._operations()
+        for index in (1, 2):
+            await operations["active_context_add"](
+                workspace=workspace,
+                request=self._add_request(self.fixture.add_record(index)),
+            )
+
+        def list_request() -> AdmittedRequest:
+            return _request("active_context_list", workspace_id=workspace.workspace_id)
+
+        def clear_request(token: str) -> AdmittedRequest:
+            return _request(
+                "active_context_clear",
+                workspace_id=workspace.workspace_id,
+                selection_token=token,
+                preflight_token=PREFLIGHT_TOKEN,
+            )
+
+        page = await operations["active_context_list"](
+            workspace=workspace, request=list_request()
+        )
+        cleared = await operations["active_context_clear"](
+            workspace=workspace, request=clear_request(page.selection_token)
+        )
+        self.assertEqual(2, cleared.changed_count)
+
+        # A restarted process signs with a new secret; a late retry also
+        # arrives after the token's lifetime.
+        restarted = self._operations(token_secret=b"secret-of-the-restarted-process-02")
+        late = self._operations(clock=lambda: NOW + timedelta(seconds=301))
+        for name, retried in (("restart", restarted), ("expired", late)):
+            with self.subTest(retry=name):
+                replay = await retried["active_context_clear"](
+                    workspace=workspace, request=clear_request(page.selection_token)
+                )
+                self.assertTrue(replay.idempotent_replay)
+                self.assertEqual(
+                    cleared.model_dump(exclude={"idempotent_replay"}),
+                    replay.model_dump(exclude={"idempotent_replay"}),
+                )
+
+        # Only the exact token that cleared replays.  A changed token, and a
+        # genuine one from before the restart that never cleared, stay refused.
+        await operations["active_context_add"](
+            workspace=workspace,
+            request=self._add_request(self.fixture.add_record(3)),
+        )
+        unused = await operations["active_context_list"](
+            workspace=workspace, request=list_request()
+        )
+        used = page.selection_token
+        refused = {
+            "changed signature": used[:-1] + ("0" if used[-1] != "0" else "1"),
+            "changed expiry": used[:69] + ("0" if used[69] != "0" else "1") + used[70:],
+            "never used": unused.selection_token,
+        }
+        for name, token in refused.items():
+            with self.subTest(refused=name):
+                with self.assertRaises(LocalStateOperationError) as caught:
+                    await restarted["active_context_clear"](
+                        workspace=workspace, request=clear_request(token)
+                    )
+                self.assertEqual("TOKEN_TAMPERED", caught.exception.code)
+        with closing(sqlite3.connect(self.fixture.database)) as connection:
+            self.assertEqual(
+                1,
+                connection.execute(
+                    "SELECT COUNT(*) FROM active_context_entries "
+                    "WHERE removed_at_us IS NULL"
+                ).fetchone()[0],
             )
 
     async def test_expired_add_and_tampered_selection_fail_closed(self) -> None:

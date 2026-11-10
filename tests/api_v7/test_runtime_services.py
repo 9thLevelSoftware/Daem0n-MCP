@@ -364,6 +364,89 @@ class WriterServiceTests(
                 connection.execute("SELECT count(*) FROM memory_events").fetchone()[0],
             )
 
+    def _tombstone(self, record_id: str) -> None:
+        """Delete a record the way destructive maintenance does."""
+        import json
+
+        from daem0nmcp.event_store import EventCommand, EventStore
+
+        with closing(sqlite3.connect(self.database)) as connection:
+            connection.execute("PRAGMA foreign_keys=ON")
+            version, payload_json = connection.execute(
+                "SELECT record.stream_version,event.payload_json "
+                "FROM memory_records record JOIN memory_events event "
+                "ON event.event_id=record.source_event_id WHERE record.record_id=?",
+                (record_id,),
+            ).fetchone()
+            state = dict(json.loads(payload_json)["record"])
+            deleted_at_us = int(WORKED_AT.timestamp() * 1_000_000)
+            state["deleted_at_us"] = deleted_at_us
+            EventStore(connection).append_and_project(
+                EventCommand(
+                    workspace_id=self.workspace.workspace_id,
+                    stream_id=record_id,
+                    stream_kind="memory",
+                    event_type="memory.deleted",
+                    occurred_at_us=deleted_at_us,
+                    recorded_at_us=deleted_at_us,
+                    actor_type="client",
+                    payload={"record": state},
+                    expected_stream_version=int(version) + 1,
+                )
+            )
+            connection.commit()
+
+    def _stream_event_types(self, record_id: str) -> list[str]:
+        with closing(sqlite3.connect(self.database)) as connection:
+            return [
+                row[0]
+                for row in connection.execute(
+                    "SELECT event_type FROM memory_events WHERE stream_id=? "
+                    "ORDER BY stream_version",
+                    (record_id,),
+                )
+            ]
+
+    async def test_outcome_refuses_a_deleted_record_but_replays_an_earlier_one(
+        self,
+    ) -> None:
+        """An outcome on a tombstoned record must not append or report success."""
+        from daem0nmcp.api.v7.pinned import MemoryOutcomeCommand
+        from daem0nmcp.api.v7.runtime_services import RuntimeServiceError
+
+        writer = self._writer()
+        stored = await writer.store(self.workspace, self._store_command())
+        record_id = stored.record.record_id
+        committed = MemoryOutcomeCommand(
+            record_id=record_id,
+            outcome_text="The release stayed healthy.",
+            worked=True,
+            happened_at=WORKED_AT,
+            idempotency_key="runtime-outcome-0001",
+        )
+        first = await writer.record_outcome(self.workspace, committed)
+        self._tombstone(record_id)
+
+        with self.assertRaisesRegex(RuntimeServiceError, "NOT_FOUND"):
+            await writer.record_outcome(
+                self.workspace,
+                MemoryOutcomeCommand(
+                    record_id=record_id,
+                    outcome_text="A late verdict on a pruned record.",
+                    worked=False,
+                    happened_at=WORKED_AT,
+                    idempotency_key="runtime-outcome-0002",
+                ),
+            )
+        replay = await writer.record_outcome(self.workspace, committed)
+
+        self.assertTrue(replay.idempotent_replay)
+        self.assertEqual(first.event, replay.event)
+        self.assertEqual(
+            ["memory.created", "memory.outcome_recorded", "memory.deleted"],
+            self._stream_event_types(record_id),
+        )
+
 
 class RecallAdapterTests(
     _RuntimeServiceFixtures,
@@ -857,6 +940,94 @@ class RecallAdapterTests(
             connection.commit()
         legacy = await run(self._retrieval_result(stored))
         self.assertNotIn("private.txt", legacy.model_dump_json())
+
+    async def test_federated_link_checks_and_composition_leave_the_event_loop(
+        self,
+    ) -> None:
+        """Ledger verification and fusion must not stall every other request."""
+        from unittest.mock import patch
+
+        from daem0nmcp.api.v7 import runtime_services
+        from daem0nmcp.workspace import WorkspaceRegistry
+
+        linked_directory = tempfile.TemporaryDirectory()
+        self.addCleanup(linked_directory.cleanup)
+        linked_root = Path(linked_directory.name).resolve()
+        linked = WorkspaceRegistry([linked_root], default_root=linked_root).default
+        workspaces = {linked.workspace_id: linked}
+        database = self.database
+
+        class Resolver:
+            @contextmanager
+            def locked_active(self, _workspace: object):
+                yield SimpleNamespace(path=database)
+
+        loop_thread = threading.get_ident()
+        calls: list[tuple[str, bool, tuple[object, ...]]] = []
+        composed = object()
+
+        def validate(path: Path, origin: str, linked_ids: tuple[str, ...]) -> None:
+            on_loop = threading.get_ident() == loop_thread
+            calls.append(("validate", on_loop, (path, origin, linked_ids)))
+
+        def compose(results: dict, query: object, **options: object) -> object:
+            on_loop = threading.get_ident() == loop_thread
+            calls.append(("compose", on_loop, (sorted(results), query)))
+            return composed
+
+        adapter = runtime_services.Task8RecallService(
+            storage_resolver=Resolver(),
+            workspace_resolver=SimpleNamespace(resolve=workspaces.__getitem__),
+            service_factory=lambda _path: object(),
+        )
+
+        async def source(workspace: object, _active: object, _query: object) -> str:
+            return "source:" + workspace.workspace_id
+
+        adapter._retrieve_source = source
+        query = self._query(self.workspace.workspace_id)
+        try:
+            with (
+                patch.object(runtime_services, "validate_directional_links", validate),
+                patch.object(runtime_services, "compose_federated_results", compose),
+            ):
+                result = await adapter.retrieve(
+                    self.workspace,
+                    query,
+                    frozenset({linked.workspace_id}),
+                    lambda _workspace: None,
+                )
+
+            def refuse(*_arguments: object) -> None:
+                raise runtime_services.FederatedRetrievalError("UNAUTHORIZED_WORKSPACE")
+
+            # A refusal raised on the worker keeps its stable code.
+            with (
+                patch.object(runtime_services, "validate_directional_links", refuse),
+                self.assertRaisesRegex(
+                    runtime_services.RuntimeServiceError, "^UNAUTHORIZED_WORKSPACE$"
+                ),
+            ):
+                await adapter.retrieve(
+                    self.workspace,
+                    query,
+                    frozenset({linked.workspace_id}),
+                    lambda _workspace: None,
+                )
+        finally:
+            adapter.close()
+
+        self.assertIs(composed, result)
+        link_check = (database, self.workspace.workspace_id, (linked.workspace_id,))
+        both = sorted((self.workspace.workspace_id, linked.workspace_id))
+        self.assertEqual(
+            [
+                ("validate", False, link_check),
+                ("validate", False, link_check),
+                ("compose", False, (both, query)),
+            ],
+            calls,
+        )
 
     async def test_recall_rejects_federation_and_preserves_abstention(
         self,

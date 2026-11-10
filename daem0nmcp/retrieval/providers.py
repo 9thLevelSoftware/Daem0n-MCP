@@ -13,9 +13,12 @@ import sqlite3
 import threading
 import uuid
 from collections.abc import Callable, Mapping
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import suppress
 from datetime import datetime, timezone
+from time import monotonic as _monotonic
 from time import perf_counter_ns
+from typing import Any
 
 from ..bounded_workers import BoundedWorkerBusyError, BoundedWorkerPool
 from .lexical_config import (
@@ -24,11 +27,13 @@ from .lexical_config import (
     lexical_fts_table_name,
 )
 from .types import (
+    _MAX_CANDIDATE_LIMIT,
     Candidate,
     EvidenceRef,
     ProviderResult,
     ProviderStatus,
     RetrievalQuery,
+    without_terminal_escapes,
 )
 from .vector_validation import VECTOR_ATTESTATION_FORMAT
 
@@ -56,6 +61,11 @@ _FTS_QUESTION_STOP_WORDS = frozenset(
         "you",
     }
 )
+# Position of the any-single-term rung in a ladder of three or more terms.  One
+# shared word out of several is weak evidence, so its candidates are ranked
+# after a full page of stricter matches: rank fusion then cannot place them
+# above another provider's hit the way a complete lexical match would be.
+_SINGLE_TERM_RUNG = 2
 _WORKSPACE_ID = re.compile(r"^ws_[0-9a-f]{24}$")
 _RECORD_ID = re.compile(r"^mem_[0-9a-f]{64}$")
 _CONTENT_HASH = re.compile(r"^[0-9a-f]{64}$")
@@ -93,12 +103,12 @@ def _safe_fts_queries(text: str) -> tuple[str, ...] | None:
         text.encode("utf-8")
     except UnicodeEncodeError:
         return None
-    if any(ord(character) < 32 and not character.isspace() for character in text):
-        return None
     terms = tuple(
         dict.fromkeys(
             term
-            for term in re.findall(r"\w+", text, flags=re.UNICODE)
+            for term in re.findall(
+                r"\w+", without_terminal_escapes(text), flags=re.UNICODE
+            )
             if term.casefold() not in _FTS_QUESTION_STOP_WORDS
         )
     )
@@ -124,7 +134,38 @@ def _safe_fts_queries(text: str) -> tuple[str, ...] | None:
         pairs = tuple(
             f"{quoted[index]} {quoted[index + 1]}" for index in range(len(quoted) - 1)
         )
-    return (conjunctive, " OR ".join(pairs))
+    # The last rung matches any single term, so a query whose other terms are
+    # absent from the corpus still reaches the documents about the one present.
+    # The provider ranks it as weak evidence (see _SINGLE_TERM_RUNG).
+    return (conjunctive, " OR ".join(pairs), " OR ".join(quoted))
+
+
+def _document_filter_sql(query: RetrievalQuery) -> tuple[str, tuple[object, ...]]:
+    """Return the query's category, tag and record-ID scope as SQL conditions.
+
+    The conditions select ``retrieval_documents`` rows before the candidate
+    limit applies.  They only narrow: the retrieval policy still checks every
+    candidate against the canonical record state afterwards.
+    """
+
+    clauses: list[str] = []
+    parameters: list[object] = []
+    if query.categories is not None:
+        values = sorted(query.categories)
+        clauses.append(f"category IN ({','.join('?' for _ in values)})")
+        parameters.extend(values)
+    if query.tags is not None:
+        # tags_text is the record's tags joined by newlines.
+        for tag in sorted(query.tags):
+            clauses.append(
+                "instr(char(10)||tags_text||char(10),char(10)||?||char(10))>0"
+            )
+            parameters.append(tag)
+    if query.record_ids is not None:
+        values = sorted(query.record_ids)
+        clauses.append(f"record_id IN ({','.join('?' for _ in values)})")
+        parameters.extend(values)
+    return "".join(f" AND {clause}" for clause in clauses), tuple(parameters)
 
 
 def _transaction_datetime(value: object) -> datetime | None:
@@ -146,12 +187,23 @@ class LexicalProvider:
         connection_factory: Callable[[], sqlite3.Connection] | None = None,
         timeout_seconds: float = 2.0,
         worker_pool: BoundedWorkerPool | None = None,
+        content_tiering: bool | None = None,
     ) -> None:
         self._connection_factory = _sqlite_read_factory(connection, connection_factory)
         self._timeout_seconds = _positive_timeout(timeout_seconds, "timeout_seconds")
         if worker_pool is not None and not isinstance(worker_pool, BoundedWorkerPool):
             raise ValueError("worker_pool must be a BoundedWorkerPool")
         self._worker_pool = worker_pool or _LEXICAL_WORKERS
+        if content_tiering is None:
+            from ..config import settings
+
+            content_tiering = settings.lexical_content_tiering
+        if not isinstance(content_tiering, bool):
+            raise ValueError("content_tiering must be boolean")
+        # Off: candidates are ordered by the weighted BM25 score alone.  On:
+        # content/rationale matches precede tag-assisted ones and are ordered
+        # among themselves without the tag weight.
+        self._content_tiering = content_tiering
 
     async def search(
         self,
@@ -246,7 +298,8 @@ class LexicalProvider:
                     manifest_generation=generation,
                     elapsed_ms=(perf_counter_ns() - started) / 1_000_000,
                 )
-            if not fts_queries:
+            filter_sql, filter_parameters = _document_filter_sql(query)
+            if not fts_queries and not filter_sql:
                 return ProviderResult(
                     provider=self.name,
                     status=result_status,
@@ -254,9 +307,51 @@ class LexicalProvider:
                     manifest_generation=generation,
                     elapsed_ms=(perf_counter_ns() - started) / 1_000_000,
                 )
+            # An archived document the query excludes must not take a
+            # candidate slot.  This is not an explicit scope, so it does not
+            # turn an empty query into a listing.
+            scope_sql = filter_sql
+            if not query.include_archived:
+                filter_sql += " AND archived=0"
             content_weight, rationale_weight, tags_weight = LEXICAL_BM25_WEIGHTS
+            if self._content_tiering:
+                tier_column = f""",
+                           "{expected_table}".rowid IN (
+                               SELECT rowid FROM "{expected_table}"
+                               WHERE "{expected_table}" MATCH ?
+                           ) AS content_match"""
+                ordering = f"""content_match DESC,
+                             CASE WHEN content_match THEN bm25(
+                                 {expected_table}, {content_weight},
+                                 {rationale_weight}, 0
+                             ) ELSE score END ASC,
+                             document.record_id ASC"""
+            else:
+                tier_column = ""
+                ordering = "score ASC, document.record_id ASC"
             rows = []
-            for fts_query in fts_queries:
+            rank_offset = 0
+            if not fts_queries:
+                # No searchable term, but an explicit scope: list the scoped
+                # documents, most recently changed first, as listings do.
+                rows = connection.execute(
+                    "SELECT record_id,content_hash,source_event_id,"
+                    "transaction_from_us,0.0,NULL FROM retrieval_documents "
+                    "WHERE workspace_id=? AND projection_generation=?"
+                    f"{filter_sql} "
+                    "ORDER BY transaction_from_us DESC,record_id ASC LIMIT ?",
+                    (
+                        query.workspace_id,
+                        generation,
+                        *filter_parameters,
+                        bounded_limit,
+                    ),
+                ).fetchall()
+            for rung, fts_query in enumerate(fts_queries):
+                rung_limit = bounded_limit
+                if rung >= _SINGLE_TERM_RUNG:
+                    rank_offset = min(bounded_limit, _MAX_CANDIDATE_LIMIT // 2)
+                    rung_limit = min(bounded_limit, _MAX_CANDIDATE_LIMIT - rank_offset)
                 rows = connection.execute(
                     f"""
                     SELECT document.record_id, document.content_hash,
@@ -265,11 +360,8 @@ class LexicalProvider:
                                {expected_table}, {content_weight},
                                {rationale_weight}, {tags_weight}
                            ) AS score,
-                           snippet({expected_table}, 0, '', '', ' … ', 18),
-                           "{expected_table}".rowid IN (
-                               SELECT rowid FROM "{expected_table}"
-                               WHERE "{expected_table}" MATCH ?
-                           ) AS content_match
+                           snippet({expected_table}, 0, '', '', ' … ', 18)
+                           {tier_column}
                     FROM "{expected_table}"
                     JOIN (
                         SELECT document_rowid,record_id,content_hash,
@@ -277,32 +369,60 @@ class LexicalProvider:
                                transaction_from_us AS updated_at_us
                         FROM retrieval_documents
                         WHERE workspace_id=? AND projection_generation=?
+                              {filter_sql}
                     ) AS document
                       ON document.document_rowid="{expected_table}".rowid
                     WHERE "{expected_table}" MATCH ?
-                    ORDER BY content_match DESC,
-                             CASE WHEN content_match THEN bm25(
-                                 {expected_table}, {content_weight},
-                                 {rationale_weight}, 0
-                             ) ELSE score END ASC,
-                             document.record_id ASC
+                    ORDER BY {ordering}
                     LIMIT ?
                     """,
                     (
-                        "{content rationale}: (" + fts_query + ")",
+                        *(
+                            ("{content rationale}: (" + fts_query + ")",)
+                            if self._content_tiering
+                            else ()
+                        ),
                         query.workspace_id,
                         generation,
+                        *filter_parameters,
                         fts_query,
-                        bounded_limit,
+                        rung_limit,
                     ),
                 ).fetchall()
                 if rows:
+                    break
+                # A rung whose only matches are excluded archived documents
+                # still ends the ladder: weaker matches must not stand in for
+                # a stricter match the caller chose not to see.
+                if (
+                    filter_sql != scope_sql
+                    and connection.execute(
+                        f"""
+                        SELECT 1 FROM "{expected_table}"
+                        JOIN (
+                            SELECT document_rowid FROM retrieval_documents
+                            WHERE workspace_id=? AND projection_generation=?
+                                  {scope_sql} AND archived<>0
+                        ) AS document
+                          ON document.document_rowid="{expected_table}".rowid
+                        WHERE "{expected_table}" MATCH ?
+                        LIMIT 1
+                        """,
+                        (
+                            query.workspace_id,
+                            generation,
+                            *filter_parameters,
+                            fts_query,
+                        ),
+                    ).fetchone()
+                    is not None
+                ):
                     break
         except (json.JSONDecodeError, sqlite3.Error, TypeError, ValueError):
             return self._unavailable(started)
 
         candidates = []
-        for rank, row in enumerate(rows, 1):
+        for rank, row in enumerate(rows, rank_offset + 1):
             score = float(row[4])
             snippet = row[5]
             candidates.append(
@@ -459,6 +579,213 @@ def _default_qdrant_client_factory(**kwargs: object) -> object:
     return QdrantClient(**kwargs)
 
 
+class QdrantStorageLockedError(RuntimeError):
+    """The local storage folder is held by a client this process cannot share.
+
+    That is normally another process; the holder decides when it is released.
+    """
+
+    code = "DENSE_STORAGE_LOCKED"
+
+    def __init__(self) -> None:
+        super().__init__(self.code)
+
+
+_LOCAL_CLIENT_UNOPENED = object()
+_LOCAL_LOCK_RETRY_INITIAL_SECONDS = 1.0
+_LOCAL_LOCK_RETRY_MAX_SECONDS = 30.0
+_LOCAL_CLIENTS_LOCK = threading.Lock()
+_LOCAL_CLIENTS: dict[tuple[str, object], _LocalClientOwner] = {}
+# Consecutive lock failures and the earliest next attempt, per folder.  An
+# embedded open loads every collection before it discovers the lock, so a
+# folder held by another process is probed with backoff, not on every call.
+_LOCAL_LOCK_RETRIES: dict[tuple[str, object], tuple[int, float]] = {}
+
+
+def _is_local_storage_lock_error(error: BaseException) -> bool:
+    if not isinstance(error, RuntimeError):
+        return False
+    cause = error.__context__
+    if cause is not None and type(cause).__module__.partition(".")[0] == "portalocker":
+        return True
+    return "already accessed by another instance" in str(error)
+
+
+class _LocalClientOwner:
+    """The one embedded client of a storage folder and the thread that owns it.
+
+    Embedded Qdrant locks its folder against every other client, including one
+    in the same process, keeps thread-affine SQLite handles and is not safe for
+    concurrent calls.  Every user of a folder therefore shares this client, and
+    every call, the open and the close included, runs on one worker thread.
+    """
+
+    def __init__(self, key: tuple[str, object]) -> None:
+        self.key = key
+        self.state_lock = threading.Lock()
+        self.client: object = _LOCAL_CLIENT_UNOPENED
+        self.references = 0
+        self.retired = False
+        self._thread_id: int | None = None
+        self._executor = ThreadPoolExecutor(
+            max_workers=1,
+            thread_name_prefix="daem0nmcp-qdrant-local",
+        )
+
+    def run(self, function: Callable[..., Any], *arguments: object) -> Any:
+        if threading.get_ident() == self._thread_id:
+            return function(*arguments)
+        try:
+            work = self._executor.submit(self._run_owned, function, arguments)
+        except RuntimeError:
+            # No worker can start during interpreter shutdown.
+            return function(*arguments)
+        return work.result()
+
+    def _run_owned(
+        self, function: Callable[..., Any], arguments: tuple[object, ...]
+    ) -> Any:
+        self._thread_id = threading.get_ident()
+        return function(*arguments)
+
+    def open(self, path: str, factory: Callable[..., object]) -> None:
+        """Create the client; the caller holds ``state_lock``."""
+
+        now = _monotonic()
+        with _LOCAL_CLIENTS_LOCK:
+            failures, retry_at = _LOCAL_LOCK_RETRIES.get(self.key, (0, now))
+        if now < retry_at:
+            raise QdrantStorageLockedError()
+        try:
+            self.client = self.run(lambda: factory(path=path))
+        except Exception as error:
+            if not _is_local_storage_lock_error(error):
+                raise
+            delay = min(
+                _LOCAL_LOCK_RETRY_INITIAL_SECONDS * 2 ** min(failures, 16),
+                _LOCAL_LOCK_RETRY_MAX_SECONDS,
+            )
+            with _LOCAL_CLIENTS_LOCK:
+                _LOCAL_LOCK_RETRIES[self.key] = (failures + 1, _monotonic() + delay)
+            raise QdrantStorageLockedError() from error
+        with _LOCAL_CLIENTS_LOCK:
+            _LOCAL_LOCK_RETRIES.pop(self.key, None)
+
+    def close_client(self) -> None:
+        """Close and drop the client on its own thread, finalizer included."""
+
+        client, self.client = self.client, _LOCAL_CLIENT_UNOPENED
+        close = getattr(client, "close", None)
+        if callable(close):
+            close()
+
+    def retire(self) -> None:
+        """Leave the registry; the caller holds ``state_lock``."""
+
+        self.retired = True
+        with _LOCAL_CLIENTS_LOCK:
+            if _LOCAL_CLIENTS.get(self.key) is self:
+                del _LOCAL_CLIENTS[self.key]
+        self._executor.shutdown(wait=False)
+
+
+class _SharedLocalClient:
+    """One user's reference to the embedded client of a storage folder.
+
+    Attribute access and calls forward to the shared client.  ``close`` only
+    releases this reference; the client itself closes with its last user.
+    """
+
+    __slots__ = ("_shared_closed", "_shared_lock", "_shared_owner")
+
+    def __init__(self, owner: _LocalClientOwner) -> None:
+        object.__setattr__(self, "_shared_owner", owner)
+        object.__setattr__(self, "_shared_lock", threading.Lock())
+        object.__setattr__(self, "_shared_closed", False)
+
+    def _shared_client(self) -> object:
+        if self._shared_closed:
+            raise RuntimeError("Qdrant client is closed")
+        return self._shared_owner.client
+
+    def _shared_call(
+        self, name: str, arguments: tuple[object, ...], options: dict[str, object]
+    ) -> object:
+        return getattr(self._shared_client(), name)(*arguments, **options)
+
+    def _shared_apply(self, function: Callable[..., Any], *arguments: object) -> Any:
+        """Run ``function(client, *arguments)`` as one step on the owning thread."""
+
+        return self._shared_owner.run(
+            lambda: function(self._shared_client(), *arguments)
+        )
+
+    def __getattr__(self, name: str) -> Any:
+        if name.startswith("__") and name.endswith("__"):
+            raise AttributeError(name)
+        value = getattr(self._shared_client(), name)
+        if not callable(value):
+            return value
+
+        def call(*arguments: object, **options: object) -> object:
+            return self._shared_owner.run(self._shared_call, name, arguments, options)
+
+        return call
+
+    def __setattr__(self, name: str, value: object) -> None:
+        setattr(self._shared_client(), name, value)
+
+    def close(self) -> None:
+        with self._shared_lock:
+            if self._shared_closed:
+                return
+            object.__setattr__(self, "_shared_closed", True)
+        owner = self._shared_owner
+        with owner.state_lock:
+            owner.references -= 1
+            if owner.references:
+                return
+            try:
+                # Queued behind any call still running on the owner.
+                owner.run(owner.close_client)
+            finally:
+                owner.retire()
+
+
+def _share_local_client(path: str, factory: Callable[..., object]) -> object:
+    try:
+        hash(factory)
+        factory_key: object = factory
+    except TypeError:
+        factory_key = id(factory)
+    key = (os.path.normcase(os.path.realpath(path)), factory_key)
+    while True:
+        with _LOCAL_CLIENTS_LOCK:
+            owner = _LOCAL_CLIENTS.get(key)
+            if owner is None:
+                owner = _LOCAL_CLIENTS[key] = _LocalClientOwner(key)
+        with owner.state_lock:
+            if owner.retired:
+                # Its last user closed it while this caller waited.
+                continue
+            if owner.client is _LOCAL_CLIENT_UNOPENED:
+                try:
+                    owner.open(path, factory)
+                except BaseException:
+                    owner.retire()
+                    raise
+            owner.references += 1
+            return _SharedLocalClient(owner)
+
+
+def qdrant_client_type(client: object) -> type:
+    """Return the concrete client class, seeing through a shared local handle."""
+
+    if isinstance(client, _SharedLocalClient):
+        return type(client._shared_client())
+    return type(client)
+
+
 def create_qdrant_client(
     *,
     qdrant_url: str | None,
@@ -467,7 +794,13 @@ def create_qdrant_client(
     timeout_seconds: float,
     client_factory: Callable[..., object] | None = None,
 ) -> object:
-    """Construct a remote or local client without importing Qdrant eagerly."""
+    """Construct a remote client, or share the one client of a local folder.
+
+    Local callers receive a handle onto a single client per folder and
+    factory; closing the handle releases one reference.  A folder held by
+    any other client, normally another process, raises
+    ``QdrantStorageLockedError``.
+    """
 
     if isinstance(timeout_seconds, bool) or not isinstance(
         timeout_seconds, (int, float)
@@ -495,12 +828,15 @@ def create_qdrant_client(
     except TypeError as exc:
         raise ValueError("qdrant_path must be path-like") from exc
     _nonempty_string(path, "qdrant_path", maximum=4096)
-    return factory(path=path)
+    return _share_local_client(path, factory)
 
 
 def qdrant_delete_collection(client: object, collection_name: str) -> None:
     """Release owned local persistence before removing a provider collection."""
 
+    if isinstance(client, _SharedLocalClient):
+        client._shared_apply(qdrant_delete_collection, collection_name)
+        return
     if type(client).__module__.startswith("qdrant_client"):
         from qdrant_client import QdrantClient
         from qdrant_client.local.qdrant_local import QdrantLocal
@@ -1051,7 +1387,7 @@ class DenseProvider:
                 generation=generation,
             )
         try:
-            current_source = self._event_snapshot(connection, query.workspace_id)
+            current_source = self._event_cursor(connection, query.workspace_id)
         except (sqlite3.Error, TypeError, ValueError):
             return self._result(
                 started,
@@ -1059,7 +1395,7 @@ class DenseProvider:
                 reason="DENSE_MANIFEST_MISMATCH",
                 generation=generation,
             )
-        if manifest_source != current_source:
+        if (manifest_source[0], *manifest_source[2:]) != current_source:
             return self._result(
                 started,
                 status="degraded",
@@ -1126,6 +1462,13 @@ class DenseProvider:
             if points is None or isinstance(points, (str, bytes, Mapping)):
                 raise TypeError("invalid Qdrant response")
             iterator = iter(points)
+        except QdrantStorageLockedError as error:
+            return self._result(
+                started,
+                status="degraded",
+                reason=error.code,
+                generation=generation,
+            )
         except Exception:
             return self._result(
                 started,
@@ -1241,19 +1584,23 @@ class DenseProvider:
         )
 
     @staticmethod
-    def _event_snapshot(
+    def _event_cursor(
         connection: sqlite3.Connection,
         workspace_id: str,
-    ) -> tuple[int, str, int | None, str | None]:
-        digest = hashlib.sha256()
-        count = 0
-        for row in connection.execute(
-            "SELECT event_hash FROM memory_events WHERE workspace_id=? "
-            "ORDER BY event_id",
-            (workspace_id,),
-        ):
-            digest.update(bytes.fromhex(str(row[0])))
-            count += 1
+    ) -> tuple[int, int | None, str | None]:
+        """Return the event count and newest event of the append-only log.
+
+        Every append changes the count, so this detects a generation that is
+        behind without rehashing the log on each query.  The repository still
+        verifies the full event root before any dense candidate is used.
+        """
+
+        count = int(
+            connection.execute(
+                "SELECT COUNT(*) FROM memory_events WHERE workspace_id=?",
+                (workspace_id,),
+            ).fetchone()[0]
+        )
         cursor = connection.execute(
             "SELECT recorded_at_us,event_id FROM memory_events "
             "WHERE workspace_id=? "
@@ -1261,8 +1608,8 @@ class DenseProvider:
             (workspace_id,),
         ).fetchone()
         if cursor is None:
-            return count, digest.hexdigest(), None, None
-        return count, digest.hexdigest(), int(cursor[0]), str(cursor[1])
+            return count, None, None
+        return count, int(cursor[0]), str(cursor[1])
 
     def _manifest_matches(
         self,
@@ -1471,6 +1818,7 @@ __all__ = [
     "DENSE_BUILDER_VERSION",
     "DenseProvider",
     "LexicalProvider",
+    "QdrantStorageLockedError",
     "build_dense_point_payload",
     "create_qdrant_client",
     "dense_builder_contract",
@@ -1478,6 +1826,7 @@ __all__ = [
     "dense_query_encoder_matches_contract",
     "dense_manifest_details",
     "dense_point_id",
+    "qdrant_client_type",
     "qdrant_collection_exists",
     "qdrant_delete_collection",
 ]

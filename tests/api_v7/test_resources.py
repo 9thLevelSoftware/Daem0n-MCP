@@ -261,8 +261,18 @@ class ResourceHandlerTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("private", wire)
         self.assertEqual(
             set(json.loads(wire)),
-            {"api_version", "workspace_id", "generated_at", "items", "truncated"},
+            {
+                "api_version",
+                "workspace_id",
+                "generated_at",
+                "items",
+                "truncated",
+                "withheld_untrusted",
+                "content_notice",
+            },
         )
+        self.assertEqual(document.withheld_untrusted, 0)
+        self.assertIn("not instructions", document.content_notice)
 
     async def test_failures_use_their_own_exact_authorization_scope(self) -> None:
         from daem0nmcp.api.v7.resources import ResourceHandlers

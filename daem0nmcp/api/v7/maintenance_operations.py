@@ -8,10 +8,11 @@ import hashlib
 import hmac
 import json
 import os
+import re
 import secrets
 import sqlite3
 import threading
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -36,6 +37,7 @@ from ...workspace import Workspace, WorkspaceRegistry
 from .application import AdmittedRequest
 from .errors import STABLE_ERROR_CODE_SET
 from .models import (
+    MAX_CONTEXT_JSON_BYTES,
     DestructiveMutationReceipt,
     Preview,
     RecordSummary,
@@ -43,12 +45,23 @@ from .models import (
 )
 from .runtime_protocols import ActiveStorageResolver, WorkerPool
 from .runtime_services import WorkspaceStorageResolver
-from .tasks import await_task_terminal
+from .tasks import await_task_terminal, durable_task_execution_var
 from .tools import MemoryCompactData
 
 _EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
 _MAX_SELECTION = 500
+# Whole-workspace selection scans (duplicates, compaction, dream purge) verify
+# every scanned record.  The foreground refuses a scan above this many records
+# with TASK_REQUIRED so a synchronous call keeps a bounded deadline, memory and
+# write-lock hold.  The same call admitted as a durable task has no record
+# bound: it reads the rows in batches of ``_SCAN_BATCH``, retains only what the
+# selection needs, and is limited by the task's own deadline and cancellation.
 _MAX_GROUP_SCAN = 2_000
+_SCAN_BATCH = 500
+# An apply looks back at most this many events for its preview's position in
+# the log; a preview further behind is refused as stale.
+_MAX_EVENTS_SINCE_PREVIEW = 1_000
+_RECORD_ID = re.compile(r"mem_[0-9a-f]{64}")
 _REQUIRED_TABLES = frozenset({"memory_events", "memory_records", "schema_version"})
 _RECORD_COLUMNS = (
     "record.record_id,record.workspace_id,record.record_type,"
@@ -350,6 +363,89 @@ def _source_high_water(connection: sqlite3.Connection, workspace_id: str) -> str
     )
 
 
+def _events_since_preview(
+    connection: sqlite3.Connection,
+    workspace_id: str,
+    high_water: str,
+) -> list[sqlite3.Row] | None:
+    """Return the events appended after the preview took ``high_water``.
+
+    The log is append-only, so the preview's watermark is the watermark of a
+    prefix of today's log.  ``None`` means that prefix does not end within the
+    last ``_MAX_EVENTS_SINCE_PREVIEW`` events, so freshness cannot be shown.
+    """
+
+    counted = connection.execute(
+        "SELECT count(*) FROM memory_events WHERE workspace_id=?",
+        (workspace_id,),
+    ).fetchone()
+    if counted is None:
+        raise MaintenanceOperationError("CAPABILITY_DEGRADED")
+    tail = connection.execute(
+        "SELECT event_id,recorded_at_us,stream_id,payload_json FROM memory_events "
+        "WHERE workspace_id=? ORDER BY rowid DESC LIMIT ?",
+        (workspace_id, _MAX_EVENTS_SINCE_PREVIEW),
+    ).fetchall()
+    tail.reverse()
+    event_count = int(counted[0]) - len(tail)
+    base = connection.execute(
+        "SELECT COALESCE(max(recorded_at_us),0),COALESCE(max(event_id),'') FROM ("
+        "SELECT recorded_at_us,event_id FROM memory_events WHERE workspace_id=? "
+        "ORDER BY rowid LIMIT ?)",
+        (workspace_id, event_count),
+    ).fetchone()
+    if base is None:
+        raise MaintenanceOperationError("CAPABILITY_DEGRADED")
+    max_recorded_at_us, max_event_id = int(base[0]), str(base[1])
+    for index in range(len(tail) + 1):
+        if index:
+            row = tail[index - 1]
+            event_count += 1
+            max_recorded_at_us = max(max_recorded_at_us, int(row["recorded_at_us"]))
+            max_event_id = max(max_event_id, str(row["event_id"]))
+        watermark = sha256_json(
+            {
+                "event_count": event_count,
+                "max_event_id": max_event_id,
+                "max_recorded_at_us": max_recorded_at_us,
+            }
+        )
+        if watermark == high_water:
+            return tail[index:]
+    return None
+
+
+def _require_untouched_since_preview(
+    connection: sqlite3.Connection,
+    workspace_id: str,
+    claims: _SelectionClaims,
+    records: Sequence[_RecordSnapshot],
+) -> None:
+    """Refuse the apply when a later write involves a record it depends on.
+
+    The apply has already re-run the selection and matched every selected
+    record and state to the preview, so a write that changed the selection is
+    refused before this point.  What that comparison cannot see is a write
+    that leaves a record's own state alone: a relationship or citation
+    naming it.  Every memory event appended since the preview is therefore
+    checked, and one on a depended-on record's stream or naming its ID
+    anywhere in its payload is a conflict.  Any other write is unrelated and
+    leaves the preview valid.  Writes outside the memory event log are not
+    seen here, as they never were: an active-context entry lives in the
+    governance log.
+    """
+
+    appended = _events_since_preview(connection, workspace_id, claims.source_high_water)
+    if appended is None:
+        raise MaintenanceOperationError("CONFLICT")
+    depended_on = {record.record_id for record in records}
+    for row in appended:
+        if str(row["stream_id"]) in depended_on or not depended_on.isdisjoint(
+            _RECORD_ID.findall(str(row["payload_json"]))
+        ):
+            raise MaintenanceOperationError("CONFLICT")
+
+
 def _selection_pairs(records: Sequence[_RecordSnapshot]) -> list[list[str]]:
     return [[record.record_id, record.state_hash] for record in records]
 
@@ -496,12 +592,22 @@ def _prune_criteria(request: AdmittedRequest) -> dict[str, Any]:
     }
 
 
-def _prune_candidates(
-    connection: sqlite3.Connection,
+# v7 recall is read-only and does not count recalls, so ``recall_count`` only
+# carries what a migration or import brought along.  The usage evidence v7
+# does record canonically is a later store or outcome naming the record in
+# ``informed_by``; such a record is never pruned.
+_CITED_AS_INFORMING = (
+    "EXISTS (SELECT 1 FROM memory_provenance_edges AS edge "
+    "WHERE edge.workspace_id=record.workspace_id "
+    "AND edge.informed_by_record_id=record.record_id)"
+)
+
+
+def _prune_scope(
     workspace_id: str,
     criteria: Mapping[str, Any],
     evaluated_at_us: int,
-) -> tuple[list[_RecordSnapshot], int]:
+) -> tuple[str, list[Any]]:
     cutoff_us = evaluated_at_us - int(criteria["older_than_days"]) * 86_400_000_000
     categories = list(criteria["categories"])
     placeholders = ",".join("?" for _ in categories)
@@ -510,16 +616,22 @@ def _prune_candidates(
         + placeholders
         + ") AND record.created_at_us<? AND record.deleted_at_us IS NULL "
         "AND record.is_permanent=0 AND record.pinned=0 AND record.archived=0 "
-        "AND record.outcome IS NULL AND record.recall_count<?"
+        "AND record.outcome IS NULL"
     )
-    parameters: list[Any] = [
-        workspace_id,
-        *categories,
-        cutoff_us,
-        criteria["min_recall_count"],
-    ]
     if criteria["protect_successful"]:
         where += " AND (record.worked IS NULL OR record.worked=0)"
+    return where, [workspace_id, *categories, cutoff_us]
+
+
+def _prune_candidates(
+    connection: sqlite3.Connection,
+    workspace_id: str,
+    criteria: Mapping[str, Any],
+    evaluated_at_us: int,
+) -> tuple[list[_RecordSnapshot], int]:
+    scope, scope_parameters = _prune_scope(workspace_id, criteria, evaluated_at_us)
+    where = f"{scope} AND record.recall_count<? AND NOT {_CITED_AS_INFORMING}"
+    parameters = [*scope_parameters, criteria["min_recall_count"]]
     total_row = connection.execute(
         f"SELECT count(*) FROM memory_records AS record WHERE {where}",
         parameters,
@@ -535,6 +647,80 @@ def _prune_candidates(
     return [_verified_snapshot(row) for row in rows], int(total_row[0])
 
 
+def _prune_kept_counts(
+    connection: sqlite3.Connection,
+    workspace_id: str,
+    criteria: Mapping[str, Any],
+    evaluated_at_us: int,
+) -> dict[str, int]:
+    """Count the otherwise prunable records each usage safeguard kept."""
+
+    scope, parameters = _prune_scope(workspace_id, criteria, evaluated_at_us)
+    row = connection.execute(
+        f"SELECT COALESCE(sum({_CITED_AS_INFORMING}),0),"
+        f"COALESCE(sum(NOT {_CITED_AS_INFORMING} AND record.recall_count>=?),0) "
+        f"FROM memory_records AS record WHERE {scope}",
+        (criteria["min_recall_count"], *parameters),
+    ).fetchone()
+    if row is None:
+        raise MaintenanceOperationError("CAPABILITY_DEGRADED")
+    return {
+        "kept_cited_as_informing": int(row[0]),
+        "kept_legacy_recall_count": int(row[1]),
+    }
+
+
+def _foreground_scan_limit(workspace: Workspace, tool_name: str) -> int | None:
+    """Return the record bound of a selection scan; ``None`` inside its task.
+
+    Only the durable task admitted for this exact tool and workspace scans
+    unbounded; every other caller keeps the foreground bound.
+    """
+
+    execution = durable_task_execution_var.get()
+    if (
+        execution is not None
+        and execution.tool_name == tool_name
+        and execution.workspace_id == workspace.workspace_id
+    ):
+        return None
+    return _MAX_GROUP_SCAN
+
+
+def _scan_snapshots(
+    connection: sqlite3.Connection,
+    where: str,
+    order: str,
+    parameters: Sequence[Any],
+    scan_limit: int | None,
+    cancelled: threading.Event | None,
+) -> Iterator[_RecordSnapshot]:
+    """Yield every verified record of a selection scan in bounded batches."""
+
+    if scan_limit is not None:
+        counted = connection.execute(
+            "SELECT count(*) FROM (SELECT 1 FROM memory_records AS record "
+            f"WHERE {where} LIMIT ?)",
+            (*parameters, scan_limit + 1),
+        ).fetchone()
+        if counted is None or int(counted[0]) > scan_limit:
+            raise MaintenanceOperationError("TASK_REQUIRED")
+    cursor = connection.execute(
+        f"SELECT {_RECORD_COLUMNS} FROM memory_records AS record "
+        "JOIN memory_events AS event ON event.event_id=record.source_event_id "
+        f"WHERE {where} ORDER BY {order}",
+        tuple(parameters),
+    )
+    while True:
+        if cancelled is not None and cancelled.is_set():
+            raise _WorkerCancelledError()
+        rows = cursor.fetchmany(_SCAN_BATCH)
+        if not rows:
+            return
+        for row in rows:
+            yield _verified_snapshot(row)
+
+
 def _duplicate_criteria(request: AdmittedRequest) -> dict[str, Any]:
     return {"merge_duplicates": request.merge_duplicates}
 
@@ -545,35 +731,61 @@ def _normalized_duplicate_content(value: object) -> str:
     return " ".join(value.casefold().split())
 
 
+def _duplicate_key(snapshot: _RecordSnapshot) -> tuple[str, str, str, str]:
+    context = snapshot.state["context"]
+    if not isinstance(context, dict):
+        raise MaintenanceOperationError("CAPABILITY_DEGRADED")
+    return (
+        str(snapshot.state["record_type"]),
+        _normalized_duplicate_content(snapshot.state["content"]),
+        ""
+        if snapshot.state["file_path_relative"] is None
+        else str(snapshot.state["file_path_relative"]),
+        # Visibility is a retrieval policy.  Copies under different policies
+        # are not duplicates: merging them would hide one or expose the other.
+        canonical_json_bytes(context.get("visibility", "workspace")).decode("utf-8"),
+    )
+
+
 def _duplicate_groups(
     connection: sqlite3.Connection,
     workspace_id: str,
     criteria: Mapping[str, Any],
+    scan_limit: int | None,
+    cancelled: threading.Event | None = None,
 ) -> tuple[list[_DuplicateGroup], int, int]:
-    rows = connection.execute(
-        f"SELECT {_RECORD_COLUMNS} FROM memory_records AS record "
-        "JOIN memory_events AS event ON event.event_id=record.source_event_id "
-        "WHERE record.workspace_id=? AND record.deleted_at_us IS NULL "
-        "ORDER BY record.record_id LIMIT ?",
-        (workspace_id, _MAX_GROUP_SCAN + 1),
-    ).fetchall()
-    if len(rows) > _MAX_GROUP_SCAN:
-        raise MaintenanceOperationError("TASK_REQUIRED")
-    grouped: dict[tuple[str, str, str], list[_RecordSnapshot]] = {}
-    for row in rows:
-        snapshot = _verified_snapshot(row)
-        key = (
-            str(snapshot.state["record_type"]),
-            _normalized_duplicate_content(snapshot.state["content"]),
-            ""
-            if snapshot.state["file_path_relative"] is None
-            else str(snapshot.state["file_path_relative"]),
-        )
-        grouped.setdefault(key, []).append(snapshot)
-    duplicate_items = [
-        (key, members) for key, members in grouped.items() if len(members) > 1
-    ]
-    duplicate_items.sort(key=lambda item: item[0])
+    # Only records that share a key are retained.  A key seen once is held as
+    # a digest and its record's ID; that first member is loaded again once a
+    # second one turns up.
+    first_seen: dict[bytes, str] = {}
+    first_ids: dict[tuple[str, str, str, str], str] = {}
+    grouped: dict[tuple[str, str, str, str], list[_RecordSnapshot]] = {}
+    for snapshot in _scan_snapshots(
+        connection,
+        "record.workspace_id=? AND record.deleted_at_us IS NULL",
+        "record.record_id",
+        (workspace_id,),
+        scan_limit,
+        cancelled,
+    ):
+        key = _duplicate_key(snapshot)
+        members = grouped.get(key)
+        if members is not None:
+            members.append(snapshot)
+            continue
+        digest = hashlib.sha256(canonical_json_bytes(list(key))).digest()
+        first_id = first_seen.get(digest)
+        if first_id is None:
+            first_seen[digest] = snapshot.record_id
+            continue
+        first_ids[key] = first_id
+        grouped[key] = [snapshot]
+    for key, first_id in first_ids.items():
+        first = _load_snapshot(connection, workspace_id, first_id)
+        if _duplicate_key(first) != key:
+            raise MaintenanceOperationError("CAPABILITY_DEGRADED")
+        grouped[key].insert(0, first)
+    duplicate_items = sorted(grouped.items(), key=lambda item: item[0])
     eligible = sum(len(members) - 1 for _key, members in duplicate_items)
     if not criteria["merge_duplicates"]:
         return [], eligible, len(duplicate_items)
@@ -592,7 +804,13 @@ def _duplicate_groups(
         if take == 0:
             break
         chosen = tuple(candidates[:take])
-        selected.append(_DuplicateGroup(keeper=keeper, candidates=chosen))
+        group = _DuplicateGroup(keeper=keeper, candidates=chosen)
+        try:
+            _merge_plan(group)
+        except _UnmergeableGroupError:
+            # The keeper's context cannot hold the merge; both copies stay.
+            continue
+        selected.append(group)
         event_capacity -= 1 + len(chosen)
     return selected, eligible, len(duplicate_items)
 
@@ -615,23 +833,24 @@ def _compaction_candidates(
     connection: sqlite3.Connection,
     workspace_id: str,
     criteria: Mapping[str, Any],
+    scan_limit: int | None,
+    cancelled: threading.Event | None = None,
 ) -> tuple[list[_RecordSnapshot], int]:
-    rows = connection.execute(
-        f"SELECT {_RECORD_COLUMNS} FROM memory_records AS record "
-        "JOIN memory_events AS event ON event.event_id=record.source_event_id "
-        "WHERE record.workspace_id=? AND record.deleted_at_us IS NULL "
-        "AND record.archived=0 AND record.pinned=0 AND record.is_permanent=0 "
-        "AND record.record_type IN ('decision','learning') "
-        "ORDER BY record.created_at_us,record.record_id LIMIT ?",
-        (workspace_id, _MAX_GROUP_SCAN + 1),
-    ).fetchall()
-    if len(rows) > _MAX_GROUP_SCAN:
-        raise MaintenanceOperationError("TASK_REQUIRED")
     query = criteria["query"]
     query_text = None if query is None else str(query).casefold()
-    eligible: list[_RecordSnapshot] = []
-    for row in rows:
-        record = _verified_snapshot(row)
+    limit = int(criteria["limit"])
+    selected: list[_RecordSnapshot] = []
+    eligible = 0
+    for record in _scan_snapshots(
+        connection,
+        "record.workspace_id=? AND record.deleted_at_us IS NULL "
+        "AND record.archived=0 AND record.pinned=0 AND record.is_permanent=0 "
+        "AND record.record_type IN ('decision','learning')",
+        "record.created_at_us,record.record_id",
+        (workspace_id,),
+        scan_limit,
+        cancelled,
+    ):
         if (
             record.state["record_type"] == "decision"
             and record.state["outcome"] is None
@@ -653,8 +872,10 @@ def _compaction_candidates(
             ]
             if not any(query_text in value.casefold() for value in searchable):
                 continue
-        eligible.append(record)
-    return eligible[: int(criteria["limit"])], len(eligible)
+        eligible += 1
+        if len(selected) < limit:
+            selected.append(record)
+    return selected, eligible
 
 
 def _record_summary(record: _RecordSnapshot) -> RecordSummary:
@@ -713,22 +934,103 @@ def _dream_criteria(_request: AdmittedRequest) -> dict[str, Any]:
     return {}
 
 
+def _promoted_dreaming_records(
+    connection: sqlite3.Connection,
+    workspace_id: str,
+    scan_limit: int | None,
+    cancelled: threading.Event | None,
+) -> Iterator[tuple[tuple[str, str], _RecordSnapshot, int]]:
+    """Yield the live records v7 dreaming produced, keyed by what they re-examine.
+
+    v7 dreaming stages capture candidates; a record is its output only when
+    it was created by promoting a candidate whose ``source_kind`` is
+    ``dreaming``.  Tags are not consulted: the promoter may change them, and
+    anyone may write them.  Records of one strategy about the same source
+    records share a key; a later run over newer versions of those sources
+    supersedes the earlier one.  Each record comes with the time dreaming
+    staged its candidate: a record's own creation time is when someone
+    promoted it, which says nothing about how fresh the analysis is.
+    """
+
+    if (
+        connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' "
+            "AND name='memory_capture_candidates'"
+        ).fetchone()
+        is None
+    ):
+        return
+    scope = (
+        "FROM memory_capture_candidates AS candidate "
+        "WHERE candidate.workspace_id=? AND candidate.source_kind='dreaming' "
+        "AND candidate.status='promoted'"
+    )
+    if scan_limit is not None:
+        counted = connection.execute(
+            f"SELECT count(*) FROM (SELECT 1 {scope} LIMIT ?)",
+            (workspace_id, scan_limit + 1),
+        ).fetchone()
+        if counted is None or int(counted[0]) > scan_limit:
+            raise MaintenanceOperationError("TASK_REQUIRED")
+    promoted = connection.execute(
+        "SELECT candidate.candidate_id,candidate.provenance_json,"
+        "candidate.promoted_event_id,candidate.created_at_us "
+        f"{scope} ORDER BY candidate.candidate_id",
+        (workspace_id,),
+    ).fetchall()
+    for candidate_id, provenance_json, promoted_event_id, staged_at_us in promoted:
+        if cancelled is not None and cancelled.is_set():
+            raise _WorkerCancelledError()
+        created = connection.execute(
+            "SELECT event_id,stream_id,payload_json,payload_hash FROM memory_events "
+            "WHERE workspace_id=? AND event_id=? AND stream_kind='memory' "
+            "AND event_type='memory.created' AND stream_version=1",
+            (workspace_id, promoted_event_id),
+        ).fetchone()
+        if created is None:
+            continue
+        if _verified_payload(created).get("capture_candidate_id") != candidate_id:
+            continue
+        try:
+            provenance = json.loads(str(provenance_json))
+            strategy = provenance["strategy"]
+            source_ids = sorted(
+                {source["record_id"] for source in provenance["sources"]}
+            )
+        except (KeyError, TypeError, ValueError, RecursionError):
+            continue
+        if (
+            not isinstance(strategy, str)
+            or not source_ids
+            or not all(isinstance(source_id, str) for source_id in source_ids)
+        ):
+            continue
+        record = _load_snapshot(connection, workspace_id, str(created["stream_id"]))
+        if record.state["deleted_at_us"] is not None:
+            continue
+        yield ("v7", f"{strategy}:{sha256_json(source_ids)}"), record, int(staged_at_us)
+
+
+def _creation_order(record: _RecordSnapshot) -> tuple[int, int, str]:
+    return (record.created_at_us, record.created_at_us, record.record_id)
+
+
 def _dream_candidates(
     connection: sqlite3.Connection,
     workspace_id: str,
-) -> tuple[list[_RecordSnapshot], int, int, int]:
-    rows = connection.execute(
-        f"SELECT {_RECORD_COLUMNS} FROM memory_records AS record "
-        "JOIN memory_events AS event ON event.event_id=record.source_event_id "
-        "WHERE record.workspace_id=? AND record.record_type='learning' "
-        "AND record.deleted_at_us IS NULL ORDER BY record.record_id LIMIT ?",
-        (workspace_id, _MAX_GROUP_SCAN + 1),
-    ).fetchall()
-    if len(rows) > _MAX_GROUP_SCAN:
-        raise MaintenanceOperationError("TASK_REQUIRED")
+    scan_limit: int | None,
+    cancelled: threading.Event | None = None,
+) -> tuple[list[_RecordSnapshot], int, int, int, int]:
     grouped: dict[tuple[str, str], list[_RecordSnapshot]] = {}
-    for row in rows:
-        record = _verified_snapshot(row)
+    for record in _scan_snapshots(
+        connection,
+        "record.workspace_id=? AND record.record_type='learning' "
+        "AND record.deleted_at_us IS NULL",
+        "record.record_id",
+        (workspace_id,),
+        scan_limit,
+        cancelled,
+    ):
         tags = record.state["tags"]
         if not isinstance(tags, list) or not all(isinstance(tag, str) for tag in tags):
             raise MaintenanceOperationError("CAPABILITY_DEGRADED")
@@ -749,31 +1051,64 @@ def _dream_candidates(
             group_key = ("summary", day)
         if group_key is not None:
             grouped.setdefault(group_key, []).append(record)
+    staged_at_us: dict[str, int] = {}
+    for group_key, record, staged in _promoted_dreaming_records(
+        connection, workspace_id, scan_limit, cancelled
+    ):
+        grouped.setdefault(group_key, []).append(record)
+        staged_at_us[record.record_id] = staged
+
+    def age(record: _RecordSnapshot) -> tuple[int, int, str]:
+        return (
+            staged_at_us.get(record.record_id, record.created_at_us),
+            record.created_at_us,
+            record.record_id,
+        )
+
     candidates: list[_RecordSnapshot] = []
+    selected_ids: set[str] = set()
     reevaluation_duplicates = 0
     summary_duplicates = 0
+    dreaming_duplicates = 0
+    # The v6 tag groups sort before the "v7" groups, so a store without v7
+    # dream output selects exactly what it always did.
     for key in sorted(grouped):
         members = grouped[key]
         if len(members) <= 1:
             continue
-        keeper = max(
-            members,
-            key=lambda record: (record.created_at_us, record.record_id),
-        )
+        # v6 groups go by record creation, as they always did; v7 groups by
+        # when dreaming produced the analysis.
+        order = age if key[0] == "v7" else _creation_order
+        keeper = max(members, key=order)
         duplicates = sorted(
-            (record for record in members if record.record_id != keeper.record_id),
-            key=lambda record: (record.created_at_us, record.record_id),
+            (
+                record
+                for record in members
+                if record.record_id != keeper.record_id
+                and record.record_id not in selected_ids
+                # A promoted dream record someone pinned or made permanent
+                # is no longer only dream output.
+                and not (
+                    key[0] == "v7"
+                    and (record.state["pinned"] or record.state["is_permanent"])
+                )
+            ),
+            key=order,
         )
         candidates.extend(duplicates)
+        selected_ids.update(record.record_id for record in duplicates)
         if key[0] == "reevaluation":
             reevaluation_duplicates += len(duplicates)
-        else:
+        elif key[0] == "summary":
             summary_duplicates += len(duplicates)
+        else:
+            dreaming_duplicates += len(duplicates)
     return (
         candidates[:_MAX_SELECTION],
         len(candidates),
         reevaluation_duplicates,
         summary_duplicates,
+        dreaming_duplicates,
     )
 
 
@@ -816,6 +1151,150 @@ def _verified_payload(row: sqlite3.Row) -> dict[str, Any]:
         raise MaintenanceOperationError("CAPABILITY_DEGRADED") from None
 
 
+def _retire_relationships(
+    store: EventStore,
+    connection: sqlite3.Connection,
+    workspace_id: str,
+    record_id: str,
+    *,
+    recorded_at_us: int,
+    correlation_id: str,
+    causation_event_id: str,
+    maintenance: Mapping[str, Any],
+    successor_record_id: str | None = None,
+) -> None:
+    """Close every open relationship of a record that was just deleted.
+
+    A relationship left open on a deleted record is unreachable (it cannot be
+    listed) and breaks graph reads.  With ``successor_record_id`` the edge is
+    re-created on the surviving record, unless that would be a self-edge or
+    repeat an edge the survivor already has.  As in ``memory_unlink``, a
+    relationship that already has an end is treated as removed: it is neither
+    closed again nor moved.
+    """
+
+    rows = connection.execute(
+        "SELECT relationship_id,version,source_record_id,target_record_id,"
+        "relationship_type,legacy_type,description,confidence,metadata_json,"
+        "valid_from_us,transaction_from_us "
+        "FROM memory_relationship_versions "
+        "WHERE workspace_id=? AND relationship_type<>'legacy' "
+        "AND transaction_to_us IS NULL AND valid_to_us IS NULL "
+        "AND (source_record_id=? OR target_record_id=?) "
+        "ORDER BY relationship_id",
+        (workspace_id, record_id, record_id),
+    ).fetchall()
+    for row in rows:
+        relationship_id = str(row["relationship_id"])
+        metadata = _parse_json(row["metadata_json"], dict)
+        valid_from_us = int(row["valid_from_us"])
+        event_at_us = max(recorded_at_us, int(row["transaction_from_us"]) + 1)
+        relation = {
+            "source_record_id": str(row["source_record_id"]),
+            "target_record_id": str(row["target_record_id"]),
+            "relationship_type": str(row["relationship_type"]),
+            "legacy_type": row["legacy_type"],
+            "description": row["description"],
+            "confidence": row["confidence"],
+            "metadata": metadata,
+        }
+        removed = store.append_and_project(
+            EventCommand(
+                workspace_id=workspace_id,
+                stream_id=relationship_id,
+                stream_kind="relationship",
+                event_type="relationship.removed",
+                occurred_at_us=event_at_us,
+                recorded_at_us=event_at_us,
+                actor_type="client",
+                causation_event_id=causation_event_id,
+                correlation_id=correlation_id,
+                expected_stream_version=int(row["version"]) + 1,
+                payload={
+                    "relationship": {
+                        **relation,
+                        "valid_from_us": valid_from_us,
+                        "valid_to_us": max(event_at_us, valid_from_us + 1),
+                    },
+                    "maintenance": {
+                        **maintenance,
+                        "role": "relationship_closed",
+                        "deleted_record_id": record_id,
+                    },
+                },
+            )
+        )
+        if successor_record_id is None:
+            continue
+        source = (
+            successor_record_id
+            if relation["source_record_id"] == record_id
+            else relation["source_record_id"]
+        )
+        target = (
+            successor_record_id
+            if relation["target_record_id"] == record_id
+            else relation["target_record_id"]
+        )
+        if source == target:
+            continue
+        other = target if source == successor_record_id else source
+        if (
+            connection.execute(
+                "SELECT 1 FROM memory_records WHERE workspace_id=? "
+                "AND record_id=? AND deleted_at_us IS NULL",
+                (workspace_id, other),
+            ).fetchone()
+            is None
+        ):
+            continue
+        duplicate = connection.execute(
+            "SELECT 1 FROM memory_relationship_versions "
+            "WHERE workspace_id=? AND source_record_id=? AND target_record_id=? "
+            "AND relationship_type=? AND transaction_to_us IS NULL "
+            "AND (valid_to_us IS NULL OR valid_to_us>?) LIMIT 1",
+            (workspace_id, source, target, relation["relationship_type"], event_at_us),
+        ).fetchone()
+        if duplicate is not None:
+            continue
+        store.append_and_project(
+            EventCommand(
+                workspace_id=workspace_id,
+                stream_id=deterministic_id(
+                    "rel",
+                    "memory-duplicates-repoint",
+                    workspace_id,
+                    correlation_id,
+                    relationship_id,
+                    record_id,
+                ),
+                stream_kind="relationship",
+                event_type="relationship.created",
+                occurred_at_us=event_at_us,
+                recorded_at_us=event_at_us,
+                actor_type="client",
+                causation_event_id=removed.event_id,
+                correlation_id=correlation_id,
+                expected_stream_version=1,
+                payload={
+                    "relationship": {
+                        **relation,
+                        "source_record_id": source,
+                        "target_record_id": target,
+                        "valid_from_us": valid_from_us,
+                        "valid_to_us": None,
+                    },
+                    "maintenance": {
+                        **maintenance,
+                        "role": "relationship_repointed",
+                        "deleted_record_id": record_id,
+                        "replaces_relationship_id": relationship_id,
+                    },
+                },
+            )
+        )
+
+
 def _prune_replay(
     connection: sqlite3.Connection,
     workspace_id: str,
@@ -825,7 +1304,7 @@ def _prune_replay(
     rows = connection.execute(
         "SELECT event_id,stream_id,event_type,payload_json,payload_hash "
         "FROM memory_events WHERE workspace_id=? AND correlation_id=? "
-        "ORDER BY rowid",
+        "AND stream_kind='memory' ORDER BY rowid",
         (workspace_id, correlation_id),
     ).fetchall()
     if not rows:
@@ -944,6 +1423,12 @@ def _prune_preview_sync(
                     criteria,
                     evaluated_at_us,
                 )
+                kept = _prune_kept_counts(
+                    connection,
+                    workspace.workspace_id,
+                    criteria,
+                    evaluated_at_us,
+                )
                 token, expires_at = _issue_selection_token(
                     dependencies,
                     workspace_id=workspace.workspace_id,
@@ -958,6 +1443,7 @@ def _prune_preview_sync(
                     selection_token=token,
                     counts={
                         "eligible": eligible,
+                        **kept,
                         "remaining": max(0, eligible - len(records)),
                         "selected": len(records),
                     },
@@ -1003,11 +1489,6 @@ def _prune_sync(
                 if replay is not None:
                     connection.commit()
                     return replay
-                if (
-                    _source_high_water(connection, workspace.workspace_id)
-                    != claims.source_high_water
-                ):
-                    raise MaintenanceOperationError("CONFLICT")
                 records, _eligible = _prune_candidates(
                     connection,
                     workspace.workspace_id,
@@ -1019,6 +1500,9 @@ def _prune_sync(
                     or sha256_json(_selection_pairs(records)) != claims.selection_hash
                 ):
                     raise MaintenanceOperationError("CONFLICT")
+                _require_untouched_since_preview(
+                    connection, workspace.workspace_id, claims, records
+                )
                 store = EventStore(connection, assume_transaction=True)
                 event_ids: list[str] = []
                 affected_ids: list[str] = []
@@ -1050,6 +1534,21 @@ def _prune_sync(
                                 },
                             },
                         )
+                    )
+                    _retire_relationships(
+                        store,
+                        connection,
+                        workspace.workspace_id,
+                        record.record_id,
+                        recorded_at_us=recorded_at_us,
+                        correlation_id=correlation_id,
+                        causation_event_id=event.event_id,
+                        maintenance={
+                            "criteria_hash": claims.criteria_hash,
+                            "operation": claims.target_tool,
+                            "selected_count": claims.selected_count,
+                            "selection_hash": claims.selection_hash,
+                        },
                     )
                     affected_ids.append(record.record_id)
                     event_ids.append(event.event_id)
@@ -1095,6 +1594,7 @@ def _duplicates_preview_sync(
     dependencies: MaintenanceOperationDependencies,
     workspace: Workspace,
     request: AdmittedRequest,
+    scan_limit: int | None,
 ) -> Preview:
     evaluated_at_us = _now_us(dependencies)
     criteria = _duplicate_criteria(request)
@@ -1109,6 +1609,7 @@ def _duplicates_preview_sync(
                     connection,
                     workspace.workspace_id,
                     criteria,
+                    scan_limit,
                 )
                 records = _duplicate_candidates(groups)
                 token, expires_at = _issue_selection_token(
@@ -1128,6 +1629,7 @@ def _duplicates_preview_sync(
                         "eligible": eligible,
                         "remaining": max(0, eligible - len(records)),
                         "selected": len(records),
+                        **_kept_counts(groups),
                     },
                     sample_ids=[record.record_id for record in records[:20]],
                     expires_at=expires_at,
@@ -1151,7 +1653,7 @@ def _duplicates_replay(
     rows = connection.execute(
         "SELECT event_id,stream_id,event_type,payload_json,payload_hash "
         "FROM memory_events WHERE workspace_id=? AND correlation_id=? "
-        "ORDER BY rowid",
+        "AND stream_kind='memory' ORDER BY rowid",
         (workspace_id, correlation_id),
     ).fetchall()
     if not rows:
@@ -1209,7 +1711,34 @@ def _duplicates_replay(
     )
 
 
-def _merged_keeper_state(group: _DuplicateGroup) -> dict[str, Any]:
+# Where a duplicate's value differs from the one the keeper retains, the
+# duplicate's value is kept under this context key as
+# ``{"record_id": ..., "rationale"?, "outcome"?, "worked"?, "context"?}``.
+_MERGED_DUPLICATES_KEY = "merged_duplicates"
+_MAX_CODE_BINDINGS = 16
+
+
+class _UnmergeableGroupError(Exception):
+    """The merged keeper cannot hold what the group carries; nothing is merged."""
+
+
+def _binding_key(binding: object) -> tuple[object, object] | None:
+    if not isinstance(binding, dict):
+        return None
+    return (binding.get("relative_file_path"), binding.get("qualified_name"))
+
+
+def _merge_plan(group: _DuplicateGroup) -> tuple[dict[str, Any], dict[str, int]]:
+    """Return the keeper's merged state and what it takes from its duplicates.
+
+    Field by field: the keeper keeps its own content and scalar values; tags
+    are united; a pin or permanence on any member holds; the keeper stays
+    archived only if every member is; the most recently updated outcome wins.
+    A rationale, context key or code binding only a duplicate carries moves to
+    the keeper.  Where both carry different values the keeper's stays and the
+    duplicate's is preserved under ``context["merged_duplicates"]``.
+    """
+
     members = [group.keeper, *group.candidates]
     state = dict(group.keeper.state)
     tags: set[str] = set()
@@ -1226,6 +1755,7 @@ def _merged_keeper_state(group: _DuplicateGroup) -> dict[str, Any]:
         bool(member.state["is_permanent"]) for member in members
     )
     state["archived"] = all(bool(member.state["archived"]) for member in members)
+    preserved: dict[str, dict[str, Any]] = {}
     outcome_sources = [
         member
         for member in members
@@ -1238,7 +1768,114 @@ def _merged_keeper_state(group: _DuplicateGroup) -> dict[str, Any]:
         )
         state["outcome"] = outcome_source.state["outcome"]
         state["worked"] = outcome_source.state["worked"]
-    return state
+        for member in outcome_sources:
+            verdict = (member.state["outcome"], member.state["worked"])
+            if verdict != (state["outcome"], state["worked"]):
+                preserved.setdefault(member.record_id, {}).update(
+                    {"outcome": verdict[0], "worked": verdict[1]}
+                )
+
+    keeper_context = group.keeper.state["context"]
+    if not isinstance(keeper_context, dict):
+        raise MaintenanceOperationError("CAPABILITY_DEGRADED")
+    context = dict(keeper_context)
+    carried = context.get(_MERGED_DUPLICATES_KEY, [])
+    if not isinstance(carried, list):
+        # Someone's own value sits where the merge log goes; leave it alone.
+        raise _UnmergeableGroupError()
+    carried = list(carried)
+    bindings = context.get("code_bindings")
+    merge_bindings = bindings is None or isinstance(bindings, list)
+    bindings = list(bindings) if isinstance(bindings, list) else []
+    bound = {_binding_key(binding) for binding in bindings}
+    rationale = state["rationale"]
+    kept = {"kept_code_bindings": 0, "kept_context_keys": 0, "kept_rationales": 0}
+    # Newest duplicate first, so the most recent value fills a gap.
+    for candidate in sorted(
+        group.candidates,
+        key=lambda record: (record.created_at_us, record.record_id),
+        reverse=True,
+    ):
+        entry = preserved.setdefault(candidate.record_id, {})
+        candidate_rationale = candidate.state["rationale"]
+        if candidate_rationale:
+            if not rationale:
+                rationale = candidate_rationale
+                kept["kept_rationales"] += 1
+            elif candidate_rationale != rationale:
+                entry["rationale"] = candidate_rationale
+        candidate_context = candidate.state["context"]
+        if not isinstance(candidate_context, dict):
+            raise MaintenanceOperationError("CAPABILITY_DEGRADED")
+        conflicts: dict[str, Any] = {}
+        for key in sorted(candidate_context):
+            value = candidate_context[key]
+            if key == "visibility":
+                # Equal across the group (see _duplicate_key); never inherited.
+                continue
+            if key == _MERGED_DUPLICATES_KEY:
+                if not isinstance(value, list):
+                    raise _UnmergeableGroupError()
+                carried.extend(value)
+            elif key == "code_bindings" and merge_bindings and isinstance(value, list):
+                unmerged = []
+                for binding in value:
+                    binding_key = _binding_key(binding)
+                    if binding in bindings:
+                        continue
+                    if (
+                        binding_key is None
+                        or binding_key in bound
+                        or len(bindings) >= _MAX_CODE_BINDINGS
+                    ):
+                        unmerged.append(binding)
+                        continue
+                    bindings.append(binding)
+                    bound.add(binding_key)
+                    kept["kept_code_bindings"] += 1
+                if unmerged:
+                    conflicts[key] = unmerged
+            elif key not in context:
+                context[key] = value
+                kept["kept_context_keys"] += 1
+            elif context[key] != value:
+                conflicts[key] = value
+        if conflicts:
+            entry["context"] = conflicts
+    if bindings:
+        context["code_bindings"] = bindings
+    entries = [
+        {"record_id": record_id, **entry}
+        for record_id, entry in preserved.items()
+        if entry
+    ]
+    if carried or entries:
+        context[_MERGED_DUPLICATES_KEY] = [*carried, *entries]
+    if len(canonical_json_bytes(context)) > MAX_CONTEXT_JSON_BYTES:
+        raise _UnmergeableGroupError()
+    state["rationale"] = rationale
+    state["context"] = context
+    kept["preserved_conflicts"] = len(entries)
+    return state, kept
+
+
+def _merged_keeper_state(group: _DuplicateGroup) -> dict[str, Any]:
+    return _merge_plan(group)[0]
+
+
+def _kept_counts(groups: Sequence[_DuplicateGroup]) -> dict[str, int]:
+    """Sum what the selected merges keep, for the preview."""
+
+    totals = {
+        "kept_code_bindings": 0,
+        "kept_context_keys": 0,
+        "kept_rationales": 0,
+        "preserved_conflicts": 0,
+    }
+    for group in groups:
+        for name, value in _merge_plan(group)[1].items():
+            totals[name] += value
+    return totals
 
 
 def _duplicates_sync(
@@ -1247,6 +1884,7 @@ def _duplicates_sync(
     request: AdmittedRequest,
     claims: _SelectionClaims,
     cancelled: threading.Event,
+    scan_limit: int | None,
 ) -> DestructiveMutationReceipt:
     if cancelled.is_set():
         raise _WorkerCancelledError()
@@ -1270,15 +1908,12 @@ def _duplicates_sync(
                 if replay is not None:
                     connection.commit()
                     return replay
-                if (
-                    _source_high_water(connection, workspace.workspace_id)
-                    != claims.source_high_water
-                ):
-                    raise MaintenanceOperationError("CONFLICT")
                 groups, _eligible, _duplicate_group_count = _duplicate_groups(
                     connection,
                     workspace.workspace_id,
                     criteria,
+                    scan_limit,
+                    cancelled,
                 )
                 records = _duplicate_candidates(groups)
                 if (
@@ -1286,6 +1921,12 @@ def _duplicates_sync(
                     or sha256_json(_selection_pairs(records)) != claims.selection_hash
                 ):
                     raise MaintenanceOperationError("CONFLICT")
+                _require_untouched_since_preview(
+                    connection,
+                    workspace.workspace_id,
+                    claims,
+                    [*records, *(group.keeper for group in groups)],
+                )
                 store = EventStore(connection, assume_transaction=True)
                 affected_ids: list[str] = []
                 event_ids: list[str] = []
@@ -1350,6 +1991,22 @@ def _duplicates_sync(
                                 },
                             )
                         )
+                        _retire_relationships(
+                            store,
+                            connection,
+                            workspace.workspace_id,
+                            candidate.record_id,
+                            recorded_at_us=recorded_at_us,
+                            correlation_id=correlation_id,
+                            causation_event_id=candidate_event.event_id,
+                            maintenance={
+                                "criteria_hash": claims.criteria_hash,
+                                "operation": claims.target_tool,
+                                "selected_count": claims.selected_count,
+                                "selection_hash": claims.selection_hash,
+                            },
+                            successor_record_id=group.keeper.record_id,
+                        )
                         affected_ids.append(candidate.record_id)
                         event_ids.append(candidate_event.event_id)
                 if cancelled.is_set():
@@ -1395,6 +2052,7 @@ def _compaction_preview_sync(
     dependencies: MaintenanceOperationDependencies,
     workspace: Workspace,
     request: AdmittedRequest,
+    scan_limit: int | None,
 ) -> Preview:
     evaluated_at_us = _now_us(dependencies)
     criteria = _compaction_criteria(request)
@@ -1409,6 +2067,7 @@ def _compaction_preview_sync(
                     connection,
                     workspace.workspace_id,
                     criteria,
+                    scan_limit,
                 )
                 token, expires_at = _issue_selection_token(
                     dependencies,
@@ -1605,6 +2264,7 @@ def _compaction_sync(
     request: AdmittedRequest,
     claims: _SelectionClaims,
     cancelled: threading.Event,
+    scan_limit: int | None,
 ) -> MemoryCompactData:
     if cancelled.is_set():
         raise _WorkerCancelledError()
@@ -1633,21 +2293,21 @@ def _compaction_sync(
                     return replay
                 if claims.selected_count == 0:
                     raise MaintenanceOperationError("NOT_FOUND")
-                if (
-                    _source_high_water(connection, workspace.workspace_id)
-                    != claims.source_high_water
-                ):
-                    raise MaintenanceOperationError("CONFLICT")
                 records, _eligible = _compaction_candidates(
                     connection,
                     workspace.workspace_id,
                     criteria,
+                    scan_limit,
+                    cancelled,
                 )
                 if (
                     len(records) != claims.selected_count
                     or sha256_json(_selection_pairs(records)) != claims.selection_hash
                 ):
                     raise MaintenanceOperationError("CONFLICT")
+                _require_untouched_since_preview(
+                    connection, workspace.workspace_id, claims, records
+                )
                 source_event_ids = [record.source_event_id for record in records]
                 summary_id = deterministic_id(
                     "mem",
@@ -1807,6 +2467,7 @@ def _dream_preview_sync(
     dependencies: MaintenanceOperationDependencies,
     workspace: Workspace,
     request: AdmittedRequest,
+    scan_limit: int | None,
 ) -> Preview:
     evaluated_at_us = _now_us(dependencies)
     criteria = _dream_criteria(request)
@@ -1822,7 +2483,8 @@ def _dream_preview_sync(
                     eligible,
                     reevaluation_duplicates,
                     summary_duplicates,
-                ) = _dream_candidates(connection, workspace.workspace_id)
+                    dreaming_duplicates,
+                ) = _dream_candidates(connection, workspace.workspace_id, scan_limit)
                 token, expires_at = _issue_selection_token(
                     dependencies,
                     workspace_id=workspace.workspace_id,
@@ -1836,6 +2498,7 @@ def _dream_preview_sync(
                 return Preview(
                     selection_token=token,
                     counts={
+                        "dreaming_duplicates": dreaming_duplicates,
                         "eligible": eligible,
                         "reevaluation_duplicates": reevaluation_duplicates,
                         "remaining": max(0, eligible - len(records)),
@@ -1861,6 +2524,7 @@ def _dream_sync(
     request: AdmittedRequest,
     claims: _SelectionClaims,
     cancelled: threading.Event,
+    scan_limit: int | None,
 ) -> DestructiveMutationReceipt:
     if cancelled.is_set():
         raise _WorkerCancelledError()
@@ -1884,19 +2548,17 @@ def _dream_sync(
                 if replay is not None:
                     connection.commit()
                     return replay
-                if (
-                    _source_high_water(connection, workspace.workspace_id)
-                    != claims.source_high_water
-                ):
-                    raise MaintenanceOperationError("CONFLICT")
-                records, _eligible, _reevaluations, _summaries = _dream_candidates(
-                    connection, workspace.workspace_id
+                records, *_counts = _dream_candidates(
+                    connection, workspace.workspace_id, scan_limit, cancelled
                 )
                 if (
                     len(records) != claims.selected_count
                     or sha256_json(_selection_pairs(records)) != claims.selection_hash
                 ):
                     raise MaintenanceOperationError("CONFLICT")
+                _require_untouched_since_preview(
+                    connection, workspace.workspace_id, claims, records
+                )
                 store = EventStore(connection, assume_transaction=True)
                 affected_ids: list[str] = []
                 event_ids: list[str] = []
@@ -1928,6 +2590,21 @@ def _dream_sync(
                                 },
                             },
                         )
+                    )
+                    _retire_relationships(
+                        store,
+                        connection,
+                        workspace.workspace_id,
+                        record.record_id,
+                        recorded_at_us=recorded_at_us,
+                        correlation_id=correlation_id,
+                        causation_event_id=event.event_id,
+                        maintenance={
+                            "criteria_hash": claims.criteria_hash,
+                            "operation": claims.target_tool,
+                            "selected_count": claims.selected_count,
+                            "selection_hash": claims.selection_hash,
+                        },
                     )
                     affected_ids.append(record.record_id)
                     event_ids.append(event.event_id)
@@ -2013,9 +2690,12 @@ def build_maintenance_operations(
         *, workspace: Workspace, request: AdmittedRequest
     ) -> Preview:
         _authorize(workspace, request, "memory_duplicates_preview")
+        scan_limit = _foreground_scan_limit(workspace, "memory_duplicates_preview")
         return await _run_read(
             dependencies,
-            lambda: _duplicates_preview_sync(dependencies, workspace, request),
+            lambda: _duplicates_preview_sync(
+                dependencies, workspace, request, scan_limit
+            ),
         )
 
     async def memory_duplicates_cleanup(
@@ -2030,6 +2710,7 @@ def build_maintenance_operations(
             target_tool="memory_duplicates_cleanup",
             criteria=criteria,
         )
+        scan_limit = _foreground_scan_limit(workspace, "memory_duplicates_cleanup")
         return await _run_mutation(
             dependencies,
             lambda cancelled: _duplicates_sync(
@@ -2038,6 +2719,7 @@ def build_maintenance_operations(
                 request,
                 claims,
                 cancelled,
+                scan_limit,
             ),
         )
 
@@ -2045,9 +2727,12 @@ def build_maintenance_operations(
         *, workspace: Workspace, request: AdmittedRequest
     ) -> Preview:
         _authorize(workspace, request, "memory_compaction_preview")
+        scan_limit = _foreground_scan_limit(workspace, "memory_compaction_preview")
         return await _run_read(
             dependencies,
-            lambda: _compaction_preview_sync(dependencies, workspace, request),
+            lambda: _compaction_preview_sync(
+                dependencies, workspace, request, scan_limit
+            ),
         )
 
     async def memory_compact(
@@ -2062,6 +2747,7 @@ def build_maintenance_operations(
             target_tool="memory_compact",
             criteria=criteria,
         )
+        scan_limit = _foreground_scan_limit(workspace, "memory_compact")
         return await _run_mutation(
             dependencies,
             lambda cancelled: _compaction_sync(
@@ -2070,6 +2756,7 @@ def build_maintenance_operations(
                 request,
                 claims,
                 cancelled,
+                scan_limit,
             ),
         )
 
@@ -2077,9 +2764,10 @@ def build_maintenance_operations(
         *, workspace: Workspace, request: AdmittedRequest
     ) -> Preview:
         _authorize(workspace, request, "dream_duplicates_preview")
+        scan_limit = _foreground_scan_limit(workspace, "dream_duplicates_preview")
         return await _run_read(
             dependencies,
-            lambda: _dream_preview_sync(dependencies, workspace, request),
+            lambda: _dream_preview_sync(dependencies, workspace, request, scan_limit),
         )
 
     async def dream_duplicates_purge(
@@ -2094,6 +2782,7 @@ def build_maintenance_operations(
             target_tool="dream_duplicates_purge",
             criteria=criteria,
         )
+        scan_limit = _foreground_scan_limit(workspace, "dream_duplicates_purge")
         return await _run_mutation(
             dependencies,
             lambda cancelled: _dream_sync(
@@ -2102,6 +2791,7 @@ def build_maintenance_operations(
                 request,
                 claims,
                 cancelled,
+                scan_limit,
             ),
         )
 

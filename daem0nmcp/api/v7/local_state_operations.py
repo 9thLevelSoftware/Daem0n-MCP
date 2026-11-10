@@ -693,6 +693,9 @@ def _add_sync(
                 if len(record_rows) != 1:
                     raise LocalStateOperationError("CAPABILITY_DEGRADED")
                 _record_summary(record_rows[0])
+                # A tombstoned record takes no new or changed entry; only the
+                # retry of an add committed before the deletion replays.
+                record_deleted = record_rows[0]["deleted_at_us"] is not None
                 entry_rows = connection.execute(
                     "SELECT active_context_id,priority,reason,added_at_us,"
                     "expires_at_us,removed_at_us FROM active_context_entries "
@@ -703,6 +706,8 @@ def _add_sync(
                     raise LocalStateOperationError("CAPABILITY_DEGRADED")
                 event_type: str | None = None
                 if not entry_rows:
+                    if record_deleted:
+                        raise LocalStateOperationError("NOT_FOUND")
                     _require_active_capacity(
                         connection,
                         workspace.workspace_id,
@@ -745,6 +750,8 @@ def _add_sync(
                         entry["removed_at_us"],
                     )
                     if actual != expected:
+                        if record_deleted:
+                            raise LocalStateOperationError("NOT_FOUND")
                         if not was_current:
                             _require_active_capacity(
                                 connection,
@@ -991,12 +998,29 @@ def _clear_sync(
     cancelled: threading.Event,
 ) -> DestructiveMutationReceipt:
     now_us = _now_us(dependencies)
-    selected_hash = _authenticate_selection(
-        dependencies,
-        workspace.workspace_id,
-        request.selection_token,
-        now_us,
-    )
+    unauthenticated: LocalStateOperationError | None = None
+    try:
+        selected_hash = _authenticate_selection(
+            dependencies,
+            workspace.workspace_id,
+            request.selection_token,
+            now_us,
+        )
+    except LocalStateOperationError as error:
+        # The signing secret does not outlive the process and the token does
+        # not outlive its lifetime, but a clear that committed must still
+        # replay.  Its journal row is keyed by the exact token and was written
+        # only after that token authenticated, so a well-formed token is looked
+        # up there first; without such a row the refusal below stands.
+        match = (
+            _SELECTION_RE.fullmatch(request.selection_token)
+            if isinstance(request.selection_token, str)
+            else None
+        )
+        if match is None:
+            raise
+        selected_hash = match.group(1)
+        unauthenticated = error
     if cancelled.is_set():
         raise _WorkerCancelledError()
     journal_key = _journal_key(request.selection_token)
@@ -1037,6 +1061,8 @@ def _clear_sync(
                         raise _WorkerCancelledError()
                     connection.commit()
                     return result
+                if unauthenticated is not None:
+                    raise unauthenticated
                 rows = _snapshot_rows(connection, workspace.workspace_id, now_us)
                 current_hash = _snapshot_hash(workspace.workspace_id, rows)
                 if not hmac.compare_digest(selected_hash, current_hash):

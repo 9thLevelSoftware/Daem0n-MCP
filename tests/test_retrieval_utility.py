@@ -60,7 +60,7 @@ class UtilityFoldingTests(unittest.TestCase):
         )
 
         estimate = fold_utility(())
-        self.assertEqual(UtilityEstimate(0.5, 0.5, 0), estimate)
+        self.assertEqual(UtilityEstimate(0.5, 0.5, 0, 0), estimate)
         for credit in ("single_step", "trace"):
             self.assertEqual(0.0, utility_signal(estimate, credit))
 
@@ -105,18 +105,102 @@ class UtilityFoldingTests(unittest.TestCase):
         self.assertEqual(0.6185, estimate.q_trace)
         self.assertEqual(3, estimate.evidence_count)
 
+    def test_deep_evidence_does_not_inflate_single_step_support(self):
+        from daem0nmcp.retrieval.utility import (
+            UtilityContribution,
+            fold_utility,
+            utility_signal,
+        )
+
+        direct = (UtilityContribution(1, "evt_a", 0, 1.0, 1.0),)
+        deep_failures = (
+            UtilityContribution(2, "evt_b", 2, 0.0, 0.25),
+            UtilityContribution(3, "evt_c", 3, 0.0, 0.25),
+        )
+        alone = fold_utility(direct)
+        padded = fold_utility(direct + deep_failures)
+        self.assertEqual(alone.q_single, padded.q_single)
+        # The behaviour first: deep failures must not triple the boost.
+        self.assertAlmostEqual(0.1, utility_signal(alone, "single_step"))
+        self.assertAlmostEqual(0.1, utility_signal(padded, "single_step"))
+        self.assertEqual((1, 1), (alone.evidence_count, alone.single_evidence_count))
+        self.assertEqual((3, 1), (padded.evidence_count, padded.single_evidence_count))
+        # Trace credit folds the deep failures in, so they count there.
+        self.assertLess(padded.q_trace, alone.q_trace)
+        self.assertAlmostEqual(
+            (padded.q_trace - 0.5) * 2, utility_signal(padded, "trace")
+        )
+
     def test_signal_uses_selected_credit_and_evidence_support(self):
         from daem0nmcp.retrieval.utility import UtilityEstimate, utility_signal
 
         self.assertAlmostEqual(
-            0.1, utility_signal(UtilityEstimate(0.65, 0.5, 1), "single_step")
+            0.1, utility_signal(UtilityEstimate(0.65, 0.5, 1, 1), "single_step")
         )
-        self.assertEqual(0.0, utility_signal(UtilityEstimate(0.65, 0.5, 1), "trace"))
+        self.assertEqual(0.0, utility_signal(UtilityEstimate(0.65, 0.5, 1, 1), "trace"))
         self.assertEqual(
-            1.0, utility_signal(UtilityEstimate(1.0, 0.0, 3), "single_step")
+            1.0, utility_signal(UtilityEstimate(1.0, 0.0, 3, 3), "single_step")
         )
-        self.assertEqual(-1.0, utility_signal(UtilityEstimate(1.0, 0.0, 3), "trace"))
-        self.assertEqual(1.0, utility_signal(UtilityEstimate(1.0, 1.0, 10), "trace"))
+        self.assertEqual(-1.0, utility_signal(UtilityEstimate(1.0, 0.0, 3, 3), "trace"))
+        self.assertEqual(1.0, utility_signal(UtilityEstimate(1.0, 1.0, 10, 0), "trace"))
+
+
+class UtilityOrderTests(unittest.TestCase):
+    def test_in_band_order_is_the_stable_combined_score_sort(self):
+        from itertools import product
+
+        from daem0nmcp.retrieval.utility import utility_order
+
+        for signals in product((-1.0, -0.4, 0.0, 0.4, 1.0), repeat=4):
+            expected = sorted(
+                range(4),
+                key=lambda index: (-(61 / (61 + index) + 0.1 * signals[index]), index),
+            )
+            self.assertEqual(
+                tuple(expected), utility_order((0.5,) * 4, signals, 0.1), signals
+            )
+
+    def test_out_of_band_relevance_blocks_overtaking_at_any_weight(self):
+        from daem0nmcp.retrieval.utility import utility_order
+
+        self.assertEqual((0, 1), utility_order((1.0, 0.94), (0.0, 1.0), 1.0))
+        self.assertEqual((1, 0), utility_order((1.0, 0.95), (0.0, 1.0), 1.0))
+        self.assertEqual((0, 1), utility_order((1.0, 0.94), (-1.0, 0.0), 1.0))
+        self.assertEqual((), utility_order((), (), 1.0))
+
+    def test_a_candidate_is_compared_only_with_the_one_directly_above(self):
+        from daem0nmcp.retrieval.utility import utility_order
+
+        relevance = (0.5,) * 8
+        # Alone, the well-proven fifth match climbs three places.
+        self.assertEqual(
+            (0, 4, 1, 2, 3, 5, 6, 7),
+            utility_order(relevance, (0, 0, 0, 0, 1, 0, 0, 0), 0.1),
+        )
+        # A failed first match sinks three places and then sits directly
+        # above the fifth, which is out of its band and cannot pass it.
+        self.assertEqual(
+            (1, 2, 3, 0, 4, 5, 6, 7),
+            utility_order(relevance, (-1, 0, 0, 0, 1, 0, 0, 0), 0.1),
+        )
+        # The fifth stops below the first although it outscores the second,
+        # which has moved above the first and is in band with the fifth.
+        self.assertEqual(
+            (1, 0, 4, 2, 3, 5, 6, 7),
+            utility_order(relevance, (0, 0.2, 0.2, 0.2, 1, 0, 0, 0), 0.1),
+        )
+
+    def test_band_is_sized_for_the_default_fusion_constant(self):
+        from daem0nmcp.retrieval.utility import utility_order
+
+        def order(rrf_k):
+            relevance = tuple(1 / (rrf_k + rank) for rank in range(1, 6))
+            return utility_order(relevance, (0, 1, 1, 1, 1), 1.0)
+
+        self.assertEqual((1, 2, 3, 0, 4), order(60))
+        self.assertEqual((1, 0, 2, 3, 4), order(18))
+        # Below 18 adjacent single-channel ranks are already out of band.
+        self.assertEqual((0, 1, 2, 3, 4), order(17))
 
 
 class UtilityRepository(CanonicalRepository):
@@ -133,6 +217,82 @@ class UtilityRepository(CanonicalRepository):
         if self.fail:
             raise RuntimeError("private outcome database detail")
         return self.contributions
+
+
+class UtilityHarmTests(unittest.IsolatedAsyncioTestCase):
+    """Utility breaks near-ties; it never outranks clearly better matches."""
+
+    DIGITS = "123456789abcdef"
+
+    def _saturated(self, digit, reward):
+        from daem0nmcp.retrieval.utility import UtilityContribution
+
+        return {
+            _record_id(digit): tuple(
+                UtilityContribution(index, f"evt_{index}", 1, reward, 1.0)
+                for index in range(20)
+            )
+        }
+
+    async def _order(self, contributions, *, dense=(), **changes):
+        providers = {
+            "lexical": StaticProvider(
+                "lexical",
+                _provider_result(
+                    "lexical",
+                    *(
+                        _candidate(digit, "lexical", rank)
+                        for rank, digit in enumerate(self.DIGITS, start=1)
+                    ),
+                ),
+                [],
+            )
+        }
+        if dense:
+            providers["dense"] = StaticProvider(
+                "dense",
+                _provider_result(
+                    "dense",
+                    *(
+                        _candidate(digit, "dense", rank)
+                        for rank, digit in enumerate(dense, start=1)
+                    ),
+                ),
+                [],
+            )
+        result = await _service(
+            providers=providers,
+            repository=UtilityRepository(contributions),
+            utility_mode="apply",
+            **changes,
+        ).retrieve_candidates(
+            _query(limit=len(self.DIGITS), candidate_limit=len(self.DIGITS))
+        )
+        self.assertEqual("UTILITY_APPLIED", result.providers[-1].reason)
+        return "".join(source.candidate.record_id[-1] for source in result.selected)
+
+    async def test_default_weight_keeps_seventh_match_below_the_best_match(self):
+        order = await self._order(self._saturated("7", 1.0))
+        self.assertEqual("1237456", order[:7])
+
+    async def test_maximum_weight_keeps_last_match_below_the_best_match(self):
+        order = await self._order(self._saturated("f", 1.0), utility_weight=1.0)
+        self.assertEqual("1", order[0])
+        self.assertGreater(order.index("f"), order.index("9"))
+
+    async def test_single_channel_match_stays_below_cross_channel_agreement(self):
+        order = await self._order(
+            self._saturated("2", 1.0), dense="1", utility_weight=1.0
+        )
+        self.assertEqual("12", order[:2])
+
+    async def test_failures_do_not_sink_the_best_match_below_distant_matches(self):
+        order = await self._order(self._saturated("1", 0.0), utility_weight=1.0)
+        self.assertEqual("23415", order[:5])
+
+    async def test_near_tie_is_still_reordered_at_default_weight(self):
+        order = await self._order(self._saturated("2", 1.0))
+        self.assertEqual("213", order[:3])
 
 
 class UtilityStageTests(unittest.IsolatedAsyncioTestCase):

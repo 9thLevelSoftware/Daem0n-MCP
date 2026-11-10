@@ -741,6 +741,95 @@ class RelationshipOperationTests(unittest.IsolatedAsyncioTestCase):
             )
         self.assertEqual("CAPABILITY_DEGRADED", raised.exception.code)
 
+    async def test_readers_skip_relationships_whose_endpoint_was_deleted(
+        self,
+    ) -> None:
+        """One dangling edge in an existing store must not degrade every read."""
+        from daem0nmcp.event_store import EventCommand, EventStore
+
+        a = self._append_record("a", "Root decision.")
+        b = self._append_record("b", "Record that gets deleted.")
+        c = self._append_record("c", "Surviving neighbour.")
+        d = self._append_record("d", "Unrelated record.")
+        operations = self._operations()
+        dangling = await self._link(operations, a, b, "led_to", "dangling-ab-0001")
+        await self._link(operations, b, c, "led_to", "dangling-bc-0002")
+        kept = await self._link(operations, a, c, "depends_on", "dangling-ac-0003")
+        # A store written before deletions closed relationships: the record is
+        # tombstoned while both of its relationships stay open.
+        with closing(sqlite3.connect(self.database)) as connection:
+            connection.execute("PRAGMA foreign_keys=ON")
+            connection.row_factory = sqlite3.Row
+            row = connection.execute(
+                "SELECT event.payload_json FROM memory_records AS record "
+                "JOIN memory_events AS event "
+                "ON event.event_id=record.source_event_id WHERE record.record_id=?",
+                (b,),
+            ).fetchone()
+            state = json.loads(row["payload_json"])["record"]
+            state["deleted_at_us"] = NOW_US - 1
+            EventStore(connection).append_and_project(
+                EventCommand(
+                    workspace_id=self.workspace.workspace_id,
+                    stream_id=b,
+                    stream_kind="memory",
+                    event_type="memory.deleted",
+                    occurred_at_us=NOW_US - 1,
+                    recorded_at_us=NOW_US - 1,
+                    actor_type="client",
+                    expected_stream_version=2,
+                    payload={"record": state},
+                )
+            )
+            connection.commit()
+
+        def related(record_id: str):
+            return operations["memory_related"](
+                workspace=self.workspace,
+                request=_request(
+                    "memory_related",
+                    workspace_id=self.workspace.workspace_id,
+                    record_id=record_id,
+                    direction="both",
+                    max_depth=3,
+                ),
+            )
+
+        with self.assertLogs(
+            "daem0nmcp.api.v7.relationship_operations", level="WARNING"
+        ) as logs:
+            unrelated = await related(d)
+        self.assertEqual([], unrelated.records)
+        self.assertTrue(any("2 live relationship" in line for line in logs.output))
+        # The ids are what memory_unlink needs and no tool lists them.
+        self.assertTrue(any(dangling in line for line in logs.output))
+        neighbour = await related(a)
+        self.assertEqual([c], [item.record_id for item in neighbour.records])
+        self.assertEqual(
+            [kept], [item.relationship_id for item in neighbour.relationships]
+        )
+        chain = await operations["memory_chain_trace"](
+            workspace=self.workspace,
+            request=_request(
+                "memory_chain_trace",
+                workspace_id=self.workspace.workspace_id,
+                start_record_id=a,
+                end_record_id=c,
+            ),
+        )
+        self.assertEqual([[kept]], [path.relationship_ids for path in chain.paths])
+        # The dangling edge is still removable by id.
+        removed = await operations["memory_unlink"](
+            workspace=self.workspace,
+            request=_request(
+                "memory_unlink",
+                workspace_id=self.workspace.workspace_id,
+                relationship_id=dangling,
+                preflight_token=TOKEN,
+            ),
+        )
+        self.assertEqual(1, removed.counts["changed"])
+
     async def test_late_cancelled_link_returns_the_committed_receipt(self) -> None:
         """A cancellation after commit must not hide a durable relationship."""
         from daem0nmcp.api.v7.runtime_services import WorkspaceStorageResolver

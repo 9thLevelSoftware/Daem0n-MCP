@@ -3,7 +3,9 @@
 Daem0n v7 identifies every registered repository with an opaque
 `workspace_id`. Tool inputs and resource URIs use that ID, never a filesystem
 root. Register roots in server configuration before starting either stdio or
-Streamable HTTP at `/mcp`.
+Streamable HTTP at `/mcp`. The ID is derived from the root path, so it is
+stable but not secret: authorization grants, not knowledge of an ID, decide who
+may use a workspace.
 
 ## Choose an ownership model
 

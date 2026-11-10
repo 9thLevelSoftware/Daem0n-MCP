@@ -85,7 +85,14 @@ def _validate_ref(relative: object, name: object) -> tuple[str, str | None]:
         or (name is not None and (not isinstance(name, str) or not name.strip()))
     ):
         raise CodeBindingError("code binding reference is invalid")
-    return relative, name
+    # One spelling per file, whichever platform typed it: ``src\x``, ``./src/x``
+    # and ``src//x`` are the same workspace-relative path.  Rooted, drive and
+    # UNC spellings were refused above on the text as typed.  Bindings stored
+    # before this normalization pass through here again when they are read.
+    parts = [
+        part for part in relative.replace("\\", "/").split("/") if part not in ("", ".")
+    ]
+    return "/".join(parts) or ".", name
 
 
 def _bindings_from_context(context: Mapping[str, object]) -> tuple[CodeBinding, ...]:
@@ -254,11 +261,26 @@ def _fingerprint(
             offsets = _line_offsets(source)
         exact = []
         aliases = []
+        suffixes = []
+        # ``Class.method`` names the trailing scope components of an identity
+        # whose leading module component the caller left out.
+        suffix = "." + name if "." in name else None
         for entity in entities:
             if entity.qualified_name == name:
                 exact.append(entity)
             elif entity.name == name:
                 aliases.append(entity)
+            elif (
+                suffix is not None
+                and isinstance(entity.qualified_name, str)
+                and entity.qualified_name.endswith(suffix)
+            ):
+                suffixes.append(entity)
+        if exact and suffixes:
+            # ``Server.start`` in ``Server.py`` is the identity of a top-level
+            # ``start`` and also names the method ``Server.Server.start``.
+            raise CodeBindingReferenceError("bound symbol reference is ambiguous")
+        aliases = aliases or suffixes
         selected = exact or aliases
         if not exact and aliases:
             identities = set()

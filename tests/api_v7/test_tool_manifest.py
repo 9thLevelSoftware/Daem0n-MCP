@@ -286,18 +286,23 @@ class ToolManifestTests(unittest.TestCase):
                     spec.task_mode,
                     "optional" if name in OPTIONAL_TOOLS else "forbidden",
                 )
+                # The call gateway performs whatever its target performs, so
+                # it carries the least favourable hint of any target.
+                gateway = name == "daem0n_tool_call"
                 self.assertEqual(
                     spec.annotations["readOnlyHint"], name in READ_ONLY_TOOLS
                 )
                 self.assertEqual(
-                    spec.annotations["destructiveHint"], name in DESTRUCTIVE_TOOLS
+                    spec.annotations["destructiveHint"],
+                    gateway or name in DESTRUCTIVE_TOOLS,
                 )
                 self.assertEqual(
-                    spec.annotations["openWorldHint"], name in OPEN_WORLD_TOOLS
+                    spec.annotations["openWorldHint"],
+                    gateway or name in OPEN_WORLD_TOOLS,
                 )
                 self.assertEqual(
                     spec.annotations["idempotentHint"],
-                    name != "sandbox_execute_python",
+                    not gateway and name != "sandbox_execute_python",
                 )
                 self.assertTrue(spec.category)
                 self.assertTrue(spec.tags)

@@ -457,6 +457,14 @@ def main():
         metavar="MIGRATION_ID",
         help="Roll back the active migration run (default: latest)",
     )
+    migration_action.add_argument(
+        "--recover-pointer",
+        action="store_true",
+        help=(
+            "Republish active-db.json for a format 7 database that lost it "
+            "(refused when a migration candidate may have been active)"
+        ),
+    )
     migrate_v7_parser.add_argument(
         "--discard-v7-writes",
         action="store_true",
@@ -805,6 +813,8 @@ def main():
                     args.rollback,
                     discard_v7_writes=args.discard_v7_writes,
                 )
+            elif args.recover_pointer:
+                result = service.recover_pointer(args.project_path)
             elif args.apply:
                 result = service.apply(args.project_path, batch_size=args.batch_size)
             else:
@@ -821,7 +831,11 @@ def main():
             code = getattr(exc, "code", type(exc).__name__)
             payload = {
                 "status": "error",
-                "action": "rollback" if args.rollback is not None else "migrate",
+                "action": "rollback"
+                if args.rollback is not None
+                else "recover_pointer"
+                if args.recover_pointer
+                else "migrate",
                 "workspace_id": None,
                 "source_format": None,
                 "target_format": 7,
@@ -837,7 +851,11 @@ def main():
         except MigrationV7Error as exc:
             payload = {
                 "status": "error",
-                "action": "rollback" if args.rollback is not None else "migrate",
+                "action": "rollback"
+                if args.rollback is not None
+                else "recover_pointer"
+                if args.recover_pointer
+                else "migrate",
                 "workspace_id": None,
                 "source_format": None,
                 "target_format": 7,
@@ -849,11 +867,19 @@ def main():
                 "warnings": [],
                 # Migration details stay redacted to the code, except the
                 # rollback refusal, whose detail is the operator signal: a
-                # count and the storage-relative candidate, never a host path.
+                # count and the storage-relative candidate, never a host path;
+                # a lost pointer, whose detail is the recovery step; and an
+                # unreadable source, whose detail is the way out (file names).
                 "error": {
                     "code": exc.code,
                     "message": str(exc)
-                    if exc.code == "ROLLBACK_WOULD_HIDE_WRITES"
+                    if exc.code
+                    in {
+                        "ROLLBACK_WOULD_HIDE_WRITES",
+                        "ACTIVE_POINTER_MISSING",
+                        "POINTER_RECOVERY_AMBIGUOUS",
+                        "SOURCE_UNREADABLE",
+                    }
                     else exc.code,
                 },
             }
@@ -861,7 +887,11 @@ def main():
         except Exception:
             payload = {
                 "status": "error",
-                "action": "rollback" if args.rollback is not None else "migrate",
+                "action": "rollback"
+                if args.rollback is not None
+                else "recover_pointer"
+                if args.recover_pointer
+                else "migrate",
                 "workspace_id": None,
                 "source_format": None,
                 "target_format": 7,
@@ -1145,9 +1175,20 @@ def main():
     from .database import DatabaseManager
     from .memory import MemoryManager
     from .rules import RulesEngine
+    from .storage_activation import ACTIVE_POINTER_MISSING_CODE
 
     storage_path = active_settings.get_storage_path()
-    db = DatabaseManager(storage_path)
+    try:
+        db = DatabaseManager(storage_path)
+    except RuntimeError as exc:
+        if getattr(exc, "code", None) != ACTIVE_POINTER_MISSING_CODE:
+            raise
+        # The refusal is the operator's instruction, not a crash.
+        if args.json:
+            print(json.dumps({"error": str(exc)}))
+        else:
+            print(f"ERROR: {exc}", file=sys.stderr)
+        sys.exit(1)
     memory = MemoryManager(db)
     rules = RulesEngine(db)
 
@@ -1226,7 +1267,42 @@ def main():
                 print(f"  Vectors available: {result['vectors_available']}")
                 safe_print(f"\n{result['message']}")
         else:
-            count, applied = run_migrations(db_path, workspace_id=db.workspace_id)
+            from .database import SchemaUpgradeRequiredError
+            from .schema_version import CURRENT_SCHEMA_VERSION
+
+            schema_version = db._schema_version() if db.db_path.exists() else 0
+            if (
+                db.format_version == 7
+                and db.db_path.exists()
+                and schema_version < CURRENT_SCHEMA_VERSION
+            ):
+                # Only `migrate-v7 --apply` upgrades an active format-7 store:
+                # it works on a verified copy and keeps what rollback needs.
+                refusal = SchemaUpgradeRequiredError(schema_version)
+                if args.json:
+                    print(
+                        json.dumps(
+                            {
+                                "database": db_path,
+                                "error": {
+                                    "code": refusal.code,
+                                    "message": str(refusal),
+                                },
+                            },
+                            sort_keys=True,
+                            separators=(",", ":"),
+                        )
+                    )
+                else:
+                    print(f"ERROR: {refusal}", file=sys.stderr)
+                sys.exit(1)
+            count, applied = run_migrations(
+                db_path,
+                workspace_id=db.workspace_id,
+                # A format-6 store is what `migrate-v7` snapshots; it stops at
+                # the last v6 version here exactly as it does at start.
+                maximum_version=db._v6_migration_ceiling(schema_version),
+            )
             if args.json:
                 result = {
                     "database": db_path,

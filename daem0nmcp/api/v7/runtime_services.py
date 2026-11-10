@@ -53,6 +53,7 @@ from ...workspace import (
     WorkspaceRegistry,
     normalize_resolved_path,
     resolve_derived_path,
+    sqlite_file_uri,
 )
 from .errors import is_database_busy
 from .federated_retrieval import (
@@ -212,10 +213,9 @@ class WorkspaceStorageResolver:
 
 
 def _open_database(path: Path, *, writable: bool) -> sqlite3.Connection:
-    mode = "rw" if writable else "ro"
     try:
         connection = sqlite3.connect(
-            f"file:{path.as_posix()}?mode={mode}",
+            sqlite_file_uri(path, mode="rw" if writable else "ro"),
             uri=True,
             timeout=5.0,
             isolation_level=None,
@@ -274,7 +274,7 @@ def _inspect_database_health(
     connection: sqlite3.Connection | None = None
     try:
         connection = sqlite3.connect(
-            f"file:{path.as_posix()}?mode=ro",
+            sqlite_file_uri(path, mode="ro"),
             uri=True,
             timeout=2.0,
             isolation_level=None,
@@ -665,14 +665,6 @@ class SQLiteMemoryEventWriter:
             else _datetime_us(command.happened_at)
         )
         context = dict(command.context)
-        if command.code_refs:
-            try:
-                bindings = capture_bindings(workspace, command.code_refs)
-            except CodeBindingUnavailableError as exc:
-                raise RuntimeServiceError("CAPABILITY_DEGRADED") from exc
-            except CodeBindingError as exc:
-                raise RuntimeServiceError("INVALID_ARGUMENT") from exc
-            context["code_bindings"] = [binding.to_json() for binding in bindings]
         if command.record_type == "procedure":
             steps = list(command.procedure_steps)
             if "steps" in context and context["steps"] != steps:
@@ -735,6 +727,30 @@ class SQLiteMemoryEventWriter:
         with self._storage_resolver.locked_active(workspace) as active:
             connection = _open_database(active.path, writable=True)
             try:
+                # A retry of a committed store must replay it, so the bound
+                # files are read only for a request the log does not hold
+                # yet, and before the write lock is taken.  The lookup is
+                # repeated under that lock to settle a concurrent first write.
+                if command.code_refs and (
+                    _existing_idempotent_event(
+                        connection,
+                        workspace_id=workspace.workspace_id,
+                        event_type="memory.created",
+                        correlation_id=correlation,
+                        stream_id=record_id,
+                        request_hash=request_hash,
+                    )
+                    is None
+                ):
+                    try:
+                        bindings = capture_bindings(workspace, command.code_refs)
+                    except CodeBindingUnavailableError as exc:
+                        raise RuntimeServiceError("CAPABILITY_DEGRADED") from exc
+                    except CodeBindingError as exc:
+                        raise RuntimeServiceError("INVALID_ARGUMENT") from exc
+                    context["code_bindings"] = [
+                        binding.to_json() for binding in bindings
+                    ]
                 connection.execute("BEGIN IMMEDIATE")
                 if cancelled.is_set():
                     raise _WorkerCancelledError()
@@ -747,6 +763,10 @@ class SQLiteMemoryEventWriter:
                     request_hash=request_hash,
                 )
                 if existing is None:
+                    if command.code_refs and "code_bindings" not in context:
+                        # The request was in the log a moment ago and is not
+                        # now: never append it without its bindings.
+                        raise RuntimeServiceError("MEMORY_EVENT_INTEGRITY_FAILED")
                     if record_id in command.informed_by:
                         raise RuntimeServiceError("INVALID_ARGUMENT")
                     _validate_informed_by(
@@ -872,6 +892,10 @@ class SQLiteMemoryEventWriter:
                     request_hash=request_hash,
                 )
                 if existing is None:
+                    # A tombstoned record takes no new outcome; only the retry
+                    # of an outcome committed before the deletion replays.
+                    if row["deleted_at_us"] is not None:
+                        raise RuntimeServiceError("NOT_FOUND")
                     _validate_informed_by(
                         connection, workspace.workspace_id, command.informed_by
                     )
@@ -999,6 +1023,7 @@ _RETRIEVAL_CONFIG_FIELDS = (
     "retrieval_utility_candidate_limit",
     "memory_validity_mode",
     "retrieval_retention_mode",
+    "lexical_content_tiering",
 )
 
 
@@ -1267,10 +1292,14 @@ class Task8RecallService:
                     for workspace_id in sorted(workspaces)
                 }
                 linked = tuple(sorted(linked_workspace_ids))
-                validate_directional_links(
-                    active_by_id[origin.workspace_id].path,
-                    origin.workspace_id,
-                    linked,
+                origin_path = active_by_id[origin.workspace_id].path
+                # Verifying the link ledgers and fusing the sources are
+                # blocking work: they run on the hydration workers, which
+                # finish before a cancellation releases the locks held here.
+                await self._run_snapshot(
+                    lambda: validate_directional_links(
+                        origin_path, origin.workspace_id, linked
+                    )
                 )
                 for selected in workspaces.values():
                     value = authorizer(selected)
@@ -1315,27 +1344,30 @@ class Task8RecallService:
                         await asyncio.shield(acquire)
                         guard.release()
                         raise
-                    validate_directional_links(
-                        active_by_id[origin.workspace_id].path,
-                        origin.workspace_id,
-                        linked,
+                    await self._run_snapshot(
+                        lambda: validate_directional_links(
+                            origin_path, origin.workspace_id, linked
+                        )
                     )
                     for selected in workspaces.values():
                         value = authorizer(selected)
                         if inspect.isawaitable(value):
                             await value
-                    hydrated = compose_federated_results(
-                        dict(pairs),
-                        query,
-                        label_applicability=(
-                            getattr(
-                                self._effective_config(), "memory_validity_mode", "off"
-                            )
-                            == "apply"
-                        ),
-                        retention_mode=getattr(
-                            self._effective_config(), "retrieval_retention_mode", "off"
-                        ),
+                    composition_config = self._effective_config()
+                    hydrated = await self._run_snapshot(
+                        lambda: compose_federated_results(
+                            dict(pairs),
+                            query,
+                            label_applicability=(
+                                getattr(
+                                    composition_config, "memory_validity_mode", "off"
+                                )
+                                == "apply"
+                            ),
+                            retention_mode=getattr(
+                                composition_config, "retrieval_retention_mode", "off"
+                            ),
+                        )
                     )
                 finally:
                     guard.release()

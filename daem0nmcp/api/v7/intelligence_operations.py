@@ -7,7 +7,7 @@ import os
 import re
 import sqlite3
 import threading
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -41,6 +41,7 @@ from .models import (
 from .public_ids import PublicObjectIdNotFound, PublicObjectIdRepository
 from .runtime_protocols import ActiveStorageResolver, WorkerPool
 from .runtime_services import WorkspaceStorageResolver
+from .tasks import durable_task_execution_var
 from .tools import (
     CommunitySummary,
     Contradiction,
@@ -56,6 +57,10 @@ from .tools import (
 )
 
 _EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
+# The foreground refuses an evidence scan above these bounds with
+# TASK_REQUIRED so a synchronous call keeps a bounded deadline and memory.  The
+# same call admitted as a durable task reads the whole event log lazily and is
+# limited by the task's own deadline instead.
 _MAX_SCAN_EVENTS = 20_000
 _MAX_EVIDENCE_RECORDS = 10_000
 _MAX_GOVERNANCE_EVENTS = 5_000
@@ -63,7 +68,21 @@ _MAX_COMMUNITIES = 1_000
 _MAX_COMMUNITY_MEMBERS = 20_000
 _CLAIM_SPLIT_RE = re.compile(r"(?<=[.!?])\s+|[\r\n]+")
 _WORD_RE = re.compile(r"[A-Za-z0-9]+(?:[-_][A-Za-z0-9]+)*")
-_NEGATIONS = frozenset({"no", "not", "never", "none", "without"})
+# A contraction is rewritten to "not" before tokenizing: the word pattern would
+# otherwise split "don't" into "don" and "t" and lose the negation.
+_CONTRACTED_NEGATION_RE = re.compile(
+    r"\b[A-Za-z]+n['\u2019]t\b|\bcannot\b"
+    r"|\b(?:are|ca|could|did|does|do|had|has|have|is|must|should|was|were|wo|would)nt\b",
+    re.IGNORECASE,
+)
+_CLAUSE_SPLIT_RE = re.compile(r"[,;:()\u2013\u2014]|\s-\s")
+# Words that start a clause with a polarity of its own, and the coordinations
+# across which a negation may or may not carry.
+_CLAUSE_WORDS = frozenset(
+    {"although", "because", "but", "so", "though", "whereas", "while"}
+)
+_COORDINATIONS = frozenset({"and", "or"})
+_NEGATIONS = frozenset({"neither", "never", "no", "none", "nor", "not", "without"})
 _STOP_WORDS = frozenset(
     {
         "a",
@@ -75,6 +94,9 @@ _STOP_WORDS = frozenset(
         "be",
         "been",
         "by",
+        "did",
+        "do",
+        "does",
         "for",
         "from",
         "has",
@@ -374,10 +396,26 @@ def _safe_text(value: object) -> str:
     return value
 
 
+def _scan_is_bounded(workspace: Workspace, tool_name: str) -> bool:
+    """Return whether an evidence scan keeps the foreground bounds.
+
+    Only the durable task admitted for this exact tool and workspace scans
+    unbounded; every other caller keeps the bounds.
+    """
+
+    execution = durable_task_execution_var.get()
+    return not (
+        execution is not None
+        and execution.tool_name == tool_name
+        and execution.workspace_id == workspace.workspace_id
+    )
+
+
 def _record_evidence_from_events(
     connection: sqlite3.Connection,
     workspace_id: str,
     *,
+    bounded: bool,
     categories: frozenset[str] | None = None,
     valid_at_us: int | None = None,
     transaction_at_us: int | None = None,
@@ -387,15 +425,21 @@ def _record_evidence_from_events(
     if transaction_at_us is not None:
         transaction_filter = " AND recorded_at_us<=?"
         parameters.append(transaction_at_us)
-    rows = connection.execute(
+    query = (
         f"SELECT {_EVENT_COLUMNS} FROM memory_events WHERE workspace_id=? "
         "AND stream_kind='memory'"
         + transaction_filter
-        + " ORDER BY stream_id,stream_version LIMIT ?",
-        (*parameters, _MAX_SCAN_EVENTS + 1),
-    ).fetchall()
-    if len(rows) > _MAX_SCAN_EVENTS:
-        raise IntelligenceOperationError("TASK_REQUIRED")
+        + " ORDER BY stream_id,stream_version"
+    )
+    rows: Iterable[sqlite3.Row]
+    if bounded:
+        rows = connection.execute(
+            query + " LIMIT ?", (*parameters, _MAX_SCAN_EVENTS + 1)
+        ).fetchall()
+        if len(rows) > _MAX_SCAN_EVENTS:
+            raise IntelligenceOperationError("TASK_REQUIRED")
+    else:
+        rows = connection.execute(query, parameters)
 
     selected: dict[str, tuple[sqlite3.Row, dict[str, Any], int]] = {}
     first_recorded: dict[str, int] = {}
@@ -472,7 +516,7 @@ def _record_evidence_from_events(
                 recorded_at_us=recorded_at_us,
             )
         )
-        if len(records) > _MAX_EVIDENCE_RECORDS:
+        if bounded and len(records) > _MAX_EVIDENCE_RECORDS:
             raise IntelligenceOperationError("TASK_REQUIRED")
     return records
 
@@ -506,31 +550,170 @@ def _claims(text: str) -> list[str]:
     return claims or [text[:2_000]]
 
 
-def _semantic_signature(text: str) -> tuple[frozenset[str], bool]:
-    tokens = [token.casefold() for token in _WORD_RE.findall(text)]
-    semantic = frozenset(
+def _tokens(text: str) -> list[str]:
+    expanded = _CONTRACTED_NEGATION_RE.sub(" not ", text)
+    return [token.casefold() for token in _WORD_RE.findall(expanded)]
+
+
+def _semantic_terms(text: str) -> frozenset[str]:
+    return frozenset(
         token
-        for token in tokens
+        for token in _tokens(text)
         if token not in _STOP_WORDS and token not in _NEGATIONS
     )
-    return semantic, any(token in _NEGATIONS for token in tokens)
 
 
-def _match_score(claim_terms: frozenset[str], evidence: str) -> tuple[float, bool]:
-    evidence_terms, evidence_negated = _semantic_signature(evidence)
+def _sentence_units(sentence: str) -> list[tuple[list[str], str, int]]:
+    """Split a sentence into units that each carry one polarity.
+
+    Each unit is ``(tokens, polarity, negation index)`` with polarity ``"+"``,
+    ``"-"`` or ``"?"`` (not readable without guessing) and the index of the
+    unit's own negation, or ``-1``.  A unit ends at punctuation, at a word
+    that opens a new clause, and at "and"/"or".
+    """
+    units: list[tuple[list[str], str, int]] = []
+    # A negation with nothing after it in its unit ("We do not, under any
+    # load, ...") negates something later in the sentence; which part is not
+    # decided here, so the rest of the sentence is unreadable.
+    dangling = False
+    for clause in _CLAUSE_SPLIT_RE.split(sentence):
+        groups: list[tuple[str, list[str]]] = [("", [])]
+        for token in _tokens(clause):
+            if token in _CLAUSE_WORDS or token in _COORDINATIONS:
+                groups.append((token, []))
+            else:
+                groups[-1][1].append(token)
+        previous = "+"
+        for connective, tokens in groups:
+            if connective in _CLAUSE_WORDS:
+                previous = "+"
+            if not tokens or (tokens == ["no"] and not units):
+                # Nothing to read, or a leading "No," that answers a question
+                # rather than negating the statement after it.
+                continue
+            negations = [
+                index for index, token in enumerate(tokens) if token in _NEGATIONS
+            ]
+            if dangling or len(negations) > 1:
+                polarity = "?"
+            elif negations:
+                polarity = "-"
+                if all(token in _STOP_WORDS for token in tokens[negations[0] + 1 :]):
+                    polarity = "?"
+                    dangling = True
+            elif previous == "-" and connective == "or":
+                # "We don't use X or Y" negates Y as well.
+                polarity = "-"
+            elif previous == "+":
+                polarity = "+"
+            else:
+                # After "and" a negation may or may not carry: "don't use X
+                # and Y" against "don't use X and we use Y".
+                polarity = "?"
+            units.append((tokens, polarity, negations[0] if negations else -1))
+            previous = polarity
+    return units
+
+
+def _polar_units(terms: frozenset[str], text: str) -> list[tuple[frozenset[str], str]]:
+    """The parts of ``text`` that mention ``terms``, each with its polarity.
+
+    Only the sentences that share the most terms are read: a negation in
+    another sentence is about something else.
+    """
+    best_overlap = 0
+    best_sentences: list[list[tuple[list[str], str, int]]] = []
+    for sentence in _CLAIM_SPLIT_RE.split(text):
+        units = _sentence_units(sentence)
+        overlap = len(terms & {token for unit in units for token in unit[0]})
+        if overlap > best_overlap:
+            best_overlap = overlap
+            best_sentences = [units]
+        elif overlap and overlap == best_overlap:
+            best_sentences.append(units)
+    result: list[tuple[frozenset[str], str]] = []
+    for units in best_sentences:
+        for tokens, polarity, negation in units:
+            mentioned = terms.intersection(tokens)
+            if not mentioned:
+                continue
+            if (
+                polarity == "-"
+                and negation >= 0
+                and terms.isdisjoint(tokens[negation + 1 :])
+            ):
+                # The terms come before the negation ("use Postgres in no
+                # service", "use Postgres not MySQL"): it may or may not
+                # reach back to them.
+                polarity = "?"
+            result.append((mentioned, polarity))
+    return result
+
+
+def _statement(text: str) -> tuple[str, ...]:
+    return tuple(token for token in _tokens(text) if token not in _STOP_WORDS)
+
+
+def _restates(claim: str, evidence: str) -> bool:
+    """Whether a sentence of ``evidence`` says ``claim`` word for word."""
+    statement = _statement(claim)
+    return bool(statement) and any(
+        _statement(sentence) == statement
+        for sentence in _CLAIM_SPLIT_RE.split(evidence)
+    )
+
+
+def _agreement(
+    claim_units: list[tuple[frozenset[str], str]],
+    claim_terms: frozenset[str],
+    evidence: str,
+) -> bool | None:
+    """Whether ``evidence`` agrees with the claim; ``None`` when unclear.
+
+    Each part of the claim is compared with the evidence unit(s) sharing the
+    most of its terms.  Units that disagree with each other, an unreadable
+    unit, or parts of the claim that fare differently are not resolved by
+    guessing.
+    """
+    if not claim_units or any(polarity == "?" for _terms, polarity in claim_units):
+        return None
+    evidence_units = _polar_units(claim_terms, evidence)
+    verdicts: set[bool] = set()
+    for terms, claim_polarity in claim_units:
+        best_overlap = 0
+        polarities: set[str] = set()
+        for evidence_terms, polarity in evidence_units:
+            overlap = len(terms & evidence_terms)
+            if overlap > best_overlap:
+                best_overlap = overlap
+                polarities = {polarity}
+            elif overlap and overlap == best_overlap:
+                polarities.add(polarity)
+        if not polarities:
+            continue
+        if len(polarities) != 1 or "?" in polarities:
+            return None
+        verdicts.add(polarities.pop() == claim_polarity)
+    if len(verdicts) != 1:
+        return None
+    return verdicts.pop()
+
+
+def _match_score(claim_terms: frozenset[str], evidence: str) -> float:
     if not claim_terms:
-        return 0.0, evidence_negated
-    overlap = len(claim_terms & evidence_terms)
+        return 0.0
+    overlap = len(claim_terms & _semantic_terms(evidence))
     minimum = 1 if len(claim_terms) == 1 else 2
     if overlap < minimum:
-        return 0.0, evidence_negated
-    return overlap / len(claim_terms), evidence_negated
+        return 0.0
+    return overlap / len(claim_terms)
 
 
 def _memory_verify_sync(
     dependencies: IntelligenceOperationDependencies,
     workspace: Workspace,
     request: AdmittedRequest,
+    bounded: bool,
 ) -> MemoryVerifyData:
     valid_at = (
         None
@@ -551,6 +734,7 @@ def _memory_verify_sync(
                 evidence = _record_evidence_from_events(
                     connection,
                     workspace.workspace_id,
+                    bounded=bounded,
                     categories=categories,
                     valid_at_us=valid_at,
                     transaction_at_us=transaction_at,
@@ -559,14 +743,20 @@ def _memory_verify_sync(
                 contradictions: list[Contradiction] = []
                 all_refs: dict[tuple[str, str], EvidenceRef] = {}
                 for claim in _claims(request.text):
-                    claim_terms, claim_negated = _semantic_signature(claim)
+                    claim_terms = _semantic_terms(claim)
+                    claim_units = _polar_units(claim_terms, claim)
                     matches: list[tuple[float, bool, _RecordEvidence]] = []
                     for item in evidence:
-                        score, evidence_negated = _match_score(
-                            claim_terms, item.content
+                        score = _match_score(claim_terms, item.content)
+                        if score < 0.75:
+                            continue
+                        agrees = _restates(claim, item.content) or _agreement(
+                            claim_units, claim_terms, item.content
                         )
-                        if score >= 0.75:
-                            matches.append((score, evidence_negated, item))
+                        # Evidence whose stance on the claim is unclear proves
+                        # nothing either way.
+                        if agrees is not None:
+                            matches.append((score, agrees, item))
                     matches.sort(
                         key=lambda entry: (
                             -entry[0],
@@ -574,12 +764,8 @@ def _memory_verify_sync(
                         )
                     )
                     selected = matches[:32]
-                    contradictory = [
-                        entry for entry in selected if entry[1] != claim_negated
-                    ]
-                    supporting = [
-                        entry for entry in selected if entry[1] == claim_negated
-                    ]
+                    contradictory = [entry for entry in selected if not entry[1]]
+                    supporting = [entry for entry in selected if entry[1]]
                     if contradictory:
                         status = "contradicted"
                         used = contradictory
@@ -644,12 +830,12 @@ def _relevant_records(
     *,
     limit: int = 100,
 ) -> list[_RecordEvidence]:
-    terms, _negated = _semantic_signature(subject.content)
+    terms = _semantic_terms(subject.content)
     scored: list[tuple[float, _RecordEvidence]] = []
     for item in records:
         if item.record.record_id == subject.record.record_id:
             continue
-        score, _ = _match_score(terms, item.content)
+        score = _match_score(terms, item.content)
         if score >= 0.4:
             scored.append((score, item))
     scored.sort(key=lambda entry: (-entry[0], entry[1].record.record_id))
@@ -660,6 +846,7 @@ def _decision_simulate_sync(
     dependencies: IntelligenceOperationDependencies,
     workspace: Workspace,
     request: AdmittedRequest,
+    bounded: bool,
 ) -> DecisionSimulationData:
     try:
         with dependencies.storage_resolver.locked_active(workspace) as active:
@@ -669,6 +856,7 @@ def _decision_simulate_sync(
                 current = _record_evidence_from_events(
                     connection,
                     workspace.workspace_id,
+                    bounded=bounded,
                 )
                 current_by_id = {item.record.record_id: item for item in current}
                 decision = current_by_id.get(request.record_id)
@@ -684,6 +872,7 @@ def _decision_simulate_sync(
                 then = _record_evidence_from_events(
                     connection,
                     workspace.workspace_id,
+                    bounded=bounded,
                     transaction_at_us=comparison_at,
                 )
                 then_by_id = {item.record.record_id: item for item in then}
@@ -866,6 +1055,7 @@ def _rule_evolution_sync(
     dependencies: IntelligenceOperationDependencies,
     workspace: Workspace,
     request: AdmittedRequest,
+    bounded: bool,
 ) -> RuleEvolutionData:
     now = _now(dependencies)
     try:
@@ -879,7 +1069,7 @@ def _rule_evolution_sync(
                     request.rule_id,
                 )
                 memory_evidence = _record_evidence_from_events(
-                    connection, workspace.workspace_id
+                    connection, workspace.workspace_id, bounded=bounded
                 )
                 reports: list[RuleEvolutionReport] = []
                 all_references: dict[tuple[str, str], EvidenceRef] = {}
@@ -888,10 +1078,10 @@ def _rule_evolution_sync(
                     revisions = _governance_revision_count(
                         connection, workspace.workspace_id, row
                     )
-                    terms, _ = _semantic_signature(rule.trigger)
+                    terms = _semantic_terms(rule.trigger)
                     matches: list[tuple[float, _RecordEvidence]] = []
                     for item in memory_evidence:
-                        score, _ = _match_score(terms, item.content)
+                        score = _match_score(terms, item.content)
                         if score >= 0.4:
                             matches.append((score, item))
                     matches.sort(
@@ -1084,6 +1274,7 @@ def _hierarchical_recall_sync(
     dependencies: IntelligenceOperationDependencies,
     workspace: Workspace,
     request: AdmittedRequest,
+    bounded: bool,
 ) -> HierarchicalRecallData:
     try:
         with dependencies.storage_resolver.locked_active(workspace) as active:
@@ -1097,7 +1288,7 @@ def _hierarchical_recall_sync(
                     connection, workspace.workspace_id, generation
                 )
                 records = _record_evidence_from_events(
-                    connection, workspace.workspace_id
+                    connection, workspace.workspace_id, bounded=bounded
                 )
                 by_id = {item.record.record_id: item for item in records}
                 members_by_community: dict[str, list[_RecordEvidence]] = {
@@ -1109,16 +1300,16 @@ def _hierarchical_recall_sync(
                         raise IntelligenceOperationError("CAPABILITY_DEGRADED")
                     members_by_community[str(member["community_id"])].append(record)
 
-                query_terms, _ = _semantic_signature(request.query)
+                query_terms = _semantic_terms(request.query)
                 direct: list[tuple[float, sqlite3.Row]] = []
                 fallback: list[tuple[float, sqlite3.Row]] = []
                 for row in communities:
-                    label_score, _ = _match_score(query_terms, str(row["label"]))
+                    label_score = _match_score(query_terms, str(row["label"]))
                     if label_score > 0:
                         direct.append((label_score, row))
                     member_score = max(
                         (
-                            _match_score(query_terms, item.content)[0]
+                            _match_score(query_terms, item.content)
                             for item in members_by_community[str(row["community_id"])]
                         ),
                         default=0.0,
@@ -1183,10 +1374,10 @@ def _position_evidence(
     position: str,
     records: list[_RecordEvidence],
 ) -> list[tuple[float, _RecordEvidence]]:
-    terms, _ = _semantic_signature(position)
+    terms = _semantic_terms(position)
     selected: list[tuple[float, _RecordEvidence]] = []
     for item in records:
-        score, _ = _match_score(terms, item.content)
+        score = _match_score(terms, item.content)
         if score < 0.4:
             continue
         if item.worked is True:
@@ -1250,6 +1441,7 @@ def _decision_debate_sync(
     workspace: Workspace,
     request: AdmittedRequest,
     cancelled: threading.Event,
+    bounded: bool,
 ) -> DecisionDebateData:
     now = _now(dependencies)
     now_us = _datetime_us(now)
@@ -1342,7 +1534,7 @@ def _decision_debate_sync(
                     )
 
                 records = _record_evidence_from_events(
-                    connection, workspace.workspace_id
+                    connection, workspace.workspace_id, bounded=bounded
                 )
                 advocate_evidence = _position_evidence(
                     request.advocate_position, records
@@ -1496,10 +1688,11 @@ def build_intelligence_operations(
         *, workspace: Workspace, request: AdmittedRequest
     ) -> DecisionDebateData:
         _authorize(workspace, request, "decision_debate")
+        bounded = _scan_is_bounded(workspace, "decision_debate")
         return await _run_mutation(
             dependencies,
             lambda cancelled: _decision_debate_sync(
-                dependencies, workspace, request, cancelled
+                dependencies, workspace, request, cancelled, bounded
             ),
         )
 
@@ -1507,36 +1700,42 @@ def build_intelligence_operations(
         *, workspace: Workspace, request: AdmittedRequest
     ) -> DecisionSimulationData:
         _authorize(workspace, request, "decision_simulate")
+        bounded = _scan_is_bounded(workspace, "decision_simulate")
         return await _run_read(
             dependencies,
-            lambda: _decision_simulate_sync(dependencies, workspace, request),
+            lambda: _decision_simulate_sync(dependencies, workspace, request, bounded),
         )
 
     async def memory_recall_hierarchical(
         *, workspace: Workspace, request: AdmittedRequest
     ) -> HierarchicalRecallData:
         _authorize(workspace, request, "memory_recall_hierarchical")
+        bounded = _scan_is_bounded(workspace, "memory_recall_hierarchical")
         return await _run_read(
             dependencies,
-            lambda: _hierarchical_recall_sync(dependencies, workspace, request),
+            lambda: _hierarchical_recall_sync(
+                dependencies, workspace, request, bounded
+            ),
         )
 
     async def memory_verify(
         *, workspace: Workspace, request: AdmittedRequest
     ) -> MemoryVerifyData:
         _authorize(workspace, request, "memory_verify")
+        bounded = _scan_is_bounded(workspace, "memory_verify")
         return await _run_read(
             dependencies,
-            lambda: _memory_verify_sync(dependencies, workspace, request),
+            lambda: _memory_verify_sync(dependencies, workspace, request, bounded),
         )
 
     async def rule_evolution_analyze(
         *, workspace: Workspace, request: AdmittedRequest
     ) -> RuleEvolutionData:
         _authorize(workspace, request, "rule_evolution_analyze")
+        bounded = _scan_is_bounded(workspace, "rule_evolution_analyze")
         return await _run_read(
             dependencies,
-            lambda: _rule_evolution_sync(dependencies, workspace, request),
+            lambda: _rule_evolution_sync(dependencies, workspace, request, bounded),
         )
 
     return MappingProxyType(

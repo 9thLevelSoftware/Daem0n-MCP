@@ -15,7 +15,7 @@ import os
 import re
 import sqlite3
 import threading
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -55,6 +55,7 @@ _REQUIRED_TABLES = frozenset(
 )
 _REBUILD_MARKERS = frozenset({"rebuild_required_at_us", "rebuild_required_event_id"})
 _MAX_RELATION_PATH = 8
+_UTILITY_BATCH_SIZE = 500
 _EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
 _REPOSITORY_WORKERS = BoundedWorkerPool(
     max_workers=4,
@@ -136,6 +137,17 @@ def sqlite_read_connection_factory(
         return sqlite3.connect(uri, uri=True, timeout=timeout)
 
     return open_connection
+
+
+def _chunks(values: tuple[str, ...]) -> Iterator[tuple[str, ...]]:
+    """Keep IN lists under SQLite's historical 999 bound-variable limit."""
+
+    for start in range(0, len(values), _UTILITY_BATCH_SIZE):
+        yield values[start : start + _UTILITY_BATCH_SIZE]
+
+
+def _slots(values: tuple[str, ...]) -> str:
+    return ",".join("?" for _ in values)
 
 
 def _datetime_us(value: datetime) -> int:
@@ -472,72 +484,123 @@ class SQLiteRetrievalRepository:
         try:
             revision = self._begin_read_snapshot(connection)
             self._event_root(connection, workspace_id, revision)
-            result: dict[str, tuple[UtilityContribution, ...]] = {}
-            for record_id in record_ids:
-                depths = {record_id: 0}
-                frontier = (record_id,)
-                for depth in range(1, MAX_DEPTH + 1):
-                    remaining = MAX_DESCENDANTS - (len(depths) - 1)
-                    if not frontier or remaining == 0:
-                        break
-                    frontier_slots = ",".join("?" for _ in frontier)
-                    visited_slots = ",".join("?" for _ in depths)
+            # One set-based read per traversal depth, then one for signals and
+            # one for outcome edges, however many records were requested.
+            depths = {record_id: {record_id: 0} for record_id in record_ids}
+            frontiers = {record_id: (record_id,) for record_id in record_ids}
+            for depth in range(1, MAX_DEPTH + 1):
+                active = {
+                    record_id: frontier
+                    for record_id, frontier in frontiers.items()
+                    if frontier and len(depths[record_id]) - 1 < MAX_DESCENDANTS
+                }
+                if not active:
+                    break
+                children: dict[str, list[str]] = {}
+                parents = tuple(
+                    dict.fromkeys(
+                        parent for frontier in active.values() for parent in frontier
+                    )
+                )
+                for chunk in _chunks(parents):
+                    # A record with r slots left has visited
+                    # MAX_DESCENDANTS + 1 - r records and selects at most r
+                    # unvisited children, so every child it can select is
+                    # among the first MAX_DESCENDANTS + 1 of its parent.
+                    # Without statistics SQLite scans the whole workspace
+                    # for an IN list of three or more parents, so the
+                    # per-parent index is named explicitly.
                     rows = connection.execute(
-                        "SELECT DISTINCT record_id FROM memory_provenance_edges "
+                        "SELECT informed_by_record_id,record_id FROM ("
+                        "SELECT informed_by_record_id,record_id,ROW_NUMBER() OVER ("
+                        "PARTITION BY informed_by_record_id ORDER BY record_id"
+                        ") AS position FROM ("
+                        "SELECT DISTINCT informed_by_record_id,record_id "
+                        "FROM memory_provenance_edges "
+                        "INDEXED BY idx_provenance_source "
                         "WHERE workspace_id=? AND edge_kind='store' "
-                        f"AND informed_by_record_id IN ({frontier_slots}) "
-                        f"AND record_id NOT IN ({visited_slots}) "
-                        "AND recorded_at_us<=? ORDER BY record_id LIMIT ?",
+                        f"AND informed_by_record_id IN ({_slots(chunk)}) "
+                        "AND recorded_at_us<=?)) WHERE position<=?",
                         (
                             workspace_id,
-                            *frontier,
-                            *depths,
+                            *chunk,
                             transaction_at_us,
-                            remaining,
+                            MAX_DESCENDANTS + 1,
                         ),
                     ).fetchall()
-                    frontier = tuple(str(row[0]) for row in rows)
-                    depths.update((descendant, depth) for descendant in frontier)
+                    for row in rows:
+                        children.setdefault(str(row[0]), []).append(str(row[1]))
+                for record_id in record_ids:
+                    frontier = active.get(record_id, ())
+                    visited = depths[record_id]
+                    remaining = MAX_DESCENDANTS - (len(visited) - 1)
+                    frontier = tuple(
+                        sorted(
+                            {
+                                child
+                                for parent in frontier
+                                for child in children.get(parent, ())
+                                if child not in visited
+                            }
+                        )[:remaining]
+                    )
+                    frontiers[record_id] = frontier
+                    visited.update((descendant, depth) for descendant in frontier)
 
-                contributions: dict[str, UtilityContribution] = {}
-                record_slots = ",".join("?" for _ in depths)
+            signals: dict[str, list[sqlite3.Row]] = {}
+            reachable = tuple(
+                dict.fromkeys(
+                    descendant for visited in depths.values() for descendant in visited
+                )
+            )
+            for chunk in _chunks(reachable):
                 rows = connection.execute(
                     "SELECT recorded_at_us,event_id,record_id,reward,weight "
                     "FROM memory_outcome_signals WHERE workspace_id=? "
-                    f"AND record_id IN ({record_slots}) AND recorded_at_us<=?",
-                    (workspace_id, *depths, transaction_at_us),
+                    f"AND record_id IN ({_slots(chunk)}) AND recorded_at_us<=?",
+                    (workspace_id, *chunk, transaction_at_us),
                 ).fetchall()
                 for row in rows:
-                    depth = depths[str(row[2])]
-                    if depth == 0 and float(row[3]) != 1.0:
-                        continue
-                    contribution = UtilityContribution(
-                        recorded_at_us=int(row[0]),
-                        event_id=str(row[1]),
-                        depth=depth,
-                        reward=float(row[3]),
-                        weight=float(row[4]),
-                    )
-                    contributions[contribution.event_id] = contribution
+                    signals.setdefault(str(row[2]), []).append(row)
 
+            outcome_edges: dict[str, list[sqlite3.Row]] = {}
+            for chunk in _chunks(record_ids):
                 rows = connection.execute(
                     "SELECT signals.recorded_at_us,signals.event_id,"
-                    "signals.reward,signals.weight "
+                    "signals.reward,signals.weight,edges.informed_by_record_id "
                     "FROM memory_provenance_edges AS edges "
                     "JOIN memory_outcome_signals AS signals "
                     "ON signals.event_id=edges.event_id "
                     "AND signals.workspace_id=edges.workspace_id "
                     "WHERE edges.workspace_id=? AND edges.edge_kind='outcome' "
-                    "AND edges.informed_by_record_id=? "
+                    f"AND edges.informed_by_record_id IN ({_slots(chunk)}) "
                     "AND edges.recorded_at_us<=? AND signals.recorded_at_us<=?",
                     (
                         workspace_id,
-                        record_id,
+                        *chunk,
                         transaction_at_us,
                         transaction_at_us,
                     ),
                 ).fetchall()
                 for row in rows:
+                    outcome_edges.setdefault(str(row[4]), []).append(row)
+
+            result: dict[str, tuple[UtilityContribution, ...]] = {}
+            for record_id in record_ids:
+                contributions: dict[str, UtilityContribution] = {}
+                for descendant, depth in depths[record_id].items():
+                    for row in signals.get(descendant, ()):
+                        if depth == 0 and float(row[3]) != 1.0:
+                            continue
+                        contribution = UtilityContribution(
+                            recorded_at_us=int(row[0]),
+                            event_id=str(row[1]),
+                            depth=depth,
+                            reward=float(row[3]),
+                            weight=float(row[4]),
+                        )
+                        contributions[contribution.event_id] = contribution
+                for row in outcome_edges.get(record_id, ()):
                     contribution = UtilityContribution(
                         recorded_at_us=int(row[0]),
                         event_id=str(row[1]),

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import sqlite3
+import time
 import unittest
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
@@ -703,6 +705,336 @@ class RetrievalServiceProviderTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(_record_id("2"), result.items[0].evidence_refs[0].record_id)
 
 
+class DelayedProvider:
+    """Answer after a fixed delay and record when the search started/ended."""
+
+    def __init__(self, name, result, delay, log):
+        self.name = name
+        self._result = result
+        self._delay = delay
+        self._log = log
+
+    async def search(self, query, limit, **_seeds):
+        self._log.append(("start", self.name))
+        try:
+            await asyncio.sleep(self._delay)
+        except asyncio.CancelledError:
+            self._log.append(("cancelled", self.name))
+            raise
+        self._log.append(("end", self.name))
+        if isinstance(self._result, BaseException):
+            raise self._result
+        return self._result
+
+
+_OPTIONAL_INTENT_TEXT = "history of workflow steps decision result"
+_CONCURRENT_OPTIONAL = ("dense", "temporal", "procedure", "outcome")
+_SERIAL_OPTIONAL = ("temporal", "procedure", "outcome")
+
+
+def _delayed_providers(log, delays, *, lexical_delay=0.0, overrides=None):
+    providers = {
+        "lexical": DelayedProvider(
+            "lexical",
+            _provider_result("lexical", _candidate("1", "lexical", 1)),
+            lexical_delay,
+            log,
+        )
+    }
+    for index, name in enumerate(_CONCURRENT_OPTIONAL):
+        digit = str(index + 2)
+        providers[name] = DelayedProvider(
+            name,
+            _provider_result(
+                name, _candidate(digit, name, 1), _candidate("1", name, 2)
+            ),
+            delays[name],
+            log,
+        )
+    providers.update(overrides or {})
+    return providers
+
+
+class RetrievalServiceProviderConcurrencyTests(unittest.IsolatedAsyncioTestCase):
+    async def test_dense_runs_alongside_the_serial_projection_providers(self):
+        log = []
+        service = _service(
+            providers=_delayed_providers(
+                log, dict.fromkeys(_CONCURRENT_OPTIONAL, 0.05), lexical_delay=0.05
+            ),
+            repository=CanonicalRepository(),
+            provider_timeout_seconds=30.0,
+        )
+
+        result = await service.retrieve(_query(text=_OPTIONAL_INTENT_TEXT))
+
+        self.assertFalse(result.abstained)
+        self.assertEqual([("start", "lexical"), ("end", "lexical")], log[:2])
+        # Dense and the first projection provider both start before either
+        # ends; awaited one at a time, dense would end before temporal starts.
+        self.assertEqual([("start", "dense"), ("start", "temporal")], log[2:4])
+        # The projection providers share one bounded worker pool, so a single
+        # recall never has two of their searches in flight.
+        self.assertEqual(
+            [(event, name) for name in _SERIAL_OPTIONAL for event in ("start", "end")],
+            [entry for entry in log if entry[1] in _SERIAL_OPTIONAL],
+        )
+        self.assertEqual(
+            ("lexical", *_CONCURRENT_OPTIONAL),
+            tuple(d.provider for d in result.providers),
+        )
+        self.assertTrue(all(d.status == "ready" for d in result.providers))
+
+    async def test_hung_dense_does_not_delay_the_projection_providers(self):
+        log = []
+        delays = {"dense": 60.0, "temporal": 0.01, "procedure": 0.01, "outcome": 0.01}
+        service = _service(
+            providers=_delayed_providers(log, delays),
+            repository=CanonicalRepository(),
+            provider_timeout_seconds=1.0,
+        )
+
+        result = await service.retrieve(_query(text=_OPTIONAL_INTENT_TEXT))
+
+        self.assertFalse(result.abstained)
+        self.assertEqual(
+            (
+                ("lexical", "ready", None),
+                ("dense", "failed", "DENSE_PROVIDER_TIMEOUT"),
+                ("temporal", "ready", None),
+                ("procedure", "ready", None),
+                ("outcome", "ready", None),
+            ),
+            tuple((d.provider, d.status, d.reason) for d in result.providers),
+        )
+        # Every projection provider finished inside the dense timeout rather
+        # than waiting for it to expire first.
+        self.assertLess(
+            log.index(("end", "outcome")), log.index(("cancelled", "dense"))
+        )
+
+    async def test_every_hung_optional_provider_reports_its_own_timeout(self):
+        calls = []
+        providers = {
+            "lexical": StaticProvider(
+                "lexical",
+                _provider_result("lexical", _candidate("1", "lexical", 1)),
+                calls,
+            )
+        }
+        for name in _CONCURRENT_OPTIONAL:
+            providers[name] = HangingProvider(name, calls)
+        service = _service(
+            providers=providers,
+            repository=CanonicalRepository(),
+            provider_timeout_seconds=0.2,
+        )
+
+        result = await service.retrieve(_query(text=_OPTIONAL_INTENT_TEXT))
+
+        self.assertFalse(result.abstained)
+        self.assertEqual(
+            ["lexical", *_CONCURRENT_OPTIONAL], [name for name, _ in calls]
+        )
+        self.assertEqual(
+            tuple(
+                (name, "failed", f"{name.upper()}_PROVIDER_TIMEOUT")
+                for name in _CONCURRENT_OPTIONAL
+            ),
+            tuple((d.provider, d.status, d.reason) for d in result.providers[1:]),
+        )
+        self.assertEqual(_record_id("1"), result.items[0].evidence_refs[0].record_id)
+
+    async def test_fusion_is_independent_of_provider_completion_order(self):
+        outcomes = []
+        for delays, expected_finish in (
+            (
+                {"dense": 0.0, "temporal": 0.05, "procedure": 0.05, "outcome": 0.05},
+                ("dense", *_SERIAL_OPTIONAL),
+            ),
+            (
+                {"dense": 1.0, "temporal": 0.0, "procedure": 0.0, "outcome": 0.0},
+                (*_SERIAL_OPTIONAL, "dense"),
+            ),
+        ):
+            log = []
+            result = await _service(
+                providers=_delayed_providers(log, delays),
+                repository=CanonicalRepository(),
+            ).retrieve(_query(text=_OPTIONAL_INTENT_TEXT))
+            self.assertFalse(result.abstained)
+            outcomes.append(
+                (
+                    tuple(d.provider for d in result.providers),
+                    tuple(
+                        (item.evidence_refs[0].record_id, item.score)
+                        for item in result.items
+                    ),
+                    tuple(
+                        tuple(ref.provider for ref in item.evidence_refs)
+                        for item in result.items
+                    ),
+                    result.context.text,
+                )
+            )
+            finished = tuple(name for event, name in log if event == "end")[1:]
+            self.assertEqual(expected_finish, finished)
+
+        self.assertEqual(outcomes[0], outcomes[1])
+        self.assertEqual(("lexical", *_CONCURRENT_OPTIONAL), outcomes[0][0])
+
+    async def test_failing_provider_does_not_disturb_the_other_providers(self):
+        log = []
+        delays = dict.fromkeys(_CONCURRENT_OPTIONAL, 0.05)
+        result = await _service(
+            providers=_delayed_providers(
+                log,
+                delays,
+                overrides={
+                    "temporal": DelayedProvider(
+                        "temporal", RuntimeError("temporal secret"), 0.0, log
+                    )
+                },
+            ),
+            repository=CanonicalRepository(),
+        ).retrieve(_query(text=_OPTIONAL_INTENT_TEXT))
+
+        self.assertFalse(result.abstained)
+        self.assertEqual(
+            (
+                ("lexical", "ready", None),
+                ("dense", "ready", None),
+                ("temporal", "failed", "TEMPORAL_PROVIDER_FAILED"),
+                ("procedure", "ready", None),
+                ("outcome", "ready", None),
+            ),
+            tuple((d.provider, d.status, d.reason) for d in result.providers),
+        )
+        self.assertNotIn("temporal secret", repr(result))
+        self.assertEqual([], [entry for entry in log if entry[0] == "cancelled"])
+        # The failure happened while dense was still running, and the
+        # providers queued behind the failed one still ran.
+        self.assertLess(log.index(("end", "temporal")), log.index(("end", "dense")))
+        self.assertLess(
+            log.index(("end", "temporal")), log.index(("start", "procedure"))
+        )
+        self.assertEqual(
+            {_record_id(digit) for digit in "1245"},
+            {item.evidence_refs[0].record_id for item in result.items},
+        )
+
+    async def test_cancelling_recall_cancels_every_running_provider(self):
+        log = []
+        service = _service(
+            providers=_delayed_providers(
+                log, dict.fromkeys(_CONCURRENT_OPTIONAL, 60.0)
+            ),
+            repository=CanonicalRepository(),
+            provider_timeout_seconds=120.0,
+        )
+
+        task = asyncio.ensure_future(
+            service.retrieve(_query(text=_OPTIONAL_INTENT_TEXT))
+        )
+        for _ in range(3000):
+            if ("start", "dense") in log and ("start", "temporal") in log:
+                break
+            await asyncio.sleep(0.01)
+        task.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await task
+
+        self.assertEqual(
+            {("cancelled", "dense"), ("cancelled", "temporal")},
+            {entry for entry in log if entry[0] == "cancelled"},
+        )
+        # Nothing queued behind the cancelled provider was started.
+        self.assertEqual(
+            {"lexical", "dense", "temporal"},
+            {name for event, name in log if event == "start"},
+        )
+
+    async def test_overlapping_recalls_do_not_exhaust_the_projection_pool(self):
+        from daem0nmcp.retrieval import specialized
+
+        pool = specialized._SPECIALIZED_WORKERS
+        for _ in range(3000):
+            if pool.in_flight == 0:
+                break
+            await asyncio.sleep(0.01)
+        self.assertEqual(0, pool.in_flight)
+
+        def slow_connection():
+            time.sleep(0.2)
+            return sqlite3.connect(":memory:")
+
+        calls = []
+        service = _service(
+            providers={
+                "lexical": StaticProvider(
+                    "lexical",
+                    _provider_result("lexical", _candidate("1", "lexical", 1)),
+                    calls,
+                ),
+                "temporal": specialized.TemporalProvider(
+                    connection_factory=slow_connection, timeout_seconds=30.0
+                ),
+                "procedure": specialized.ProcedureProvider(
+                    connection_factory=slow_connection, timeout_seconds=30.0
+                ),
+                "outcome": specialized.OutcomeProvider(
+                    connection_factory=slow_connection, timeout_seconds=30.0
+                ),
+            },
+            repository=CanonicalRepository(),
+            provider_timeout_seconds=60.0,
+        )
+
+        # As many recalls as the shared pool has workers: each may hold one
+        # worker at a time, so none of their searches is turned away.
+        results = await asyncio.gather(
+            *(service.retrieve(_query(text=_OPTIONAL_INTENT_TEXT)) for _ in range(4))
+        )
+
+        self.assertEqual(
+            [("lexical", "temporal", "procedure", "outcome")] * 4,
+            [tuple(d.provider for d in result.providers) for result in results],
+        )
+        self.assertEqual(
+            [],
+            [
+                d.reason
+                for result in results
+                for d in result.providers
+                if d.reason is not None and d.reason.endswith("_PROVIDER_BUSY")
+            ],
+        )
+
+    async def test_graph_is_seeded_after_concurrent_dense_completes(self):
+        log = []
+        graph = SeededGraphProvider(
+            _provider_result("graph", _candidate("6", "graph", 1))
+        )
+        delays = {"dense": 0.1, "temporal": 0.0, "procedure": 0.0, "outcome": 0.0}
+        result = await _service(
+            providers=_delayed_providers(log, delays, overrides={"graph": graph}),
+            repository=CanonicalRepository(),
+        ).retrieve(_query(text=_OPTIONAL_INTENT_TEXT + " because"))
+
+        self.assertFalse(result.abstained)
+        self.assertEqual(
+            ("lexical", "dense", "graph", "temporal", "procedure", "outcome"),
+            tuple(d.provider for d in result.providers),
+        )
+        self.assertEqual(
+            {_record_id("1"), _record_id("2")},
+            {seed.record_id for seed in graph.seeds},
+        )
+        self.assertTrue(
+            all(seed.channels <= {"lexical", "dense"} for seed in graph.seeds)
+        )
+
+
 class RetrievalServicePolicyTests(unittest.IsolatedAsyncioTestCase):
     async def test_one_aware_snapshot_drives_repository_and_ordered_policy(self):
         clock = FixedClock()
@@ -791,6 +1123,71 @@ class RetrievalServicePolicyTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertNotIn("denied secret", result.context.text)
         self.assertNotIn("unselected architecture result", result.context.text)
+
+    async def _ranked_categories(self, categories, *, limit):
+        """Return the 1-based ranks recalled for per-rank record categories."""
+
+        digits = "123456789abcdef"[: len(categories)]
+        candidates = tuple(
+            _candidate(digit, "lexical", rank)
+            for rank, digit in enumerate(digits, start=1)
+        )
+        repository = CanonicalRepository(
+            changes={
+                _record_id(digit): {"category": category}
+                for digit, category in zip(digits, categories, strict=True)
+            }
+        )
+        result = await _service(
+            providers={
+                "lexical": StaticProvider(
+                    "lexical", _provider_result("lexical", *candidates), []
+                )
+            },
+            repository=repository,
+        ).retrieve(_query(limit=limit, candidate_limit=max(limit, len(digits))))
+
+        self.assertFalse(result.abstained)
+        return [
+            digits.index(item.evidence_refs[0].record_id[-1]) + 1
+            for item in result.items
+        ]
+
+    async def test_category_diversity_keeps_strong_hits_and_rank_order(self):
+        # Eight same-category hits followed by four hits that each open a new
+        # category: weak novelty must not push out strong hits 2-4.
+        ranks = await self._ranked_categories(
+            ("decision",) * 8 + ("warning", "pattern", "learning", "procedure"),
+            limit=6,
+        )
+
+        self.assertEqual([1, 2, 3, 4, 9, 10], ranks)
+
+    async def test_category_diversity_is_bounded_and_returned_in_rank_order(self):
+        cases = (
+            # A new category just below the cut still claims the single slot,
+            # and the result is emitted by rank, not by pick order.
+            (("decision", "decision", "decision", "warning"), 3, [1, 2, 4]),
+            # Category firsts inside the top `limit` need no diversity slot.
+            (("decision", "decision", "warning", "decision"), 3, [1, 2, 3]),
+            # A new category beyond twice the limit is below the rank floor.
+            (("decision",) * 4 + ("warning",), 2, [1, 2]),
+            # At most a third of the slots (minimum one) go to diversity.
+            (
+                ("decision",) * 6 + ("warning", "pattern", "learning"),
+                6,
+                [1, 2, 3, 4, 7, 8],
+            ),
+            # Diversity displaces the lowest-ranked duplicate category.
+            (("decision", "decision", "warning", "pattern"), 3, [1, 3, 4]),
+            # Nothing is displaced when every candidate fits.
+            (("decision", "decision", "warning"), 5, [1, 2, 3]),
+        )
+        for categories, limit, expected in cases:
+            with self.subTest(categories=categories, limit=limit):
+                self.assertEqual(
+                    expected, await self._ranked_categories(categories, limit=limit)
+                )
 
     async def test_all_filtered_returns_exact_counts_without_loading_content(self):
         candidates = (

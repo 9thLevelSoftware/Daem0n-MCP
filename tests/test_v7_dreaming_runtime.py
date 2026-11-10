@@ -145,16 +145,17 @@ def _append_many_decisions(
 
 
 def _settings(root: Path, **changes: object) -> Settings:
-    return Settings(
-        project_root=str(root),
-        dream_idle_timeout=60,
-        dream_min_decision_age_hours=0,
-        dream_review_cooldown_hours=72,
-        dream_pending_min_age_hours=0,
-        dream_pending_cooldown_hours=72,
-        dream_pending_evidence_threshold=2,
-        **changes,
-    )
+    values: dict[str, object] = {
+        "project_root": str(root),
+        "dream_idle_timeout": 60,
+        "dream_min_decision_age_hours": 0,
+        "dream_review_cooldown_hours": 72,
+        "dream_pending_min_age_hours": 0,
+        "dream_pending_cooldown_hours": 72,
+        "dream_pending_evidence_threshold": 2,
+    }
+    values.update(changes)
+    return Settings(**values)
 
 
 @pytest.mark.asyncio
@@ -439,10 +440,7 @@ async def test_explicit_pending_action_is_audited_and_replay_safe(
         row = connection.execute(
             "SELECT worked,outcome FROM memory_records WHERE record_id=?", (pending,)
         ).fetchone()
-        assert row == (
-            1,
-            "Automatically resolved from unanimous verified related evidence.",
-        )
+        assert row == (1, dreaming_runtime._INFERRED_OUTCOME_TEXT)
         assert (
             connection.execute(
                 "SELECT COUNT(*) FROM memory_events WHERE stream_id=? "
@@ -827,6 +825,8 @@ async def test_graph_pair_cursor_finds_pair_across_production_membership_page(
                 return Result([(1,)])
             if "FROM memory_relationship_versions" in sql:
                 return Result([])
+            if "FROM memory_capture_candidates" in sql:
+                return Result([])
             if "FROM discovery_entity_records" not in sql:
                 raise AssertionError(sql)
             rows = self.rows
@@ -965,3 +965,770 @@ async def test_connection_discovery_and_community_refresh_use_active_graph(
             (workspace.workspace_id,),
         ).fetchone()[0]
         assert generation > first.generation
+
+
+# Read with defaults so the module still collects against older source.
+_MST = getattr(dreaming_runtime, "_MIN_SHARED_TERMS", 2)
+_EPR = getattr(dreaming_runtime, "_EVIDENCE_PAGE_ROWS", 64)
+_MCC = dreaming_runtime._MAX_CONTENT_CHARS
+
+
+def _pending_candidate_context(database: Path, record_id: str) -> dict[str, object]:
+    with sqlite3.connect(database) as connection:
+        row = connection.execute(
+            "SELECT proposed_record_json FROM memory_capture_candidates WHERE "
+            "json_extract(provenance_json,'$.strategy')='pending_outcome' AND "
+            "json_extract(provenance_json,'$.sources[0].record_id')=?",
+            (record_id,),
+        ).fetchone()
+    assert row is not None
+    return json.loads(row[0])["context"]
+
+
+async def _run_pending_pass(workspace, **changes: object) -> None:
+    coordinator = V7DreamingCoordinator(
+        workspaces=(workspace,),
+        settings=_settings(workspace.root, **changes),
+        candidate_store=CaptureCandidateStore(),
+        capability_statuses={"graph": "disabled"},
+    )
+    await coordinator.start()
+    try:
+        await coordinator.run_once(workspace)
+    finally:
+        await coordinator.aclose()
+
+
+def _append_unrelated_outcomes(database: Path, workspace_id: str) -> str:
+    pending = _append(
+        database,
+        workspace_id,
+        "d",
+        "Adopt the new postgres connection pooler",
+        worked=None,
+    )
+    _append(
+        database,
+        workspace_id,
+        "e",
+        "Ship the new onboarding carousel",
+        worked=True,
+    )
+    _append(
+        database,
+        workspace_id,
+        "f",
+        "Rename the new billing webhook",
+        worked=True,
+    )
+    return pending
+
+
+def _append_migration_evidence(database: Path, workspace_id: str) -> list[str]:
+    return [
+        _append(
+            database,
+            workspace_id,
+            suffix,
+            f"postgres migration passed {stage}",
+            worked=True,
+        )
+        for suffix, stage in (("e", "tests"), ("f", "staging"))
+    ]
+
+
+@pytest.mark.asyncio
+async def test_records_sharing_only_ordinary_words_are_not_evidence(
+    dream_workspace,
+) -> None:
+    workspace, database = dream_workspace
+    pending = _append_unrelated_outcomes(database, workspace.workspace_id)
+
+    await _run_pending_pass(workspace)
+
+    context = _pending_candidate_context(database, pending)
+    assert context["evidence_count"] == 0
+    assert context["classification"] == "insufficient"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("shared_terms", "padding", "expected"),
+    [
+        (_MST - 1, 0, 0),
+        (_MST, 0, 1),
+        # Enough shared terms, but diluted below the similarity floor.
+        (_MST, 12, 0),
+    ],
+)
+async def test_evidence_threshold_is_enforced_on_both_sides(
+    dream_workspace, shared_terms: int, padding: int, expected: int
+) -> None:
+    workspace, database = dream_workspace
+    subject = ["postgres", "pooler", "failover", "replica"]
+    assert len(subject) >= _MST
+    pending = _append(
+        database,
+        workspace.workspace_id,
+        "d",
+        " ".join(subject),
+        worked=None,
+    )
+    other = ["carousel", "webhook", "invoice", "tooltip"]
+    filler = [f"unrelated{index}" for index in range(padding)]
+    _append(
+        database,
+        workspace.workspace_id,
+        "e",
+        " ".join(subject[:shared_terms] + other[shared_terms:] + filler),
+        worked=True,
+    )
+
+    await _run_pending_pass(workspace)
+
+    assert _pending_candidate_context(database, pending)["evidence_count"] == expected
+
+
+@pytest.mark.asyncio
+async def test_unrelated_outcomes_never_commit_an_automatic_outcome(
+    dream_workspace,
+) -> None:
+    workspace, database = dream_workspace
+    pending = _append_unrelated_outcomes(database, workspace.workspace_id)
+
+    await _run_pending_pass(workspace, dream_pending_dry_run=False)
+
+    with sqlite3.connect(database) as connection:
+        assert connection.execute(
+            "SELECT worked,outcome FROM memory_records WHERE record_id=?", (pending,)
+        ).fetchone() == (None, None)
+        assert (
+            connection.execute(
+                "SELECT COUNT(*) FROM memory_events WHERE stream_id=? "
+                "AND event_type='memory.outcome_recorded'",
+                (pending,),
+            ).fetchone()[0]
+            == 0
+        )
+
+
+@pytest.mark.asyncio
+async def test_automatic_outcome_is_attributed_to_dreaming_and_unverified(
+    dream_workspace,
+) -> None:
+    from daem0nmcp.retrieval.utility import verification_weight
+
+    workspace, database = dream_workspace
+    pending = _append(
+        database, workspace.workspace_id, "d", "postgres migration pending", worked=None
+    )
+    evidence = _append_migration_evidence(database, workspace.workspace_id)
+
+    await _run_pending_pass(workspace, dream_pending_dry_run=False)
+
+    with sqlite3.connect(database) as connection:
+        actor, payload_json, event_id = connection.execute(
+            "SELECT actor_type,payload_json,event_id FROM memory_events WHERE "
+            "stream_id=? AND event_type='memory.outcome_recorded'",
+            (pending,),
+        ).fetchone()
+        payload = json.loads(payload_json)
+        weight = connection.execute(
+            "SELECT weight FROM memory_outcome_signals WHERE event_id=?", (event_id,)
+        ).fetchone()[0]
+        evidence_events = {
+            row[0]
+            for row in connection.execute(
+                "SELECT source_event_id FROM memory_records WHERE record_id IN (?,?)",
+                evidence,
+            )
+        }
+    assert actor == "system"
+    assert payload["dreaming"]["strategy"] == "pending_outcome"
+    assert set(payload["dreaming"]["evidence_event_ids"]) == evidence_events
+    # No verification object: the outcome model's unverified form and weight.
+    assert "verification" not in payload
+    assert weight == verification_weight(True, None) == 0.5
+    outcome_text = payload["record"]["outcome"].casefold()
+    assert "dreaming" in outcome_text
+    assert "not verified" in outcome_text
+
+
+@pytest.mark.asyncio
+async def test_outcome_inferred_by_dreaming_is_not_evidence_for_another_decision(
+    dream_workspace,
+) -> None:
+    workspace, database = dream_workspace
+    inferred = _append(
+        database, workspace.workspace_id, "a", "postgres migration pending", worked=None
+    )
+    _append_migration_evidence(database, workspace.workspace_id)
+    await _run_pending_pass(workspace, dream_pending_dry_run=False)
+    with sqlite3.connect(database) as connection:
+        assert (
+            connection.execute(
+                "SELECT worked FROM memory_records WHERE record_id=?", (inferred,)
+            ).fetchone()[0]
+            == 1
+        )
+
+    # Two verified outcomes plus the inferred one must not reach a threshold of 3.
+    second = _append(
+        database, workspace.workspace_id, "b", "postgres migration rollout", worked=None
+    )
+    await _run_pending_pass(
+        workspace, dream_pending_dry_run=False, dream_pending_evidence_threshold=3
+    )
+
+    with sqlite3.connect(database) as connection:
+        assert (
+            connection.execute(
+                "SELECT worked FROM memory_records WHERE record_id=?", (second,)
+            ).fetchone()[0]
+            is None
+        )
+    assert _pending_candidate_context(database, second)["classification"] == (
+        "insufficient"
+    )
+
+
+@pytest.mark.asyncio
+async def test_evidence_completeness_scales_past_one_page_of_records(
+    dream_workspace,
+) -> None:
+    workspace, database = dream_workspace
+    pending = _append(
+        database, workspace.workspace_id, "d", "postgres migration pending", worked=None
+    )
+    _append_migration_evidence(database, workspace.workspace_id)
+    for index in range(_EPR + 6):
+        _append(
+            database,
+            workspace.workspace_id,
+            f"{index + 1:064x}",
+            f"unrelated observation number{index}",
+            worked=None,
+            record_type="observation",
+        )
+
+    await _run_pending_pass(workspace)
+
+    context = _pending_candidate_context(database, pending)
+    assert context["evidence_count"] == 2
+    assert context["classification"] == "unanimous_positive"
+
+
+@pytest.mark.asyncio
+async def test_exhausted_evidence_scan_budget_is_reported_as_incomplete(
+    dream_workspace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace, database = dream_workspace
+    pending = _append(
+        database, workspace.workspace_id, "d", "postgres migration pending", worked=None
+    )
+    _append_migration_evidence(database, workspace.workspace_id)
+    monkeypatch.setattr(dreaming_runtime, "_EVIDENCE_SCAN_SECONDS", 0.0)
+
+    await _run_pending_pass(workspace, dream_pending_dry_run=False)
+
+    assert _pending_candidate_context(database, pending)["classification"] == (
+        "insufficient"
+    )
+    with sqlite3.connect(database) as connection:
+        assert (
+            connection.execute(
+                "SELECT worked FROM memory_records WHERE record_id=?", (pending,)
+            ).fetchone()[0]
+            is None
+        )
+
+
+def _connection_candidates(database: Path) -> list[dict[str, object]]:
+    with sqlite3.connect(database) as connection:
+        rows = connection.execute(
+            "SELECT proposed_record_json FROM memory_capture_candidates WHERE "
+            "json_extract(provenance_json,'$.strategy')='connection_discovery' "
+            "ORDER BY created_at_us,candidate_id"
+        ).fetchall()
+    return [json.loads(row[0])["context"] for row in rows]
+
+
+def _graph_pair(database: Path, workspace_id: str) -> None:
+    for suffix, tail in (("7", "in cache.py"), ("8", "after cache.py changes")):
+        _append(
+            database,
+            workspace_id,
+            suffix,
+            f"CacheManager calls refresh_cache() {tail}",
+            worked=True,
+            record_type="observation",
+        )
+
+
+def _rebuild_graph(database: Path, workspace_id: str) -> int:
+    from daem0nmcp.graph_projection import GraphProjectionBuilder
+
+    with sqlite3.connect(database) as connection:
+        connection.execute("PRAGMA foreign_keys=ON")
+        return (
+            GraphProjectionBuilder(connection)
+            .rebuild(workspace_id, force=True)
+            .generation
+        )
+
+
+def _connection_coordinator(workspace) -> V7DreamingCoordinator:
+    return V7DreamingCoordinator(
+        workspaces=(workspace,),
+        settings=_settings(
+            workspace.root,
+            dream_connection_min_shared_entities=2,
+            dream_community_staleness_threshold=10_000,
+        ),
+        candidate_store=CaptureCandidateStore(),
+        capability_statuses={"graph": "ready"},
+    )
+
+
+_NEEDS_GRAPH = pytest.mark.skipif(
+    importlib.util.find_spec("igraph") is None,
+    reason="real graph profile is not installed",
+)
+
+
+@pytest.mark.asyncio
+@_NEEDS_GRAPH
+async def test_graph_rebuild_does_not_propose_the_same_connection_again(
+    dream_workspace,
+) -> None:
+    workspace, database = dream_workspace
+    _graph_pair(database, workspace.workspace_id)
+    first_generation = _rebuild_graph(database, workspace.workspace_id)
+    coordinator = _connection_coordinator(workspace)
+    await coordinator.start()
+    try:
+        await coordinator.run_once(workspace)
+        assert len(_connection_candidates(database)) == 1
+        assert _rebuild_graph(database, workspace.workspace_id) > first_generation
+        await coordinator.run_once(workspace)
+        health = await coordinator.health(workspace)
+    finally:
+        await coordinator.aclose()
+
+    assert len(_connection_candidates(database)) == 1
+    assert health is not None
+    state = next(
+        item
+        for item in health["strategies"]
+        if item["strategy"] == "connection_discovery"
+    )
+    assert (state["status"], state["stable_error_code"]) == ("idle", None)
+
+
+@pytest.mark.asyncio
+@_NEEDS_GRAPH
+@pytest.mark.parametrize(
+    ("same_reason", "expected"), [(True, 1), (False, 2)], ids=["same", "new-reason"]
+)
+async def test_connection_stored_before_the_fingerprint_change_is_recognised(
+    dream_workspace, same_reason: bool, expected: int
+) -> None:
+    workspace, database = dream_workspace
+    _graph_pair(database, workspace.workspace_id)
+    generation = _rebuild_graph(database, workspace.workspace_id)
+    coordinator = _connection_coordinator(workspace)
+    await coordinator.start()
+    try:
+        analysis = coordinator._analyze(
+            workspace, "connection_discovery", threading.Event()
+        )
+        assert len(analysis.proposals) == 1
+        request = analysis.proposals[0].request
+        context = dict(request.record["context"])
+        if not same_reason:
+            context["shared_entities"] = ["some-other-entity", "yet-another-entity"]
+        # The shape stored by earlier releases: the fingerprint covered the
+        # graph generation and the exact source versions.
+        provenance = {
+            "strategy": "connection_discovery",
+            "strategy_version": 1,
+            "sources": request.provenance["sources"],
+            "graph_generation": generation - 1,
+        }
+        await CaptureCandidateStore().stage(
+            workspace,
+            CaptureCandidateRequest(
+                source_kind="dreaming",
+                record={**request.record, "context": context},
+                provenance=provenance,
+                idempotency_key="dream-connection_discovery-" + "0" * 64,
+            ),
+        )
+        await coordinator.run_once(workspace)
+    finally:
+        await coordinator.aclose()
+
+    assert len(_connection_candidates(database)) == expected
+
+
+def _community_state(health) -> tuple[object, object, object]:
+    assert health is not None
+    item = next(
+        item for item in health["strategies"] if item["strategy"] == "community_refresh"
+    )
+    return item["status"], item["stable_error_code"], item["yielded"]
+
+
+def _community_coordinator(workspace) -> V7DreamingCoordinator:
+    return V7DreamingCoordinator(
+        workspaces=(workspace,),
+        settings=_settings(workspace.root, dream_community_staleness_threshold=1),
+        candidate_store=CaptureCandidateStore(),
+        capability_statuses={"graph": "ready"},
+    )
+
+
+@pytest.mark.asyncio
+async def test_community_refresh_backs_off_after_a_deadline_until_inputs_change(
+    dream_workspace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from daem0nmcp.graph_projection import (
+        GraphProjectionBuilder,
+        GraphProjectionBuildError,
+    )
+
+    workspace, database = dream_workspace
+    _append(
+        database,
+        workspace.workspace_id,
+        "7",
+        "CacheManager observation",
+        worked=None,
+        record_type="observation",
+    )
+    passes: list[float] = []
+
+    def over_deadline(self, workspace_id, **_kwargs):
+        passes.append(time.monotonic())
+        raise GraphProjectionBuildError("DEADLINE_EXCEEDED")
+
+    monkeypatch.setattr(GraphProjectionBuilder, "rebuild", over_deadline)
+    coordinator = _community_coordinator(workspace)
+    await coordinator.start()
+    try:
+        state = coordinator._states[workspace.workspace_id]
+        for _ in range(3):
+            await coordinator.run_once(workspace)
+        # One full pass, then idle passes wait instead of repeating it.
+        assert len(passes) == 1
+        assert _community_state(await coordinator.health(workspace)) == (
+            "degraded",
+            "DEADLINE_EXCEEDED",
+            False,
+        )
+        first_wait = state.community_retry_at - passes[-1]
+        assert first_wait >= dreaming_runtime._COMMUNITY_BACKOFF_SECONDS
+
+        # The same inputs are retried once the wait has elapsed, and a second
+        # consecutive deadline waits longer.
+        state.community_retry_at = 0.0
+        await coordinator.run_once(workspace)
+        await coordinator.run_once(workspace)
+        assert len(passes) == 2
+        assert state.community_retry_at - passes[-1] >= 2 * first_wait - 1.0
+
+        # New events are new inputs: retry at once, from the first wait again.
+        _append(
+            database,
+            workspace.workspace_id,
+            "8",
+            "CacheManager follow-up observation",
+            worked=None,
+            record_type="observation",
+        )
+        await coordinator.run_once(workspace)
+        await coordinator.run_once(workspace)
+        assert len(passes) == 3
+        assert (
+            state.community_retry_at - passes[-1]
+            < 2 * dreaming_runtime._COMMUNITY_BACKOFF_SECONDS
+        )
+    finally:
+        await coordinator.aclose()
+
+
+def test_community_refresh_backoff_is_exponential_and_capped() -> None:
+    base = dreaming_runtime._COMMUNITY_BACKOFF_SECONDS
+    cap = dreaming_runtime._COMMUNITY_BACKOFF_MAX_SECONDS
+    waits = [dreaming_runtime._community_backoff_seconds(n) for n in range(1, 40)]
+    assert waits[:3] == [base, 2 * base, 4 * base]
+    assert waits == sorted(waits)
+    assert waits[-1] == cap > base
+
+
+@pytest.mark.asyncio
+async def test_community_refresh_that_yields_to_foreground_is_not_degraded(
+    dream_workspace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from daem0nmcp.graph_projection import (
+        GraphProjectionBuilder,
+        GraphProjectionBuildError,
+    )
+
+    workspace, database = dream_workspace
+    _append(
+        database,
+        workspace.workspace_id,
+        "7",
+        "CacheManager observation",
+        worked=None,
+        record_type="observation",
+    )
+    scheduled: list[Path] = []
+
+    def interrupted(self, workspace_id, *, cancelled, **_kwargs):
+        # Foreground activity arrives while the pass is running.
+        cancelled.set()
+        raise GraphProjectionBuildError("CANCELLED")
+
+    monkeypatch.setattr(GraphProjectionBuilder, "rebuild", interrupted)
+    coordinator = V7DreamingCoordinator(
+        workspaces=(workspace,),
+        settings=_settings(workspace.root, dream_community_staleness_threshold=1),
+        candidate_store=CaptureCandidateStore(),
+        capability_statuses={"graph": "ready"},
+        projection_scheduler=scheduled.append,
+    )
+    await coordinator.start()
+    try:
+        await coordinator.run_once(workspace)
+        health = await coordinator.health(workspace)
+        state = coordinator._states[workspace.workspace_id]
+    finally:
+        await coordinator.aclose()
+
+    assert _community_state(health) == ("idle", None, True)
+    assert health["yielded"] is True
+    assert scheduled == []
+    assert state.community_failures == 0
+
+
+def _append_numbered(
+    database: Path, workspace_id: str, contents: list[str], *, worked: bool | None
+) -> list[str]:
+    return [
+        _append(database, workspace_id, f"{index + 1:064x}", content, worked=worked)
+        for index, content in enumerate(contents)
+    ]
+
+
+def _pending_state(database: Path, record_id: str) -> tuple[object, object]:
+    with sqlite3.connect(database) as connection:
+        return connection.execute(
+            "SELECT worked,outcome FROM memory_records WHERE record_id=?", (record_id,)
+        ).fetchone()
+
+
+@pytest.mark.asyncio
+async def test_opposing_outcome_ranked_below_the_retained_evidence_blocks_unanimity(
+    dream_workspace,
+) -> None:
+    workspace, database = dream_workspace
+    pending = _append(
+        database,
+        workspace.workspace_id,
+        "d",
+        "postgres migration cutover replica pending",
+        worked=None,
+    )
+    # More agreeing records than are retained, all ranked above the opposing one.
+    _append_numbered(
+        database,
+        workspace.workspace_id,
+        [f"postgres migration cutover replica stage{index}" for index in range(12)],
+        worked=True,
+    )
+    _append(
+        database,
+        workspace.workspace_id,
+        "e",
+        "postgres migration rollback",
+        worked=False,
+    )
+
+    await _run_pending_pass(workspace, dream_pending_dry_run=False)
+
+    assert _pending_state(database, pending) == (None, None)
+    assert _pending_candidate_context(database, pending)["classification"] == "mixed"
+
+
+@pytest.mark.asyncio
+async def test_successful_alternative_ranked_below_the_retained_evidence_is_found(
+    dream_workspace,
+) -> None:
+    workspace, database = dream_workspace
+    failed = _append(
+        database,
+        workspace.workspace_id,
+        "d",
+        "postgres migration cutover replica",
+        worked=False,
+    )
+    _append_numbered(
+        database,
+        workspace.workspace_id,
+        [f"postgres migration cutover replica stage{index}" for index in range(12)],
+        worked=None,
+    )
+    alternative = _append(
+        database,
+        workspace.workspace_id,
+        "e",
+        "postgres migration rollback",
+        worked=True,
+    )
+
+    await _run_pending_pass(workspace)
+
+    with sqlite3.connect(database) as connection:
+        proposed, provenance = connection.execute(
+            "SELECT proposed_record_json,provenance_json FROM "
+            "memory_capture_candidates WHERE "
+            "json_extract(provenance_json,'$.strategy')='failed_decision' AND "
+            "json_extract(provenance_json,'$.sources[0].record_id')=?",
+            (failed,),
+        ).fetchone()
+    assert json.loads(proposed)["context"]["classification"] == (
+        "successful_alternative"
+    )
+    assert alternative in {
+        source["record_id"] for source in json.loads(provenance)["sources"]
+    }
+
+
+@pytest.mark.asyncio
+async def test_long_unrelated_record_does_not_make_evidence_incomplete(
+    dream_workspace,
+) -> None:
+    workspace, database = dream_workspace
+    pending = _append(
+        database, workspace.workspace_id, "d", "postgres migration pending", worked=None
+    )
+    _append_migration_evidence(database, workspace.workspace_id)
+    for index in range(_EPR + 6):
+        _append(
+            database,
+            workspace.workspace_id,
+            f"{index + 1:064x}",
+            f"unrelated observation number{index}",
+            worked=None,
+            record_type="observation",
+        )
+    _append(
+        database,
+        workspace.workspace_id,
+        "a",
+        "carousel " + "x" * (_MCC + 100),
+        worked=None,
+        record_type="observation",
+    )
+
+    await _run_pending_pass(workspace)
+
+    context = _pending_candidate_context(database, pending)
+    assert context["evidence_count"] == 2
+    assert context["classification"] == "unanimous_positive"
+
+
+@pytest.mark.asyncio
+async def test_long_record_is_judged_on_its_whole_text(dream_workspace) -> None:
+    workspace, database = dream_workspace
+    pending = _append(
+        database, workspace.workspace_id, "d", "postgres migration pending", worked=None
+    )
+    _append_migration_evidence(database, workspace.workspace_id)
+    # The subject of this failed record only appears after the first page of text.
+    _append(
+        database,
+        workspace.workspace_id,
+        "a",
+        "x" * (_MCC + 100) + " postgres migration rollback",
+        worked=False,
+    )
+
+    await _run_pending_pass(workspace, dream_pending_dry_run=False)
+
+    assert _pending_state(database, pending) == (None, None)
+    assert _pending_candidate_context(database, pending)["classification"] == "mixed"
+
+
+@pytest.mark.asyncio
+async def test_cut_short_evidence_scan_does_not_name_partial_evidence(
+    dream_workspace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace, database = dream_workspace
+    pending = _append(
+        database, workspace.workspace_id, "d", "postgres migration pending", worked=None
+    )
+    for index in range(_EPR + 6):
+        _append(
+            database,
+            workspace.workspace_id,
+            f"{index + 1:064x}",
+            f"postgres migration note{index}",
+            worked=None,
+            record_type="observation",
+        )
+    # One page is read, then the row budget ends the scan.
+    monkeypatch.setattr(dreaming_runtime, "_MAX_EVIDENCE_SCAN_ROWS", _EPR)
+
+    await _run_pending_pass(workspace)
+
+    context = _pending_candidate_context(database, pending)
+    assert (context["classification"], context["evidence_count"]) == (
+        "insufficient",
+        0,
+    )
+    with sqlite3.connect(database) as connection:
+        provenance = connection.execute(
+            "SELECT provenance_json FROM memory_capture_candidates WHERE "
+            "json_extract(provenance_json,'$.strategy')='pending_outcome'"
+        ).fetchone()[0]
+    assert [item["record_id"] for item in json.loads(provenance)["sources"]] == [
+        pending
+    ]
+
+
+@pytest.mark.asyncio
+async def test_interrupted_analysis_is_pending_work_without_sqlite_error_codes(
+    dream_workspace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace, database = dream_workspace
+    _append(
+        database, workspace.workspace_id, "d", "postgres migration pending", worked=None
+    )
+
+    def interrupted(*_args: object, **_kwargs: object) -> _Analysis:
+        # What sqlite3 raises before Python 3.11: no sqlite_errorcode attribute.
+        raise sqlite3.OperationalError("interrupted")
+
+    monkeypatch.setattr(V7DreamingCoordinator, "_pending_analysis", interrupted)
+    monkeypatch.delattr(sqlite3, "SQLITE_INTERRUPT", raising=False)
+    coordinator = V7DreamingCoordinator(
+        workspaces=(workspace,),
+        settings=_settings(workspace.root),
+        candidate_store=CaptureCandidateStore(),
+        capability_statuses={"graph": "disabled"},
+    )
+    await coordinator.start()
+    try:
+        await coordinator.run_once(workspace)
+        health = await coordinator.health(workspace)
+    finally:
+        await coordinator.aclose()
+
+    assert health is not None
+    state = next(
+        item for item in health["strategies"] if item["strategy"] == "pending_outcome"
+    )
+    assert (state["status"], state["stable_error_code"]) == ("idle", None)

@@ -76,6 +76,137 @@ class OpaqueCapabilityAuthorityTests(unittest.TestCase):
         with self.assertRaisesRegex(TokenValidationError, "TOKEN_EXPIRED"):
             authority.verify(second.token)
 
+    def test_consumed_handle_frees_capacity_and_keeps_its_replay_code(self) -> None:
+        from daem0nmcp.api.v7.opaque_capabilities import (
+            OpaqueCapabilityAuthority,
+        )
+        from daem0nmcp.covenant import TokenValidationError
+
+        authority = OpaqueCapabilityAuthority(
+            self.delegate, max_handles=1, clock=lambda: self.now
+        )
+        spent = []
+        for index in range(5):
+            issued = authority.issue(self.scope, "memory_store", f"{index:064x}")
+            authority.verify(issued.token)
+            authority.release_consumed(issued.token)
+            spent.append(issued.token)
+        # No signed claims are retained for a spent capability.
+        self.assertEqual({}, dict(authority._handles))
+        for token in spent:
+            with self.assertRaises(TokenValidationError) as raised:
+                authority.verify(token)
+            self.assertEqual("TOKEN_REPLAYED", raised.exception.code)
+        authority.release_consumed(spent[0])
+        authority.release_consumed("cap_unknown_handle_0000")
+
+        self.now += self.delegate.ttl_seconds
+        authority.issue(self.scope, "memory_store", "a" * 64)
+        self.assertEqual({}, authority._consumed)
+        self.assertEqual([], authority._consumed_by_expiry)
+        with self.assertRaises(TokenValidationError) as raised:
+            authority.verify(spent[0])
+        self.assertEqual("TOKEN_TAMPERED", raised.exception.code)
+
+    def test_replay_markers_last_the_lifetime_within_a_global_bound(self) -> None:
+        from daem0nmcp.api.v7.opaque_capabilities import (
+            OpaqueCapabilityAuthority,
+        )
+        from daem0nmcp.covenant import TokenValidationError
+
+        def code(authority: OpaqueCapabilityAuthority, token: str) -> str:
+            with self.assertRaises(TokenValidationError) as raised:
+                authority.verify(token)
+            return raised.exception.code
+
+        def spend(authority: OpaqueCapabilityAuthority, count: int) -> list[str]:
+            spent = []
+            for index in range(count):
+                issued = authority.issue(self.scope, "memory_store", f"{index:064x}")
+                authority.release_consumed(issued.token)
+                spent.append(issued.token)
+            return spent
+
+        # Far more consumed writes than the session's live-handle bound: every
+        # one of them is still a replay until it would have expired.
+        authority = OpaqueCapabilityAuthority(
+            self.delegate, max_handles_per_session=2, clock=lambda: self.now
+        )
+        spent = spend(authority, 40)
+        self.assertEqual({"TOKEN_REPLAYED"}, {code(authority, t) for t in spent})
+        forged = "cap_" + "f" * 40
+        self.assertEqual("TOKEN_TAMPERED", code(authority, forged))
+        self.now += 300
+        authority.issue(self.scope, "memory_store", "c" * 64)
+        self.assertEqual(0, len(authority._consumed))
+        self.assertEqual({"TOKEN_TAMPERED"}, {code(authority, t) for t in spent})
+
+        # At the marker bound nothing grows, and a marker that had to be
+        # dropped early still reads as a replay, never as a forgery.
+        bounded = OpaqueCapabilityAuthority(
+            self.delegate, max_consumed_markers=3, clock=lambda: self.now
+        )
+        early = spend(bounded, 2)
+        self.now += 100
+        late = spend(bounded, 4)
+        self.assertEqual(3, len(bounded._consumed))
+        self.assertEqual(
+            {"TOKEN_REPLAYED"}, {code(bounded, t) for t in [*early, *late]}
+        )
+        self.assertEqual("TOKEN_REPLAYED", code(bounded, forged))
+        self.now += 300
+        self.assertEqual("TOKEN_TAMPERED", code(bounded, forged))
+        with self.assertRaises(ValueError):
+            OpaqueCapabilityAuthority(self.delegate, max_consumed_markers=0)
+
+    def test_quotas_refuse_the_caller_without_evicting_anyone(self) -> None:
+        from daem0nmcp.api.v7.opaque_capabilities import (
+            OpaqueCapabilityAuthority,
+            OpaqueCapabilityCapacityError,
+        )
+
+        authority = OpaqueCapabilityAuthority(
+            self.delegate,
+            max_handles=4,
+            max_handles_per_principal=3,
+            max_handles_per_session=2,
+            clock=lambda: self.now,
+        )
+
+        def scope(principal: str, session: str) -> InvocationScope:
+            return InvocationScope(principal, session, "tests/private-workspace")
+
+        live = [
+            authority.issue(scope("p1", "s1"), "memory_store", "1" * 64),
+            authority.issue(scope("p1", "s1"), "memory_store", "2" * 64),
+        ]
+        with self.assertRaisesRegex(OpaqueCapabilityCapacityError, "session"):
+            authority.issue(scope("p1", "s1"), "memory_store", "3" * 64)
+        live.append(authority.issue(scope("p1", "s2"), "memory_store", "4" * 64))
+        with self.assertRaisesRegex(OpaqueCapabilityCapacityError, "principal"):
+            authority.issue(scope("p1", "s3"), "memory_store", "5" * 64)
+        # The same session name under another principal is a separate share.
+        live.append(authority.issue(scope("p2", "s1"), "memory_store", "6" * 64))
+        with self.assertRaises(OpaqueCapabilityCapacityError):
+            authority.issue(scope("p3", "s1"), "memory_store", "7" * 64)
+        for issued in live:
+            self.assertEqual(
+                issued.args_sha256, authority.verify(issued.token)["args_sha256"]
+            )
+
+        authority.discard(live[0].token)
+        authority.release_consumed(live[3].token)
+        authority.issue(scope("p1", "s1"), "memory_store", "8" * 64)
+        authority.issue(scope("p3", "s1"), "memory_store", "9" * 64)
+        for name in (
+            "max_handles",
+            "max_handles_per_principal",
+            "max_handles_per_session",
+        ):
+            for invalid in (0, True, 1_000_001, "4"):
+                with self.assertRaises(ValueError):
+                    OpaqueCapabilityAuthority(self.delegate, **{name: invalid})
+
     def test_handle_factory_is_strict_and_collision_never_rebinds(self) -> None:
         from daem0nmcp.api.v7.opaque_capabilities import (
             OpaqueCapabilityAuthority,

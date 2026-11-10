@@ -57,6 +57,7 @@ def build_tool_search_index(manifest: V7Manifest) -> ToolSearchIndex:
         index.add_tool(
             ToolMetadata(
                 name=spec.name,
+                title=spec.title or None,
                 description=spec.description,
                 category=spec.category,
                 tags=list(spec.tags),

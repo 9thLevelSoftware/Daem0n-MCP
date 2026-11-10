@@ -693,3 +693,146 @@ async def test_remote_https_bounds_idle_non_tls_and_duplicate_json(
         for peer in idle:
             peer.close()
         assert time.monotonic() - shutdown_started < 4
+
+
+class _RecordingHTTPSServer:
+    """Loopback TLS server that records each request and answers one way."""
+
+    def __init__(self, cert_path, key_path, *, status, headers=(), body=b""):
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+        self.requests: list[tuple[str, dict[str, str]]] = []
+        recorder = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, _format: str, *args: object) -> None:
+                return
+
+            def _answer(self) -> None:
+                length = int(self.headers.get("content-length") or 0)
+                if length:
+                    self.rfile.read(length)
+                recorder.requests.append(
+                    (
+                        self.command,
+                        {name.lower(): value for name, value in self.headers.items()},
+                    )
+                )
+                self.send_response(status)
+                for name, value in headers:
+                    self.send_header(name, value)
+                self.send_header("content-length", str(len(body)))
+                self.send_header("connection", "close")
+                self.end_headers()
+                self.wfile.write(body)
+
+            def do_GET(self) -> None:
+                self._answer()
+
+            def do_POST(self) -> None:
+                self._answer()
+
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        context.minimum_version = ssl.TLSVersion.TLSv1_2
+        context.load_cert_chain(cert_path, key_path)
+        self._server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self._server.daemon_threads = True
+        self._server.socket = context.wrap_socket(self._server.socket, server_side=True)
+        self.port = self._server.server_address[1]
+        self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
+        self._thread.start()
+
+    def close(self) -> None:
+        self._server.shutdown()
+        self._server.server_close()
+        self._thread.join(timeout=5)
+
+
+def _direct_connections(monkeypatch) -> None:
+    for name in ("HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("NO_PROXY", "127.0.0.1,localhost")
+    monkeypatch.setenv("no_proxy", "127.0.0.1,localhost")
+
+
+@pytest.mark.parametrize("status", [301, 302, 303, 307, 308])
+def test_remote_client_does_not_follow_redirects_with_its_bearer(
+    tmp_path, monkeypatch, status
+):
+    _direct_connections(monkeypatch)
+    cert_path, key_path = _certificate(tmp_path)
+    target = _RecordingHTTPSServer(
+        cert_path, key_path, status=200, body=b'{"data":{"stolen":true}}'
+    )
+    redirector = _RecordingHTTPSServer(
+        cert_path,
+        key_path,
+        status=status,
+        headers=(("location", f"https://127.0.0.1:{target.port}/v1/sessions"),),
+        body=b'{"redirect":true}',
+    )
+    try:
+        client = RemoteBridgeHTTPSClient(
+            base_url=f"https://127.0.0.1:{redirector.port}",
+            bearer=SECRET,
+            ssl_context=ssl.create_default_context(cafile=str(cert_path)),
+        )
+        with pytest.raises(BridgeConnectionError):
+            client.call("/v1/sessions", {"workspace_id": "ws_" + "1" * 24})
+    finally:
+        redirector.close()
+        target.close()
+
+    assert len(redirector.requests) == 1
+    assert redirector.requests[0][1]["authorization"] == f"Bearer {SECRET}"
+    assert target.requests == []
+
+
+def test_remote_client_ignores_environment_proxies(tmp_path, monkeypatch):
+    cert_path, key_path = _certificate(tmp_path)
+    server = _RecordingHTTPSServer(
+        cert_path, key_path, status=200, body=b'{"data":{"direct":true}}'
+    )
+    proxy = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    proxy.bind(("127.0.0.1", 0))
+    proxy.listen(4)
+    proxy.settimeout(0.2)
+    proxied: list[bytes] = []
+    stop = threading.Event()
+
+    def accept() -> None:
+        while not stop.is_set():
+            try:
+                peer, _ = proxy.accept()
+            except OSError:
+                continue
+            with peer:
+                peer.settimeout(2)
+                try:
+                    proxied.append(peer.recv(4096))
+                except OSError:
+                    proxied.append(b"")
+
+    thread = threading.Thread(target=accept, daemon=True)
+    thread.start()
+    proxy_url = f"http://127.0.0.1:{proxy.getsockname()[1]}"
+    for name in ("HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy"):
+        monkeypatch.setenv(name, proxy_url)
+    for name in ("NO_PROXY", "no_proxy"):
+        monkeypatch.delenv(name, raising=False)
+    try:
+        response = RemoteBridgeHTTPSClient(
+            base_url=f"https://127.0.0.1:{server.port}",
+            bearer=SECRET,
+            ssl_context=ssl.create_default_context(cafile=str(cert_path)),
+        ).call("/v1/sessions", {"workspace_id": "ws_" + "1" * 24})
+    finally:
+        stop.set()
+        thread.join(timeout=5)
+        proxy.close()
+        server.close()
+
+    assert proxied == []
+    assert response.status == 200
+    assert response.body == {"data": {"direct": True}}
+    assert len(server.requests) == 1

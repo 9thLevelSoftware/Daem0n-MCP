@@ -33,7 +33,7 @@ class CapabilityProfile:
 
 
 PROFILES = {
-    "local": CapabilityProfile("local", ("qdrant-client", "rank-bm25")),
+    "local": CapabilityProfile("local", ("qdrant-client",)),
     "graph": CapabilityProfile(
         "graph",
         (

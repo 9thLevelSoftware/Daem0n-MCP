@@ -161,9 +161,14 @@ async def main() -> None:
     report = await run_evaluation(mode="lexical_only", topics=24, seed=20261004)
     baseline = report["arms"]["baseline"]
     enhanced = report["arms"]["all_apply"]
+    tiered = report["arms"]["all_apply_tiering"]
     metrics = {
         "coding_memory_ndcg": enhanced["ndcg_at_10"]["overall"],
         "baseline_ndcg": baseline["ndcg_at_10"]["overall"],
+        "content_tiering_ndcg": tiered["ndcg_at_10"]["overall"],
+        "baseline_required_fact_retention": baseline["retention"][
+            "required_fact_retention"
+        ],
         "outcome_reuse_ndcg": enhanced["ndcg_at_10"]["outcome_reuse"],
         "provenance_chain_ndcg": enhanced["ndcg_at_10"]["provenance_chain"],
         "required_fact_retention": enhanced["retention"]["required_fact_retention"],

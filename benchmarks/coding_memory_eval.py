@@ -7,7 +7,6 @@ import asyncio
 import json
 import math
 import random
-import shutil
 import sqlite3
 import tempfile
 from contextlib import closing
@@ -38,6 +37,37 @@ Mode = Literal["lexical_only", "fully_enabled"]
 _START = datetime(2026, 1, 1, tzinfo=timezone.utc)
 _RETENTION_NOTE_TAG_COUNT = 16
 _UTILITY_WEIGHT = 0.2
+# One component per retention topic: a shared component gave several topics the
+# same query text with different goldens, which no single ranking can satisfy.
+_RETENTION_COMPONENTS = (
+    "release",
+    "canary",
+    "schemas",
+    "toggles",
+    "bundles",
+    "workers",
+    "replicas",
+    "queues",
+    "certificates",
+    "firewalls",
+    "dashboards",
+    "secrets",
+    "images",
+    "shards",
+    "mirrors",
+    "tenants",
+    "plugins",
+    "runners",
+    "proxies",
+    "archives",
+    "volumes",
+    "regions",
+    "pipelines",
+    "balancers",
+)
+# The chain family has 6 x 4 component/problem pairs and the retention family
+# one component per topic; more topics would repeat a query text.
+_MAX_TOPICS = len(_RETENTION_COMPONENTS)
 
 
 @dataclass(frozen=True)
@@ -106,6 +136,8 @@ def _workspace(temporary: Path) -> tuple[Workspace, Path]:
 
 
 def _corpus(root: Path, topics: int, symbols_available: bool) -> _Corpus:
+    if topics > _MAX_TOPICS:
+        raise ValueError(f"topics must not exceed {_MAX_TOPICS}")
     corpus = _Corpus()
     (root / "src").mkdir()
     (root / "docs").mkdir()
@@ -223,20 +255,25 @@ def _corpus(root: Path, topics: int, symbols_available: bool) -> _Corpus:
             )
             corpus.bindings[key] = (t % 2 == 0, True)
             corpus.queries.append(
-                _Query(key, "validity", f"handle_topic_{t} handler update", ((key, 3),))
+                # Asked as a question, never as the record's own text: a
+                # verbatim query scores 1.0 whatever the ranking does.
+                _Query(
+                    key, "validity", f"what changed in handle_topic_{t}", ((key, 3),)
+                )
             )
         key = f"validity-{t}-file"
         corpus.writes.append(
-            _Store(key, f"topic {t} runbook pointer", code_refs=((document, None),))
+            _Store(key, f"runbook_topic_{t} pointer", code_refs=((document, None),))
         )
         corpus.bindings[key] = (t % 3 == 0, False)
         corpus.queries.append(
-            _Query(key, "validity", f"topic {t} runbook pointer", ((key, 3),))
+            # One identifier per topic, as for symbols: words shared by every
+            # pointer would tie the siblings and leave the cut at ten results
+            # to the path-derived record IDs.
+            _Query(key, "validity", f"where is runbook_topic_{t} kept", ((key, 3),))
         )
 
-        component = ("release", "canary", "schemas", "toggles", "bundles", "workers")[
-            t % 6
-        ]
+        component = _RETENTION_COMPONENTS[t]
         procedure = f"retention-{t}-procedure"
         steps = (
             f"freeze {component} writes",
@@ -272,6 +309,12 @@ def _corpus(root: Path, topics: int, symbols_available: bool) -> _Corpus:
                 steps[0],
             )
         )
+    goldens: dict[str, tuple[tuple[str, int], ...]] = {}
+    for query in corpus.queries:
+        if goldens.setdefault(query.text, query.relevant) != query.relevant:
+            raise RuntimeError(
+                "coding evaluation corpus repeats a query text with another golden"
+            )
     return corpus
 
 
@@ -359,6 +402,10 @@ def _arms(mode: Mode, statuses: dict[str, str]) -> dict[str, dict[str, Any]]:
         "retrieval_retention_mode": "off",
         "retrieval_rerank_enabled": False,
         "retrieval_reranker": "embedding",
+        # The product default. With the content tier on, the runbook outranks
+        # its tag-heavy drafts and the retention arm has nothing left to do, so
+        # the tier is measured in arms of its own.
+        "lexical_content_tiering": False,
     }
     overrides: dict[str, dict[str, Any]] = {
         "baseline": {},
@@ -373,6 +420,13 @@ def _arms(mode: Mode, statuses: dict[str, str]) -> dict[str, dict[str, Any]]:
             "retrieval_utility_mode": "apply",
             "memory_validity_mode": "apply",
             "retrieval_retention_mode": "apply",
+        },
+        "tiering_apply": {"lexical_content_tiering": True},
+        "all_apply_tiering": {
+            "retrieval_utility_mode": "apply",
+            "memory_validity_mode": "apply",
+            "retrieval_retention_mode": "apply",
+            "lexical_content_tiering": True,
         },
     }
     if mode == "fully_enabled":
@@ -423,6 +477,23 @@ def _percentile(values: list[float], quantile: float) -> float:
     return ordered[low] + (ordered[high] - ordered[low]) * (position - low)
 
 
+def _retains_required_fact(
+    query: _Query, record_ids: dict[str, str], result: RetrievalData
+) -> bool:
+    """Report whether the expected record's own rendered block keeps the fact."""
+
+    expected = record_ids[query.relevant[0][0]]
+    citations = {
+        item.citation for item in result.items if item.record.record_id == expected
+    }
+    # The composer joins one block per item with a blank line and starts each
+    # block with its citation; fixture text never contains a blank line.
+    return any(
+        block.partition(" ")[0] in citations and (query.required_fact or "") in block
+        for block in (result.rendered_context or "").split("\n\n")
+    )
+
+
 def _metrics(
     corpus: _Corpus,
     record_ids: dict[str, str],
@@ -470,7 +541,7 @@ def _metrics(
     validity["symbol"] = _flag_metrics(symbol_flags) if symbols_available else None
     retention = [query for query in corpus.queries if query.family == "retention"]
     retained = sum(
-        query.required_fact in (results[query.key].rendered_context or "")
+        _retains_required_fact(query, record_ids, results[query.key])
         for query in retention
     )
     return {
@@ -498,6 +569,8 @@ async def run_evaluation(
         raise ValueError("unknown coding evaluation mode")
     if isinstance(topics, bool) or not isinstance(topics, int) or topics < 1:
         raise ValueError("topics must be a positive integer")
+    if topics > _MAX_TOPICS:
+        raise ValueError(f"topics must not exceed {_MAX_TOPICS}")
     if isinstance(seed, bool) or not isinstance(seed, int):
         raise ValueError("seed must be an integer")
     statuses = (
@@ -516,14 +589,14 @@ async def run_evaluation(
     symbols_available = bool(
         getattr(default_code_indexer_factory(), "available", False)
     )
-    # Stable registry-derived IDs also stabilize real provider score ties. An
-    # exclusive mkdir fails closed rather than touching any existing fixture.
-    temporary = (
-        Path(tempfile.gettempdir()) / f"daem0nmcp-coding-eval-{mode}-{topics}-{seed}"
-    )
-    temporary.mkdir()
-    try:
-        workspace, database = _workspace(temporary)
+    # A directory of its own per run: a leftover from a killed run cannot block
+    # the next one, and the context manager removes it on success, failure and
+    # interruption. Workspace and record IDs derive from this path and so
+    # differ per run; the fixture leaves no metric to a tie between records.
+    with tempfile.TemporaryDirectory(
+        prefix=f"daem0nmcp-coding-eval-{mode}-{topics}-{seed}-"
+    ) as scratch:
+        workspace, database = _workspace(Path(scratch))
         corpus = _corpus(workspace.root, topics, symbols_available)
         clock = _Clock()
         writer = SQLiteMemoryEventWriter(
@@ -548,6 +621,10 @@ async def run_evaluation(
                 "mode": mode,
                 "topics": topics,
                 "seed": seed,
+                # The seed shuffles the order of the canonical writes and
+                # nothing else; metrics are the same for every seed, so runs
+                # with different seeds are not independent samples.
+                "seed_scope": "write_order_only",
                 "schema_version": CURRENT_SCHEMA_VERSION,
                 "capability_statuses": statuses,
                 "symbol_bindings_available": symbols_available,
@@ -556,7 +633,7 @@ async def run_evaluation(
                 "retention_stress_reason": "same-category background drafts prevent category-diversity rescue of actionable steps",
                 "utility_weight": _UTILITY_WEIGHT,
                 "arm_overrides": arms,
-                "workspace_identity": "exclusive_deterministic_scratch_registry",
+                "workspace_identity": "unique_scratch_directory_per_run",
             },
             "arms": {},
         }
@@ -590,14 +667,12 @@ async def run_evaluation(
                 corpus, record_ids, results, latencies, symbols_available
             )
         return report
-    finally:
-        shutil.rmtree(temporary)
 
 
 def _positive_topics(value: str) -> int:
     topics = int(value)
-    if topics < 1:
-        raise argparse.ArgumentTypeError("topics must be positive")
+    if not 1 <= topics <= _MAX_TOPICS:
+        raise argparse.ArgumentTypeError(f"topics must be between 1 and {_MAX_TOPICS}")
     return topics
 
 
@@ -607,7 +682,12 @@ def main(argv: list[str] | None = None) -> int:
         "--mode", choices=("lexical_only", "fully_enabled"), default="lexical_only"
     )
     parser.add_argument("--topics", type=_positive_topics, default=24)
-    parser.add_argument("--seed", type=int, default=20261004)
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=20261004,
+        help="write order only; every seed reports the same metrics",
+    )
     parser.add_argument("--output", type=Path, required=True)
     arguments = parser.parse_args(argv)
     report = asyncio.run(

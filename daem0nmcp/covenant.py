@@ -19,6 +19,7 @@ from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from enum import Enum
 from functools import wraps
 from pathlib import Path
@@ -78,6 +79,46 @@ class TokenValidationError(ValueError):
     def __init__(self, code: str) -> None:
         self.code = code
         super().__init__(code)
+
+
+class SteadyClock:
+    """Seconds on the wall-clock scale that only the monotonic clock advances.
+
+    Capability lifetimes are intervals, so they are measured on a clock an
+    NTP correction or a manual change cannot move.  The wall clock is read
+    once to place the scale; later wall-clock steps in either direction are
+    not seen, so a fresh capability is neither expired early nor kept alive
+    past its lifetime, and a backward step cannot stall verification.  The
+    values are meaningful only inside this process, which is also the only
+    place a capability can be redeemed.
+    """
+
+    def __init__(
+        self,
+        *,
+        wall: Callable[[], int | float] = time.time,
+        monotonic: Callable[[], int | float] = time.monotonic,
+    ) -> None:
+        self._wall = wall
+        self._monotonic = monotonic
+        self._offset = float(wall()) - float(monotonic())
+
+    def __call__(self) -> float:
+        return self._offset + float(self._monotonic())
+
+    def wall_time(self, seconds: int | float) -> float:
+        """Place an instant of this scale on the wall clock as it reads now.
+
+        For display only.  The distance from now is kept, so after a
+        wall-clock step a client is still told how long a capability has
+        left, and how long ago something happened, by its own clock.
+        """
+        return float(self._wall()) + (float(seconds) - self())
+
+
+# One shared instance: the gate compares times taken by the state store and
+# the capability authorities, so their defaults must be the same scale.
+steady_clock = SteadyClock()
 
 
 class CovenantStateCapacityError(RuntimeError):
@@ -519,29 +560,52 @@ class _ScopeState:
 
 
 class CovenantStateStore:
-    """Bounded in-memory authorization state keyed by full invocation scope."""
+    """Bounded in-memory authorization state keyed by full invocation scope.
+
+    A principal that needs a new scope while it is at its own quota, or while
+    the whole table is full, gives up its own least recently used scope; that
+    scope is briefed again on its next call.  Another principal's scopes are
+    never removed, so only a principal holding no scope at all is refused when
+    the table is full.  Clients sharing one principal (stdio and
+    unauthenticated loopback HTTP use the process principal) share that quota,
+    so there the oldest idle session's scope is the one that is given up.
+    """
 
     def __init__(
         self,
         *,
-        clock: Callable[[], int | float] = time.time,
+        clock: Callable[[], int | float] = steady_clock,
         ttl_seconds: int = 3600,
         max_scopes: int = 1024,
         max_capabilities_per_scope: int = MAX_CAPABILITIES_PER_SCOPE,
+        max_scopes_per_principal: int = 256,
     ) -> None:
         if max_scopes <= 0:
             raise ValueError("max_scopes must be positive")
         if max_capabilities_per_scope <= 0:
             raise ValueError("max_capabilities_per_scope must be positive")
+        if max_scopes_per_principal <= 0:
+            raise ValueError("max_scopes_per_principal must be positive")
         self._clock = clock
         self._ttl_seconds = ttl_seconds
         self._max_scopes = max_scopes
         self._max_capabilities_per_scope = max_capabilities_per_scope
+        self._max_scopes_per_principal = max_scopes_per_principal
         self._states: OrderedDict[InvocationScope, _ScopeState] = OrderedDict()
+        self._principal_scopes: dict[str, int] = {}
         self._lock = threading.Lock()
 
     def _now(self) -> int:
         return int(self._clock())
+
+    def _remove_locked(self, scope: InvocationScope) -> None:
+        if self._states.pop(scope, None) is None:
+            return
+        remaining = self._principal_scopes.get(scope.principal_id, 0) - 1
+        if remaining > 0:
+            self._principal_scopes[scope.principal_id] = remaining
+        else:
+            self._principal_scopes.pop(scope.principal_id, None)
 
     def _prune_locked(self, now: int) -> None:
         stale = [
@@ -550,18 +614,34 @@ class CovenantStateStore:
             if now - state.last_seen > self._ttl_seconds
         ]
         for scope in stale:
-            self._states.pop(scope, None)
+            self._remove_locked(scope)
 
     def _state_locked(self, scope: InvocationScope, now: int) -> _ScopeState:
         self._prune_locked(now)
         state = self._states.get(scope)
         if state is None:
-            if len(self._states) >= self._max_scopes:
-                raise CovenantStateCapacityError(
-                    "live Covenant scope capacity is unavailable"
+            owned = self._principal_scopes.get(scope.principal_id, 0)
+            if (
+                owned >= self._max_scopes_per_principal
+                or len(self._states) >= self._max_scopes
+            ):
+                if owned == 0:
+                    raise CovenantStateCapacityError(
+                        "live Covenant scope capacity is unavailable"
+                    )
+                # ``_states`` is ordered least recently used first.
+                self._remove_locked(
+                    next(
+                        held
+                        for held in self._states
+                        if held.principal_id == scope.principal_id
+                    )
                 )
             state = _ScopeState(last_seen=now)
             self._states[scope] = state
+            self._principal_scopes[scope.principal_id] = (
+                self._principal_scopes.get(scope.principal_id, 0) + 1
+            )
         else:
             state.last_seen = now
             self._states.move_to_end(scope)
@@ -682,6 +762,17 @@ class CovenantStateStore:
                 "active_capabilities": len(state.issued),
             }
 
+    def wall_instant(self, seconds: int | float) -> datetime:
+        """Return a time taken from this store's clock as a UTC instant to show.
+
+        Times on a steady clock are converted to the wall clock; those of
+        any other clock are shown as they are.  Never use the result to
+        decide whether something has expired.
+        """
+        convert = getattr(self._clock, "wall_time", None)
+        shown = convert(seconds) if callable(convert) else seconds
+        return datetime.fromtimestamp(round(shown), timezone.utc)
+
 
 @dataclass(frozen=True, slots=True)
 class _IssuedCapability:
@@ -699,7 +790,7 @@ class CapabilityAuthority:
         *,
         secret: bytes,
         kid: str,
-        clock: Callable[[], int | float] = time.time,
+        clock: Callable[[], int | float] = steady_clock,
         ttl_seconds: int = COUNSEL_TTL_SECONDS,
     ) -> None:
         if not isinstance(secret, bytes) or len(secret) < 32:
@@ -730,7 +821,11 @@ class CapabilityAuthority:
         return decoded
 
     def _verification_time(self) -> int:
-        """Return wall time while failing closed after an observed rollback."""
+        """Return clock time while failing closed after an observed rollback.
+
+        The default clock is monotonic and never trips this; it guards an
+        injected clock that can run backwards.
+        """
         now = int(self._clock())
         with self._clock_lock:
             if (
@@ -974,6 +1069,14 @@ class CovenantGate:
         self._argument_normalizer = argument_normalizer
         self._workspace_authorizer = workspace_authorizer
 
+    def wall_instant(self, seconds: int | float) -> datetime:
+        """UTC instant to show a client for a capability or briefing time.
+
+        The state store and the authority share one time scale, so the
+        store's clock places either kind of time.
+        """
+        return self.state_store.wall_instant(seconds)
+
     def workspace_authorized(self, scope: InvocationScope) -> bool:
         if self._workspace_authorizer is None:
             return True
@@ -1112,6 +1215,12 @@ class CovenantGate:
                 )
         except TokenValidationError as exc:
             return CovenantViolation.build(exc.code, operation, workspace)
+        if consume_capability or not admitted:
+            # A spent capability, or one whose grant is gone and can never be
+            # redeemed, must stop holding issuance capacity.
+            release = getattr(self.authority, "release_consumed", None)
+            if callable(release):
+                release(preflight_token)
         if not admitted:
             return CovenantViolation.build("TOKEN_REPLAYED", operation, workspace)
         return None
@@ -1121,7 +1230,7 @@ def authority_from_environment(
     *,
     local_stdio: bool,
     environ: Mapping[str, str] | None = None,
-    clock: Callable[[], int | float] = time.time,
+    clock: Callable[[], int | float] = steady_clock,
 ) -> CapabilityAuthority | None:
     """Build configured remote authority or an ephemeral stdio authority."""
     env = os.environ if environ is None else environ

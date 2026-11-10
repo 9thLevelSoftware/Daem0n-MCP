@@ -7,10 +7,14 @@ import inspect
 import re
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from typing import Any, Literal, Protocol
 
-from ...covenant import CovenantGate, CovenantLevel, InvocationScope
+from ...covenant import (
+    CovenantGate,
+    CovenantLevel,
+    CovenantStateCapacityError,
+    InvocationScope,
+)
 from ...workspace import Workspace
 from .models import (
     CounselChallenge,
@@ -19,11 +23,19 @@ from .models import (
     CovenantNotice,
     InlineCounsel,
     PreflightGuidance,
+    RecordSummary,
 )
+from .opaque_capabilities import OpaqueCapabilityCapacityError
 
 RECOVERABLE_TOKEN_CODES = frozenset(
     {"TOKEN_EXPIRED", "TOKEN_ARGUMENT_MISMATCH", "TOKEN_REPLAYED"}
 )
+CAPACITY_VIOLATION = "CAPABILITY_DEGRADED"
+CAPACITY_MESSAGE = (
+    "Covenant capacity for this caller is exhausted; retry after outstanding "
+    "preflight capabilities are used or expire."
+)
+CAPACITY_RETRY_AFTER_MS = 5_000
 CounselMode = Literal["inline", "challenge", "off"]
 _CONTENT_TOKEN = re.compile(r"[a-z0-9][a-z0-9_-]{3,79}")
 _TOKEN_COMPONENT = re.compile(r"[_-]")
@@ -94,6 +106,21 @@ class CeremonyOutcome:
     challenge: CounselChallenge | None
 
 
+def is_capacity_violation(violation: Mapping[str, Any] | None) -> bool:
+    """Whether admission stopped because Covenant state capacity ran out."""
+
+    return violation is not None and violation.get("violation") == CAPACITY_VIOLATION
+
+
+def _capacity_violation(tool_name: str) -> dict[str, Any]:
+    return {
+        "status": "blocked",
+        "violation": CAPACITY_VIOLATION,
+        "operation": tool_name,
+        "message": CAPACITY_MESSAGE,
+    }
+
+
 def _content_tokens(value: object) -> frozenset[str]:
     tokens: set[str] = set()
 
@@ -113,6 +140,32 @@ def _content_tokens(value: object) -> frozenset[str]:
 
     collect(value)
     return frozenset(tokens - _COUNSEL_STOPWORDS)
+
+
+def _related_records(
+    guidance: PreflightGuidance, normalized_arguments: Mapping[str, Any]
+) -> list[RecordSummary]:
+    """The guidance records that share a path or two content tokens with a call."""
+
+    argument_tokens = _content_tokens(
+        {
+            key: value
+            for key, value in normalized_arguments.items()
+            if key not in {"idempotency_key", "workspace_id", "preflight_token"}
+        }
+    )
+    path = normalized_arguments.get("relative_file_path")
+    related: list[RecordSummary] = []
+    for record in guidance.records:
+        if isinstance(path, str) and path == record.relative_file_path:
+            related.append(record)
+            continue
+        record_tokens = _content_tokens(
+            [record.excerpt, list(record.tags), record.relative_file_path]
+        )
+        if len(argument_tokens & record_tokens) >= 2:
+            related.append(record)
+    return related
 
 
 def counsel_reasons(
@@ -135,27 +188,8 @@ def counsel_reasons(
             add("RULE_ASK_FIRST")
         if rule.warnings:
             add("RULE_WARNING")
-    argument_tokens = _content_tokens(
-        {
-            key: value
-            for key, value in normalized_arguments.items()
-            if key not in {"idempotency_key", "workspace_id", "preflight_token"}
-        }
-    )
-    path = normalized_arguments.get("relative_file_path")
-    for record in guidance.records:
-        related = isinstance(path, str) and path == record.relative_file_path
-        if not related:
-            record_tokens = _content_tokens(
-                [record.excerpt, list(record.tags), record.relative_file_path]
-            )
-            related = len(argument_tokens & record_tokens) >= 2
-        if related:
-            add(
-                "RELATED_WARNING"
-                if record.record_type == "warning"
-                else "RELATED_FAILURE"
-            )
+    for record in _related_records(guidance, normalized_arguments):
+        add("RELATED_WARNING" if record.record_type == "warning" else "RELATED_FAILURE")
     return reasons
 
 
@@ -211,7 +245,10 @@ class CovenantCeremony:
                 raise
             except Exception:
                 return CeremonyOutcome(violation, notice, None)
-            self._gate.record_briefing(scope)
+            try:
+                self._gate.record_briefing(scope)
+            except CovenantStateCapacityError:
+                return CeremonyOutcome(_capacity_violation(tool_name), notice, None)
             notice = CovenantNotice(auto_brief=brief)
             violation = authorize(token)
             if code(violation) in RECOVERABLE_TOKEN_CODES:
@@ -239,11 +276,15 @@ class CovenantCeremony:
                     raw_guidance = await raw_guidance
                 guidance = PreflightGuidance.model_validate(raw_guidance)
                 new_token = self._gate.issue_preflight(scope, tool_name, call_args)
-                expires_at = datetime.fromtimestamp(
-                    self._gate.authority.verify(new_token)["exp"], timezone.utc
+                expires_at = self._gate.wall_instant(
+                    self._gate.authority.verify(new_token)["exp"]
                 )
             except asyncio.CancelledError:
                 raise
+            except (CovenantStateCapacityError, OpaqueCapabilityCapacityError):
+                # No capability could be issued, so a counsel answer would name
+                # a remedy that cannot be followed.
+                return CeremonyOutcome(_capacity_violation(tool_name), notice, None)
             except Exception:
                 return CeremonyOutcome(violation, notice, None)
             reasons = counsel_reasons(level, guidance, normalized)
@@ -278,10 +319,14 @@ class CovenantCeremony:
 
 __all__ = [
     "ArgumentNormalizer",
+    "CAPACITY_MESSAGE",
+    "CAPACITY_RETRY_AFTER_MS",
+    "CAPACITY_VIOLATION",
     "CeremonyOutcome",
     "CounselMode",
     "CovenantCeremony",
     "PreflightService",
     "RECOVERABLE_TOKEN_CODES",
     "counsel_reasons",
+    "is_capacity_violation",
 ]

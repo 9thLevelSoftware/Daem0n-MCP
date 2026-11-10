@@ -33,7 +33,7 @@ from .fusion import (
     MAX_RRF_K,
     weighted_reciprocal_rank_fusion,
 )
-from .planner import RetrievalPlan, RetrievalPlanner
+from .planner import ProviderRequest, RetrievalPlan, RetrievalPlanner
 from .policy import PolicyRecord, apply_retrieval_policy
 from .types import (
     EvidenceItem,
@@ -45,7 +45,13 @@ from .types import (
     RetrievalResult,
     _aware_datetime,
 )
-from .utility import UtilityContribution, UtilityEstimate, fold_utility, utility_signal
+from .utility import (
+    UtilityContribution,
+    UtilityEstimate,
+    fold_utility,
+    utility_order,
+    utility_signal,
+)
 
 _VALIDITY_WORKERS = BoundedWorkerPool(
     max_workers=2, thread_name_prefix="daem0nmcp-validity"
@@ -60,6 +66,18 @@ _PROVIDER_ORDER = (
     "outcome",
 )
 _SUPPORTED_PROVIDERS = frozenset(_PROVIDER_ORDER)
+# These providers run their searches on one shared bounded worker pool that
+# turns work away when it is full.  A recall awaits them one after another so
+# that it holds at most one of those workers at a time.
+_SHARED_POOL_PROVIDERS = frozenset({"temporal", "procedure", "outcome"})
+
+# Category diversity may displace stronger hits only within these bounds: a
+# candidate that opens a new category must rank inside the first
+# ``limit * _DIVERSITY_RANK_FLOOR_FACTOR`` policy-valid candidates, and such
+# picks may claim at most ``limit // _DIVERSITY_SLOT_DIVISOR`` result slots
+# (never fewer than one).
+_DIVERSITY_RANK_FLOOR_FACTOR = 2
+_DIVERSITY_SLOT_DIVISOR = 3
 
 
 @runtime_checkable
@@ -464,14 +482,22 @@ class RetrievalService:
 
         provider_results = {"lexical": lexical}
         graph_request = None
+        shared_pool_requests = []
+        provider_lanes = []
         for request in plan.requests[1:]:
             if request.provider == "graph":
                 graph_request = request
-                continue
-            result = await self._invoke_provider(
-                request.provider, provider_query, request.limit
-            )
-            provider_results[request.provider] = result
+            elif request.provider in _SHARED_POOL_PROVIDERS:
+                shared_pool_requests.append(request)
+            else:
+                provider_lanes.append((request,))
+        provider_lanes.append(tuple(shared_pool_requests))
+        # A slow or hung provider only holds up the providers that share its
+        # worker pool, not every optional provider.  Results are keyed by
+        # name and merged in plan order below, never in completion order.
+        provider_results.update(
+            await self._invoke_provider_lanes(provider_lanes, provider_query)
+        )
 
         if graph_request is not None:
             seed_results = tuple(
@@ -713,20 +739,19 @@ class RetrievalService:
                 )
                 for candidate in head
             }
-            ranked = sorted(
-                enumerate(head),
-                key=lambda pair: (
-                    -(
-                        61 / (61 + pair[0])
-                        + self._utility_weight
-                        * utility_signal(
-                            estimates[pair[1].record_id], self._utility_credit
+            sorted_head = tuple(
+                head[index]
+                for index in utility_order(
+                    tuple(candidate.score for candidate in head),
+                    tuple(
+                        utility_signal(
+                            estimates[candidate.record_id], self._utility_credit
                         )
+                        for candidate in head
                     ),
-                    pair[0],
-                ),
+                    self._utility_weight,
+                )
             )
-            sorted_head = tuple(candidate for _, candidate in ranked)
             if self._utility_mode == "apply":
                 result = sorted_head + ordered[len(head) :]
                 reason = "UTILITY_APPLIED"
@@ -759,6 +784,36 @@ class RetrievalService:
                 returned_count=returned_count,
             ),
         )
+
+    async def _invoke_provider_lanes(
+        self,
+        lanes: Iterable[tuple[ProviderRequest, ...]],
+        query: RetrievalQuery,
+    ) -> dict[str, ProviderResult]:
+        """Run the lanes together and the requests of each lane in turn."""
+
+        async def invoke_lane(
+            lane: tuple[ProviderRequest, ...],
+        ) -> list[ProviderResult]:
+            return [
+                await self._invoke_provider(request.provider, query, request.limit)
+                for request in lane
+            ]
+
+        tasks = [asyncio.ensure_future(invoke_lane(lane)) for lane in lanes if lane]
+        try:
+            return {
+                result.provider: result
+                for lane_results in await asyncio.gather(*tasks)
+                for result in lane_results
+            }
+        except BaseException:
+            # Cancellation of the recall, or of one provider from inside,
+            # must not leave sibling searches running unobserved.
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            raise
 
     async def _invoke_provider(
         self,
@@ -935,27 +990,39 @@ class RetrievalService:
         records: tuple[PolicyRecord, ...],
         limit: int,
     ) -> tuple[FusedCandidate, ...]:
+        """Pick ``limit`` candidates by rank, with bounded category diversity.
+
+        The first candidate of a category not yet represented may displace a
+        higher-ranked duplicate category, but only from within the rank floor
+        and only for a bounded share of the slots; everything else is filled
+        strictly by rank.  The selection is returned in rank order.
+        """
+
         record_by_identity = {record.identity: record for record in records}
-        chosen: list[FusedCandidate] = []
-        chosen_ids: set[tuple[str, str | None]] = set()
+        diversity_slots = max(1, limit // _DIVERSITY_SLOT_DIVISOR)
+        chosen: set[int] = set()
         seen_categories: set[str] = set()
-        for candidate in candidates:
+        for index, candidate in enumerate(
+            candidates[: limit * _DIVERSITY_RANK_FLOOR_FACTOR]
+        ):
+            if len(chosen) == limit:
+                break
             category = record_by_identity[_identity(candidate)].category.casefold()
             if category in seen_categories:
                 continue
-            chosen.append(candidate)
-            chosen_ids.add(_identity(candidate))
+            if index >= limit:
+                # Outside the top ``limit`` by rank: this pick displaces a
+                # stronger hit, so it spends one of the diversity slots.
+                if diversity_slots == 0:
+                    break
+                diversity_slots -= 1
+            chosen.add(index)
             seen_categories.add(category)
-            if len(chosen) == limit:
-                return tuple(chosen)
-        for candidate in candidates:
-            identity = _identity(candidate)
-            if identity in chosen_ids:
-                continue
-            chosen.append(candidate)
+        for index in range(len(candidates)):
             if len(chosen) == limit:
                 break
-        return tuple(chosen)
+            chosen.add(index)
+        return tuple(candidates[index] for index in sorted(chosen))
 
     @staticmethod
     def _validated_composed_items(

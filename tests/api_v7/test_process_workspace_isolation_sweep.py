@@ -31,7 +31,6 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import json
-import re
 import shutil
 import sqlite3
 from collections.abc import Awaitable, Callable
@@ -1022,9 +1021,7 @@ async def _jwt_pass(tmp_path, a_root, b_root, a, b, seed) -> None:
                 # A is what shows B's failure is the authorization refusal.
                 await session.read_resource(f"memory://workspaces/{a}/{kind}")
                 uri = f"memory://workspaces/{b}/{kind}"
-                with pytest.raises(
-                    McpError, match=f"^Error reading resource '{re.escape(uri)}'$"
-                ):
+                with pytest.raises(McpError, match="^Resource unavailable$"):
                     await session.read_resource(uri)
             # B as the source of an A-side federated read or consolidation.
             denied = await call(

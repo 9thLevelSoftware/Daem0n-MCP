@@ -9,6 +9,7 @@ import hmac
 import json
 import tempfile
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 
 import daem0nmcp.covenant as covenant
@@ -21,6 +22,7 @@ from daem0nmcp.covenant import (
     CovenantStateCapacityError,
     CovenantStateStore,
     InvocationScope,
+    SteadyClock,
     UnknownCovenantOperation,
     authority_from_environment,
     authorize_workflow_call,
@@ -299,6 +301,55 @@ class CapabilityGateTests(unittest.TestCase):
             )
         self.assertLessEqual(len(store._states[scope].issued), 3)
         self.assertLessEqual(len(store._states[scope].consumed), 3)
+
+    def test_scope_quota_recycles_only_the_requesting_principals_scopes(
+        self,
+    ) -> None:
+        store = CovenantStateStore(
+            clock=self.clock,
+            ttl_seconds=300,
+            max_scopes=4,
+            max_scopes_per_principal=2,
+        )
+
+        def scope(principal: str, session: str) -> InvocationScope:
+            return InvocationScope(principal, session, self.workspace)
+
+        victim = scope("victim", "session")
+        store.mark_briefed(victim)
+        store.record_issued(victim, "nonce", "inscribe.remember", "a" * 64, 1_300)
+        for index in range(6):
+            store.mark_briefed(scope("churn", f"session-{index}"))
+            self.clock.value += 1
+        self.assertEqual(3, len(store._states))
+        self.assertEqual({"victim": 1, "churn": 2}, store._principal_scopes)
+        self.assertTrue(store.is_briefed(victim))
+        self.assertTrue(store.consume_nonce(victim, "nonce", 1_300))
+        self.assertFalse(store.is_briefed(scope("churn", "session-3")))
+        self.assertTrue(store.is_briefed(scope("churn", "session-4")))
+
+        # Touching a scope makes it the most recently used one, so the next
+        # new scope replaces the other.
+        self.assertTrue(store.is_briefed(scope("churn", "session-4")))
+        store.mark_briefed(scope("churn", "session-6"))
+        self.assertTrue(store.is_briefed(scope("churn", "session-4")))
+        self.assertFalse(store.is_briefed(scope("churn", "session-5")))
+
+        # A full table makes a principal recycle its own scope; a principal
+        # holding none is refused and nobody else loses state.
+        store.mark_briefed(scope("third", "session"))
+        self.assertEqual(4, len(store._states))
+        store.mark_briefed(scope("third", "session-2"))
+        self.assertFalse(store.is_briefed(scope("third", "session")))
+        with self.assertRaises(CovenantStateCapacityError):
+            store.mark_briefed(scope("fourth", "session"))
+        self.assertEqual({"victim": 1, "churn": 2, "third": 1}, store._principal_scopes)
+
+        self.clock.value += 301
+        store.mark_briefed(scope("fourth", "session"))
+        self.assertEqual({"fourth": 1}, store._principal_scopes)
+        with self.assertRaises(ValueError):
+            CovenantStateStore(max_scopes_per_principal=0)
 
     def test_missing_identity_fails_closed(self) -> None:
         result = self.gate.authorize(
@@ -606,6 +657,129 @@ class CapabilityGateTests(unittest.TestCase):
             "inscribe.remember", args, self.scope_a, preflight_token=token
         )
         self.assertEqual("TOKEN_EXPIRED", resurrected["violation"])
+
+    def _steady_gate(self, wall: MutableClock, monotonic: MutableClock) -> CovenantGate:
+        clock = SteadyClock(wall=wall, monotonic=monotonic)
+        return CovenantGate(
+            state_store=CovenantStateStore(clock=clock, ttl_seconds=3_600),
+            authority=CapabilityAuthority(
+                secret=b"test-covenant-key-is-at-least-32-bytes!!",
+                kid="test-key",
+                clock=clock,
+                ttl_seconds=300,
+            ),
+        )
+
+    def test_backward_wall_clock_step_does_not_block_capabilities(self) -> None:
+        wall, monotonic = MutableClock(1_700_000_000), MutableClock(50)
+        gate = self._steady_gate(wall, monotonic)
+        args = {"category": "decision", "content": "x"}
+        gate.record_briefing(self.scope_a)
+        held = gate.issue_preflight(self.scope_a, "inscribe.remember", args)
+        self.assertEqual(1_700_000_300, gate.authority.verify(held)["exp"])
+
+        wall.value -= 120
+        self.assertIsNone(
+            gate.authorize(
+                "inscribe.remember", args, self.scope_a, preflight_token=held
+            )
+        )
+        # A capability issued after the step works too, so a guided retry
+        # recovers instead of expiring until the wall clock catches up.
+        for _ in range(2):
+            monotonic.value += 1
+            fresh = gate.issue_preflight(self.scope_a, "inscribe.remember", args)
+            self.assertIsNone(
+                gate.authorize(
+                    "inscribe.remember", args, self.scope_a, preflight_token=fresh
+                )
+            )
+        self.assertTrue(gate.state_store.is_briefed(self.scope_a))
+
+    def test_wall_clock_steps_neither_shorten_nor_extend_a_lifetime(self) -> None:
+        wall, monotonic = MutableClock(1_700_000_000), MutableClock(50)
+        gate = self._steady_gate(wall, monotonic)
+        args = {"category": "decision", "content": "x"}
+        gate.record_briefing(self.scope_a)
+
+        def check(token: str) -> str | None:
+            result = gate.authorize(
+                "inscribe.remember",
+                args,
+                self.scope_a,
+                preflight_token=token,
+                consume_capability=False,
+            )
+            return None if result is None else result["violation"]
+
+        token = gate.issue_preflight(self.scope_a, "inscribe.remember", args)
+        wall.value += 86_400
+        self.assertIsNone(check(token))
+        self.assertTrue(gate.state_store.is_briefed(self.scope_a))
+
+        wall.value -= 2 * 86_400
+        monotonic.value += 299
+        self.assertIsNone(check(token))
+        monotonic.value += 1
+        self.assertEqual("TOKEN_EXPIRED", check(token))
+        wall.value -= 86_400
+        self.assertEqual("TOKEN_EXPIRED", check(token))
+
+    def test_default_clocks_share_the_steady_scale(self) -> None:
+        from daem0nmcp.api.v7.opaque_capabilities import OpaqueCapabilityAuthority
+
+        authority = authority_from_environment(local_stdio=True, environ={})
+        self.assertIs(covenant.steady_clock, authority._clock)
+        self.assertIs(covenant.steady_clock, CovenantStateStore()._clock)
+        self.assertIs(
+            covenant.steady_clock,
+            CapabilityAuthority(secret=b"k" * 32, kid="k")._clock,
+        )
+        self.assertIs(
+            covenant.steady_clock, OpaqueCapabilityAuthority(authority)._clock
+        )
+        self.assertIsInstance(covenant.steady_clock, SteadyClock)
+
+        wall, monotonic = MutableClock(1_700_000_000), MutableClock(7)
+        clock = SteadyClock(wall=wall, monotonic=monotonic)
+        wall.value = 5
+        self.assertEqual(1_700_000_000, clock())
+        monotonic.value += 12
+        self.assertEqual(1_700_000_012, clock())
+
+    def test_displayed_instants_follow_the_wall_clock_after_a_step(self) -> None:
+        for step in (3_600, -600):
+            with self.subTest(step=step):
+                wall, monotonic = MutableClock(1_700_000_000), MutableClock(50)
+                gate = self._steady_gate(wall, monotonic)
+                gate.record_briefing(self.scope_a)
+                briefed_at = gate.state_store.status(self.scope_a)["briefed_at"]
+
+                wall.value += step + 10
+                monotonic.value += 10
+                args = {"category": "decision", "content": "x"}
+                token = gate.issue_preflight(self.scope_a, "inscribe.remember", args)
+                exp = gate.authority.verify(token)["exp"]
+
+                # Enforcement and the signed claim stay on the steady scale.
+                self.assertEqual(1_700_000_310, exp)
+                self.assertEqual(1_700_000_000, briefed_at)
+                # What a client is shown is placed on today's wall clock:
+                # 300 seconds from now, and briefed 10 seconds ago.
+                self.assertEqual(
+                    datetime.fromtimestamp(wall.value + 300, timezone.utc),
+                    gate.wall_instant(exp),
+                )
+                self.assertEqual(
+                    datetime.fromtimestamp(wall.value - 10, timezone.utc),
+                    gate.wall_instant(briefed_at),
+                )
+
+    def test_displayed_instants_of_a_plain_clock_are_unchanged(self) -> None:
+        self.assertEqual(
+            datetime.fromtimestamp(1_300, timezone.utc),
+            self.gate.wall_instant(1_300),
+        )
 
     def test_json_surrogates_return_stable_argument_and_token_errors(self) -> None:
         invalid_text = json.loads('"\\ud800"')

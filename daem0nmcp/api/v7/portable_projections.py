@@ -50,6 +50,7 @@ from ...retrieval.providers import (
     dense_query_encoder_matches_contract,
     qdrant_delete_collection,
 )
+from ...retrieval.runtime import _configured_qdrant_path
 from ...retrieval.vector_validation import (
     VECTOR_ATTESTATION_FORMAT,
     cosine_vectors_match,
@@ -118,14 +119,35 @@ class _QdrantTransferClient(Protocol):
     def collection_exists(self, collection_name: str) -> bool: ...
 
 
-def _qdrant_transfer_client(config: object) -> _QdrantTransferClient:
-    """Construct and structurally validate the portable-transfer client."""
+def _main_database_path(connection: sqlite3.Connection) -> Path | None:
+    """Return the file behind a connection's main database, if it has one."""
+
+    for row in connection.execute("PRAGMA database_list"):
+        if str(row[1]) == "main" and str(row[2]):
+            return Path(str(row[2]))
+    return None
+
+
+def _qdrant_transfer_client(
+    config: object, database_path: Path | None
+) -> _QdrantTransferClient:
+    """Construct and structurally validate the portable-transfer client.
+
+    The vectors live where the retrieval runtime keeps them for the active
+    database: a remote URL, a configured folder, or by default the ``qdrant``
+    folder beside that database.  A database without a file has no such
+    default and needs one of the first two.
+    """
 
     try:
         client = create_qdrant_client(
             qdrant_url=getattr(config, "qdrant_url", None),
             qdrant_api_key=getattr(config, "qdrant_api_key", None),
-            qdrant_path=getattr(config, "qdrant_path", None),
+            qdrant_path=(
+                getattr(config, "qdrant_path", None)
+                if database_path is None
+                else _configured_qdrant_path(database_path, config)
+            ),
             timeout_seconds=getattr(config, "qdrant_timeout_seconds", 10.0),
         )
     except Exception as exc:
@@ -615,6 +637,7 @@ def _vector_snapshot(
     config: object,
     checkpoint: Callable[[], None] | None = None,
     *,
+    database_path: Path | None,
     expected_lease: DenseGenerationReadLease | None = None,
     lease_checkpoint: Callable[[], None] | None = None,
 ) -> tuple[dict[str, Any], Iterator[dict[str, Any]], Callable[[], None]]:
@@ -698,7 +721,7 @@ def _vector_snapshot(
         )
     ):
         raise PortableTransferError("CAPABILITY_DEGRADED")
-    client = _qdrant_transfer_client(config)
+    client = _qdrant_transfer_client(config, database_path)
     close = getattr(client, "close", None)
 
     def close_client() -> None:
@@ -1092,6 +1115,9 @@ def create_export_session(
                 workspace_id,
                 config,
                 checkpoint,
+                # The manifest is read from the frozen snapshot; the vectors
+                # stay with the live database it was copied from.
+                database_path=_main_database_path(connection),
                 expected_lease=vector_lease,
                 lease_checkpoint=lambda: renew_vector_lease(force=True),
             )
@@ -2101,7 +2127,7 @@ def prepare_vector_candidate(
     try:
         if checkpoint is not None:
             checkpoint()
-        client = _qdrant_transfer_client(config)
+        client = _qdrant_transfer_client(config, _main_database_path(connection))
         if checkpoint is not None:
             checkpoint()
         _reclaim_stale_vector_artifacts(
@@ -2730,7 +2756,11 @@ def prepare_import(
             "FROM portable_transfer_pages "
             "WHERE session_id=? ORDER BY page_index",
             (session_id,),
-        )
+        ).fetchall()
+        # Read up front: a query left half-read by a failure below keeps its
+        # read lock after the connection is closed, for as long as the
+        # error's traceback refers to this frame, and that lock refuses
+        # every writer of a rollback-journal database.
         actual_page_count = 0
         for expected_page_index, (page_index, kind, page_hash, relative) in enumerate(
             pages

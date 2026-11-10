@@ -7,13 +7,19 @@ establish communion for an invocation scope.
 
 from __future__ import annotations
 
+import json
 import sqlite3
 import sys
 from pathlib import Path
 
 from ..storage_activation import PointerValidationError, resolve_active_database
-from ..workspace import WorkspaceIdentity, workspace_identity
-from ._client import get_project_path, succeed
+from ..workspace import WorkspaceIdentity, sqlite_file_uri, workspace_identity
+from ._client import (
+    REINSTALL_NOTICE,
+    get_project_path,
+    started_by_module_switch,
+    succeed,
+)
 
 _BUSY_TIMEOUT_MS = 2000
 
@@ -64,7 +70,7 @@ def _fast_briefing(project_path: str) -> str:
         return ""
 
     try:
-        database_uri = f"file:{db_path.as_posix()}?mode=ro"
+        database_uri = sqlite_file_uri(db_path, mode="ro")
         conn = sqlite3.connect(database_uri, uri=True, timeout=2)
     except sqlite3.Error:
         return ""
@@ -124,8 +130,26 @@ def _format_briefing(stats: dict) -> str:
 def main() -> None:
     project_path = get_project_path()
     if project_path is None:
+        if started_by_module_switch():
+            # The command is in the user's settings, so it runs in every
+            # project they open, not only in Daem0n ones.
+            succeed(json.dumps({"systemMessage": REINSTALL_NOTICE}))
         sys.exit(0)
-    succeed(_hook_message(workspace_identity(project_path)))
+    message = _hook_message(workspace_identity(project_path))
+    if started_by_module_switch():
+        # JSON output lets the notice reach the user, not only the model.
+        succeed(
+            json.dumps(
+                {
+                    "systemMessage": REINSTALL_NOTICE,
+                    "hookSpecificOutput": {
+                        "hookEventName": "SessionStart",
+                        "additionalContext": message,
+                    },
+                }
+            )
+        )
+    succeed(message)
 
 
 if __name__ == "__main__":

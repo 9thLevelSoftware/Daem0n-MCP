@@ -8,9 +8,9 @@ REM
 REM Usage: start_daem0nmcp_server.bat [project_dir]
 REM The project defaults to an exported
 REM DAEM0NMCP_PROJECT_ROOT, else the directory you
-REM run it from. Stdio (python -m daem0nmcp) also
-REM works on Windows; use this launcher when you
-REM want an HTTP server instead.
+REM run it from. Stdio also works on Windows (the
+REM README has the command to register); use this
+REM launcher when you want an HTTP server instead.
 REM ============================================
 
 title Daem0nMCP Server

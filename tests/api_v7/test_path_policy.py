@@ -12,7 +12,10 @@ import asyncio
 import copy
 import hashlib
 import sqlite3
+import sys
+import threading
 import time
+import traceback
 import types
 from contextlib import closing
 from pathlib import Path
@@ -848,14 +851,69 @@ async def _import_call(invoke, workspace_id: str, arguments: dict) -> dict[str, 
     within a bounded deadline and a bounded number of attempts.
     """
 
-    deadline = time.monotonic() + 30
+    started = time.monotonic()
+    deadline = started + 30
+    contended: list[str] = []
     for _attempt in range(8):
         result = await _target_call(invoke, workspace_id, "workspace_import", arguments)
         if result["ok"] or result["error"]["code"] != "DATABASE_IN_USE":
             return result
+        # Whatever holds the write lock is a thread of this process; record
+        # what every thread is doing so a failure names the holder.
+        contended.append(
+            f"--- attempt {_attempt} at +{time.monotonic() - started:.1f}s\n"
+            + _all_thread_stacks()
+            + "\nSQLITE OBJECTS\n"
+            + _live_sqlite_objects()
+        )
+        # pytest shortens a long assertion message; captured stderr is whole.
+        print(contended[-1], file=sys.stderr)
         assert time.monotonic() < deadline, result["error"]
         await asyncio.sleep(0.5)
     raise AssertionError("the import stayed contended for 8 attempts")
+
+
+def _live_sqlite_objects() -> str:
+    import gc
+
+    lines = []
+    for item in gc.get_objects():
+        if isinstance(item, (sqlite3.Cursor, sqlite3.Connection)):
+            holders = []
+            for holder in gc.get_referrers(item):
+                if isinstance(holder, types.FrameType):
+                    holders.append(
+                        f"frame {holder.f_code.co_filename}:{holder.f_lineno}"
+                        f":{holder.f_code.co_name}"
+                    )
+                elif isinstance(holder, types.GeneratorType):
+                    holders.append(f"generator {holder.gi_code.co_qualname}")
+                elif isinstance(holder, dict):
+                    owners = [
+                        type(owner).__name__
+                        for owner in gc.get_referrers(holder)
+                        if not isinstance(owner, (dict, list, types.FrameType))
+                    ][:3]
+                    holders.append(f"dict of {owners} keys={list(holder)[:6]}")
+                elif not isinstance(holder, list):
+                    holders.append(type(holder).__name__)
+            extra = ""
+            if isinstance(item, sqlite3.Connection):
+                try:
+                    extra = f" in_transaction={item.in_transaction}"
+                except Exception as exc:  # noqa: BLE001
+                    extra = f" ({type(exc).__name__})"
+            lines.append(f"{type(item).__name__}@{id(item):x}{extra}: {holders}")
+    return "\n".join(lines)
+
+
+def _all_thread_stacks() -> str:
+    names = {thread.ident: thread.name for thread in threading.enumerate()}
+    return "\n".join(
+        f"thread {names.get(ident, ident)}:\n"
+        + "".join(traceback.format_stack(frame, limit=14))
+        for ident, frame in sys._current_frames().items()
+    )
 
 
 async def _import_pages(invoke, workspace_id: str, pages) -> dict[str, Any]:

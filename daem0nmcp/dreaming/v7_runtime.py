@@ -16,7 +16,7 @@ import time
 from _thread import LockType
 from collections.abc import Callable, Mapping, Sequence
 from contextlib import suppress
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from functools import partial
 from pathlib import Path
@@ -54,12 +54,112 @@ _GRAPH_CURSOR = re.compile(
 )
 _MAX_CONTENT_CHARS = 1_024
 _MAX_SOURCE_BYTES = 512 * 1_024
-_MAX_EVIDENCE_ROWS = 64
-_MAX_EVIDENCE_BYTES = 256 * 1_024
+_EVIDENCE_PAGE_ROWS = 64
+_MAX_EVIDENCE_SCAN_ROWS = 65_536
+_EVIDENCE_SCAN_SECONDS = 1.0
 _MAX_EVIDENCE = 10
+# A record is evidence about a decision only when the two share at least this
+# many distinctive terms and those terms are a meaningful part of both texts
+# (Dice coefficient over the distinctive term sets).
+_MIN_SHARED_TERMS = 2
+_MIN_TERM_SIMILARITY = 0.5
+# Function words and the outcome vocabulary every record uses say nothing about
+# what a record is about.
+_STOP_WORDS = frozenset(
+    {
+        "about",
+        "after",
+        "all",
+        "also",
+        "and",
+        "any",
+        "are",
+        "because",
+        "been",
+        "before",
+        "but",
+        "can",
+        "could",
+        "decided",
+        "decision",
+        "decisions",
+        "did",
+        "does",
+        "done",
+        "each",
+        "failed",
+        "failing",
+        "fails",
+        "failure",
+        "for",
+        "from",
+        "had",
+        "has",
+        "have",
+        "how",
+        "into",
+        "its",
+        "may",
+        "more",
+        "must",
+        "new",
+        "not",
+        "now",
+        "old",
+        "our",
+        "out",
+        "outcome",
+        "over",
+        "passed",
+        "passes",
+        "passing",
+        "pending",
+        "should",
+        "some",
+        "success",
+        "successful",
+        "test",
+        "tested",
+        "tests",
+        "than",
+        "that",
+        "the",
+        "their",
+        "them",
+        "then",
+        "there",
+        "these",
+        "they",
+        "this",
+        "use",
+        "used",
+        "uses",
+        "using",
+        "was",
+        "were",
+        "what",
+        "when",
+        "which",
+        "will",
+        "with",
+        "worked",
+        "working",
+        "works",
+        "would",
+        "you",
+    }
+)
+_INFERRED_OUTCOME_TEXT = (
+    "Inferred by background dreaming from unanimous related outcomes; "
+    "not verified by a test, command or review."
+)
 _MAX_GRAPH_MEMBERSHIPS = 4_096
 _MAX_GRAPH_PAIR_CHECKS = 20_000
 _ANALYSIS_SECONDS = 2.0
+# A community refresh that ran out of time is not repeated on the next idle
+# pass: it waits, doubling per consecutive deadline, until its inputs change.
+_COMMUNITY_BACKOFF_SECONDS = 300.0
+_COMMUNITY_BACKOFF_MAX_SECONDS = 21_600.0
 
 
 class V7DreamingError(RuntimeError):
@@ -128,6 +228,9 @@ class _WorkspaceRuntime:
     available: bool = True
     activity_epoch: int = 0
     publication_lock: LockType = field(default_factory=threading.Lock)
+    community_failures: int = 0
+    community_failed_events: int = -1
+    community_retry_at: float = 0.0
 
 
 def _now_us() -> int:
@@ -155,8 +258,21 @@ def _open(path: Path, *, writable: bool) -> sqlite3.Connection:
     return connection
 
 
-def _tokens(value: str) -> frozenset[str]:
-    return frozenset(word.casefold() for word in _WORD.findall(value))
+def _terms(value: str) -> frozenset[str]:
+    """Return the distinctive terms of a text: its words minus stop words."""
+
+    return frozenset(word.casefold() for word in _WORD.findall(value)) - _STOP_WORDS
+
+
+def _shared_terms(left: frozenset[str], right: frozenset[str]) -> int:
+    """Count shared distinctive terms, or 0 when the texts are not related."""
+
+    shared = len(left & right)
+    if shared < _MIN_SHARED_TERMS or 2 * shared < _MIN_TERM_SIMILARITY * (
+        len(left) + len(right)
+    ):
+        return 0
+    return shared
 
 
 def _row_record(row: sqlite3.Row) -> _Record:
@@ -180,41 +296,148 @@ def _row_record(row: sqlite3.Row) -> _Record:
     )
 
 
+@dataclass(frozen=True, slots=True)
+class _Evidence:
+    """The related records of one decision, as far as the scan could tell."""
+
+    records: tuple[_Record, ...] = ()
+    complete: bool = False
+    # The best-ranked related record of each direction whose outcome was not
+    # inferred by dreaming, wherever it ranks among the related records.
+    positive: _Record | None = None
+    negative: _Record | None = None
+
+    def with_witnesses(self) -> tuple[_Record, ...]:
+        """The retained records plus any direction witness ranked below them."""
+
+        retained = {item.record_id for item in self.records}
+        return self.records + tuple(
+            item
+            for item in (self.positive, self.negative)
+            if item is not None and item.record_id not in retained
+        )
+
+
 def _related(
     connection: sqlite3.Connection,
     workspace_id: str,
     source: _Record,
     cancelled: threading.Event,
-) -> tuple[tuple[_Record, ...], bool]:
-    source_tokens = _tokens(source.content)
+    deadline: float,
+) -> _Evidence:
+    """Rank the live records related to ``source`` and say whether all were seen.
+
+    Every live record of the workspace is read whole, one bounded page at a
+    time, so the result is complete for a workspace of any size that fits the
+    row and time budgets.  Only the best ``_MAX_EVIDENCE`` records are
+    retained, so the direction of every related outcome is tracked separately:
+    a contradicting record that ranks below the retained ones is still
+    reported.  A scan that was cut short names no records, because which ones
+    it reached depends on timing; the directions it did see remain valid.
+    """
+
+    source_terms = _terms(source.content)
+    complete = not source.content_truncated
+    if not source_terms:
+        return _Evidence(complete=complete)
     ranked: list[tuple[int, int, str, _Record]] = []
+    witnesses: dict[bool, tuple[int, int, str, _Record]] = {}
+    scanned = 0
     rows = connection.execute(
-        "SELECT record_id,record_type,substr(content,1,?) AS content,"
-        "length(CAST(content AS BLOB)) AS content_bytes,content_hash,state_hash,"
+        "SELECT record_id,record_type,content,content_hash,state_hash,"
         "source_event_id,stream_version,created_at_us,updated_at_us,outcome,worked "
         "FROM memory_records WHERE workspace_id=? AND record_id<>? AND archived=0 "
-        "AND deleted_at_us IS NULL ORDER BY updated_at_us DESC,record_id "
-        "LIMIT ?",
-        (_MAX_CONTENT_CHARS, workspace_id, source.record_id, _MAX_EVIDENCE_ROWS + 1),
-    ).fetchall()
-    complete = len(rows) <= _MAX_EVIDENCE_ROWS and not source.content_truncated
-    admitted_bytes = 0
-    for row in rows[:_MAX_EVIDENCE_ROWS]:
-        if cancelled.is_set():
-            return (), False
-        candidate = _row_record(row)
-        admitted_bytes += len(candidate.content.encode("utf-8"))
-        if admitted_bytes > _MAX_EVIDENCE_BYTES:
-            complete = False
-            break
-        complete = complete and not candidate.content_truncated
-        overlap = len(source_tokens & _tokens(candidate.content))
-        if overlap:
-            ranked.append(
-                (-overlap, -candidate.updated_at_us, candidate.record_id, candidate)
-            )
-    ranked.sort(key=lambda item: item[:3])
-    return tuple(item[3] for item in ranked[:_MAX_EVIDENCE]), complete
+        "AND deleted_at_us IS NULL",
+        (workspace_id, source.record_id),
+    )
+    try:
+        while True:
+            if cancelled.is_set():
+                return _Evidence()
+            if scanned >= _MAX_EVIDENCE_SCAN_ROWS or time.monotonic() >= deadline:
+                complete = complete and rows.fetchone() is None
+                break
+            page = rows.fetchmany(_EVIDENCE_PAGE_ROWS)
+            if not page:
+                break
+            scanned += len(page)
+            for row in page:
+                shared = _shared_terms(source_terms, _terms(str(row["content"])))
+                if not shared:
+                    continue
+                # Only the terms of the whole text were needed; keep a prefix.
+                candidate = replace(
+                    _row_record(row),
+                    content=str(row["content"])[:_MAX_CONTENT_CHARS],
+                )
+                entry = (
+                    -shared,
+                    -candidate.updated_at_us,
+                    candidate.record_id,
+                    candidate,
+                )
+                ranked.append(entry)
+                verdict = candidate.worked
+                if verdict is None:
+                    continue
+                witness = witnesses.get(verdict)
+                if (
+                    witness is None or entry[:3] < witness[:3]
+                ) and not _outcome_is_inferred(
+                    connection, workspace_id, candidate.record_id
+                ):
+                    witnesses[verdict] = entry
+            ranked.sort(key=lambda item: item[:3])
+            del ranked[_MAX_EVIDENCE:]
+    finally:
+        rows.close()
+    positive = witnesses.get(True)
+    negative = witnesses.get(False)
+    return _Evidence(
+        records=tuple(item[3] for item in ranked) if complete else (),
+        complete=complete,
+        positive=None if positive is None else positive[3],
+        negative=None if negative is None else negative[3],
+    )
+
+
+def _interrupted(error: sqlite3.OperationalError) -> bool:
+    """Whether a read was stopped by the progress handler (SQLITE_INTERRUPT)."""
+
+    # Python 3.10 has neither the error code attribute nor the constant.
+    code = getattr(error, "sqlite_errorcode", None)
+    return code == 9 if code is not None else "interrupted" in str(error)
+
+
+def _scan_deadline(budget_end: float, remaining_sources: int) -> float:
+    """Give each remaining source an equal share of the evidence scan budget."""
+
+    now = time.monotonic()
+    return now + max(0.0, budget_end - now) / max(1, remaining_sources)
+
+
+def _outcome_is_inferred(
+    connection: sqlite3.Connection, workspace_id: str, record_id: str
+) -> bool:
+    """Whether the record's current outcome was written by dreaming itself."""
+
+    row = connection.execute(
+        "SELECT json_type(payload_json,'$.dreaming') FROM memory_events "
+        "WHERE workspace_id=? AND stream_id=? "
+        "AND event_type='memory.outcome_recorded' "
+        "ORDER BY stream_version DESC LIMIT 1",
+        (workspace_id, record_id),
+    ).fetchone()
+    return row is not None and row[0] is not None
+
+
+def _community_backoff_seconds(failures: int) -> float:
+    """Wait after the ``failures``-th consecutive community refresh deadline."""
+
+    return min(
+        _COMMUNITY_BACKOFF_MAX_SECONDS,
+        _COMMUNITY_BACKOFF_SECONDS * 2 ** min(max(failures, 1) - 1, 32),
+    )
 
 
 def _cursor_value(updated_at_us: int, record_id: str) -> str:
@@ -273,7 +496,14 @@ def _stable_request(
     context: Mapping[str, Any],
     sources: Sequence[_Record],
     extra: Mapping[str, Any] | None = None,
+    identity: Mapping[str, Any] | None = None,
 ) -> _Proposal:
+    """Build a candidate whose idempotency key names what is being proposed.
+
+    By default that is the exact provenance.  ``identity`` replaces it for a
+    proposal that stays the same proposal when its provenance moves on.
+    """
+
     identities = [item.identity() for item in sources]
     provenance: dict[str, Any] = {
         "strategy": strategy,
@@ -284,6 +514,12 @@ def _stable_request(
         provenance.update(dict(extra))
     fingerprint = sha256_json(
         {"strategy": strategy, "workspace_id": workspace_id, "provenance": provenance}
+        if identity is None
+        else {
+            "strategy": strategy,
+            "workspace_id": workspace_id,
+            "identity": dict(identity),
+        }
     )
     request = CaptureCandidateRequest(
         source_kind="dreaming",
@@ -303,6 +539,37 @@ def _stable_request(
             (item.record_id, item.source_event_id) for item in sources
         ),
     )
+
+
+def _proposed_connections(
+    connection: sqlite3.Connection, workspace_id: str, outer_record_id: str
+) -> dict[str, set[tuple[str, ...]]]:
+    """Return the reasons already proposed for each peer of one record.
+
+    A connection is the pair of records plus the entities they share.  Pending
+    and promoted candidates both count, whichever graph generation or record
+    version surfaced them, so the lookup reads the stored proposal itself and
+    also recognises candidates staged before the key named the pair.
+    """
+
+    proposed: dict[str, set[tuple[str, ...]]] = {}
+    for peer, shared_json in connection.execute(
+        "SELECT json_extract(proposed_record_json,'$.context.source_record_ids[1]'),"
+        "json_extract(proposed_record_json,'$.context.shared_entities') "
+        "FROM memory_capture_candidates WHERE workspace_id=? "
+        "AND source_kind='dreaming' "
+        "AND json_extract(provenance_json,'$.strategy')='connection_discovery' "
+        "AND json_extract(proposed_record_json,"
+        "'$.context.source_record_ids[0]')=?",
+        (workspace_id, outer_record_id),
+    ).fetchall():
+        try:
+            shared = json.loads(str(shared_json))
+        except ValueError:
+            continue
+        if isinstance(peer, str) and isinstance(shared, list):
+            proposed.setdefault(peer, set()).add(tuple(str(item) for item in shared))
+    return proposed
 
 
 class V7DreamingCoordinator:
@@ -521,9 +788,13 @@ class V7DreamingCoordinator:
             analysis_cursor: str | None = None
             if strategy == "community_refresh":
                 pending = await self._run_worker(
-                    lambda: self._refresh_communities(workspace, state.cancelled)
+                    lambda: self._refresh_communities(state)
                 )
-                if pending and self._projection_scheduler is not None:
+                if (
+                    pending
+                    and not state.cancelled.is_set()
+                    and self._projection_scheduler is not None
+                ):
                     with self._storage.locked_active(workspace) as active:
                         self._projection_scheduler(active.path)
             else:
@@ -634,7 +905,7 @@ class V7DreamingCoordinator:
                     connection, workspace, cursor, cancelled
                 )
             except sqlite3.OperationalError as error:
-                if getattr(error, "sqlite_errorcode", None) == sqlite3.SQLITE_INTERRUPT:
+                if _interrupted(error):
                     return _Analysis(pending_count=1, cursor=cursor)
                 raise
             finally:
@@ -760,21 +1031,28 @@ class V7DreamingCoordinator:
             cancelled=cancelled,
         )
         proposals: list[_Proposal] = []
-        for source in selected:
+        scan_budget = time.monotonic() + _EVIDENCE_SCAN_SECONDS
+        for index, source in enumerate(selected):
             if cancelled.is_set():
                 break
-            evidence, complete = _related(
+            found = _related(
                 connection,
                 workspace.workspace_id,
                 source,
                 cancelled,
+                _scan_deadline(scan_budget, len(selected) - index),
             )
+            complete = found.complete
+            evidence = found.with_witnesses()
             successful = tuple(item for item in evidence if item.worked is True)
             if successful:
                 result = "successful_alternative"
                 wording = "A failed decision has related successful evidence and should be reviewed for revision."
             elif len(evidence) < 2 or not complete:
                 result = "insufficient_evidence"
+                if not complete:
+                    # A partial scan's records depend on timing; do not key on them.
+                    evidence = ()
                 wording = "A failed decision lacks enough related evidence for a reliable re-evaluation."
             else:
                 result = "confirmed_failure"
@@ -793,6 +1071,7 @@ class V7DreamingCoordinator:
                         "evidence_count": len(evidence),
                     },
                     sources=sources,
+                    extra={"classification": result},
                 )
             )
         return _Analysis(
@@ -818,17 +1097,30 @@ class V7DreamingCoordinator:
         threshold = self._settings.dream_pending_evidence_threshold
         proposals: list[_Proposal] = []
         outcomes: list[_OutcomeAction] = []
-        for source in selected:
+        scan_budget = time.monotonic() + _EVIDENCE_SCAN_SECONDS
+        for index, source in enumerate(selected):
             if cancelled.is_set():
                 break
-            evidence, complete = _related(
+            found = _related(
                 connection,
                 workspace.workspace_id,
                 source,
                 cancelled,
+                _scan_deadline(scan_budget, len(selected) - index),
             )
-            positive = tuple(item for item in evidence if item.worked is True)
-            negative = tuple(item for item in evidence if item.worked is False)
+            complete = found.complete
+            evidence = found.with_witnesses()
+            # An outcome dreaming inferred is not evidence for another inference.
+            verified = tuple(
+                item
+                for item in evidence
+                if item.worked is not None
+                and not _outcome_is_inferred(
+                    connection, workspace.workspace_id, item.record_id
+                )
+            )
+            positive = tuple(item for item in verified if item.worked is True)
+            negative = tuple(item for item in verified if item.worked is False)
             if positive and negative:
                 classification = "mixed"
             elif complete and len(positive) >= threshold:
@@ -837,6 +1129,9 @@ class V7DreamingCoordinator:
                 classification = "unanimous_negative"
             else:
                 classification = "insufficient"
+                if not complete:
+                    # A partial scan's records depend on timing; do not key on them.
+                    evidence = ()
             directional = (
                 positive
                 if classification == "unanimous_positive"
@@ -861,7 +1156,7 @@ class V7DreamingCoordinator:
                         source,
                         tuple(directional),
                         worked,
-                        "Automatically resolved from unanimous verified related evidence.",
+                        _INFERRED_OUTCOME_TEXT,
                         identity_hash,
                     )
                 )
@@ -889,6 +1184,7 @@ class V7DreamingCoordinator:
                         "evidence_count": len(evidence),
                     },
                     sources=(source, *directional),
+                    extra={"classification": classification},
                 )
             )
         return _Analysis(
@@ -1036,6 +1332,7 @@ class V7DreamingCoordinator:
 
         deadline = time.monotonic() + _ANALYSIS_SECONDS
         proposals: list[_Proposal] = []
+        proposed: dict[str, set[tuple[str, ...]]] | None = None
         last_peer = peer_after
         stopped = False
         for inspected, (right, (peer, entities)) in enumerate(
@@ -1068,6 +1365,15 @@ class V7DreamingCoordinator:
             ).fetchone()
             if linked is not None:
                 continue
+            reason = shared[:32]
+            if proposed is None:
+                proposed = _proposed_connections(
+                    connection, workspace.workspace_id, outer_record_id
+                )
+            if reason in proposed.get(right, ()):
+                # Already proposed for this reason; a graph rebuild or an
+                # edit to either record does not make it a new connection.
+                continue
             proposals.append(
                 _stable_request(
                     workspace_id=workspace.workspace_id,
@@ -1077,12 +1383,16 @@ class V7DreamingCoordinator:
                     rationale="The active graph generation contains enough shared entity memberships.",
                     context={
                         "source_record_ids": [outer_record_id, right],
-                        "shared_entities": list(shared[:32]),
+                        "shared_entities": list(reason),
                         "confidence": self._settings.dream_connection_confidence,
                         "committed": False,
                     },
                     sources=(source, peer),
                     extra={"graph_generation": generation},
+                    identity={
+                        "record_ids": [outer_record_id, right],
+                        "shared_entities": list(reason),
+                    },
                 )
             )
             if len(proposals) >= self._settings.dream_connection_max_per_session:
@@ -1114,9 +1424,9 @@ class V7DreamingCoordinator:
             cursor=next_cursor,
         )
 
-    def _refresh_communities(
-        self, workspace: Workspace, cancelled: threading.Event
-    ) -> int:
+    def _refresh_communities(self, state: _WorkspaceRuntime) -> int:
+        workspace = state.workspace
+        cancelled = state.cancelled
         with self._storage.locked_active(workspace) as active:
             connection = _open(active.path, writable=True)
             try:
@@ -1135,13 +1445,36 @@ class V7DreamingCoordinator:
                 pending = max(0, event_count - baseline)
                 if pending < self._settings.dream_community_staleness_threshold:
                     return pending
-                from ..graph_projection import GraphProjectionBuilder
-
-                GraphProjectionBuilder(connection).rebuild(
-                    workspace.workspace_id,
-                    force=False,
-                    cancelled=cancelled,
+                if state.community_failures:
+                    if event_count != state.community_failed_events:
+                        state.community_failures = 0
+                    elif time.monotonic() < state.community_retry_at:
+                        # Same inputs as the pass that ran out of time.
+                        raise V7DreamingError("DEADLINE_EXCEEDED")
+                from ..graph_projection import (
+                    GraphProjectionBuilder,
+                    GraphProjectionBuildError,
                 )
+
+                try:
+                    GraphProjectionBuilder(connection).rebuild(
+                        workspace.workspace_id,
+                        force=False,
+                        cancelled=cancelled,
+                    )
+                except GraphProjectionBuildError as error:
+                    if error.code == "CANCELLED" and cancelled.is_set():
+                        # Yielded to foreground activity; nothing failed.
+                        return pending
+                    if error.code == "DEADLINE_EXCEEDED":
+                        state.community_failures += 1
+                        state.community_failed_events = event_count
+                        state.community_retry_at = (
+                            time.monotonic()
+                            + _community_backoff_seconds(state.community_failures)
+                        )
+                    raise
+                state.community_failures = 0
                 return 0
             finally:
                 connection.close()
@@ -1323,7 +1656,7 @@ class V7DreamingCoordinator:
         classification = "unanimous_positive" if action.worked else "unanimous_negative"
         committed = committed_source is not None
         wording = (
-            "Canonical outcome committed from unanimous verified evidence."
+            "Canonical outcome committed from unanimous related evidence."
             if committed
             else "Proposed outcome could not commit because authoritative evidence changed."
         )

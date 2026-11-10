@@ -26,6 +26,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 pytest.importorskip("numpy")
+# The router imports the classifier, which needs the models-local profile.
+pytest.importorskip("sentence_transformers")
 
 from daem0nmcp.compression.jit import JITCompressor
 from daem0nmcp.recall_planner import QueryComplexity
