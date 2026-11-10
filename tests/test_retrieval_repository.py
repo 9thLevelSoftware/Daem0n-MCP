@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import importlib.util
 import json
+import random
 import sqlite3
 import tempfile
 import threading
@@ -2550,6 +2551,145 @@ class SQLiteRetrievalRepositoryUtilityTests(unittest.IsolatedAsyncioTestCase):
             [(item.recorded_at_us, item.event_id) for item in result],
         )
         self.assertEqual({}, await self.load())
+
+    def _expected_contributions(self, root, edges, signals, cutoff):
+        depths = {root: 0}
+        frontier = (root,)
+        for depth in range(1, 5):
+            remaining = 64 - (len(depths) - 1)
+            if not frontier or remaining == 0:
+                break
+            frontier = tuple(
+                sorted(
+                    {
+                        child
+                        for parent, child, kind, offset, _ in edges
+                        if kind == "store"
+                        and parent in frontier
+                        and child not in depths
+                        and offset <= cutoff
+                    }
+                )[:remaining]
+            )
+            depths.update((child, depth) for child in frontier)
+        found = {}
+        for event_id, (record_id, reward, weight, offset) in signals.items():
+            if offset > cutoff or record_id not in depths:
+                continue
+            if depths[record_id] == 0 and reward != 1.0:
+                continue
+            found[event_id] = (offset, depths[record_id], reward, weight)
+        for parent, _, kind, offset, event_id in edges:
+            if kind != "outcome" or parent != root or offset > cutoff:
+                continue
+            _, reward, weight, signal_offset = signals[event_id]
+            if signal_offset > cutoff:
+                continue
+            if event_id not in found or found[event_id][1] > 1:
+                found[event_id] = (signal_offset, 1, reward, weight)
+        return tuple(
+            (BASE_US + offset, event_id, depth, reward, weight)
+            for event_id, (offset, depth, reward, weight) in sorted(
+                found.items(), key=lambda item: (item[1][0], item[0])
+            )
+        )
+
+    async def test_batched_load_matches_per_record_traversal_in_bounded_queries(self):
+        randomizer = random.Random(20261110)
+        records = [self.record(number) for number in range(200, 260)]
+        hub_children = [self.record(number) for number in range(300, 440)]
+        edges = []
+        signals = {}
+
+        def add_edge(parent, child, kind="store", event_id=None):
+            offset = randomizer.choice((10, 40, 90, 120))
+            event_id = self.edge(
+                parent, child, kind=kind, offset=offset, event_id=event_id
+            )
+            edges.append((parent, child, kind, offset, event_id))
+
+        def add_signal(record_id):
+            reward = randomizer.choice((0.0, 1.0))
+            weight = randomizer.choice((0.25, 0.5, 0.75, 1.0))
+            offset = randomizer.choice((20, 60, 100, 130))
+            event_id = self.signal(record_id, reward, offset=offset, weight=weight)
+            signals[event_id] = (record_id, reward, weight, offset)
+            return event_id
+
+        for _ in range(150):
+            add_edge(*randomizer.sample(records, 2))
+        # Two wide parents sharing children exercise the per-record cap.
+        for child in hub_children:
+            add_edge(records[0], child)
+        for child in hub_children[::2]:
+            add_edge(records[1], child)
+        add_edge(records[2], records[0])
+        add_edge(records[2], records[1])
+        add_edge(hub_children[0], records[3])
+        for record_id in records + hub_children[:80]:
+            for _ in range(randomizer.randrange(3)):
+                add_signal(record_id)
+        for _ in range(40):
+            parent, descendant = randomizer.sample(records, 2)
+            add_edge(
+                parent, descendant, kind="outcome", event_id=add_signal(descendant)
+            )
+        self.fixture.connection.commit()
+
+        roots = tuple(records[:25])
+        repository = self.fixture.repository()
+        statements = []
+        open_connection = repository._open_connection
+
+        def traced_connection():
+            connection = open_connection()
+            connection.set_trace_callback(statements.append)
+            return connection
+
+        repository._open_connection = traced_connection
+        largest = 0
+        for cutoff in (100, 50):
+            statements.clear()
+            result = await repository.load_utility_contributions(
+                WORKSPACE_ID, roots, BASE_US + cutoff
+            )
+            learning_reads = [
+                statement
+                for statement in statements
+                if "memory_provenance_edges" in statement
+                or "memory_outcome_signals" in statement
+            ]
+            self.assertLessEqual(len(learning_reads), 6, learning_reads)
+            self.assertEqual(roots, tuple(result))
+            largest = max(largest, *(len(result[root]) for root in roots))
+            for root in roots:
+                with self.subTest(root=root[-3:], cutoff=cutoff):
+                    self.assertEqual(
+                        self._expected_contributions(root, edges, signals, cutoff),
+                        tuple(
+                            (
+                                item.recorded_at_us,
+                                item.event_id,
+                                item.depth,
+                                item.reward,
+                                item.weight,
+                            )
+                            for item in result[root]
+                        ),
+                    )
+                    alone = await repository.load_utility_contributions(
+                        WORKSPACE_ID, (root,), BASE_US + cutoff
+                    )
+                    self.assertEqual(result[root], alone[root])
+        self.assertGreater(largest, 20)
+        # Splitting the IN lists into several statements changes nothing.
+        with patch("daem0nmcp.retrieval.repository._UTILITY_BATCH_SIZE", 7):
+            self.assertEqual(
+                result,
+                await repository.load_utility_contributions(
+                    WORKSPACE_ID, roots, BASE_US + 50
+                ),
+            )
 
     async def test_workspace_and_both_edge_and_signal_time_boundaries(self):
         root, child, future_child, outsider = (
