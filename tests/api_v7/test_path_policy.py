@@ -12,7 +12,10 @@ import asyncio
 import copy
 import hashlib
 import sqlite3
+import sys
+import threading
 import time
+import traceback
 import types
 from contextlib import closing
 from pathlib import Path
@@ -848,14 +851,33 @@ async def _import_call(invoke, workspace_id: str, arguments: dict) -> dict[str, 
     within a bounded deadline and a bounded number of attempts.
     """
 
-    deadline = time.monotonic() + 30
+    started = time.monotonic()
+    deadline = started + 30
+    contended: list[str] = []
     for _attempt in range(8):
         result = await _target_call(invoke, workspace_id, "workspace_import", arguments)
         if result["ok"] or result["error"]["code"] != "DATABASE_IN_USE":
             return result
-        assert time.monotonic() < deadline, result["error"]
+        # Whatever holds the write lock is a thread of this process; record
+        # what every thread is doing so a failure names the holder.
+        contended.append(
+            f"--- attempt {_attempt} at +{time.monotonic() - started:.1f}s\n"
+            + _all_thread_stacks()
+        )
+        assert time.monotonic() < deadline, (result["error"], "\n".join(contended))
         await asyncio.sleep(0.5)
-    raise AssertionError("the import stayed contended for 8 attempts")
+    raise AssertionError(
+        "the import stayed contended for 8 attempts\n" + "\n".join(contended)
+    )
+
+
+def _all_thread_stacks() -> str:
+    names = {thread.ident: thread.name for thread in threading.enumerate()}
+    return "\n".join(
+        f"thread {names.get(ident, ident)}:\n"
+        + "".join(traceback.format_stack(frame, limit=14))
+        for ident, frame in sys._current_frames().items()
+    )
 
 
 async def _import_pages(invoke, workspace_id: str, pages) -> dict[str, Any]:
