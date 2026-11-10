@@ -998,12 +998,29 @@ def _clear_sync(
     cancelled: threading.Event,
 ) -> DestructiveMutationReceipt:
     now_us = _now_us(dependencies)
-    selected_hash = _authenticate_selection(
-        dependencies,
-        workspace.workspace_id,
-        request.selection_token,
-        now_us,
-    )
+    unauthenticated: LocalStateOperationError | None = None
+    try:
+        selected_hash = _authenticate_selection(
+            dependencies,
+            workspace.workspace_id,
+            request.selection_token,
+            now_us,
+        )
+    except LocalStateOperationError as error:
+        # The signing secret does not outlive the process and the token does
+        # not outlive its lifetime, but a clear that committed must still
+        # replay.  Its journal row is keyed by the exact token and was written
+        # only after that token authenticated, so a well-formed token is looked
+        # up there first; without such a row the refusal below stands.
+        match = (
+            _SELECTION_RE.fullmatch(request.selection_token)
+            if isinstance(request.selection_token, str)
+            else None
+        )
+        if match is None:
+            raise
+        selected_hash = match.group(1)
+        unauthenticated = error
     if cancelled.is_set():
         raise _WorkerCancelledError()
     journal_key = _journal_key(request.selection_token)
@@ -1044,6 +1061,8 @@ def _clear_sync(
                         raise _WorkerCancelledError()
                     connection.commit()
                     return result
+                if unauthenticated is not None:
+                    raise unauthenticated
                 rows = _snapshot_rows(connection, workspace.workspace_id, now_us)
                 current_hash = _snapshot_hash(workspace.workspace_id, rows)
                 if not hmac.compare_digest(selected_hash, current_hash):
