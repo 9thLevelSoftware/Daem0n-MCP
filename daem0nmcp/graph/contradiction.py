@@ -210,6 +210,8 @@ async def invalidate_contradicted_facts(
     if invalidation_time is None:
         invalidation_time = datetime.now(timezone.utc)
 
+    from .temporal import invalidate_version
+
     invalidated_count = 0
 
     for contradiction in contradictions:
@@ -228,11 +230,13 @@ async def invalidate_contradicted_facts(
         if version.valid_to is not None:
             continue
 
-        # Invalidate the version
-        version.valid_to = invalidation_time
-        version.invalidated_by_version_id = new_version_id
-
-        invalidated_count += 1
+        if await invalidate_version(
+            session,
+            version.id,
+            new_version_id,
+            invalidation_time,
+        ):
+            invalidated_count += 1
 
     return invalidated_count
 

@@ -1,171 +1,145 @@
-"""
-Claude Code SessionStart hook - auto-communion with Daem0n.
+"""Claude Code SessionStart hook for the v7 session briefing ritual.
 
-Runs at session start to output a briefing summary and mark the
-session as briefed. Never blocks.
-
-Uses raw sqlite3 for the fast path (main) to avoid the overhead and
-lock-contention risk of spinning up a full SQLAlchemy async engine
-alongside the already-running MCP server.
+The hook is deliberately read-only. It can render a compatibility preview from
+an existing active database, but only the MCP ``session_brief`` handler may
+establish communion for an invocation scope.
 """
 
-import hashlib
+from __future__ import annotations
+
+import json
 import sqlite3
 import sys
-from datetime import datetime, timezone
 from pathlib import Path
 
-from ._client import get_project_path, succeed
+from ..storage_activation import PointerValidationError, resolve_active_database
+from ..workspace import WorkspaceRegistry, sqlite_file_uri
+from ._client import (
+    REINSTALL_NOTICE,
+    get_project_path,
+    started_by_module_switch,
+    succeed,
+)
 
-# Keep async_main for test compatibility -------------------------------------------------
+_BUSY_TIMEOUT_MS = 2000
+
+
+def _workspace_id(project_path: str) -> str:
+    """Return the stable opaque ID for the hook's configured project root."""
+    return WorkspaceRegistry(default_root=project_path).default.workspace_id
 
 
 async def async_main(project_path: str) -> str:
-    """
-    Core async logic.  Returns the briefing text (empty string if nothing).
-
-    Separated from ``main()`` so tests can call it inside an existing
-    event loop without needing a subprocess.
-    """
-    from ._client import get_managers  # noqa: F811 – lazy import
-
-    db, memory, _rules = get_managers(project_path)
-    await db.init_db()
-
-    stats = await memory.get_statistics()
-
-    from ..enforcement import SessionManager
-
-    session_mgr = SessionManager(db)
-    await session_mgr.mark_briefed(project_path)
-
-    return _format_briefing(stats)
-
-
-# Fast synchronous path for the actual hook ----------------------------------------------
-
-_BUSY_TIMEOUT_MS = 2000  # 2 seconds – fail fast if the MCP server holds a lock
-
-
-def _get_session_id(project_path: str) -> str:
-    """Mirror enforcement.get_session_id without importing the module."""
-    repo_hash = hashlib.md5(project_path.encode()).hexdigest()[:8]
-    hour_bucket = datetime.now().strftime("%Y%m%d%H")
-    return f"{repo_hash}-{hour_bucket}"
+    """Return a read-only compatibility preview for in-process callers."""
+    return _fast_briefing(project_path)
 
 
 def _fast_briefing(project_path: str) -> str:
-    """
-    Gather briefing stats using a direct sqlite3 connection.
-
-    This avoids importing SQLAlchemy / aiosqlite / the full model stack,
-    skips migrations (the MCP server handles those), and uses a short
-    busy_timeout so we never block the Claude Code startup sequence.
-    """
-    db_path = Path(project_path) / ".daem0nmcp" / "storage" / "daem0nmcp.db"
-    if not db_path.exists():
+    """Read bounded legacy statistics without creating or updating storage."""
+    storage = Path(project_path) / ".daem0nmcp" / "storage"
+    if not storage.is_dir():
+        return ""
+    try:
+        db_path = resolve_active_database(storage).path
+    except (OSError, PointerValidationError):
+        return ""
+    if not db_path.is_file():
         return ""
 
-    conn = sqlite3.connect(str(db_path), timeout=2)
+    try:
+        database_uri = sqlite_file_uri(db_path, mode="ro")
+        conn = sqlite3.connect(database_uri, uri=True, timeout=2)
+    except sqlite3.Error:
+        return ""
+
     try:
         conn.execute(f"PRAGMA busy_timeout={_BUSY_TIMEOUT_MS}")
-        conn.execute("PRAGMA journal_mode=WAL")
-
-        # --- stats ---
+        conn.execute("PRAGMA query_only=ON")
         cursor = conn.execute(
             "SELECT category, COUNT(id) FROM memories GROUP BY category"
         )
-        by_cat = {row[0]: row[1] for row in cursor.fetchall()}
-
+        by_category = {row[0]: row[1] for row in cursor.fetchall()}
         cursor = conn.execute("SELECT COUNT(id) FROM memories WHERE worked = 1")
         worked = cursor.fetchone()[0] or 0
-
         cursor = conn.execute("SELECT COUNT(id) FROM memories WHERE worked = 0")
         failed = cursor.fetchone()[0] or 0
-
-        total = sum(by_cat.values())
-
-        stats = {
-            "total_memories": total,
-            "by_category": by_cat,
-            "with_outcomes": {
-                "worked": worked,
-                "failed": failed,
-                "pending": total - worked - failed,
-            },
-        }
-
-        # --- mark briefed (best-effort) ---
-        session_id = _get_session_id(project_path)
-        now = datetime.now(timezone.utc).isoformat()
-        try:
-            conn.execute(
-                """
-                INSERT INTO session_state
-                    (session_id, project_path, briefed, context_checks,
-                     pending_decisions, last_activity, created_at)
-                VALUES (?, ?, 1, '[]', '[]', ?, ?)
-                ON CONFLICT(session_id) DO UPDATE
-                    SET briefed = 1, last_activity = excluded.last_activity
-                """,
-                (session_id, project_path, now, now),
-            )
-            conn.commit()
-        except Exception:
-            pass  # non-critical – don't fail the briefing over this
-
-        return _format_briefing(stats)
-
-    except sqlite3.OperationalError:
-        # Database locked or table missing – exit silently
+        total = sum(by_category.values())
+        return _format_briefing(
+            {
+                "total_memories": total,
+                "by_category": by_category,
+                "with_outcomes": {
+                    "worked": worked,
+                    "failed": failed,
+                    "pending": total - worked - failed,
+                },
+            }
+        )
+    except sqlite3.Error:
         return ""
     finally:
         conn.close()
 
 
-# Shared formatting ----------------------------------------------------------------------
-
-
 def _format_briefing(stats: dict) -> str:
+    """Format the optional preview while making its non-authoritative status clear."""
     total = stats.get("total_memories", 0)
-    by_cat = stats.get("by_category", {})
+    by_category = stats.get("by_category", {})
     outcomes = stats.get("with_outcomes", {})
-
-    cat_parts = []
-    for cat in ("decision", "pattern", "warning", "learning"):
-        count = by_cat.get(cat, 0)
-        if count:
-            cat_parts.append(f"{count} {cat}s")
-
-    cat_str = ", ".join(cat_parts) if cat_parts else "empty"
-    parts = [f"[Daem0n Briefing] {total} memories ({cat_str})"]
-
-    pending = outcomes.get("pending", 0)
-    warnings_count = by_cat.get("warning", 0)
-    parts.append(f"Pending outcomes: {pending} | Recent warnings: {warnings_count}")
-    parts.append("Commune complete.")
-
-    return "\n".join(parts)
-
-
-# Entry points --------------------------------------------------------------------------
+    categories = [
+        f"{count} {category}s"
+        for category in ("decision", "pattern", "warning", "learning")
+        if (count := by_category.get(category, 0))
+    ]
+    category_text = ", ".join(categories) if categories else "empty"
+    return "\n".join(
+        (
+            f"[Daem0n preview] {total} memories ({category_text})",
+            (
+                f"Pending outcomes: {outcomes.get('pending', 0)} | "
+                f"Recent warnings: {by_category.get('warning', 0)}"
+            ),
+            "Call session_brief for the authoritative v7 briefing.",
+        )
+    )
 
 
 def main() -> None:
     project_path = get_project_path()
     if project_path is None:
+        if started_by_module_switch():
+            # The command is in the user's settings, so it runs in every
+            # project they open, not only in Daem0n ones.
+            succeed(json.dumps({"systemMessage": REINSTALL_NOTICE}))
         sys.exit(0)
-    succeed(
-        "[Daem0n] IMPORTANT: Before responding to the user, "
-        'call mcp__daem0nmcp__commune(action="briefing") '
-        "to receive your session briefing and project context."
+    workspace_id = _workspace_id(project_path)
+    message = (
+        "[Daem0n] IMPORTANT: The first Daem0n call establishes this invocation's "
+        "v7 session and brief automatically (meta.covenant.auto_brief). "
+        f'Use workspace_id="{workspace_id}". Call '
+        f'mcp__daem0nmcp__session_brief(workspace_id="{workspace_id}") '
+        "for the full brief."
     )
+    if started_by_module_switch():
+        # JSON output lets the notice reach the user, not only the model.
+        succeed(
+            json.dumps(
+                {
+                    "systemMessage": REINSTALL_NOTICE,
+                    "hookSpecificOutput": {
+                        "hookEventName": "SessionStart",
+                        "additionalContext": message,
+                    },
+                }
+            )
+        )
+    succeed(message)
 
 
 if __name__ == "__main__":
     import warnings
 
-    warnings.filterwarnings("ignore")  # stderr output → Claude Code "hook error"
+    warnings.filterwarnings("ignore")
 
     from daem0nmcp.claude_hooks._client import run_hook_safely
 

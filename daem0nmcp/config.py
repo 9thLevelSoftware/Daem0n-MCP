@@ -5,28 +5,79 @@ All settings are loaded from environment variables with DAEM0NMCP_ prefix.
 Example: DAEM0NMCP_LOG_LEVEL=DEBUG
 """
 
+import math
+import os
+import re
 import shutil
+from collections.abc import Mapping
 from pathlib import Path
+from typing import Any, Literal
 
-from pydantic import Field
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from .workspace import resolve_derived_path
+
+ENV_FILE_VARIABLE = "DAEM0NMCP_ENV_FILE"
 _DEFAULT_EMBEDDING_BACKEND = "onnx"
+_RETRIEVAL_PROVIDERS = frozenset(
+    {"lexical", "dense", "graph", "temporal", "procedure", "outcome"}
+)
+_QDRANT_COLLECTION_PREFIX = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,31}$")
+
+
+def _operator_env_file() -> Path | None:
+    """Return the settings file the operator named, never one found by location.
+
+    The server is normally launched with the project as its working directory,
+    so a `.env` found there is repository-controlled input, not configuration.
+    """
+    configured = os.environ.get(ENV_FILE_VARIABLE, "")
+    if not configured:
+        return None
+    path = Path(configured)
+    if not path.is_absolute():
+        raise ValueError(
+            f"{ENV_FILE_VARIABLE} must be an absolute path; "
+            f"a relative path would be resolved against the working directory"
+        )
+    if not path.is_file():
+        raise ValueError(f"{ENV_FILE_VARIABLE} does not name a file: {configured}")
+    return path
 
 
 class Settings(BaseSettings):
     """Daem0nMCP configuration settings."""
 
     model_config = SettingsConfigDict(
-        env_prefix="DAEM0NMCP_", env_file=".env", env_file_encoding="utf-8"
+        env_prefix="DAEM0NMCP_", env_file=None, env_file_encoding="utf-8"
     )
+
+    def __init__(self, **values: Any) -> None:
+        if "_env_file" not in values:
+            values["_env_file"] = _operator_env_file()
+        super().__init__(**values)
 
     # Core paths
     project_root: str = "."
+    workspace_roots: list[str] = Field(default_factory=list)
     storage_path: str | None = None  # Auto-detect if not set
 
     # Server
     log_level: str = "INFO"
+    ui_rendering_enabled: bool = True
+    tool_surface: Literal["core", "full"] = "core"
+    covenant_mode: Literal["guided", "strict"] = "guided"
+    sync_timeout_seconds: float = Field(
+        default=15.0, ge=1.0, le=60.0, allow_inf_nan=False
+    )
+
+    @field_validator("sync_timeout_seconds", mode="before")
+    @classmethod
+    def validate_sync_deadline(cls, value):
+        if isinstance(value, bool):
+            raise ValueError("sync_timeout_seconds must be between 1 and 60")
+        return value
 
     # Context management
     max_project_contexts: int = 10  # Maximum cached project contexts
@@ -71,6 +122,37 @@ class Settings(BaseSettings):
     )
     qdrant_url: str | None = None  # Optional remote Qdrant URL (overrides local path)
     qdrant_api_key: str | None = None  # API key for remote Qdrant (if using cloud)
+    qdrant_timeout_seconds: float = Field(default=10.0, gt=0.0, le=60.0)
+    qdrant_collection_prefix: str = "daem0nmcp"
+
+    # v7 retrieval orchestration
+    retrieval_candidate_limit: int = Field(default=50, ge=1, le=1000)
+    retrieval_token_budget: int = Field(default=2400, ge=1, le=131_072)
+    retrieval_rrf_weights: dict[str, float] = Field(
+        default_factory=lambda: {
+            "lexical": 1.0,
+            "dense": 1.0,
+            "graph": 0.7,
+            "temporal": 0.85,
+            "procedure": 0.8,
+            "outcome": 0.9,
+        }
+    )
+    retrieval_graph_max_depth: int = Field(default=2, ge=1, le=8)
+    retrieval_graph_max_branching: int = Field(default=50, ge=1, le=100)
+    retrieval_rerank_enabled: bool = False
+    retrieval_rerank_candidate_limit: int = Field(default=25, ge=1, le=1000)
+    retrieval_reranker: Literal["embedding", "late_interaction"] = "embedding"
+    retrieval_late_interaction_model: str = "colbert-ir/colbertv2.0"
+    retrieval_utility_mode: Literal["off", "shadow", "apply"] = "shadow"
+    retrieval_utility_weight: float = Field(default=0.1, ge=0.0, le=1.0)
+    retrieval_utility_credit: Literal["single_step", "trace"] = "trace"
+    retrieval_utility_candidate_limit: int = Field(default=25, ge=1, le=200)
+    memory_validity_mode: Literal["off", "shadow", "apply"] = "shadow"
+    retrieval_retention_mode: Literal["off", "shadow", "apply"] = "shadow"
+    # Rank content/rationale matches above tag-assisted ones and drop the tag
+    # weight among them.  Off: weighted BM25 over content, rationale and tags.
+    lexical_content_tiering: bool = False
 
     # File Watcher (Phase 1: Proactive Layer)
     watcher_enabled: bool = False  # Enable file watcher daemon
@@ -103,7 +185,35 @@ class Settings(BaseSettings):
     bm25_b: float = Field(default=0.75, ge=0.0, le=1.0)  # Document length normalization
 
     # RRF fusion parameter
-    rrf_k: int = Field(default=60, ge=1)  # Dampening constant for RRF
+    rrf_k: int = Field(default=60, ge=1, le=1_000_000)  # Dampening constant
+
+    @field_validator("retrieval_rrf_weights", mode="before")
+    @classmethod
+    def validate_retrieval_rrf_weights(cls, value: object) -> dict[str, float]:
+        if not isinstance(value, Mapping) or set(value) != _RETRIEVAL_PROVIDERS:
+            raise ValueError("retrieval RRF weights must name every provider")
+        validated: dict[str, float] = {}
+        for provider in sorted(_RETRIEVAL_PROVIDERS):
+            weight = value[provider]
+            if isinstance(weight, bool) or not isinstance(weight, (int, float)):
+                raise ValueError("retrieval RRF weights must be finite and positive")
+            try:
+                converted = float(weight)
+            except (OverflowError, ValueError) as exc:
+                raise ValueError(
+                    "retrieval RRF weights must be finite and positive"
+                ) from exc
+            if not math.isfinite(converted) or converted <= 0:
+                raise ValueError("retrieval RRF weights must be finite and positive")
+            validated[provider] = converted
+        return validated
+
+    @field_validator("qdrant_collection_prefix")
+    @classmethod
+    def validate_qdrant_collection_prefix(cls, value: str) -> str:
+        if _QDRANT_COLLECTION_PREFIX.fullmatch(value) is None:
+            raise ValueError("qdrant collection prefix is invalid")
+        return value
 
     # Surprise scoring
     surprise_k_nearest: int = Field(default=5, ge=1)  # Neighbors for surprise calc
@@ -129,41 +239,30 @@ class Settings(BaseSettings):
 
     # Background Dreaming
     dream_enabled: bool = True  # Master switch for dreaming
-    dream_idle_timeout: float = 60.0  # Seconds of idle before dreaming starts
-    dream_max_decisions_per_session: int = (
-        5  # Max failed decisions to re-evaluate per session
-    )
-    dream_yield_check_interval: float = (
-        0.0  # Seconds between yield checks (0 = every step)
-    )
-    dream_min_decision_age_hours: int = (
-        1  # Min age of decision before re-evaluation eligible
-    )
-    dream_review_cooldown_hours: int = 72  # Skip decisions reviewed within this window
+    dream_idle_timeout: float = Field(default=60.0, ge=0.05, le=86_400.0)
+    dream_max_concurrency: int = Field(default=2, ge=1, le=8)
+    dream_max_decisions_per_session: int = Field(
+        default=5, ge=1, le=100
+    )  # Max failed decisions to re-evaluate per session
+    dream_yield_check_interval: float = Field(default=0.0, ge=0.0, le=60.0)
+    dream_min_decision_age_hours: int = Field(default=1, ge=0, le=87_600)
+    dream_review_cooldown_hours: int = Field(default=72, ge=0, le=87_600)
 
     # ConnectionDiscovery strategy
-    dream_connection_lookback_hours: int = 168  # 7-day lookback for entity sharing
-    dream_connection_max_per_session: int = 20  # Max connections per dream session
-    dream_connection_min_shared_entities: int = 2  # Min shared entities to create link
-    dream_connection_confidence: float = 0.7  # Confidence for inferred relationships
+    dream_connection_lookback_hours: int = Field(default=168, ge=1, le=87_600)
+    dream_connection_max_per_session: int = Field(default=20, ge=1, le=100)
+    dream_connection_min_shared_entities: int = Field(default=2, ge=1, le=32)
+    dream_connection_confidence: float = Field(default=0.7, ge=0.0, le=1.0)
 
     # PendingOutcomeResolver strategy
-    dream_pending_max_per_session: int = (
-        3  # Max pending decisions to resolve per session
-    )
-    dream_pending_min_age_hours: int = (
-        24  # Min age before a pending decision is eligible
-    )
-    dream_pending_cooldown_hours: int = 168  # 7 days cooldown between re-evaluations
-    dream_pending_evidence_threshold: int = (
-        3  # Min directional evidence for auto-resolve
-    )
+    dream_pending_max_per_session: int = Field(default=3, ge=1, le=100)
+    dream_pending_min_age_hours: int = Field(default=24, ge=0, le=87_600)
+    dream_pending_cooldown_hours: int = Field(default=168, ge=0, le=87_600)
+    dream_pending_evidence_threshold: int = Field(default=3, ge=1, le=10)
     dream_pending_dry_run: bool = True  # Ships inert -- must opt-in to auto-resolve
 
     # CommunityRefresh strategy
-    dream_community_staleness_threshold: int = (
-        10  # New memories before community rebuild
-    )
+    dream_community_staleness_threshold: int = Field(default=10, ge=1, le=10_000)
 
     # Cognitive Tools
     cognitive_debate_max_rounds: int = 5
@@ -186,7 +285,7 @@ class Settings(BaseSettings):
 
         logger = logging.getLogger(__name__)
 
-        legacy_storage = project_path / ".devilmcp" / "storage"
+        legacy_storage = resolve_derived_path(project_path, ".devilmcp", "storage")
         legacy_db = legacy_storage / "devilmcp.db"
         new_db = new_storage / "daem0nmcp.db"
 
@@ -246,11 +345,11 @@ class Settings(BaseSettings):
 
         # If we're running from the Daem0nMCP server directory itself, use centralized storage
         if project_path == server_path:
-            storage = server_path / "storage" / "centralized"
+            storage = resolve_derived_path(server_path, "storage", "centralized")
             logger.info("Using centralized storage (running from Daem0nMCP directory)")
         else:
             # Use project-specific storage
-            storage = project_path / ".daem0nmcp" / "storage"
+            storage = resolve_derived_path(project_path, ".daem0nmcp", "storage")
 
             # Check for and migrate legacy .devilmcp storage
             self._migrate_legacy_storage(project_path, storage)

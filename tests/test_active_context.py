@@ -1,5 +1,6 @@
 """Tests for active working context management."""
 
+import inspect
 import shutil
 import tempfile
 from datetime import datetime, timedelta, timezone
@@ -233,14 +234,16 @@ class TestActiveContextMCPTools:
         from daem0nmcp import server
 
         # Create a memory first
-        mem = await server.remember(
+        mem = await covenant_compliant_project.call(
+            server.remember,
             category="warning",
             content="Never use eval() for user input",
             project_path=covenant_compliant_project,
         )
 
         # Add to active context
-        result = await server.set_active_context(
+        result = await covenant_compliant_project.call(
+            server.set_active_context,
             memory_id=mem["id"],
             reason="Critical security warning",
             project_path=covenant_compliant_project,
@@ -249,8 +252,8 @@ class TestActiveContextMCPTools:
         assert result["status"] == "added"
 
         # Get active context
-        context = await server.get_active_context(
-            project_path=covenant_compliant_project
+        context = await covenant_compliant_project.call(
+            server.get_active_context, project_path=covenant_compliant_project
         )
 
         assert context["count"] == 1
@@ -262,26 +265,31 @@ class TestActiveContextMCPTools:
         from daem0nmcp import server
 
         # Create and add a memory
-        mem = await server.remember(
+        mem = await covenant_compliant_project.call(
+            server.remember,
             category="decision",
             content="Use PostgreSQL for main database",
             project_path=covenant_compliant_project,
         )
 
-        await server.set_active_context(
-            memory_id=mem["id"], project_path=covenant_compliant_project
+        await covenant_compliant_project.call(
+            server.set_active_context,
+            memory_id=mem["id"],
+            project_path=covenant_compliant_project,
         )
 
         # Remove from context
-        result = await server.remove_from_active_context(
-            memory_id=mem["id"], project_path=covenant_compliant_project
+        result = await covenant_compliant_project.call(
+            server.remove_from_active_context,
+            memory_id=mem["id"],
+            project_path=covenant_compliant_project,
         )
 
         assert result["status"] == "removed"
 
         # Verify it's gone
-        context = await server.get_active_context(
-            project_path=covenant_compliant_project
+        context = await covenant_compliant_project.call(
+            server.get_active_context, project_path=covenant_compliant_project
         )
         assert context["count"] == 0
 
@@ -291,27 +299,33 @@ class TestActiveContextMCPTools:
         from daem0nmcp import server
 
         # Create and add multiple memories
-        mem1 = await server.remember(
+        mem1 = await covenant_compliant_project.call(
+            server.remember,
             category="pattern",
             content="Pattern 1",
             project_path=covenant_compliant_project,
         )
-        mem2 = await server.remember(
+        mem2 = await covenant_compliant_project.call(
+            server.remember,
             category="pattern",
             content="Pattern 2",
             project_path=covenant_compliant_project,
         )
 
-        await server.set_active_context(
-            memory_id=mem1["id"], project_path=covenant_compliant_project
+        await covenant_compliant_project.call(
+            server.set_active_context,
+            memory_id=mem1["id"],
+            project_path=covenant_compliant_project,
         )
-        await server.set_active_context(
-            memory_id=mem2["id"], project_path=covenant_compliant_project
+        await covenant_compliant_project.call(
+            server.set_active_context,
+            memory_id=mem2["id"],
+            project_path=covenant_compliant_project,
         )
 
         # Clear all
-        result = await server.clear_active_context(
-            project_path=covenant_compliant_project
+        result = await covenant_compliant_project.call(
+            server.clear_active_context, project_path=covenant_compliant_project
         )
 
         assert result["status"] == "cleared"
@@ -322,13 +336,15 @@ class TestActiveContextMCPTools:
         """Test setting active context with expiration."""
         from daem0nmcp import server
 
-        mem = await server.remember(
+        mem = await covenant_compliant_project.call(
+            server.remember,
             category="learning",
             content="Temporary focus area",
             project_path=covenant_compliant_project,
         )
 
-        result = await server.set_active_context(
+        result = await covenant_compliant_project.call(
+            server.set_active_context,
             memory_id=mem["id"],
             reason="Temporary focus",
             expires_in_hours=24,
@@ -338,11 +354,23 @@ class TestActiveContextMCPTools:
         assert result["status"] == "added"
 
     @pytest.mark.asyncio
-    async def test_mcp_set_active_context_missing_project_path(self):
+    async def test_mcp_set_active_context_missing_project_path(
+        self, tmp_path, covenant_workspace_factory
+    ):
         """Test that set_active_context requires project_path."""
         from daem0nmcp import server
 
-        result = await server.set_active_context(memory_id=1, project_path=None)
+        workspace = covenant_workspace_factory(tmp_path)
+        await workspace.brief()
+        handler_globals = inspect.unwrap(server.set_active_context).__globals__
+        original_default = handler_globals.get("_default_project_path")
+        handler_globals["_default_project_path"] = None
+        try:
+            result = await workspace.call(
+                server.set_active_context, memory_id=1, project_path=None
+            )
+        finally:
+            handler_globals["_default_project_path"] = original_default
 
         assert "error" in result
         assert result["error"] == "MISSING_PROJECT_PATH"
@@ -357,19 +385,23 @@ class TestBriefingIncludesActiveContext:
         from daem0nmcp import server
 
         # Create and activate a memory
-        mem = await server.remember(
+        mem = await covenant_compliant_project.call(
+            server.remember,
             category="warning",
             content="Database migration in progress",
             project_path=covenant_compliant_project,
         )
-        await server.set_active_context(
+        await covenant_compliant_project.call(
+            server.set_active_context,
             memory_id=mem["id"],
             reason="Ongoing migration",
             project_path=covenant_compliant_project,
         )
 
         # Get briefing
-        briefing = await server.get_briefing(project_path=covenant_compliant_project)
+        briefing = await covenant_compliant_project.call_unsealed(
+            server.get_briefing, project_path=covenant_compliant_project
+        )
 
         assert "active_context" in briefing
         assert briefing["active_context"]["count"] == 1

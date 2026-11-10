@@ -1,5 +1,6 @@
 """Tests for auto entity extraction from memories."""
 
+import inspect
 import shutil
 import tempfile
 
@@ -253,25 +254,15 @@ async def test_remember_auto_extracts_entities(temp_storage):
 
 
 @pytest.fixture
-async def covenant_compliant_project_for_entities(tmp_path):
+async def covenant_compliant_project_for_entities(tmp_path, covenant_workspace_factory):
     """Create a project that passes communion and counsel checks for entity tests."""
     from daem0nmcp import server
 
-    project_path = str(tmp_path)
-
     # Reset server state
     server._project_contexts.clear()
-
-    # Establish communion (get_briefing)
-    # This creates the DB at the right path: project_path/.daem0nmcp/storage
-    await server.get_briefing(project_path=project_path)
-
-    # Establish counsel (context_check)
-    await server.context_check(
-        description="Test entity operations", project_path=project_path
-    )
-
-    yield project_path
+    workspace = covenant_workspace_factory(tmp_path)
+    await workspace.brief()
+    yield workspace
 
 
 @pytest.mark.asyncio
@@ -280,15 +271,18 @@ async def test_mcp_recall_by_entity(covenant_compliant_project_for_entities):
     from daem0nmcp import server
 
     # Create memory with entity
-    await server.remember(
+    await covenant_compliant_project_for_entities.call(
+        server.remember,
         category="decision",
         content="Use UserService.authenticate() for login",
         project_path=covenant_compliant_project_for_entities,
     )
 
     # Query by entity
-    result = await server.recall_by_entity(
-        entity_name="UserService", project_path=covenant_compliant_project_for_entities
+    result = await covenant_compliant_project_for_entities.call(
+        server.recall_by_entity,
+        entity_name="UserService",
+        project_path=covenant_compliant_project_for_entities,
     )
 
     assert "memories" in result
@@ -301,14 +295,16 @@ async def test_mcp_recall_by_entity_with_type(covenant_compliant_project_for_ent
     from daem0nmcp import server
 
     # Create memory with entity
-    await server.remember(
+    await covenant_compliant_project_for_entities.call(
+        server.remember,
         category="pattern",
         content="Call validate_input() before processing",
         project_path=covenant_compliant_project_for_entities,
     )
 
     # Query by entity with type filter
-    result = await server.recall_by_entity(
+    result = await covenant_compliant_project_for_entities.call(
+        server.recall_by_entity,
         entity_name="validate_input",
         entity_type="function",
         project_path=covenant_compliant_project_for_entities,
@@ -323,20 +319,22 @@ async def test_mcp_list_entities(covenant_compliant_project_for_entities):
     from daem0nmcp import server
 
     # Create memories with entities
-    await server.remember(
+    await covenant_compliant_project_for_entities.call(
+        server.remember,
         category="decision",
         content="Use UserService for authentication",
         project_path=covenant_compliant_project_for_entities,
     )
-    await server.remember(
+    await covenant_compliant_project_for_entities.call(
+        server.remember,
         category="pattern",
         content="Call UserService.validate() before any action",
         project_path=covenant_compliant_project_for_entities,
     )
 
     # List entities
-    result = await server.list_entities(
-        project_path=covenant_compliant_project_for_entities
+    result = await covenant_compliant_project_for_entities.call(
+        server.list_entities, project_path=covenant_compliant_project_for_entities
     )
 
     assert "entities" in result
@@ -351,15 +349,18 @@ async def test_mcp_list_entities_with_type_filter(
     from daem0nmcp import server
 
     # Create memories with entities
-    await server.remember(
+    await covenant_compliant_project_for_entities.call(
+        server.remember,
         category="decision",
         content="Use authenticate_user() function in AuthService class",
         project_path=covenant_compliant_project_for_entities,
     )
 
     # List only function entities
-    result = await server.list_entities(
-        entity_type="function", project_path=covenant_compliant_project_for_entities
+    result = await covenant_compliant_project_for_entities.call(
+        server.list_entities,
+        entity_type="function",
+        project_path=covenant_compliant_project_for_entities,
     )
 
     assert "entities" in result
@@ -374,15 +375,16 @@ async def test_mcp_backfill_entities(covenant_compliant_project_for_entities):
     from daem0nmcp import server
 
     # Create memory (it will auto-extract, but let's test backfill anyway)
-    await server.remember(
+    await covenant_compliant_project_for_entities.call(
+        server.remember,
         category="decision",
         content="The DatabaseManager handles connections",
         project_path=covenant_compliant_project_for_entities,
     )
 
     # Run backfill
-    result = await server.backfill_entities(
-        project_path=covenant_compliant_project_for_entities
+    result = await covenant_compliant_project_for_entities.call(
+        server.backfill_entities, project_path=covenant_compliant_project_for_entities
     )
 
     assert "memories_processed" in result
@@ -391,56 +393,71 @@ async def test_mcp_backfill_entities(covenant_compliant_project_for_entities):
 
 
 @pytest.mark.asyncio
-async def test_mcp_recall_by_entity_missing_project_path():
+async def test_mcp_recall_by_entity_missing_project_path(
+    tmp_path, covenant_workspace_factory
+):
     """Test that recall_by_entity requires project_path."""
     from daem0nmcp import server
 
     # Clear any default project path
-    original_default = server._default_project_path
-    server._default_project_path = None
+    handler_globals = inspect.unwrap(server.recall_by_entity).__globals__
+    original_default = handler_globals.get("_default_project_path")
+    handler_globals["_default_project_path"] = None
     server._project_contexts.clear()
 
     try:
-        result = await server.recall_by_entity(
-            entity_name="UserService", project_path=None
+        workspace = covenant_workspace_factory(tmp_path)
+        await workspace.brief()
+        result = await workspace.call(
+            server.recall_by_entity, entity_name="UserService", project_path=None
         )
         assert "error" in result
         assert result["error"] == "MISSING_PROJECT_PATH"
     finally:
-        server._default_project_path = original_default
+        handler_globals["_default_project_path"] = original_default
 
 
 @pytest.mark.asyncio
-async def test_mcp_list_entities_missing_project_path():
+async def test_mcp_list_entities_missing_project_path(
+    tmp_path, covenant_workspace_factory
+):
     """Test that list_entities requires project_path."""
     from daem0nmcp import server
 
     # Clear any default project path
-    original_default = server._default_project_path
-    server._default_project_path = None
+    handler_globals = inspect.unwrap(server.list_entities).__globals__
+    original_default = handler_globals.get("_default_project_path")
+    handler_globals["_default_project_path"] = None
     server._project_contexts.clear()
 
     try:
-        result = await server.list_entities(project_path=None)
+        workspace = covenant_workspace_factory(tmp_path)
+        await workspace.brief()
+        result = await workspace.call(server.list_entities, project_path=None)
         assert "error" in result
         assert result["error"] == "MISSING_PROJECT_PATH"
     finally:
-        server._default_project_path = original_default
+        handler_globals["_default_project_path"] = original_default
 
 
 @pytest.mark.asyncio
-async def test_mcp_backfill_entities_missing_project_path():
+async def test_mcp_backfill_entities_missing_project_path(
+    tmp_path, covenant_workspace_factory
+):
     """Test that backfill_entities requires project_path."""
     from daem0nmcp import server
 
     # Clear any default project path
-    original_default = server._default_project_path
-    server._default_project_path = None
+    handler_globals = inspect.unwrap(server.backfill_entities).__globals__
+    original_default = handler_globals.get("_default_project_path")
+    handler_globals["_default_project_path"] = None
     server._project_contexts.clear()
 
     try:
-        result = await server.backfill_entities(project_path=None)
+        workspace = covenant_workspace_factory(tmp_path)
+        await workspace.brief()
+        result = await workspace.call(server.backfill_entities, project_path=None)
         assert "error" in result
         assert result["error"] == "MISSING_PROJECT_PATH"
     finally:
-        server._default_project_path = original_default
+        handler_globals["_default_project_path"] = original_default

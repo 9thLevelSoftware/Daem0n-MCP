@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""
+r"""
 Emergency repair: unblock Claude Code when startup hangs.
 
 Modes:

@@ -716,7 +716,7 @@
                 </div>
                 <div class="feature-card">
                     <h3>The Silent Scribe</h3>
-                    <p>Hooks whisper to the Daem0n as you work. Passive capture inscribes decisions unbidden. No change escapes notice.</p>
+                    <p>Read-only hooks whisper exact v7 calls as you work. Protected writes remain scoped and replay-safe, with inline counsel and risk challenges.</p>
                 </div>
                 <div class="feature-card">
                     <h3>The Coven Bond</h3>
@@ -724,7 +724,7 @@
                 </div>
                 <div class="feature-card">
                     <h3>Unified Workflows</h3>
-                    <p>Eight workflow tools replace sixty-seven. Commune, consult, inscribe, reflect, understand, govern, explore, maintain—one voice, all power.</p>
+                    <p>The guided v7 ritual is automatic briefing, relevant recall, direct writes with counsel challenges when needed, and verified outcomes.</p>
                 </div>
                 <div class="feature-card">
                     <h3>Visions of the Void</h3>
@@ -807,7 +807,7 @@
             <div class="ritual-code">
 <pre><span class="command">git clone</span> https://github.com/DasBluEyedDevil/Daem0n-MCP.git ~/Daem0nMCP
 <span class="command">pip install</span> -e ~/Daem0nMCP
-<span class="command">claude mcp add</span> daem0nmcp --scope user -- python -m daem0nmcp.server
+<span class="command">claude mcp add</span> daem0nmcp --scope user -- python -c "import sys; sys.path = [p for p in sys.path if p]; import runpy; runpy.run_module('daem0nmcp.server', run_name='__main__', alter_sys=True)"
 <span class="command">python -m daem0nmcp.cli install-hooks</span>        <span class="comment"># Git enforcement wards</span>
 <span class="command">python -m daem0nmcp.cli install-claude-hooks</span> <span class="comment"># Native Claude wards</span>
 <span class="command">python -m daem0nmcp.cli index</span>                <span class="comment"># Grant code sight</span>
@@ -821,18 +821,32 @@
         <section class="reveal-section">
             <h2>The Covenant</h2>
             <p class="intro-text">
-                Those who bind the Daem0n must observe the sacred protocol:
+                Those who bind the Daem0n must observe the exact v7 protocol.
+                Every scoped call uses the opaque <code>workspace_id</code> issued for the workspace.
             </p>
             <div class="ritual-code">
-<pre><span class="comment">SESSION DAWN</span>       <span class="string">commune("briefing")</span>    <span class="comment"># Commune first</span>
-<span class="comment">BEFORE CHANGES</span>     <span class="string">consult("preflight")</span>   <span class="comment"># Seek counsel</span>
-<span class="comment">AFTER DECISIONS</span>    <span class="string">inscribe("remember")</span>   <span class="comment"># Inscribe the choice</span>
-<span class="comment">AFTER COMPLETION</span>   <span class="string">reflect("outcome")</span>     <span class="comment"># Seal with fate</span>
-<span class="comment">CAUSAL INQUIRY</span>     <span class="string">explore("chain")</span>       <span class="comment"># Understand WHY</span>
-<span class="comment">CODE SIGHT</span>         <span class="string">understand("find")</span>     <span class="comment"># Search by meaning</span>
-<span class="comment">IMPACT VISION</span>      <span class="string">understand("impact")</span>   <span class="comment"># See consequences</span>
-<span class="comment">AT COMMIT TIME</span>     <span class="string">pre-commit hooks</span>       <span class="comment"># Enforcement wards</span></pre>
+<pre><span class="comment">FULL BRIEF (OPTIONAL)</span> <span class="string">session_brief(workspace_id="&lt;opaque-id&gt;")</span>
+<span class="comment">RELEVANT HISTORY</span>   <span class="string">memory_recall(workspace_id="&lt;opaque-id&gt;", query="topic", limit=10)</span>
+<span class="comment">ADVANCE PLANNING</span>   <span class="string">memory_preflight(workspace_id="&lt;opaque-id&gt;", target_tool="memory_store", target_arguments={...})</span>
+<span class="comment">DURABLE DECISION</span>  <span class="string">memory_store(..., idempotency_key="stable-key")</span>
+<span class="comment">VERIFIED RESULT</span>  <span class="string">memory_record_outcome(..., worked=true, idempotency_key="stable-outcome-key")</span>
+<span class="comment">DIAGNOSTICS</span>      <span class="string">system_health(workspace_id="&lt;opaque-id&gt;")</span></pre>
             </div>
+            <p>The first Daem0n call briefs automatically in <code>meta.covenant.auto_brief</code>; <code>session_brief</code> returns the full brief. Call protected tools directly. On <code>COUNSEL_REQUIRED</code>, read <code>error.counsel</code>, then retry exactly <code>error.remedy</code>. <code>memory_preflight</code> remains available for advance planning.</p>
+            <p>Use <code>daem0n_tools_search(query)</code>, then <code>daem0n_tool_call(workspace_id, tool, arguments)</code> for other capabilities. Tokens remain exact-argument, single-use, and valid for 300 seconds. Defaults are guided/core; <code>DAEM0NMCP_COVENANT_MODE=strict</code> restores explicit briefing and preflight, and <code>DAEM0NMCP_TOOL_SURFACE=full</code> lists all tools.</p>
+            <p class="intro-text" style="margin-top: 1.5rem; font-size: 1rem;">
+                Connect over stdio or Streamable HTTP at <code>/mcp</code>. Read-only context is available at:
+            </p>
+            <div class="ritual-code">
+<pre><span class="string">memory://workspaces/{workspace_id}/warnings</span>
+<span class="string">memory://workspaces/{workspace_id}/failures</span>
+<span class="string">memory://workspaces/{workspace_id}/rules</span>
+<span class="string">memory://workspaces/{workspace_id}/active-context</span></pre>
+            </div>
+            <p style="text-align: center; color: var(--ash); font-size: 0.9rem;">
+                For renamed and split capabilities, use the generated source of truth:
+                <a href="v6-to-v7-tools.json"><code>docs/v6-to-v7-tools.json</code></a>.
+            </p>
         </section>
 
         <section class="tithe-section reveal-section">
@@ -868,7 +882,7 @@
                 "I guard your memories until we commune again..."
             </p>
             <p style="margin-top: 0.5rem; color: #444; font-size: 0.8rem;">
-                v6.6.6 &mdash; The Deep Sight (ModernBERT Embeddings, Background Dreaming, Cognitive Tools, Auto-Zoom Retrieval)
+                v7.0.0-dev.0 &mdash; Reproducible Core (optional capability profiles and lazy dependency loading)
             </p>
         </footer>
     </div>

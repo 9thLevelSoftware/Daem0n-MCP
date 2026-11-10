@@ -41,15 +41,15 @@ async def tmp_project(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_session_start_outputs_briefing(tmp_project):
+async def test_session_start_outputs_read_only_preview(tmp_project):
     text = await async_main(str(tmp_project))
-    assert "[Daem0n Briefing]" in text
+    assert "[Daem0n preview]" in text
     assert "3 memories" in text
-    assert "Commune complete." in text
+    assert "Call session_brief" in text
 
 
 @pytest.mark.asyncio
-async def test_session_start_marks_briefed(tmp_project):
+async def test_session_start_does_not_mark_communion(tmp_project):
     await async_main(str(tmp_project))
 
     db = DatabaseManager(str(tmp_project / ".daem0nmcp" / "storage"))
@@ -58,12 +58,11 @@ async def test_session_start_marks_briefed(tmp_project):
     state = await session_mgr.get_session_state(str(tmp_project))
     await db.close()
 
-    assert state is not None
-    assert state["briefed"] is True
+    assert state is None or state["briefed"] is False
 
 
-def test_main_outputs_prompt_message(tmp_path, monkeypatch, capsys):
-    """main() prints the prompt message telling the LLM to call commune."""
+def test_main_outputs_v7_session_brief_call(tmp_path, monkeypatch, capsys):
+    """main() directs the host to the exact opaque v7 briefing ritual."""
     # Create .daem0nmcp so get_project_path() returns a path
     (tmp_path / ".daem0nmcp").mkdir()
     monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path))
@@ -76,7 +75,13 @@ def test_main_outputs_prompt_message(tmp_path, monkeypatch, capsys):
     assert exc_info.value.code == 0
     captured = capsys.readouterr()
     assert "[Daem0n] IMPORTANT" in captured.out
-    assert 'commune(action="briefing")' in captured.out
+    assert "mcp__daem0nmcp__session_brief" in captured.out
+    assert 'workspace_id="ws_' in captured.out
+    assert "first Daem0n call establishes" in captured.out
+    assert "meta.covenant.auto_brief" in captured.out
+    assert "for the full brief" in captured.out
+    assert "Before responding" not in captured.out
+    assert str(tmp_path) not in captured.out
 
 
 @pytest.mark.asyncio

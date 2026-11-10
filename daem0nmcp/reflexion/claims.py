@@ -208,29 +208,37 @@ def _extract_subject_predicate(
     """
     groups = match.groups()
 
-    if pattern_type in (
-        "identity",
-        "usage",
-        "support",
-        "return_value",
-        "property",
-        "requirement",
-    ) and len(groups) >= 2:
+    if (
+        pattern_type
+        in (
+            "identity",
+            "usage",
+            "support",
+            "return_value",
+            "property",
+            "requirement",
+        )
+        and len(groups) >= 2
+    ):
         # Two-group patterns: subject verb predicate
         return groups[0].strip(), groups[1].strip()
 
-    if pattern_type in (
-        "decision",
-        "agreement",
-        "choice",
-        "memory",
-        "discussion",
-        "previous",
-        "earlier",
-        "last_time",
-        "before",
-        "user_statement",
-    ) and groups:
+    if (
+        pattern_type
+        in (
+            "decision",
+            "agreement",
+            "choice",
+            "memory",
+            "discussion",
+            "previous",
+            "earlier",
+            "last_time",
+            "before",
+            "user_statement",
+        )
+        and groups
+    ):
         # Single-group patterns: full claim is the subject
         return groups[0].strip(), None
 

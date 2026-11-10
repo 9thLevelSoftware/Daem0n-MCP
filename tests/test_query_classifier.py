@@ -8,8 +8,13 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
-import numpy as np
 import pytest
+
+pytest.importorskip("numpy")
+# The classifier imports sentence_transformers.util (models-local profile).
+pytest.importorskip("sentence_transformers")
+
+import numpy as np
 
 from daem0nmcp.query_classifier import ExemplarQueryClassifier, QueryComplexity
 

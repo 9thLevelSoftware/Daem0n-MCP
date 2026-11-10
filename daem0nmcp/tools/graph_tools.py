@@ -10,6 +10,7 @@ try:
         _missing_project_path_error,
         get_project_context,
     )
+    from ..covenant import legacy_entrypoint
     from ..logging_config import with_request_id
     from ..mcp_instance import mcp
 except ImportError:
@@ -19,6 +20,7 @@ except ImportError:
         _missing_project_path_error,
         get_project_context,
     )
+    from daem0nmcp.covenant import legacy_entrypoint
     from daem0nmcp.logging_config import with_request_id
     from daem0nmcp.mcp_instance import mcp
 
@@ -27,6 +29,7 @@ logger = logging.getLogger(__name__)
 
 @mcp.tool(version=__version__)
 @with_request_id
+@legacy_entrypoint("link_memories")
 async def link_memories(
     source_id: int,
     target_id: int,
@@ -58,6 +61,7 @@ async def link_memories(
 
 @mcp.tool(version=__version__)
 @with_request_id
+@legacy_entrypoint("unlink_memories")
 async def unlink_memories(
     source_id: int,
     target_id: int,
@@ -84,6 +88,7 @@ async def unlink_memories(
 
 @mcp.tool(version=__version__)
 @with_request_id
+@legacy_entrypoint("trace_chain")
 async def trace_chain(
     memory_id: int,
     direction: str = "both",
@@ -115,6 +120,7 @@ async def trace_chain(
 
 @mcp.tool(version=__version__)
 @with_request_id
+@legacy_entrypoint("get_graph")
 async def get_graph(
     memory_ids: list[int] | None = None,
     topic: str | None = None,
@@ -141,6 +147,7 @@ async def get_graph(
 
 @mcp.tool(version=__version__)
 @with_request_id
+@legacy_entrypoint("get_graph_visual")
 async def get_graph_visual(
     memory_ids: list[int] | None = None,
     topic: str | None = None,
@@ -163,10 +170,8 @@ async def get_graph_visual(
     Returns:
         Graph data with ui_resource hint for visual rendering and text fallback.
     """
-    import json
-    import urllib.parse
-
     from daem0nmcp.ui.fallback import format_graph_text, format_with_ui_hint
+    from daem0nmcp.ui.rendering import APP_SPECS, build_compat_ui_uri
 
     if not project_path and not _default_project_path:
         return _missing_project_path_error()
@@ -189,16 +194,16 @@ async def get_graph_visual(
     # Generate text fallback
     text = format_graph_text(result)
 
-    # Build UI resource URI with encoded data
-    data_json = json.dumps(result)
-    encoded_data = urllib.parse.quote(data_json)
-    ui_resource = f"ui://daem0n/graph/{encoded_data}"
+    ui_resource = (
+        build_compat_ui_uri("graph", result) or APP_SPECS["graph"].resource_uri
+    )
 
     return format_with_ui_hint(result, ui_resource, text)
 
 
 @mcp.tool(version=__version__)
 @with_request_id
+@legacy_entrypoint("get_graph_stats")
 async def get_graph_stats(project_path: str | None = None) -> dict[str, Any]:
     """
     Get metrics about the knowledge graph structure: node/edge counts, density, components.
@@ -220,6 +225,7 @@ async def get_graph_stats(project_path: str | None = None) -> dict[str, Any]:
 # ============================================================================
 @mcp.tool(version=__version__)
 @with_request_id
+@legacy_entrypoint("rebuild_communities")
 async def rebuild_communities(
     min_community_size: int = 2,
     resolution: float = 1.0,
@@ -266,6 +272,7 @@ async def rebuild_communities(
 
 @mcp.tool(version=__version__)
 @with_request_id
+@legacy_entrypoint("list_communities")
 async def list_communities(
     level: int | None = None, project_path: str | None = None
 ) -> dict[str, Any]:
@@ -291,6 +298,7 @@ async def list_communities(
 
 @mcp.tool(version=__version__)
 @with_request_id
+@legacy_entrypoint("list_communities_visual")
 async def list_communities_visual(
     level: int | None = None,
     parent_community_id: int | None = None,
@@ -311,6 +319,7 @@ async def list_communities_visual(
         Dict with community data + ui_resource hint + text fallback
     """
     from daem0nmcp.ui.fallback import format_communities_text, format_with_ui_hint
+    from daem0nmcp.ui.rendering import APP_SPECS, build_compat_ui_uri
 
     # Get communities using existing function
     result = await list_communities(level=level, project_path=project_path)
@@ -342,19 +351,16 @@ async def list_communities_visual(
     # Generate text fallback
     text = format_communities_text(result)
 
-    # Create UI resource URI with encoded data
-    import json
-    import urllib.parse
-
-    data_json = json.dumps(result)
-    encoded_data = urllib.parse.quote(data_json)
-    ui_resource = f"ui://daem0n/community/{encoded_data}"
+    ui_resource = (
+        build_compat_ui_uri("community", result) or APP_SPECS["community"].resource_uri
+    )
 
     return format_with_ui_hint(data=result, ui_resource=ui_resource, text=text)
 
 
 @mcp.tool(version=__version__)
 @with_request_id
+@legacy_entrypoint("get_community_details")
 async def get_community_details(
     community_id: int, project_path: str | None = None
 ) -> dict[str, Any]:

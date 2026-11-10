@@ -10,6 +10,7 @@ try:
         _missing_project_path_error,
         get_project_context,
     )
+    from ..covenant import legacy_entrypoint
     from ..logging_config import with_request_id
     from ..mcp_instance import mcp
     from ..models import Memory
@@ -20,6 +21,7 @@ except ImportError:
         _missing_project_path_error,
         get_project_context,
     )
+    from daem0nmcp.covenant import legacy_entrypoint
     from daem0nmcp.logging_config import with_request_id
     from daem0nmcp.mcp_instance import mcp
     from daem0nmcp.models import Memory
@@ -31,6 +33,7 @@ logger = logging.getLogger(__name__)
 
 @mcp.tool(version=__version__)
 @with_request_id
+@legacy_entrypoint("list_entities")
 async def list_entities(
     entity_type: str | None = None,
     limit: int = 20,
@@ -65,6 +68,7 @@ async def list_entities(
 
 @mcp.tool(version=__version__)
 @with_request_id
+@legacy_entrypoint("backfill_entities")
 async def backfill_entities(project_path: str | None = None) -> dict[str, Any]:
     """
     Extract entities from all existing memories. Safe to run multiple times.

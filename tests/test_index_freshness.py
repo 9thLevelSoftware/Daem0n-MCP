@@ -18,9 +18,7 @@ class TestIndexFreshness:
 
     @pytest.mark.asyncio
     async def test_memory_index_rebuilds_after_external_change(self, temp_storage):
-        """Verify TF-IDF index rebuilds when DB is modified externally."""
-        import sqlite3
-        import time
+        """Verify recall observes an authoritative external canonical write."""
 
         from daem0nmcp.database import DatabaseManager
         from daem0nmcp.memory import MemoryManager
@@ -39,24 +37,20 @@ class TestIndexFreshness:
             result1 = await manager.recall("PostgreSQL")
             assert result1["found"] >= 1
 
-            # Simulate external modification (another process added a memory)
-            # Need to wait long enough to ensure timestamp is different (SQLite datetime has second precision)
-            time.sleep(1.1)  # Sleep more than 1 second to ensure different timestamp
-
-            conn = sqlite3.connect(str(db.db_path))
-            conn.execute("""
-                INSERT INTO memories (category, content, keywords, tags, context, created_at, updated_at)
-                VALUES ('decision', 'Use Redis for caching', 'redis caching', '["cache"]', '{}',
-                        datetime('now'), datetime('now'))
-            """)
-            conn.commit()
-            conn.close()
-
-            # Force freshness check - should detect change and rebuild
-            rebuilt = await manager._check_index_freshness()
-            assert rebuilt is True, (
-                "Index should have been rebuilt after external change"
-            )
+            # Simulate another live process through the authoritative event
+            # writer. A raw INSERT into the retained v6 table is intentionally
+            # not authoritative in a format-7 store.
+            external_db = DatabaseManager(temp_storage)
+            await external_db.init_db()
+            external = MemoryManager(external_db)
+            try:
+                await external.remember(
+                    category="decision",
+                    content="Use Redis for caching",
+                    tags=["cache"],
+                )
+            finally:
+                await external_db.close()
 
             # Now search should find the new memory
             result2 = await manager.recall("Redis caching")

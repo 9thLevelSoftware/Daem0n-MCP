@@ -8,15 +8,10 @@ ExemplarQueryClassifier output:
 - MEDIUM  -> hybrid BM25+vector with RRF fusion (current default baseline)
 - COMPLEX -> GraphRAG multi-hop traversal + community summaries
 
-After retrieval, optional JIT compression fires on assembled result text
-when token counts exceed tiered thresholds (soft 4K / hard 8K / emergency 16K).
-Compression metadata is returned alongside results for observability.
-
 Safety guarantees:
 - Shadow mode (default): logs classifications without changing behavior
 - All strategy methods fall back to hybrid search on any failure
 - Low-confidence classifications default to hybrid (never degrades below baseline)
-- JIT compression failures never block the pipeline (try/except with fallback)
 """
 
 from __future__ import annotations
@@ -170,7 +165,7 @@ class RetrievalRouter:
         }
 
     # ------------------------------------------------------------------
-    # JIT compression on assembled results
+    # Legacy assembled-text compression. V7 composition owns its token budget.
     # ------------------------------------------------------------------
 
     async def route_and_compress(
@@ -180,55 +175,38 @@ class RetrievalRouter:
         result_text: str | None = None,
         **kwargs: Any,
     ) -> dict[str, Any]:
-        """Route query and optionally JIT-compress assembled result text.
+        """Preserve v6 optional text compression and its separate metadata.
 
-        Calls :meth:`route_search` for classification and retrieval, then
-        runs JIT compression on *result_text* if it exceeds the soft token
-        threshold.  Compression metadata is added to the return dict so
-        callers can observe what happened without destroying structured data.
-
-        Args:
-            query: Search query text.
-            top_k: Maximum results to return.
-            result_text: Assembled text of retrieval results (all memory
-                content concatenated).  When ``None``, compression is skipped.
-            **kwargs: Forwarded to :meth:`route_search`.
-
-        Returns:
-            Dict from ``route_search`` augmented with:
-                compression_metadata -- dict or ``None``
-                compressed_text      -- str (only when compression fired)
+        Structured retrieval results remain intact. V7 production retrieval uses
+        its citation-aware composer directly and does not call this legacy API.
         """
         result = await self.route_search(query, top_k=top_k, **kwargs)
-
-        # JIT compression on assembled text (best-effort, never blocks pipeline)
-        if result_text:
+        manager = getattr(self, "_mm", None)
+        database = getattr(manager, "db", None)
+        # Unknown and v7 stores require citation-aware evidence composition.
+        # Only explicitly retained format-6 storage uses the legacy text API.
+        if result_text and getattr(database, "format_version", None) == 6:
+            result["compression_metadata"] = None
             try:
                 from .compression.jit import get_jit_compressor
 
-                jit = get_jit_compressor()
-                compression_result = jit.compress_if_needed(result_text)
-
-                if compression_result.get("threshold_triggered") is not None:
+                compressed = get_jit_compressor().compress_if_needed(result_text)
+                if compressed.get("threshold_triggered") is not None:
                     result["compression_metadata"] = {
-                        "original_tokens": compression_result["original_tokens"],
-                        "compressed_tokens": compression_result["compressed_tokens"],
-                        "compression_rate": compression_result["compression_rate"],
-                        "threshold_triggered": compression_result[
-                            "threshold_triggered"
-                        ],
-                        "content_type": compression_result.get("content_type"),
+                        key: compressed.get(key)
+                        for key in (
+                            "original_tokens",
+                            "compressed_tokens",
+                            "compression_rate",
+                            "threshold_triggered",
+                            "content_type",
+                        )
                     }
-                    result["compressed_text"] = compression_result["text"]
-                else:
-                    result["compression_metadata"] = None
+                    result["compressed_text"] = compressed["text"]
             except Exception:
                 logger.warning(
-                    "[AUTO-ZOOM] JIT compression failed, continuing without compression",
-                    exc_info=True,
+                    "Legacy JIT compression unavailable; returning structured results"
                 )
-                result["compression_metadata"] = None
-
         return result
 
     # ------------------------------------------------------------------

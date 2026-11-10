@@ -36,6 +36,8 @@ async def dispatch(
     *,
     # preflight params
     description: str | None = None,
+    target_operation: str | None = None,
+    target_args: dict[str, Any] | None = None,
     # recall params
     topic: str | None = None,
     categories: list[str] | None = None,
@@ -48,6 +50,7 @@ async def dispatch(
     include_linked: bool = False,
     visual: bool = False,
     condensed: bool = False,
+    as_of_time: str | None = None,
     # recall_entity params
     entity_name: str | None = None,
     entity_type: str | None = None,
@@ -74,9 +77,11 @@ async def dispatch(
         raise InvalidActionError(action, sorted(VALID_ACTIONS))
 
     if action == "preflight":
-        if not description:
+        if not description and not target_operation:
             raise MissingParamError("description", action)
-        return await _do_preflight(project_path, description)
+        return await _do_preflight(
+            project_path, description, target_operation, target_args
+        )
 
     elif action == "recall":
         if not topic:
@@ -94,6 +99,7 @@ async def dispatch(
             include_linked,
             visual,
             condensed,
+            as_of_time,
         )
 
     elif action == "recall_file":
@@ -140,11 +146,21 @@ async def dispatch(
     raise InvalidActionError(action, sorted(VALID_ACTIONS))
 
 
-async def _do_preflight(project_path: str, description: str) -> dict[str, Any]:
+async def _do_preflight(
+    project_path: str,
+    description: str | None,
+    target_operation: str | None,
+    target_args: dict[str, Any] | None,
+) -> dict[str, Any]:
     """Pre-flight check combining recall + check_rules."""
     from ..server import context_check
 
-    return await context_check(description=description, project_path=project_path)
+    return await context_check(
+        description=description,
+        target_operation=target_operation,
+        target_args=target_args,
+        project_path=project_path,
+    )
 
 
 async def _do_recall(
@@ -160,6 +176,7 @@ async def _do_recall(
     include_linked: bool,
     visual: bool,
     condensed: bool,
+    as_of_time: str | None,
 ) -> Any:
     """Semantic search for memories."""
     from ..server import recall, recall_visual
@@ -172,7 +189,11 @@ async def _do_recall(
             file_path=file_path,
             offset=offset,
             limit=limit,
+            since=since,
+            until=until,
             include_linked=include_linked,
+            condensed=condensed,
+            as_of_time=as_of_time,
             project_path=project_path,
         )
     return await recall(
@@ -187,6 +208,7 @@ async def _do_recall(
         project_path=project_path,
         include_linked=include_linked,
         condensed=condensed,
+        as_of_time=as_of_time,
     )
 
 

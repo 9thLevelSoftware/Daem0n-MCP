@@ -1,7 +1,9 @@
-"""
-Re-encode all memory embeddings with the new embedding model.
+"""Deprecated format-6 embedding re-encoder.
 
 Usage: python -m daem0nmcp.migrations.migrate_embedding_model [--project-path PATH]
+
+Architecture format 7 stores retrieval vectors in rebuildable projections.  This
+legacy writer therefore refuses every format-7 active database.
 
 This script:
 1. Loads all memories with vector_embedding IS NOT NULL from SQLite
@@ -17,27 +19,58 @@ import os
 import sqlite3
 import sys
 import time
+from pathlib import Path
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
 
 
-def _resolve_db_path(project_path: str) -> str:
+_V6_ONLY_ERROR = (
+    "Deprecated v6-only vector migration cannot run against format 7; use "
+    "`python -m daem0nmcp.cli rebuild-projection --projection dense "
+    "--workspace-id <workspace-id>` instead."
+)
+
+
+def _resolve_db_selection(project_path: str) -> tuple[str, int, Path | None]:
     """
-    Find daem0nmcp.db from a project path, accepting any of:
+    Find the authoritative database and architecture format from a project path.
+
+    Accepted paths are any of:
       - /path/to/project                 (.daem0nmcp/storage/daem0nmcp.db)
       - /path/to/project/.daem0nmcp      (storage/daem0nmcp.db)
       - /path/to/project/.daem0nmcp/storage  (daem0nmcp.db)
     """
-    candidates = [
-        os.path.join(project_path, ".daem0nmcp", "storage", "daem0nmcp.db"),
-        os.path.join(project_path, "storage", "daem0nmcp.db"),
-        os.path.join(project_path, "daem0nmcp.db"),
+    storage_candidates = [
+        Path(project_path) / ".daem0nmcp" / "storage",
+        Path(project_path) / "storage",
+        Path(project_path),
     ]
-    for path in candidates:
-        if os.path.exists(path):
-            return path
-    return ""
+    from daem0nmcp.storage_activation import (
+        has_canonical_v7_state,
+        resolve_active_database,
+    )
+
+    for storage in storage_candidates:
+        pointer = storage / "active-db.json"
+        if pointer.exists() or pointer.is_symlink():
+            resolved = resolve_active_database(storage)
+            return str(resolved.path), resolved.format_version, storage
+    for storage in storage_candidates:
+        path = storage / "daem0nmcp.db"
+        if path.is_file():
+            resolved = resolve_active_database(storage)
+            format_version = (
+                7 if has_canonical_v7_state(resolved.path) else resolved.format_version
+            )
+            return str(resolved.path), format_version, storage
+    return "", 0, None
+
+
+def _resolve_db_path(project_path: str) -> str:
+    """Return the authoritative database path for compatibility callers."""
+
+    return _resolve_db_selection(project_path)[0]
 
 
 def main():
@@ -52,7 +85,7 @@ def main():
     parser.add_argument("--batch-size", type=int, default=100, help="Commit batch size")
     args = parser.parse_args()
 
-    db_path = _resolve_db_path(args.project_path)
+    db_path, _, storage = _resolve_db_selection(args.project_path)
     if not db_path:
         logger.error(
             f"Database not found. Searched from: {args.project_path}\n"
@@ -61,6 +94,25 @@ def main():
             f"         <path>/daem0nmcp.db"
         )
         sys.exit(1)
+
+    from daem0nmcp.storage_activation import DatabaseFileLock
+
+    assert storage is not None
+    with DatabaseFileLock(storage, "shared"):
+        db_path, format_version, locked_storage = _resolve_db_selection(
+            args.project_path
+        )
+        if locked_storage is None or locked_storage.resolve() != storage.resolve():
+            logger.error("Active database storage changed during migration.")
+            sys.exit(1)
+        if format_version != 6:
+            logger.error(_V6_ONLY_ERROR)
+            sys.exit(1)
+        return _migrate_v6_database(db_path, args.batch_size)
+
+
+def _migrate_v6_database(db_path: str, batch_size: int) -> None:
+    """Perform the format-6 write while the caller holds the storage lock."""
 
     logger.info(f"Using database: {db_path}")
 
@@ -142,7 +194,7 @@ def main():
             migrated += 1
 
             # Batch commit
-            if len(batch_updates) >= args.batch_size:
+            if len(batch_updates) >= batch_size:
                 conn.executemany(
                     "UPDATE memories SET vector_embedding = ? WHERE id = ?",
                     batch_updates,

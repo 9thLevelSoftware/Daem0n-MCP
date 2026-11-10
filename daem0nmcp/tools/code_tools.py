@@ -14,10 +14,17 @@ try:
         _missing_project_path_error,
         _resolve_within_project,
         get_project_context,
+        workspace_registry,
     )
+    from ..covenant import legacy_entrypoint
     from ..logging_config import with_request_id
     from ..mcp_instance import mcp
     from ..models import Memory
+    from ..workspace import (
+        IndexPathError,
+        resolve_index_target,
+        validate_index_patterns,
+    )
 except ImportError:
     from daem0nmcp import __version__
     from daem0nmcp.config import settings
@@ -26,10 +33,17 @@ except ImportError:
         _missing_project_path_error,
         _resolve_within_project,
         get_project_context,
+        workspace_registry,
     )
+    from daem0nmcp.covenant import legacy_entrypoint
     from daem0nmcp.logging_config import with_request_id
     from daem0nmcp.mcp_instance import mcp
     from daem0nmcp.models import Memory
+    from daem0nmcp.workspace import (
+        IndexPathError,
+        resolve_index_target,
+        validate_index_patterns,
+    )
 
 from sqlalchemy import select
 
@@ -245,6 +259,7 @@ def _scan_for_todos(
 # ============================================================================
 @mcp.tool(version=__version__)
 @with_request_id
+@legacy_entrypoint("scan_todos")
 async def scan_todos(
     path: str | None = None,
     auto_remember: bool = False,
@@ -345,6 +360,7 @@ async def scan_todos(
 # ============================================================================
 @mcp.tool(version=__version__)
 @with_request_id
+@legacy_entrypoint("index_project")
 async def index_project(
     path: str | None = None,
     patterns: list[str] | None = None,
@@ -365,16 +381,27 @@ async def index_project(
     except ImportError:
         from daem0nmcp.code_indexer import CodeIndexManager, is_available
 
+    if not project_path and not _default_project_path:
+        return _missing_project_path_error()
+
+    ctx = await get_project_context(project_path)
+    workspace = workspace_registry.resolve(ctx.workspace_id or ctx.project_path)
+    try:
+        resolve_index_target(workspace, path)
+        target_path, path_error = _resolve_within_project(ctx.project_path, path)
+        if path_error or target_path is None:
+            raise IndexPathError("index root must remain inside the workspace")
+        validated_patterns = (
+            validate_index_patterns(patterns) if patterns is not None else None
+        )
+    except IndexPathError as exc:
+        return {"error": exc.code, "message": str(exc), "indexed": 0}
+
     if not is_available():
         return {
             "error": "Code indexing not available - install tree-sitter-languages",
             "indexed": 0,
         }
-
-    if not project_path and not _default_project_path:
-        return _missing_project_path_error()
-
-    ctx = await get_project_context(project_path)
 
     # Get Qdrant store if available
     qdrant = None
@@ -388,8 +415,12 @@ async def index_project(
 
     indexer = CodeIndexManager(db=ctx.db_manager, qdrant=qdrant)
 
-    target_path = path or ctx.project_path
-    result = await indexer.index_project(target_path, patterns)
+    try:
+        result = await indexer.index_project(
+            str(target_path), validated_patterns, workspace_root=ctx.project_path
+        )
+    except IndexPathError as exc:
+        return {"error": exc.code, "message": str(exc), "indexed": 0}
 
     index_result = {
         "result": result,
@@ -400,6 +431,7 @@ async def index_project(
 
 @mcp.tool(version=__version__)
 @with_request_id
+@legacy_entrypoint("find_code")
 async def find_code(
     query: str, project_path: str | None = None, limit: int = 20
 ) -> dict[str, Any]:
@@ -449,6 +481,7 @@ async def find_code(
 
 @mcp.tool(version=__version__)
 @with_request_id
+@legacy_entrypoint("analyze_impact")
 async def analyze_impact(
     entity_name: str, project_path: str | None = None
 ) -> dict[str, Any]:
@@ -492,6 +525,7 @@ async def analyze_impact(
 # ============================================================================
 @mcp.tool(version=__version__)
 @with_request_id
+@legacy_entrypoint("propose_refactor")
 async def propose_refactor(
     file_path: str, project_path: str | None = None
 ) -> dict[str, Any]:

@@ -5,8 +5,8 @@
       "type": "local",
       "command": [
         "python",
-        "-m",
-        "daem0nmcp"
+        "-c",
+        "import sys; sys.path = [p for p in sys.path if p]; import runpy; runpy.run_module('daem0nmcp', run_name='__main__', alter_sys=True)"
       ],
       "enabled": true,
       "environment": {

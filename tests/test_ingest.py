@@ -1,8 +1,48 @@
 """Tests for document ingestion hardening."""
 
+import importlib.metadata
+import importlib.util
+import ssl
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+
+
+def _validated_http_stack_available() -> bool:
+    if any(
+        importlib.util.find_spec(module) is None
+        for module in ("httpx", "httpcore", "packaging")
+    ):
+        return False
+    from packaging.version import InvalidVersion, Version
+
+    try:
+        httpx_version = Version(importlib.metadata.version("httpx"))
+        httpcore_version = Version(importlib.metadata.version("httpcore"))
+    except (importlib.metadata.PackageNotFoundError, InvalidVersion):
+        return False
+    return (
+        not httpx_version.is_prerelease
+        and not httpx_version.is_devrelease
+        and Version("0.28.1") <= httpx_version < Version("0.29")
+        and not httpcore_version.is_prerelease
+        and not httpcore_version.is_devrelease
+        and Version("1.0.9") <= httpcore_version < Version("1.1")
+    )
+
+
+HTTP_ADMISSION_AVAILABLE = _validated_http_stack_available()
+HTTP_FETCH_AVAILABLE = (
+    HTTP_ADMISSION_AVAILABLE and importlib.util.find_spec("bs4") is not None
+)
+requires_http_admission = pytest.mark.skipif(
+    not HTTP_ADMISSION_AVAILABLE,
+    reason="the apps HTTP dependency profile is unavailable",
+)
+requires_http_fetch = pytest.mark.skipif(
+    not HTTP_FETCH_AVAILABLE,
+    reason="the apps HTTP and HTML dependency profile is unavailable",
+)
 
 
 class AsyncContextManager:
@@ -33,10 +73,84 @@ class MockAsyncClient:
         return AsyncContextManager(self._response)
 
 
+@requires_http_admission
+class TestURLAdmission:
+    """Exercise the owning module's async admission boundary without live DNS."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "file:///etc/passwd",
+            "ftp://docs.example.test/file",
+            "https:///missing-host",
+            "https://user@docs.example.test/",
+            "https://:password@docs.example.test/",
+            "https://docs.example.test:not-a-port/",
+            "https://docs.example.test:/",
+            "https://docs.example.test:0/",
+            "https://docs.example.test:65536/",
+            "https://docs.example.test\\alternate/path",
+            "https://docs.example.test\t/path",
+            "https://docs.example.test\x00/path",
+            "http://localhost/",
+            "http://localhost./",
+            "http://localhost.localdomain/",
+            "http://service.localhost/",
+            "http://127.0.0.1/",
+            "http://169.254.169.254/",
+            "http://[::1]/",
+            "http://[fe80::1]/",
+        ],
+    )
+    async def test_rejects_invalid_or_non_public_urls_without_dns(self, url):
+        from daem0nmcp.tools.agency_tools import _validate_url
+
+        resolver = AsyncMock(side_effect=AssertionError("unexpected resolver call"))
+
+        error = await _validate_url(url, resolver=resolver)
+
+        assert error is not None
+        resolver.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "answers",
+        [(), ("93.184.216.34", "127.0.0.1")],
+    )
+    async def test_rejects_empty_or_mixed_hostname_answers(self, answers):
+        from daem0nmcp.tools.agency_tools import _validate_url
+
+        resolver = AsyncMock(return_value=answers)
+
+        error = await _validate_url(
+            "https://docs.example.test/resource",
+            resolver=resolver,
+        )
+
+        assert error is not None
+        resolver.assert_awaited_once_with("docs.example.test", 443)
+
+    @pytest.mark.asyncio
+    async def test_accepts_an_all_public_hostname_answer_set(self):
+        from daem0nmcp.tools.agency_tools import _validate_url
+
+        resolver = AsyncMock(return_value=("93.184.216.34", "2606:4700:4700::1111"))
+
+        error = await _validate_url(
+            "https://docs.example.test:8443/resource",
+            resolver=resolver,
+        )
+
+        assert error is None
+        resolver.assert_awaited_once_with("docs.example.test", 8443)
+
+
 class TestIngestDocHardening:
     """Test ingestion security and limits."""
 
     @pytest.mark.asyncio
+    @requires_http_admission
     async def test_rejects_non_http_schemes(self, covenant_compliant_project):
         """Verify that file://, ftp://, etc. are rejected."""
         from daem0nmcp.server import ingest_doc
@@ -50,8 +164,11 @@ class TestIngestDocHardening:
         ]
 
         for url in bad_urls:
-            result = await ingest_doc(
-                url=url, topic="test", project_path=covenant_compliant_project
+            result = await covenant_compliant_project.call(
+                ingest_doc,
+                url=url,
+                topic="test",
+                project_path=covenant_compliant_project,
             )
             assert "error" in result, f"Should reject {url}"
             assert (
@@ -60,9 +177,10 @@ class TestIngestDocHardening:
             )
 
     @pytest.mark.asyncio
+    @requires_http_fetch
     async def test_enforces_content_size_limit(self):
         """Verify large responses are truncated."""
-        from daem0nmcp.server import MAX_CONTENT_SIZE, _fetch_and_extract
+        from daem0nmcp.tools.agency_tools import MAX_CONTENT_SIZE, _fetch_and_extract
 
         # Mock a response that's too large
         mock_response = MagicMock()
@@ -71,29 +189,37 @@ class TestIngestDocHardening:
         mock_response.encoding = "utf-8"
         mock_response.extensions = {}
 
-        async def _aiter_bytes():
+        async def _aiter_raw(chunk_size=None):
             yield b"x" * (MAX_CONTENT_SIZE + 1000)
 
-        mock_response.aiter_bytes = _aiter_bytes
+        mock_response.aiter_raw = _aiter_raw
 
         with patch("httpx.AsyncClient", return_value=MockAsyncClient(mock_response)):
             result = await _fetch_and_extract("https://example.com/large")
 
-        # Should be truncated or return None
-        assert result is None or len(result) <= MAX_CONTENT_SIZE
+        assert result is None
 
     @pytest.mark.asyncio
     async def test_enforces_chunk_limit(self, covenant_compliant_project):
         """Verify total chunks are limited."""
         from daem0nmcp.server import MAX_CHUNKS, ingest_doc
 
-        with patch(
-            "daem0nmcp.server._fetch_and_extract", new_callable=AsyncMock
-        ) as mock_fetch:
+        with (
+            patch(
+                "daem0nmcp.tools.agency_tools._validate_url",
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
+            patch(
+                "daem0nmcp.tools.agency_tools._fetch_and_extract",
+                new_callable=AsyncMock,
+            ) as mock_fetch,
+        ):
             # Return content that would create many chunks
             mock_fetch.return_value = "word " * 100000  # Lots of words
 
-            result = await ingest_doc(
+            result = await covenant_compliant_project.call(
+                ingest_doc,
                 url="https://example.com/huge",
                 topic="test",
                 chunk_size=100,
@@ -104,6 +230,7 @@ class TestIngestDocHardening:
                 assert result["chunks_created"] <= MAX_CHUNKS
 
     @pytest.mark.asyncio
+    @requires_http_admission
     async def test_rejects_ssrf_urls(self, covenant_compliant_project):
         """Verify SSRF protection blocks localhost and private IPs."""
         from daem0nmcp.server import ingest_doc
@@ -116,8 +243,11 @@ class TestIngestDocHardening:
         ]
 
         for url in ssrf_urls:
-            result = await ingest_doc(
-                url=url, topic="test", project_path=covenant_compliant_project
+            result = await covenant_compliant_project.call(
+                ingest_doc,
+                url=url,
+                topic="test",
+                project_path=covenant_compliant_project,
             )
             assert "error" in result, f"Should reject {url}: {result}"
             error_msg = result["error"].lower()
@@ -138,7 +268,8 @@ class TestIngestDocHardening:
         from daem0nmcp.server import ingest_doc
 
         # Test negative chunk_size
-        result = await ingest_doc(
+        result = await covenant_compliant_project.call(
+            ingest_doc,
             url="https://example.com",
             topic="test",
             chunk_size=-1,
@@ -148,7 +279,8 @@ class TestIngestDocHardening:
         assert "positive" in result["error"].lower()
 
         # Test zero chunk_size
-        result = await ingest_doc(
+        result = await covenant_compliant_project.call(
+            ingest_doc,
             url="https://example.com",
             topic="test",
             chunk_size=0,
@@ -163,14 +295,18 @@ class TestIngestDocHardening:
         from daem0nmcp.server import ingest_doc
 
         # Test empty topic
-        result = await ingest_doc(
-            url="https://example.com", topic="", project_path=covenant_compliant_project
+        result = await covenant_compliant_project.call(
+            ingest_doc,
+            url="https://example.com",
+            topic="",
+            project_path=covenant_compliant_project,
         )
         assert "error" in result
         assert "empty" in result["error"].lower()
 
         # Test whitespace-only topic
-        result = await ingest_doc(
+        result = await covenant_compliant_project.call(
+            ingest_doc,
             url="https://example.com",
             topic="   ",
             project_path=covenant_compliant_project,
@@ -193,11 +329,20 @@ class TestIngestDocMocked:
 
         mock_content = "This is documentation about API usage. Use the /users endpoint for user operations."
 
-        with patch(
-            "daem0nmcp.server._fetch_and_extract", new_callable=AsyncMock
-        ) as mock_fetch:
+        with (
+            patch(
+                "daem0nmcp.tools.agency_tools._validate_url",
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
+            patch(
+                "daem0nmcp.tools.agency_tools._fetch_and_extract",
+                new_callable=AsyncMock,
+            ) as mock_fetch,
+        ):
             mock_fetch.return_value = mock_content
-            result = await ingest_doc(
+            result = await covenant_compliant_project.call(
+                ingest_doc,
                 url="https://example.com/docs",
                 topic="api-docs",
                 project_path=covenant_compliant_project,
@@ -215,11 +360,20 @@ class TestIngestDocMocked:
         from daem0nmcp.server import ingest_doc
 
         # When _fetch_and_extract returns None, ingest_doc returns an error
-        with patch(
-            "daem0nmcp.server._fetch_and_extract", new_callable=AsyncMock
-        ) as mock_fetch:
+        with (
+            patch(
+                "daem0nmcp.tools.agency_tools._validate_url",
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
+            patch(
+                "daem0nmcp.tools.agency_tools._fetch_and_extract",
+                new_callable=AsyncMock,
+            ) as mock_fetch,
+        ):
             mock_fetch.return_value = None
-            result = await ingest_doc(
+            result = await covenant_compliant_project.call(
+                ingest_doc,
                 url="https://slow.example.com/docs",
                 topic="slow-docs",
                 project_path=covenant_compliant_project,
@@ -235,11 +389,20 @@ class TestIngestDocMocked:
         from daem0nmcp.server import ingest_doc
 
         # When _fetch_and_extract returns None, ingest_doc returns an error
-        with patch(
-            "daem0nmcp.server._fetch_and_extract", new_callable=AsyncMock
-        ) as mock_fetch:
+        with (
+            patch(
+                "daem0nmcp.tools.agency_tools._validate_url",
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
+            patch(
+                "daem0nmcp.tools.agency_tools._fetch_and_extract",
+                new_callable=AsyncMock,
+            ) as mock_fetch,
+        ):
             mock_fetch.return_value = None
-            result = await ingest_doc(
+            result = await covenant_compliant_project.call(
+                ingest_doc,
                 url="https://example.com/missing",
                 topic="missing",
                 project_path=covenant_compliant_project,
@@ -248,6 +411,7 @@ class TestIngestDocMocked:
         assert "error" in result
 
 
+@requires_http_fetch
 class TestFetchAndExtract:
     """Test _fetch_and_extract HTTP handling directly."""
 
@@ -258,7 +422,7 @@ class TestFetchAndExtract:
 
         import httpx
 
-        from daem0nmcp.server import _fetch_and_extract
+        from daem0nmcp.tools.agency_tools import _fetch_and_extract
 
         with patch(
             "httpx.AsyncClient",
@@ -271,13 +435,35 @@ class TestFetchAndExtract:
         assert result is None
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "failure_kind",
+        ["dial", "tls"],
+    )
+    async def test_fetch_handles_dial_or_tls_failure(self, failure_kind):
+        from daem0nmcp.tools.agency_tools import _fetch_and_extract
+
+        if failure_kind == "dial":
+            httpcore = pytest.importorskip("httpcore")
+            failure = httpcore.ConnectError("dial failed")
+        else:
+            failure = ssl.SSLError("TLS failed")
+
+        with patch(
+            "httpx.AsyncClient",
+            return_value=MockAsyncClient(stream_error=failure),
+        ):
+            result = await _fetch_and_extract("https://docs.example.test/")
+
+        assert result is None
+
+    @pytest.mark.asyncio
     async def test_fetch_handles_http_error(self):
         """Verify _fetch_and_extract handles HTTPStatusError."""
         from unittest.mock import MagicMock, patch
 
         import httpx
 
-        from daem0nmcp.server import _fetch_and_extract
+        from daem0nmcp.tools.agency_tools import _fetch_and_extract
 
         mock_response = MagicMock()
         mock_response.raise_for_status.side_effect = httpx.HTTPStatusError(
@@ -287,11 +473,11 @@ class TestFetchAndExtract:
         mock_response.encoding = "utf-8"
         mock_response.extensions = {}
 
-        async def _aiter_bytes():
+        async def _aiter_raw(chunk_size=None):
             if False:
                 yield b""
 
-        mock_response.aiter_bytes = _aiter_bytes
+        mock_response.aiter_raw = _aiter_raw
 
         with patch("httpx.AsyncClient", return_value=MockAsyncClient(mock_response)):
             result = await _fetch_and_extract("https://example.com/missing")
@@ -299,26 +485,136 @@ class TestFetchAndExtract:
         assert result is None
 
     @pytest.mark.asyncio
+    async def test_fetch_rejects_redirect_status_without_followup(self):
+        import httpx
+
+        from daem0nmcp.tools.agency_tools import _fetch_and_extract
+
+        mock_response = MagicMock()
+        mock_response.raise_for_status.side_effect = httpx.HTTPStatusError(
+            "302 Found",
+            request=MagicMock(),
+            response=MagicMock(status_code=302),
+        )
+        mock_response.headers.get = MagicMock(return_value=None)
+        mock_response.encoding = "utf-8"
+
+        with patch("httpx.AsyncClient", return_value=MockAsyncClient(mock_response)):
+            result = await _fetch_and_extract("https://docs.example.test/start")
+
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_fetch_rejects_declared_size_before_reading_body(self):
+        from daem0nmcp.tools.agency_tools import MAX_CONTENT_SIZE, _fetch_and_extract
+
+        mock_response = MagicMock()
+        mock_response.raise_for_status = MagicMock()
+        mock_response.headers.get = MagicMock(return_value=str(MAX_CONTENT_SIZE + 1))
+        mock_response.encoding = "utf-8"
+
+        async def _aiter_raw(chunk_size=None):
+            raise AssertionError("oversized declared body must not be read")
+            yield b""
+
+        mock_response.aiter_raw = _aiter_raw
+
+        with patch("httpx.AsyncClient", return_value=MockAsyncClient(mock_response)):
+            result = await _fetch_and_extract("https://docs.example.test/large")
+
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_fetch_constructs_locked_down_client_and_owned_transport(self):
+        from daem0nmcp.tools.agency_tools import INGEST_TIMEOUT, _fetch_and_extract
+
+        mock_response = MagicMock()
+        mock_response.raise_for_status = MagicMock()
+        mock_response.status_code = 200
+        mock_response.headers = {"content-encoding": "identity"}
+        mock_response.encoding = "utf-8"
+        mock_response.extensions = {}
+
+        async def _aiter_raw(chunk_size=None):
+            yield b"<p>safe documentation</p>"
+
+        mock_response.aiter_raw = _aiter_raw
+        resolver = AsyncMock(return_value=("93.184.216.34",))
+        delegate = object()
+        transport = object()
+
+        with (
+            patch(
+                "daem0nmcp.pinned_http.PinnedAsyncHTTPTransport",
+                return_value=transport,
+            ) as transport_factory,
+            patch(
+                "httpx.AsyncClient",
+                return_value=MockAsyncClient(mock_response),
+            ) as client_factory,
+        ):
+            result = await _fetch_and_extract(
+                "https://docs.example.test/",
+                resolver=resolver,
+                delegate=delegate,
+            )
+
+        assert result == "safe documentation"
+        transport_factory.assert_called_once_with(
+            resolver=resolver,
+            delegate=delegate,
+        )
+        kwargs = client_factory.call_args.kwargs
+        assert kwargs["transport"] is transport
+        assert kwargs["timeout"] == float(INGEST_TIMEOUT)
+        assert kwargs["follow_redirects"] is False
+        assert kwargs["trust_env"] is False
+        assert kwargs["headers"] == {"Accept-Encoding": "identity"}
+
+    @pytest.mark.asyncio
+    async def test_fetch_failure_log_does_not_include_raw_url(self, caplog):
+        from daem0nmcp.tools.agency_tools import _fetch_and_extract
+
+        raw_url = "https://docs.example.test/path?token=do-not-log#fragment"
+        with (
+            caplog.at_level("ERROR", logger="daem0nmcp.tools.agency_tools"),
+            patch(
+                "httpx.AsyncClient",
+                return_value=MockAsyncClient(stream_error=RuntimeError(raw_url)),
+            ),
+        ):
+            result = await _fetch_and_extract(raw_url)
+
+        assert result is None
+        assert raw_url not in caplog.text
+        assert "do-not-log" not in caplog.text
+
+    @pytest.mark.asyncio
     async def test_fetch_extracts_html_content(self):
         """Verify _fetch_and_extract properly extracts text from HTML."""
         from unittest.mock import MagicMock, patch
 
-        from daem0nmcp.server import _fetch_and_extract
+        from daem0nmcp.tools.agency_tools import _fetch_and_extract
 
         mock_response = MagicMock()
-        # Mock headers.get() to return None for content-length
-        mock_response.headers.get = MagicMock(return_value=None)
+        mock_response.status_code = 200
+        mock_response.headers = {"content-encoding": "identity"}
         mock_response.raise_for_status = MagicMock()
         mock_response.encoding = "utf-8"
         mock_response.extensions = {}
 
-        async def _aiter_bytes():
-            yield b"<html><body><p>API documentation content</p></body></html>"
+        async def _aiter_raw(chunk_size=None):
+            yield (
+                b"<html><body><nav>menu</nav><p>API documentation content</p>"
+                b"<script>secret()</script></body></html>"
+            )
 
-        mock_response.aiter_bytes = _aiter_bytes
+        mock_response.aiter_raw = _aiter_raw
 
         with patch("httpx.AsyncClient", return_value=MockAsyncClient(mock_response)):
             result = await _fetch_and_extract("https://example.com/docs")
 
         assert result is not None
         assert "API documentation content" in result
+        assert "secret" not in result
+        assert "menu" not in result

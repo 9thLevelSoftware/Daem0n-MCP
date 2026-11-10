@@ -1,0 +1,392 @@
+"""Security regression tests for HTTP listener configuration."""
+
+import asyncio
+import json
+import unittest
+
+from pydantic import BaseModel
+
+from daem0nmcp.transport_security import (
+    OriginPolicyMiddleware,
+    StrictJsonBodyMiddleware,
+    TransportSecurityError,
+    build_http_origin_middleware,
+    get_auth_configuration,
+    strict_stdio_json_boundary,
+    validate_transport_security,
+)
+
+
+class TransportSecurityTests(unittest.TestCase):
+    def test_loopback_hosts_do_not_require_authentication(self):
+        for host in ("127.0.0.1", "::1", "[::1]", "localhost", "LOCALHOST"):
+            with self.subTest(host=host):
+                validate_transport_security(host, environ={})
+
+    def test_remote_hosts_require_production_authentication(self):
+        for host in ("0.0.0.0", "::", "[::]", "203.0.113.10", "mcp.example.com"):
+            with (
+                self.subTest(host=host),
+                self.assertRaisesRegex(
+                    TransportSecurityError, "REMOTE_BIND_REQUIRES_AUTH"
+                ),
+            ):
+                validate_transport_security(host, environ={})
+
+    def test_unrelated_token_does_not_authorize_remote_bind(self):
+        with self.assertRaisesRegex(
+            TransportSecurityError, "REMOTE_BIND_REQUIRES_AUTH"
+        ):
+            validate_transport_security(
+                "0.0.0.0", environ={"DAEM0NMCP_TOKEN": "development-secret"}
+            )
+
+    def test_invalid_and_development_verifiers_do_not_authorize_remote_bind(self):
+        invalid_environments = (
+            {"FASTMCP_SERVER_AUTH": "not.a.real.Provider"},
+            {
+                "FASTMCP_SERVER_AUTH": (
+                    "fastmcp.server.auth.providers.debug.DebugTokenVerifier"
+                )
+            },
+            {
+                "FASTMCP_SERVER_AUTH": (
+                    "fastmcp.server.auth.providers.jwt.StaticTokenVerifier"
+                ),
+                "FASTMCP_SERVER_AUTH_STATIC_TOKENS": "dev-token",
+            },
+            {
+                "FASTMCP_SERVER_AUTH": (
+                    "fastmcp.server.auth.providers.jwt.JWTVerifier"
+                ),
+                "FASTMCP_SERVER_AUTH_JWT_JWKS_URI": "https://issuer.example/jwks",
+            },
+        )
+
+        for environ in invalid_environments:
+            with (
+                self.subTest(environ=environ),
+                self.assertRaises(TransportSecurityError),
+            ):
+                validate_transport_security("mcp.example.com", environ=environ)
+
+    def test_complete_jwt_verifier_configuration_authorizes_remote_bind(self):
+        validate_transport_security(
+            "0.0.0.0",
+            environ={
+                "FASTMCP_SERVER_AUTH": (
+                    "fastmcp.server.auth.providers.jwt.JWTVerifier"
+                ),
+                "FASTMCP_SERVER_AUTH_JWT_JWKS_URI": "https://issuer.example/jwks",
+                "FASTMCP_SERVER_AUTH_JWT_ISSUER": "https://issuer.example",
+                "FASTMCP_SERVER_AUTH_JWT_AUDIENCE": "daem0nmcp",
+            },
+        )
+
+    def test_proxied_loopback_listener_requires_production_authentication(self):
+        exposed_environments = (
+            {"DAEM0NMCP_ALLOWED_HOSTS": "mcp.example"},
+            {"DAEM0NMCP_ALLOWED_HOSTS": "localhost:8765,mcp.example:443"},
+            {"DAEM0NMCP_ALLOWED_HOSTS": "203.0.113.10:8765"},
+            {"DAEM0NMCP_TRUSTED_PROXY_IPS": "127.0.0.1"},
+            {"DAEM0NMCP_TRUSTED_PROXY_IPS": "10.0.0.5"},
+        )
+        for host in ("127.0.0.1", "::1", "localhost"):
+            for environ in exposed_environments:
+                with (
+                    self.subTest(host=host, environ=environ),
+                    self.assertRaisesRegex(
+                        TransportSecurityError, "PROXIED_LISTENER_REQUIRES_AUTH"
+                    ),
+                ):
+                    validate_transport_security(host, environ=environ)
+
+    def test_malformed_allowed_host_on_loopback_is_a_host_configuration_error(self):
+        for value in ("not a host", "localhost,", " localhost", "localhost.:80"):
+            with (
+                self.subTest(value=value),
+                self.assertRaisesRegex(
+                    TransportSecurityError, "INVALID_HOST_CONFIGURATION"
+                ),
+            ):
+                validate_transport_security(
+                    "127.0.0.1", environ={"DAEM0NMCP_ALLOWED_HOSTS": value}
+                )
+
+    def test_proxied_loopback_listener_rejects_development_verifiers(self):
+        class DevelopmentVerifier:
+            pass
+
+        with self.assertRaisesRegex(
+            TransportSecurityError, "INVALID_AUTH_CONFIGURATION"
+        ):
+            validate_transport_security(
+                "127.0.0.1",
+                auth_provider=DevelopmentVerifier(),
+                environ={"DAEM0NMCP_ALLOWED_HOSTS": "mcp.example"},
+            )
+
+    def test_proxied_loopback_listener_starts_with_production_authentication(self):
+        validate_transport_security(
+            "127.0.0.1",
+            environ={
+                "DAEM0NMCP_ALLOWED_HOSTS": "mcp.example",
+                "DAEM0NMCP_TRUSTED_PROXY_IPS": "127.0.0.1",
+                "FASTMCP_SERVER_AUTH": (
+                    "fastmcp.server.auth.providers.jwt.JWTVerifier"
+                ),
+                "FASTMCP_SERVER_AUTH_JWT_JWKS_URI": "https://issuer.example/jwks",
+                "FASTMCP_SERVER_AUTH_JWT_ISSUER": "https://issuer.example",
+                "FASTMCP_SERVER_AUTH_JWT_AUDIENCE": "daem0nmcp",
+            },
+        )
+
+    def test_loopback_only_allowed_hosts_do_not_require_authentication(self):
+        for allowed in (
+            "localhost",
+            "localhost:9876",
+            "127.0.0.1:9876",
+            "[::1]:9876",
+            "LOCALHOST:9876,127.0.0.1",
+        ):
+            with self.subTest(allowed=allowed):
+                validate_transport_security(
+                    "127.0.0.1", environ={"DAEM0NMCP_ALLOWED_HOSTS": allowed}
+                )
+
+    def test_jwks_uri_must_be_https_unless_it_is_loopback(self):
+        def environment(jwks_uri: str) -> dict[str, str]:
+            return {
+                "FASTMCP_SERVER_AUTH": (
+                    "fastmcp.server.auth.providers.jwt.JWTVerifier"
+                ),
+                "FASTMCP_SERVER_AUTH_JWT_JWKS_URI": jwks_uri,
+                "FASTMCP_SERVER_AUTH_JWT_ISSUER": "https://issuer.example",
+                "FASTMCP_SERVER_AUTH_JWT_AUDIENCE": "daem0nmcp",
+            }
+
+        for jwks_uri in (
+            "http://issuer.example/jwks",
+            "http://203.0.113.10/jwks",
+            "http://localhost.issuer.example/jwks",
+            "http://user@127.0.0.1@issuer.example/jwks",
+            "ftp://issuer.example/jwks",
+            "file:///etc/jwks.json",
+            "issuer.example/jwks",
+            "https:///jwks",
+            "https://issuer.example:port/jwks",
+        ):
+            with self.subTest(jwks_uri=jwks_uri):
+                with self.assertRaisesRegex(
+                    TransportSecurityError, "INVALID_AUTH_CONFIGURATION"
+                ):
+                    get_auth_configuration(environment(jwks_uri))
+                with self.assertRaisesRegex(
+                    TransportSecurityError, "INVALID_AUTH_CONFIGURATION"
+                ):
+                    validate_transport_security(
+                        "0.0.0.0", environ=environment(jwks_uri)
+                    )
+
+        for jwks_uri in (
+            "https://issuer.example/jwks",
+            "HTTPS://issuer.example/jwks",
+            "http://127.0.0.1:8080/jwks.json",
+            "http://localhost:8080/jwks.json",
+            "http://[::1]:8080/jwks.json",
+        ):
+            with self.subTest(jwks_uri=jwks_uri):
+                configuration = get_auth_configuration(environment(jwks_uri))
+                self.assertEqual(configuration.kwargs["jwks_uri"], jwks_uri)
+
+    def test_remote_browser_origins_are_default_deny_and_explicitly_allowlisted(self):
+        middleware = build_http_origin_middleware(
+            "0.0.0.0",
+            9876,
+            environ={},
+        )
+        self.assertEqual(len(middleware), 1)
+        self.assertEqual(middleware[0].kwargs["allowed_origins"], ())
+
+        configured = build_http_origin_middleware(
+            "0.0.0.0",
+            9876,
+            environ={
+                "DAEM0NMCP_ALLOWED_ORIGINS": (
+                    "https://mcp.example.com,https://console.example.com"
+                )
+            },
+        )
+        self.assertEqual(
+            configured[0].kwargs["allowed_origins"],
+            ("https://console.example.com", "https://mcp.example.com"),
+        )
+
+    def test_origin_middleware_rejects_unknown_and_serves_exact_preflight(self):
+        downstream_calls: list[object] = []
+
+        async def downstream(scope, receive, send):
+            downstream_calls.append(scope)
+            await send({"type": "http.response.start", "status": 200, "headers": []})
+            await send({"type": "http.response.body", "body": b"ok"})
+
+        middleware = OriginPolicyMiddleware(
+            downstream,
+            allowed_origins=("https://console.example.com",),
+        )
+
+        async def request(origin: str, method: str = "POST"):
+            sent: list[dict[str, object]] = []
+            headers = [(b"origin", origin.encode("ascii"))]
+            if method == "OPTIONS":
+                headers.append((b"access-control-request-method", b"POST"))
+
+            async def send(message):
+                sent.append(message)
+
+            await middleware(
+                {"type": "http", "method": method, "headers": headers},
+                lambda: None,
+                send,
+            )
+            return sent
+
+        rejected = asyncio.run(request("https://evil.example"))
+        self.assertEqual(rejected[0]["status"], 403)
+        self.assertEqual(downstream_calls, [])
+
+        preflight = asyncio.run(request("https://console.example.com", "OPTIONS"))
+        self.assertEqual(preflight[0]["status"], 204)
+        headers = dict(preflight[0]["headers"])
+        self.assertEqual(
+            headers[b"access-control-allow-origin"],
+            b"https://console.example.com",
+        )
+        self.assertEqual(downstream_calls, [])
+
+    def test_origin_configuration_rejects_wildcards_and_non_origins(self):
+        for value in (
+            "*",
+            "https://example.com/path",
+            "https://user@example.com",
+            "file:///tmp/source",
+            "https://example.com,",
+            "https://exa\nmple.com",
+            "https://exa\rmple.com",
+            "https://exa\tmple.com",
+        ):
+            with self.subTest(value=value), self.assertRaises(TransportSecurityError):
+                build_http_origin_middleware(
+                    "0.0.0.0",
+                    9876,
+                    environ={"DAEM0NMCP_ALLOWED_ORIGINS": value},
+                )
+
+    def test_http_json_boundary_rejects_duplicate_keys_before_dispatch(self):
+        downstream_bodies: list[bytes] = []
+
+        async def downstream(_scope, receive, send):
+            message = await receive()
+            downstream_bodies.append(message["body"])
+            await send({"type": "http.response.start", "status": 200, "headers": []})
+            await send({"type": "http.response.body", "body": b"ok"})
+
+        middleware = StrictJsonBodyMiddleware(downstream)
+
+        async def request(body: bytes):
+            sent: list[dict[str, object]] = []
+            messages = iter(
+                [
+                    {
+                        "type": "http.request",
+                        "body": body,
+                        "more_body": False,
+                    }
+                ]
+            )
+
+            async def receive():
+                return next(messages)
+
+            async def send(message):
+                sent.append(message)
+
+            await middleware(
+                {
+                    "type": "http",
+                    "method": "POST",
+                    "headers": [(b"content-type", b"application/json")],
+                },
+                receive,
+                send,
+            )
+            return sent
+
+        duplicate = (
+            b'{"jsonrpc":"2.0","method":"tools/call","params":'
+            b'{"name":"memory_store","arguments":{"content":"first",'
+            b'"content":"last"}}}'
+        )
+        rejected = asyncio.run(request(duplicate))
+        self.assertEqual(rejected[0]["status"], 400)
+        self.assertEqual(downstream_bodies, [])
+
+        unique = b'{"jsonrpc":"2.0","method":"tools/list","id":1}'
+        accepted = asyncio.run(request(unique))
+        self.assertEqual(accepted[0]["status"], 200)
+        self.assertEqual(downstream_bodies, [unique])
+
+    def test_http_json_boundary_rejects_excessive_nesting(self):
+        async def downstream(_scope, _receive, _send):
+            raise AssertionError("malformed JSON reached MCP dispatch")
+
+        middleware = StrictJsonBodyMiddleware(downstream)
+
+        async def request():
+            sent: list[dict[str, object]] = []
+            delivered = False
+
+            async def receive():
+                nonlocal delivered
+                if delivered:
+                    return {"type": "http.disconnect"}
+                delivered = True
+                return {
+                    "type": "http.request",
+                    "body": (b"[" * 2_000) + (b"]" * 2_000),
+                    "more_body": False,
+                }
+
+            async def send(message):
+                sent.append(message)
+
+            await middleware(
+                {"type": "http", "method": "POST", "headers": []},
+                receive,
+                send,
+            )
+            return sent
+
+        rejected = asyncio.run(request())
+        self.assertEqual(rejected[0]["status"], 400)
+
+    def test_stdio_json_boundary_rejects_duplicate_keys_and_restores_model(self):
+        class Message(BaseModel):
+            content: str
+
+        duplicate = '{"content":"first","content":"last"}'
+        self.assertEqual(Message.model_validate_json(duplicate).content, "last")
+        with strict_stdio_json_boundary(Message):
+            with self.assertRaises(ValueError):
+                Message.model_validate_json(duplicate)
+            self.assertEqual(
+                Message.model_validate_json('{"content":"only"}').content,
+                "only",
+            )
+            with self.assertRaises(ValueError):
+                Message.model_validate_json(json.dumps([[[float("nan")]]]))
+        self.assertEqual(Message.model_validate_json(duplicate).content, "last")
+
+
+if __name__ == "__main__":
+    unittest.main()

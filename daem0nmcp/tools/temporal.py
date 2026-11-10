@@ -10,6 +10,7 @@ try:
         _missing_project_path_error,
         get_project_context,
     )
+    from ..covenant import legacy_entrypoint
     from ..logging_config import with_request_id
     from ..mcp_instance import mcp
 except ImportError:
@@ -19,6 +20,7 @@ except ImportError:
         _missing_project_path_error,
         get_project_context,
     )
+    from daem0nmcp.covenant import legacy_entrypoint
     from daem0nmcp.logging_config import with_request_id
     from daem0nmcp.mcp_instance import mcp
 
@@ -27,6 +29,7 @@ logger = logging.getLogger(__name__)
 
 @mcp.tool(version=__version__)
 @with_request_id
+@legacy_entrypoint("trace_causal_path")
 async def trace_causal_path(
     start_memory_id: int,
     end_memory_id: int,
@@ -57,6 +60,7 @@ async def trace_causal_path(
 
 @mcp.tool(version=__version__)
 @with_request_id
+@legacy_entrypoint("trace_evolution")
 async def trace_evolution(
     entity_name: str | None = None,
     entity_type: str | None = None,

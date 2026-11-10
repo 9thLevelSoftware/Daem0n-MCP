@@ -68,7 +68,8 @@ class TestMCPToolParameters:
         # Create a memory with happened_at in the past
         past_time = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
 
-        result = await server.remember(
+        result = await covenant_compliant_project.call(
+            server.remember,
             category="decision",
             content="User prefers Python over JavaScript",
             happened_at=past_time,
@@ -86,7 +87,8 @@ class TestMCPToolParameters:
         """remember should return error for invalid happened_at format."""
         from daem0nmcp import server
 
-        result = await server.remember(
+        result = await covenant_compliant_project.call(
+            server.remember,
             category="decision",
             content="Test decision",
             happened_at="not-a-valid-date",
@@ -103,7 +105,8 @@ class TestMCPToolParameters:
         from daem0nmcp import server
 
         # First create a memory
-        await server.remember(
+        await covenant_compliant_project.call(
+            server.remember,
             category="pattern",
             content="Always use type hints in Python",
             project_path=covenant_compliant_project,
@@ -111,7 +114,8 @@ class TestMCPToolParameters:
 
         # Query with as_of_time
         future_time = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
-        result = await server.recall(
+        result = await covenant_compliant_project.call(
+            server.recall,
             topic="type hints",
             as_of_time=future_time,
             project_path=covenant_compliant_project,
@@ -126,7 +130,8 @@ class TestMCPToolParameters:
         """recall should return error for invalid as_of_time format."""
         from daem0nmcp import server
 
-        result = await server.recall(
+        result = await covenant_compliant_project.call(
+            server.recall,
             topic="anything",
             as_of_time="invalid-timestamp",
             project_path=covenant_compliant_project,
@@ -144,7 +149,8 @@ class TestMCPToolParameters:
         from daem0nmcp import server
 
         # Call with entity_name (will return not found, but validates parameter acceptance)
-        result = await server.trace_evolution(
+        result = await covenant_compliant_project.call(
+            server.trace_evolution,
             entity_name="NonExistentEntity",
             entity_type="concept",
             include_invalidated=True,
@@ -161,7 +167,9 @@ class TestMCPToolParameters:
         """trace_evolution should require either entity_name or entity_id."""
         from daem0nmcp import server
 
-        result = await server.trace_evolution(project_path=covenant_compliant_project)
+        result = await covenant_compliant_project.call(
+            server.trace_evolution, project_path=covenant_compliant_project
+        )
 
         assert "error" in result
         assert "entity_name or entity_id" in result["error"].lower()
@@ -477,7 +485,8 @@ class TestEdgeCases:
         # Z suffix is common ISO 8601 format
         timestamp_with_z = "2025-01-15T10:00:00Z"
 
-        result = await server.remember(
+        result = await covenant_compliant_project.call(
+            server.remember,
             category="decision",
             content="Test Z suffix handling",
             happened_at=timestamp_with_z,
@@ -495,7 +504,8 @@ class TestEdgeCases:
         # Offset format
         timestamp_with_offset = "2025-01-15T10:00:00+05:30"
 
-        result = await server.remember(
+        result = await covenant_compliant_project.call(
+            server.remember,
             category="decision",
             content="Test offset timezone handling",
             happened_at=timestamp_with_offset,
@@ -526,7 +536,8 @@ class TestMCPToolVerification:
         one_day_ago = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
         three_days_ago = (datetime.now(timezone.utc) - timedelta(days=3)).isoformat()
 
-        await server.remember(
+        await covenant_compliant_project.call(
+            server.remember,
             category="pattern",
             content="Use dependency injection for testability",
             happened_at=two_days_ago,
@@ -534,14 +545,16 @@ class TestMCPToolVerification:
         )
 
         # Query at one day ago (after the fact was true) - should find it
-        result_after = await server.recall(
+        result_after = await covenant_compliant_project.call(
+            server.recall,
             topic="dependency injection testability",
             as_of_time=one_day_ago,
             project_path=covenant_compliant_project,
         )
 
         # Query at three days ago (before the fact was true) - should NOT find it
-        result_before = await server.recall(
+        result_before = await covenant_compliant_project.call(
+            server.recall,
             topic="dependency injection testability",
             as_of_time=three_days_ago,
             project_path=covenant_compliant_project,
@@ -571,7 +584,8 @@ class TestMCPToolVerification:
         from daem0nmcp.models import ExtractedEntity
 
         # Get a database session to create an entity
-        ctx = await server.get_project_context(covenant_compliant_project)
+        with covenant_compliant_project.installed():
+            ctx = await server.get_project_context(covenant_compliant_project)
 
         async with ctx.db_manager.get_session() as session:
             entity = ExtractedEntity(
@@ -583,7 +597,8 @@ class TestMCPToolVerification:
             await session.commit()
 
         # Now trace its evolution
-        result = await server.trace_evolution(
+        result = await covenant_compliant_project.call(
+            server.trace_evolution,
             entity_name="TestableEntity",
             include_invalidated=True,
             project_path=covenant_compliant_project,

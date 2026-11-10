@@ -7,6 +7,7 @@ Tests verification of claims against stored knowledge:
 - Summary aggregation
 """
 
+from importlib.util import find_spec
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -19,6 +20,16 @@ from daem0nmcp.reflexion.verification import (
     verify_claim,
     verify_claims,
 )
+
+requires_models_local = pytest.mark.skipif(
+    find_spec("sentence_transformers") is None,
+    reason="models-local profile is not installed",
+)
+
+
+@pytest.fixture(autouse=True)
+def models_local_enabled(monkeypatch):
+    monkeypatch.setenv("DAEM0NMCP_MODELS_LOCAL_ENABLED", "true")
 
 
 @pytest.fixture
@@ -98,9 +109,7 @@ class TestVerifyClaim:
                 "daem0nmcp.reflexion.verification.encode_document"
             ) as mock_encode_doc,
             patch("daem0nmcp.reflexion.verification.decode") as mock_decode,
-            patch(
-                "daem0nmcp.reflexion.verification.cosine_similarity"
-            ) as mock_sim,
+            patch("daem0nmcp.reflexion.verification.cosine_similarity") as mock_sim,
         ):
             # Mock embedding operations
             mock_encode.return_value = b"fake_embedding"
@@ -118,6 +127,7 @@ class TestVerifyClaim:
         assert len(result.evidence) >= 1
         assert result.evidence[0].source == "memory"
 
+    @requires_models_local
     @pytest.mark.asyncio
     async def test_verify_no_evidence_unverified(
         self, mock_memory_manager, memory_reference_claim
@@ -159,9 +169,7 @@ class TestVerifyClaim:
                 "daem0nmcp.reflexion.verification.encode_document"
             ) as mock_encode_doc,
             patch("daem0nmcp.reflexion.verification.decode") as mock_decode,
-            patch(
-                "daem0nmcp.reflexion.verification.cosine_similarity"
-            ) as mock_sim,
+            patch("daem0nmcp.reflexion.verification.cosine_similarity") as mock_sim,
         ):
             mock_encode.return_value = b"fake_embedding"
             mock_encode_doc.return_value = b"fake_embedding"
@@ -177,6 +185,7 @@ class TestVerifyClaim:
         assert result.conflict_reason is not None
         assert "negation" in result.conflict_reason.lower()
 
+    @requires_models_local
     @pytest.mark.asyncio
     async def test_verify_with_knowledge_graph(
         self, mock_memory_manager, mock_knowledge_graph, memory_reference_claim
@@ -215,6 +224,7 @@ class TestVerifyClaim:
         # Memory manager should not have been called for skip-level
         mock_memory_manager.recall.assert_not_called()
 
+    @requires_models_local
     @pytest.mark.asyncio
     async def test_verify_with_as_of_time(
         self, mock_memory_manager, memory_reference_claim
@@ -256,9 +266,7 @@ class TestVerifyClaim:
                 "daem0nmcp.reflexion.verification.encode_document"
             ) as mock_encode_doc,
             patch("daem0nmcp.reflexion.verification.decode") as mock_decode,
-            patch(
-                "daem0nmcp.reflexion.verification.cosine_similarity"
-            ) as mock_sim,
+            patch("daem0nmcp.reflexion.verification.cosine_similarity") as mock_sim,
         ):
             mock_encode.return_value = b"fake_embedding"
             mock_encode_doc.return_value = b"fake_embedding"
@@ -278,6 +286,7 @@ class TestVerifyClaim:
 class TestVerifyClaims:
     """Tests for verify_claims function."""
 
+    @requires_models_local
     @pytest.mark.asyncio
     async def test_verify_multiple_claims(self, mock_memory_manager):
         """Multiple claims should all be verified."""
@@ -318,6 +327,7 @@ class TestVerifyClaims:
 
         assert len(results) == 0
 
+    @requires_models_local
     @pytest.mark.asyncio
     async def test_verify_claims_preserves_order(self, mock_memory_manager):
         """Results should be in same order as input claims."""
@@ -522,9 +532,7 @@ class TestVerificationIntegration:
                 "daem0nmcp.reflexion.verification.encode_document"
             ) as mock_encode_doc,
             patch("daem0nmcp.reflexion.verification.decode") as mock_decode,
-            patch(
-                "daem0nmcp.reflexion.verification.cosine_similarity"
-            ) as mock_sim,
+            patch("daem0nmcp.reflexion.verification.cosine_similarity") as mock_sim,
         ):
             mock_encode.return_value = b"embedding"
             mock_encode_doc.return_value = b"embedding"

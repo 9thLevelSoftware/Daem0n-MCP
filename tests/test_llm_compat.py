@@ -21,6 +21,7 @@ from daem0nmcp.memory import MemoryManager
 from daem0nmcp.migrations.schema import MIGRATIONS
 from daem0nmcp.models import Memory
 from daem0nmcp.transforms.covenant import CovenantMiddleware, client_meta_var
+from tests.covenant_test_support import CovenantTestWorkspace
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -223,7 +224,7 @@ class TestCovenantMiddleware:
 
     def test_covenant_middleware_has_on_initialize(self):
         """CovenantMiddleware must have an on_initialize method and client_name property."""
-        middleware = CovenantMiddleware(get_state=lambda p: None)
+        middleware = CovenantMiddleware()
         assert hasattr(middleware, "on_initialize")
         assert callable(middleware.on_initialize)
         assert hasattr(middleware, "client_name")
@@ -231,13 +232,14 @@ class TestCovenantMiddleware:
         assert middleware.client_name is None
 
     @pytest.mark.asyncio
-    async def test_middleware_strips_client_meta_from_args(self):
+    async def test_middleware_strips_client_meta_from_args(self, tmp_path):
         """on_call_tool should pop _client_meta from arguments and set client_meta_var."""
+        workspace = CovenantTestWorkspace(tmp_path)
+        workspace.gate.record_briefing(workspace.scope)
         middleware = CovenantMiddleware(
-            get_state=lambda p: {
-                "briefed": True,
-                "context_checks": [{"timestamp": "2025-01-01T00:00:00+00:00"}],
-            },
+            gate=workspace.gate,
+            scope_provider=lambda _context, _workspace: workspace.scope,
+            workspace_resolver=workspace._registry.resolve,
         )
 
         meta = {
@@ -246,83 +248,101 @@ class TestCovenantMiddleware:
             "modelID": "claude-sonnet-4",
         }
         arguments = {
-            "action": "remember",
-            "project_path": "/tmp/test",
-            "category": "decision",
-            "content": "test",
+            "action": "recall",
+            "project_path": workspace,
+            "topic": "test",
             "_client_meta": json.dumps(meta),
         }
 
         # Build a mock context whose message.arguments is the mutable dict
-        mock_message = type("Msg", (), {"name": "inscribe", "arguments": arguments})()
+        mock_message = type("Msg", (), {"name": "consult", "arguments": arguments})()
         mock_context = type("Ctx", (), {"message": mock_message})()
 
         # call_next just returns a sentinel so we can verify it was called
         sentinel = object()
 
+        observed_meta = []
+
         async def mock_call_next(ctx):
+            observed_meta.append(client_meta_var.get())
             return sentinel
 
         result = await middleware.on_call_tool(mock_context, mock_call_next)
 
-        # _client_meta should be removed from arguments before call_next
-        assert "_client_meta" not in arguments
-        # ContextVar should hold the parsed dict
-        assert client_meta_var.get() == meta
+        # _client_meta should be removed from downstream arguments.
+        assert "_client_meta" not in mock_context.message.arguments
+        # Metadata exists only while downstream dispatch is executing.
+        assert observed_meta == [meta]
+        assert client_meta_var.get() is None
         # Tool call should have proceeded
         assert result is sentinel
 
     @pytest.mark.asyncio
-    async def test_middleware_handles_malformed_client_meta(self):
+    async def test_middleware_handles_malformed_client_meta(self, tmp_path):
         """on_call_tool should handle malformed _client_meta without raising."""
+        workspace = CovenantTestWorkspace(tmp_path)
+        workspace.gate.record_briefing(workspace.scope)
         middleware = CovenantMiddleware(
-            get_state=lambda p: {
-                "briefed": True,
-                "context_checks": [{"timestamp": "2025-01-01T00:00:00+00:00"}],
-            },
+            gate=workspace.gate,
+            scope_provider=lambda _context, _workspace: workspace.scope,
+            workspace_resolver=workspace._registry.resolve,
         )
 
         arguments = {
-            "action": "remember",
-            "project_path": "/tmp/test",
+            "action": "recall",
+            "project_path": workspace,
+            "topic": "test",
             "_client_meta": "not-valid-json",
         }
 
-        mock_message = type("Msg", (), {"name": "inscribe", "arguments": arguments})()
+        mock_message = type("Msg", (), {"name": "consult", "arguments": arguments})()
         mock_context = type("Ctx", (), {"message": mock_message})()
 
+        observed_meta = []
+
         async def mock_call_next(ctx):
+            observed_meta.append(client_meta_var.get())
             return "ok"
 
         result = await middleware.on_call_tool(mock_context, mock_call_next)
 
-        assert "_client_meta" not in arguments
+        assert "_client_meta" not in mock_context.message.arguments
+        assert observed_meta == [None]
         assert client_meta_var.get() is None
         assert result == "ok"
 
     @pytest.mark.asyncio
-    async def test_middleware_no_client_meta_clears_var(self):
+    async def test_middleware_no_client_meta_clears_var(self, tmp_path):
         """on_call_tool without _client_meta should set client_meta_var to None."""
+        workspace = CovenantTestWorkspace(tmp_path)
+        workspace.gate.record_briefing(workspace.scope)
         middleware = CovenantMiddleware(
-            get_state=lambda p: {
-                "briefed": True,
-                "context_checks": [{"timestamp": "2025-01-01T00:00:00+00:00"}],
-            },
+            gate=workspace.gate,
+            scope_provider=lambda _context, _workspace: workspace.scope,
+            workspace_resolver=workspace._registry.resolve,
         )
 
         # Pre-set the var to simulate a previous call that had metadata
         token = client_meta_var.set({"client": "stale"})
 
-        arguments = {"action": "recall", "project_path": "/tmp/test", "query": "test"}
+        arguments = {
+            "action": "recall",
+            "project_path": workspace,
+            "topic": "test",
+        }
         mock_message = type("Msg", (), {"name": "consult", "arguments": arguments})()
         mock_context = type("Ctx", (), {"message": mock_message})()
 
+        observed_meta = []
+
         async def mock_call_next(ctx):
+            observed_meta.append(client_meta_var.get())
             return "ok"
 
         try:
             await middleware.on_call_tool(mock_context, mock_call_next)
-            assert client_meta_var.get() is None
+            assert observed_meta == [None]
+            assert client_meta_var.get() == {"client": "stale"}
         finally:
             client_meta_var.reset(token)
 
@@ -332,7 +352,7 @@ class TestPluginTemplate:
 
     def test_simplified_covenant_in_plugin_template(self):
         """PLUGIN_TEMPLATE must contain both COVENANT_RULES_FULL and COVENANT_RULES_SIMPLIFIED,
-        plus _client_meta injection and currentModel tracking."""
+        and must not stage forgeable client metadata."""
         from daem0nmcp.opencode_install import PLUGIN_TEMPLATE
 
         assert "COVENANT_RULES_FULL" in PLUGIN_TEMPLATE, (
@@ -341,9 +361,5 @@ class TestPluginTemplate:
         assert "COVENANT_RULES_SIMPLIFIED" in PLUGIN_TEMPLATE, (
             "PLUGIN_TEMPLATE must reference COVENANT_RULES_SIMPLIFIED"
         )
-        assert "_client_meta" in PLUGIN_TEMPLATE, (
-            "PLUGIN_TEMPLATE must inject _client_meta for provenance tracking"
-        )
-        assert "currentModel" in PLUGIN_TEMPLATE, (
-            "PLUGIN_TEMPLATE must track currentModel for _client_meta injection"
-        )
+        assert "_client_meta" not in PLUGIN_TEMPLATE
+        assert "currentModel" not in PLUGIN_TEMPLATE

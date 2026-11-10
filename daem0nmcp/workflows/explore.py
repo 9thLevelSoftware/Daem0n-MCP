@@ -171,9 +171,9 @@ async def _do_chain(
     max_depth: int,
 ) -> dict[str, Any]:
     """Find causal paths between two memories."""
-    from ..server import trace_chain
+    from ..server import trace_causal_path
 
-    return await trace_chain(
+    return await trace_causal_path(
         start_memory_id=start_memory_id,
         end_memory_id=end_memory_id,
         max_depth=max_depth,

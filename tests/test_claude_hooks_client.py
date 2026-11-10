@@ -2,16 +2,18 @@
 
 import json
 import sys
+from io import BytesIO, TextIOWrapper
+from types import SimpleNamespace
 
 import pytest
 
 from daem0nmcp.claude_hooks._client import (
     block,
     get_command_from_input,
-    get_file_path_from_input,
     get_project_path,
-    get_tool_input,
+    read_hook_event,
     run_hook_safely,
+    started_by_module_switch,
     succeed,
 )
 
@@ -81,20 +83,30 @@ class TestBlockSucceed:
 
 
 class TestToolInputParsing:
-    def test_file_path_from_edit(self, monkeypatch):
-        monkeypatch.setenv("TOOL_INPUT", json.dumps({"file_path": "/foo/bar.py"}))
-        assert get_file_path_from_input() == "/foo/bar.py"
-
-    def test_notebook_path(self, monkeypatch):
-        monkeypatch.setenv("TOOL_INPUT", json.dumps({"notebook_path": "/foo.ipynb"}))
-        assert get_file_path_from_input() == "/foo.ipynb"
-
-    def test_file_path_takes_precedence(self, monkeypatch):
-        monkeypatch.setenv(
-            "TOOL_INPUT",
-            json.dumps({"file_path": "/a.py", "notebook_path": "/b.ipynb"}),
+    def test_reads_bounded_claude_json_stdin_event(self, monkeypatch):
+        payload = {
+            "session_id": "native-session",
+            "cwd": "C:/workspace",
+            "hook_event_name": "PreToolUse",
+            "tool_name": "Edit",
+            "tool_input": {"file_path": "relative.py"},
+        }
+        monkeypatch.setattr(
+            sys,
+            "stdin",
+            TextIOWrapper(BytesIO(json.dumps(payload).encode("utf-8"))),
         )
-        assert get_file_path_from_input() == "/a.py"
+        assert read_hook_event() == payload
+
+    def test_rejects_oversized_or_non_object_stdin_event(self, monkeypatch):
+        monkeypatch.setattr(
+            sys,
+            "stdin",
+            TextIOWrapper(BytesIO(b"x" * (256 * 1024 + 1))),
+        )
+        assert read_hook_event() == {}
+        monkeypatch.setattr(sys, "stdin", TextIOWrapper(BytesIO(b"[]")))
+        assert read_hook_event() == {}
 
     def test_command_from_bash(self, monkeypatch):
         monkeypatch.setenv("TOOL_INPUT", json.dumps({"command": "ls -la"}))
@@ -102,12 +114,11 @@ class TestToolInputParsing:
 
     def test_invalid_json(self, monkeypatch):
         monkeypatch.setenv("TOOL_INPUT", "not json")
-        assert get_tool_input() == {}
-        assert get_file_path_from_input() is None
+        assert get_command_from_input() is None
 
     def test_missing_env(self, monkeypatch):
         monkeypatch.delenv("TOOL_INPUT", raising=False)
-        assert get_tool_input() == {}
+        assert get_command_from_input() is None
 
 
 class TestRunHookSafely:
@@ -139,3 +150,42 @@ class TestRunHookSafely:
         # Should not raise (no sys.exit call inside ok())
         run_hook_safely(ok)
         assert results == ["done"]
+
+
+class TestStartedByModuleSwitch:
+    """Only an older ``python -m`` hook command leaves the cwd importable."""
+
+    HOOK = "daem0nmcp.claude_hooks.session_start"
+
+    @pytest.mark.parametrize(
+        ("arguments", "expected"),
+        [
+            (["-m", HOOK], True),
+            (["-X", "utf8", "-m", HOOK], True),
+            (["-c", f"import runpy; runpy.run_module('{HOOK}')"], False),
+            (["-m", "pytest", "-k", HOOK], False),
+            (["-m", "daem0nmcp.cli", "install-claude-hooks"], False),
+        ],
+    )
+    def test_recognises_only_the_older_hook_command(
+        self, monkeypatch, arguments, expected
+    ):
+        monkeypatch.setattr(sys, "orig_argv", [sys.executable, *arguments])
+        monkeypatch.setattr(sys, "flags", SimpleNamespace(isolated=0, safe_path=False))
+
+        assert started_by_module_switch() is expected
+
+    @pytest.mark.parametrize(
+        "flags",
+        [
+            {"isolated": 1},  # Python 3.10 has no safe_path flag
+            {"isolated": 0, "safe_path": True},
+        ],
+    )
+    def test_module_switch_that_skips_the_working_directory_is_fine(
+        self, monkeypatch, flags
+    ):
+        monkeypatch.setattr(sys, "orig_argv", [sys.executable, "-m", self.HOOK])
+        monkeypatch.setattr(sys, "flags", SimpleNamespace(**flags))
+
+        assert started_by_module_switch() is False

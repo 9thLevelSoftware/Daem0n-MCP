@@ -1,5 +1,6 @@
 """Tests for temporal versioning of memories."""
 
+import inspect
 import shutil
 import tempfile
 from datetime import datetime, timezone
@@ -182,7 +183,8 @@ async def test_mcp_get_memory_versions_tool(covenant_compliant_project):
     from daem0nmcp import server
 
     # Create a memory
-    result = await server.remember(
+    result = await covenant_compliant_project.call(
+        server.remember,
         category="decision",
         content="Test decision",
         project_path=covenant_compliant_project,
@@ -190,8 +192,10 @@ async def test_mcp_get_memory_versions_tool(covenant_compliant_project):
     memory_id = result["id"]
 
     # Get versions via MCP tool
-    versions = await server.get_memory_versions(
-        memory_id=memory_id, project_path=covenant_compliant_project
+    versions = await covenant_compliant_project.call(
+        server.get_memory_versions,
+        memory_id=memory_id,
+        project_path=covenant_compliant_project,
     )
 
     assert "versions" in versions
@@ -204,7 +208,8 @@ async def test_mcp_get_memory_at_time_tool(covenant_compliant_project):
     from daem0nmcp import server
 
     # Create a memory
-    result = await server.remember(
+    result = await covenant_compliant_project.call(
+        server.remember,
         category="decision",
         content="Original content for time travel",
         project_path=covenant_compliant_project,
@@ -212,13 +217,16 @@ async def test_mcp_get_memory_at_time_tool(covenant_compliant_project):
     memory_id = result["id"]
 
     # Get the creation time from versions
-    versions = await server.get_memory_versions(
-        memory_id=memory_id, project_path=covenant_compliant_project
+    versions = await covenant_compliant_project.call(
+        server.get_memory_versions,
+        memory_id=memory_id,
+        project_path=covenant_compliant_project,
     )
     creation_time = versions["versions"][0]["changed_at"]
 
     # Record an outcome
-    await server.record_outcome(
+    await covenant_compliant_project.call(
+        server.record_outcome,
         memory_id=memory_id,
         outcome="It worked great!",
         worked=True,
@@ -226,7 +234,8 @@ async def test_mcp_get_memory_at_time_tool(covenant_compliant_project):
     )
 
     # Query memory at creation time (before outcome)
-    historical = await server.get_memory_at_time(
+    historical = await covenant_compliant_project.call(
+        server.get_memory_at_time,
         memory_id=memory_id,
         timestamp=creation_time,
         project_path=covenant_compliant_project,
@@ -243,7 +252,8 @@ async def test_mcp_get_memory_at_time_invalid_timestamp(covenant_compliant_proje
     from daem0nmcp import server
 
     # Create a memory
-    result = await server.remember(
+    result = await covenant_compliant_project.call(
+        server.remember,
         category="decision",
         content="Test decision",
         project_path=covenant_compliant_project,
@@ -251,7 +261,8 @@ async def test_mcp_get_memory_at_time_invalid_timestamp(covenant_compliant_proje
     memory_id = result["id"]
 
     # Try with invalid timestamp
-    historical = await server.get_memory_at_time(
+    historical = await covenant_compliant_project.call(
+        server.get_memory_at_time,
         memory_id=memory_id,
         timestamp="not-a-valid-timestamp",
         project_path=covenant_compliant_project,
@@ -262,12 +273,21 @@ async def test_mcp_get_memory_at_time_invalid_timestamp(covenant_compliant_proje
 
 
 @pytest.mark.asyncio
-async def test_mcp_get_memory_versions_missing_project_path():
+async def test_mcp_get_memory_versions_missing_project_path(
+    tmp_path, covenant_workspace_factory
+):
     """Test that get_memory_versions requires project_path."""
     from daem0nmcp import server
 
-    # Call without project_path
-    result = await server.get_memory_versions(memory_id=1)
+    handler_globals = inspect.unwrap(server.get_memory_versions).__globals__
+    original_default = handler_globals.get("_default_project_path")
+    handler_globals["_default_project_path"] = None
+    try:
+        workspace = covenant_workspace_factory(tmp_path)
+        await workspace.brief()
+        result = await workspace.call(server.get_memory_versions, memory_id=1)
+    finally:
+        handler_globals["_default_project_path"] = original_default
 
     assert "error" in result
     assert result["error"] == "MISSING_PROJECT_PATH"

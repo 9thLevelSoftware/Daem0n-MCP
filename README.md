@@ -13,7 +13,105 @@
 
 **AI Memory & Decision System** - Give AI agents persistent memory and consistent decision-making with *actual* semantic understanding.
 
-## What's New in v6.6.6
+## v7 Protocol Cutover
+
+The public v7 MCP surface is guided and workspace-scoped:
+
+1. The first Daem0n call in a session briefs automatically; the compact brief is returned in `meta.covenant.auto_brief`. Call `session_brief` for the full brief.
+2. Call `memory_store` (or any protected tool) directly. If it returns `COUNSEL_REQUIRED`, read `error.counsel` (guidance and reasons), then retry exactly `error.remedy`. `memory_preflight` remains available for planning a change in advance.
+3. Use `daem0n_tools_search(query)`, then `daem0n_tool_call(workspace_id, tool, arguments)`.
+
+The default listing contains nine tools; all 77 remain registered and callable.
+Set `DAEM0NMCP_TOOL_SURFACE=full` to list every tool, or
+`DAEM0NMCP_COVENANT_MODE=strict` to require explicit briefing and preflight.
+Tokens remain exact-argument bound, single-use, and valid for 300 seconds.
+Destructive operations always require a counsel challenge. Linked workspaces
+still require their own explicit `session_brief`; task submission stays strict.
+Run long-running targets directly as MCP tasks, using the full listing if
+needed; the gateway does not submit tasks. Use `system_health` for diagnostics.
+
+The server states this protocol itself: the MCP initialize result carries
+`instructions` generated for the active covenant mode and tool listing.
+
+Each scoped call uses an opaque `workspace_id`. The supported transports are
+stdio and Streamable HTTP at `/mcp`. Read-only warnings, failures, rules, and
+active context use the `memory://workspaces/{workspace_id}/...` resources. See
+[`docs/v6-to-v7-tools.json`](docs/v6-to-v7-tools.json) for the generated
+migration mapping.
+
+## v7 setup and operations
+
+v7 is not published yet. Until release, install from a source checkout or a
+wheel you built from this checkout:
+
+```bash
+pip install .
+# or: python -m build && pip install dist/daem0nmcp-7.0.0.dev0-py3-none-any.whl
+```
+
+After v7 is published, `pip install daem0nmcp` will install the small core.
+Add only the feature profiles the deployment needs: `tasks`, `local`, `graph`,
+`apps`, `models-local`, `late-interaction`, `models-hosted`, `agency-e2b`, or `observability`.
+For example, `pip install "daem0nmcp[apps,graph]"`. The development and
+compatibility profiles (`dev` and `tracing`) are not required by a normal MCP
+server. `models-local` and `late-interaction` are optional and require Python
+3.11 or newer. Their secure ONNX runtime dependency has no CPython 3.10 wheel.
+On Python 3.10, the resolver omits these profiles' dependencies and the runtime
+reports Python-version remediation while core installation remains supported.
+
+The server owns workspace registration. Set `DAEM0NMCP_PROJECT_ROOT` to the
+default workspace and, when needed, `DAEM0NMCP_WORKSPACE_ROOTS` to the allowed
+additional roots. Operators derive the stable opaque ID from that configured
+root and provide it in the protected client configuration or pairing flow;
+`session_brief` then confirms that ID. Clients do not choose filesystem paths. Leave
+`DAEM0NMCP_STORAGE_PATH` unset when serving multiple registered workspaces.
+
+A workspace ID is an identifier, not a secret. It is a truncated SHA-256 of the
+canonical root path, so anyone who knows or guesses the path can compute it.
+"Opaque" means only that it is not a path and carries no meaning for clients.
+Access is decided by the authenticated principal and its grants, never by
+knowledge of the ID.
+
+For authenticated remote principals, set `DAEM0NMCP_WORKSPACE_ACCESS_FILE` to
+the server-managed grants file. If unset, the server uses
+`<managed-storage>/v7-workspace-access.json`. The file and its parent directory
+must be owner-only. Its strict JSON shape is
+`{"schema_version":1,"grants":{"oauth-sub:<subject>":["ws_<opaque>"]}}`;
+the server rereads it at authorization points, so removing a grant takes effect
+without a restart. The CLI has no grant-editing command: configure the file and
+environment before launching `python -m daem0nmcp.server`.
+
+Start the stdio server with `python -m daem0nmcp.server`, or use
+`python -m daem0nmcp.server --transport streamable-http --host 127.0.0.1 --port
+9876` for loopback HTTP. A remote HTTP deployment requires configured transport
+authentication and security policy; it is not a redirect-based setup.
+
+Loopback HTTP without `FASTMCP_SERVER_AUTH` does not authenticate callers: every
+process and user that can reach the port on that host (other accounts,
+containers, WSL) acts as the server's own principal on every registered
+workspace. On a shared machine use stdio or configure authentication. A
+loopback listener behind a reverse proxy is not local: when
+`DAEM0NMCP_TRUSTED_PROXY_IPS` is set or `DAEM0NMCP_ALLOWED_HOSTS` names a host
+other than `localhost` or a loopback address, the server refuses to start with
+`PROXIED_LISTENER_REQUIRES_AUTH` unless a production token verifier is
+configured. That check sees a proxy only through those two settings. A proxy
+that forwards the loopback authority as `Host` (for example nginx without
+`proxy_set_header Host $host`) needs neither, is not detected, and exposes the
+unauthenticated listener to its clients, so configure authentication for every
+proxied deployment.
+
+`python -m` resolves `daem0nmcp` from the current directory first, so type these
+commands (and the `python -m daem0nmcp.cli` ones) from a directory you trust.
+Commands that a host launches for you inside a project never use `-m`: the
+installers and the [registration command](#linux--macos-stdio-transport) drop
+the current directory from the import path first.
+
+The complete setup, exact preflight examples, migrations, native client
+installers, diagnostics, and all **75** registered v7 tools are in
+[the v7 operations guide](docs/v7-operations.md). The release ledger remains
+in progress; these instructions do not claim a published v7 release.
+
+## Historical v6 Migration Context: v6.6.6
 
 ### ModernBERT Deep Sight (BREAKING)
 The daemon's vision has been fundamentally sharpened. The old `all-MiniLM-L6-v2` embedding model is replaced by **ModernBERT** with asymmetric query/document encoding and optional ONNX acceleration.
@@ -26,9 +124,16 @@ The daemon's vision has been fundamentally sharpened. The old `all-MiniLM-L6-v2`
 | **Backend** | PyTorch only | ONNX quantized (with torch fallback) |
 | **Prefixes** | None | `search_query: ` / `search_document: ` |
 
-**This is a BREAKING CHANGE** — existing embeddings must be re-encoded:
+**This is a BREAKING CHANGE for format 6** — existing format-6 embeddings must be re-encoded with the deprecated legacy command:
 ```bash
 python -m daem0nmcp.migrations.migrate_embedding_model --project-path /path/to/.daem0nmcp
+```
+
+Architecture format 7 does not write canonical `memories.vector_embedding` data.
+Rebuild its dense retrieval projection instead:
+
+```bash
+python -m daem0nmcp.cli rebuild-projection --projection dense --workspace-id <workspace-id>
 ```
 
 ### Background Dreaming
@@ -65,11 +170,11 @@ python -m daem0nmcp.cli uninstall-claude-hooks     # Remove
 
 | Hook | Purpose |
 |------|---------|
-| `session_start` | Auto-briefing at session dawn |
-| `pre_edit` | Preflight enforcement + file memory recall before edits |
+| `session_start` | Explain automatic briefing and optional full `session_brief` |
+| `pre_edit` | Remind agents to recall file guidance through `daem0n_tool_call` |
 | `pre_bash` | Rule enforcement on bash commands |
-| `post_edit` | Suggest remembrance for significant changes |
-| `stop` | Auto-capture decisions from conversation |
+| `post_edit` | Suggest replay-safe memory calls for significant changes |
+| `stop` | Suggest memory and outcome calls without writing directly |
 
 ### Stats
 - **8 workflow tools** + **3 cognitive tools** (11 MCP tools total)
@@ -78,7 +183,7 @@ python -m daem0nmcp.cli uninstall-claude-hooks     # Remove
 
 ---
 
-## What's New in v5.1.0
+## Historical v6 Migration Context: v5.1.0
 
 ### Workflow Consolidation
 v5.1 consolidates **67 individual MCP tools into 8 workflow-oriented tools**, dramatically reducing context overhead for AI agents while preserving all capabilities.
@@ -96,21 +201,12 @@ v5.1 consolidates **67 individual MCP tools into 8 workflow-oriented tools**, dr
 | **`explore`** | Graph & discovery | `related`, `chain`, `graph`, `stats`, `communities`, `community_detail`, `rebuild_communities`, `entities`, `backfill_entities`, `evolution`, `versions`, `at_time` |
 | **`maintain`** | Housekeeping & federation | `prune`, `archive`, `cleanup`, `compact`, `rebuild_index`, `export`, `import_data`, `link_project`, `unlink_project`, `list_projects`, `consolidate` |
 
-#### How It Works
-Each workflow tool accepts an `action` parameter that selects the operation:
-```python
-# Old way (67 separate tools)
-mcp__daem0nmcp__get_briefing(project_path="...")
-mcp__daem0nmcp__recall(topic="auth", project_path="...")
-mcp__daem0nmcp__remember(category="decision", content="...", project_path="...")
-mcp__daem0nmcp__record_outcome(memory_id=42, outcome="...", worked=True, project_path="...")
+#### How It Worked
 
-# New way (8 workflow tools)
-mcp__daem0nmcp__commune(action="briefing", project_path="...")
-mcp__daem0nmcp__consult(action="recall", topic="auth", project_path="...")
-mcp__daem0nmcp__inscribe(action="remember", category="decision", content="...", project_path="...")
-mcp__daem0nmcp__reflect(action="outcome", memory_id=42, outcome_text="...", worked=True, project_path="...")
-```
+Format 6 grouped individual operations behind an `action` discriminator. Those
+calls are not executable v7 guidance. Use the generated
+[`docs/v6-to-v7-tools.json`](docs/v6-to-v7-tools.json) mapping for the exact
+replacement of every old operation.
 
 #### Why Consolidate?
 - **88% fewer tool definitions** in context (8 vs 67)
@@ -120,18 +216,12 @@ mcp__daem0nmcp__reflect(action="outcome", memory_id=42, outcome_text="...", work
 
 ---
 
-## What's New in v5.0.0
+## Historical v6 Migration Context: v5.0.0
 
 ### Visions of the Void (MCP Apps)
-Interactive HTML interfaces via MCP Apps (SEP-1865). Visual mode is now accessed via the `visual=true` parameter on workflow tools:
-
-```python
-commune(action="briefing", visual=true, project_path="...")      # Briefing Dashboard
-consult(action="recall", topic="auth", visual=true, project_path="...")  # Search Results UI
-commune(action="covenant", visual=true, project_path="...")      # Covenant Status
-explore(action="communities", visual=true, project_path="...")   # Community Map
-explore(action="graph", topic="auth", visual=true, project_path="...")  # Memory Graph Viewer
-```
+This v6 release added interactive HTML interfaces via MCP Apps (SEP-1865).
+Those action-dispatch examples are intentionally omitted because they are not
+valid v7 calls; use the generated migration mapping for current tool names.
 
 Features: D3.js v7 bundled (105KB, no CDN), restrictive CSP, canvas-based graph (10,000+ nodes at 60fps), graceful text fallback for non-visual hosts.
 
@@ -177,7 +267,8 @@ Five major capabilities:
 
 - Tools block with `COMMUNION_REQUIRED`/`COUNSEL_REQUIRED` until proper rituals observed
 - Preflight tokens with 5-minute validity
-- MCP Resources for dynamic context injection (`daem0n://warnings/`, `daem0n://failed/`, etc.)
+- MCP Resources for dynamic context injection (the retired URI forms are
+  mapped to v7 in `docs/v6-to-v7-tools.json`)
 </details>
 
 <details>
@@ -254,7 +345,7 @@ AI agents start each session fresh. They don't remember:
 1. Install Daem0n-MCP: `pip install -e ~/Daem0n-MCP`
 2. Run the installer: `python -m daem0nmcp.cli install-opencode`
 3. Launch OpenCode in your project directory
-4. Run `/commune` to begin
+4. Run `/commune <workspace_id>`; this host shortcut calls `session_brief`
 
 For the full ritual walkthrough, see `Summon_Daem0n_OpenCode.md`.
 
@@ -283,10 +374,23 @@ python ~/Daem0n-MCP/start_server.py --port 9876
 python3 -c "import sys; print(sys.executable)"
 
 # Register with Claude Code (replace <PYTHON_PATH>)
-claude mcp add daem0nmcp --scope user -- <PYTHON_PATH> -m daem0nmcp.server
+claude mcp add daem0nmcp --scope user -- <PYTHON_PATH> -c "import sys; sys.path = [p for p in sys.path if p]; import runpy; runpy.run_module('daem0nmcp.server', run_name='__main__', alter_sys=True)"
 
 # Restart Claude Code
 ```
+
+Do not register `<PYTHON_PATH> -m daem0nmcp.server` at user scope. Claude Code
+starts a user-scoped server inside whatever project you open, and `python -m`
+puts that directory first on `sys.path`, so a repository that contains its own
+`daem0nmcp/` directory would run in place of the installed server. The command
+above runs the same module after dropping the working directory from the import
+path; it works on Python 3.10 and newer and with `--user`, virtualenv and
+editable installs. Use the full interpreter path rather than a bare `python`.
+
+The command leaves your own `PYTHONPATH` alone. An empty or relative element in
+it (a leading or trailing `:`, or `.`) names the working directory, which puts
+the opened project back on the import path: keep `PYTHONPATH` unset or absolute
+in the environment your MCP host starts from.
 
 ### Windows (HTTP transport required)
 
@@ -316,16 +420,55 @@ Or use `start_daem0nmcp_server.bat`
 
 | Method | Transport | Default Port | Use Case |
 |--------|-----------|-------------|----------|
-| `python -m daem0nmcp.server` | `stdio` (default) or `sse` | 8765 (sse) | Unix/macOS direct channel |
-| `python start_server.py` | `streamable-http` | 9876 | Windows HTTP, remote access |
+| `python -m daem0nmcp.server` | `stdio` | n/a | Local process channel |
+| `python start_server.py` | Streamable HTTP at `/mcp` | 9876 | Windows HTTP, remote access |
+
+`python -m daem0nmcp.server` is for a terminal you started yourself. When an MCP
+host launches the stdio server for you, register the command from
+[Linux / macOS](#linux--macos-stdio-transport) instead: hosts start it inside
+whatever project is open.
 
 For OpenCode setup, see the [OpenCode Integration](#opencode-integration) section below, or run `python -m daem0nmcp.cli install-opencode` for automated setup.
 
-## Workflow Tools (8 Tools, 59 Actions)
+## v7 MCP API
 
-All capabilities are accessed through 8 workflow tools. Each tool accepts an `action` parameter to select the operation. Legacy individual functions remain importable for internal dispatch, but only the consolidated workflow and cognitive tools are exposed to MCP clients.
+The v7 public API uses strict input schemas and opaque workspace scope. The
+default core-plus-gateway listing is:
 
-### `commune` — Session Start & Status
+| Tool | Purpose |
+|---|---|
+| `session_brief` | Return the full briefing; the first gated call already briefs automatically |
+| `memory_preflight` | Plan ahead with guidance and a capability for one exact protected request |
+| `memory_recall` | Retrieve bounded, evidence-bearing records |
+| `memory_store` | Append one replay-safe memory record |
+| `memory_record_outcome` | Append a verified success or failure outcome |
+| `system_health` | Return bounded service and projection diagnostics |
+| `edit_preflight` | Admit native edit-bridge requests |
+| `daem0n_tools_search` | Discover other registered tools and their input schemas |
+| `daem0n_tool_call` | Call a discovered tool and relay its guidance or result |
+
+`daem0n_tool_call` can reach destructive, non-idempotent and open-world tools,
+so it advertises `destructiveHint: true`, `idempotentHint: false` and
+`openWorldHint: true`; a host that prompts on those hints prompts for every
+gateway call. Each `daem0n_tools_search` result carries the target's own
+`read_only`, `destructive`, `idempotent` and `open_world` hints.
+
+The read-only JSON resources are:
+
+- `memory://workspaces/{workspace_id}/warnings`
+- `memory://workspaces/{workspace_id}/failures`
+- `memory://workspaces/{workspace_id}/rules`
+- `memory://workspaces/{workspace_id}/active-context`
+
+A read returns `application/json`. Every refusal (an unknown workspace, one the
+caller may not read, or one this session has not briefed) is the same JSON-RPC
+error, code `-32002` with the message `Resource unavailable`; brief the
+workspace first.
+
+See [`docs/v6-to-v7-tools.json`](docs/v6-to-v7-tools.json) for the generated
+mapping of every v6 operation to its v7 replacement.
+
+### Historical v6: session and status workflow
 
 | Action | Purpose |
 |--------|---------|
@@ -336,7 +479,7 @@ All capabilities are accessed through 8 workflow tools. Each tool accepts an `ac
 | `covenant` | Sacred Covenant status and phase |
 | `updates` | Poll for knowledge changes (real-time notifications) |
 
-### `consult` — Pre-Action Intelligence
+### Historical v6: pre-action workflow
 
 | Action | Purpose |
 |--------|---------|
@@ -349,7 +492,7 @@ All capabilities are accessed through 8 workflow tools. Each tool accepts an `ac
 | `check_rules` | Validate action against decision rules |
 | `compress` | LLMLingua-2 context compression |
 
-### `inscribe` — Memory Writing & Linking
+### Historical v6: memory writing workflow
 
 | Action | Purpose |
 |--------|---------|
@@ -363,7 +506,7 @@ All capabilities are accessed through 8 workflow tools. Each tool accepts an `ac
 | `clear_active` | Clear all active context |
 | `ingest` | Import external documentation from URL |
 
-### `reflect` — Outcomes & Verification
+### Historical v6: outcomes workflow
 
 | Action | Purpose |
 |--------|---------|
@@ -371,7 +514,7 @@ All capabilities are accessed through 8 workflow tools. Each tool accepts an `ac
 | `verify` | Validate factual claims against stored knowledge |
 | `execute` | Sandboxed Python execution (E2B) |
 
-### `understand` — Code Comprehension
+### Historical v6: code comprehension workflow
 
 | Action | Purpose |
 |--------|---------|
@@ -381,7 +524,7 @@ All capabilities are accessed through 8 workflow tools. Each tool accepts an `ac
 | `todos` | Scan for TODO/FIXME/HACK/XXX/BUG comments |
 | `refactor` | Generate refactor suggestions with causal history |
 
-### `govern` — Rules & Triggers
+### Historical v6: rules and triggers workflow
 
 | Action | Purpose |
 |--------|---------|
@@ -392,7 +535,7 @@ All capabilities are accessed through 8 workflow tools. Each tool accepts an `ac
 | `list_triggers` | List all context triggers |
 | `remove_trigger` | Remove a context trigger |
 
-### `explore` — Graph & Discovery
+### Historical v6: graph and discovery workflow
 
 | Action | Purpose |
 |--------|---------|
@@ -409,7 +552,7 @@ All capabilities are accessed through 8 workflow tools. Each tool accepts an `ac
 | `versions` | Get version history for a memory |
 | `at_time` | Query memory state at a point in time |
 
-### `maintain` — Housekeeping & Federation
+### Historical v6: housekeeping and federation workflow
 
 | Action | Purpose |
 |--------|---------|
@@ -425,7 +568,7 @@ All capabilities are accessed through 8 workflow tools. Each tool accepts an `ac
 | `list_projects` | List all linked projects |
 | `consolidate` | Merge memories from linked projects |
 
-### Cognitive Tools (Standalone)
+### Historical v6: standalone cognitive tools
 
 | Tool | Purpose |
 |------|---------|
@@ -435,197 +578,158 @@ All capabilities are accessed through 8 workflow tools. Each tool accepts an `ac
 
 ### Tool Names by Client
 
-Different MCP clients use different naming conventions for tools. Both formats resolve to the same server-side operations.
+Recognize only the exact canonical name or its host prefix:
 
-**Workflow Tools:**
+| Canonical | Claude Code | OpenCode |
+|---|---|---|
+| `session_brief` | `mcp__daem0nmcp__session_brief` | `daem0nmcp_session_brief` |
+| `memory_preflight` | `mcp__daem0nmcp__memory_preflight` | `daem0nmcp_memory_preflight` |
+| `memory_recall` | `mcp__daem0nmcp__memory_recall` | `daem0nmcp_memory_recall` |
+| `memory_store` | `mcp__daem0nmcp__memory_store` | `daem0nmcp_memory_store` |
+| `memory_record_outcome` | `mcp__daem0nmcp__memory_record_outcome` | `daem0nmcp_memory_record_outcome` |
+| `system_health` | `mcp__daem0nmcp__system_health` | `daem0nmcp_system_health` |
+| `daem0n_tools_search` | `mcp__daem0nmcp__daem0n_tools_search` | `daem0nmcp_daem0n_tools_search` |
+| `daem0n_tool_call` | `mcp__daem0nmcp__daem0n_tool_call` | `daem0nmcp_daem0n_tool_call` |
 
-| MCP Tool | Claude Code | OpenCode |
-|----------|-------------|----------|
-| commune | `mcp__daem0nmcp__commune` | `daem0nmcp_commune` |
-| consult | `mcp__daem0nmcp__consult` | `daem0nmcp_consult` |
-| inscribe | `mcp__daem0nmcp__inscribe` | `daem0nmcp_inscribe` |
-| reflect | `mcp__daem0nmcp__reflect` | `daem0nmcp_reflect` |
-| understand | `mcp__daem0nmcp__understand` | `daem0nmcp_understand` |
-| govern | `mcp__daem0nmcp__govern` | `daem0nmcp_govern` |
-| explore | `mcp__daem0nmcp__explore` | `daem0nmcp_explore` |
-| maintain | `mcp__daem0nmcp__maintain` | `daem0nmcp_maintain` |
-
-**Cognitive Tools:**
-
-| MCP Tool | Claude Code | OpenCode |
-|----------|-------------|----------|
-| simulate_decision | `mcp__daem0nmcp__simulate_decision` | `daem0nmcp_simulate_decision` |
-| evolve_rule | `mcp__daem0nmcp__evolve_rule` | `daem0nmcp_evolve_rule` |
-| debate_internal | `mcp__daem0nmcp__debate_internal` | `daem0nmcp_debate_internal` |
-
-**Format pattern:**
-
-| Client | Format | Separator |
-|--------|--------|-----------|
-| Claude Code | `mcp__servername__toolname` | Double underscore (`__`) |
-| OpenCode | `servername_toolname` | Single underscore (`_`) |
+Host metadata is never an identity source. Authentication comes from the
+transport, and every scoped request is resolved through `workspace_id`.
 
 ## Usage Examples
 
-### Store a Memory
-```python
-inscribe(
-    action="remember",
-    category="decision",  # decision, pattern, warning, or learning
-    content="Use JWT tokens instead of sessions",
-    rationale="Need stateless auth for horizontal scaling",
-    tags=["auth", "architecture"],
-    file_path="src/auth/jwt.py"  # optional file association
+### Session Start
+
+The first gated call returns a compact automatic brief. Request the full brief
+explicitly when needed:
+
+```text
+session_brief(
+    workspace_id="<workspace_id>",
+    focus_areas=["authentication", "API"]
 )
 ```
 
 ### Retrieve Memories
-```python
-consult(action="recall", topic="authentication")
-# Returns: decisions, patterns, warnings, learnings about auth
-# Sorted by: semantic relevance x recency x importance
 
-consult(action="recall_file", file_path="src/auth/jwt.py")
-# Returns: all memories linked to this file
-
-consult(action="recall_entity", entity_name="UserService")
-# Returns: all memories mentioning the entity
-
-consult(action="recall", topic="auth", condensed=True)
-# Condensed: 50-75% fewer tokens, content truncated to 150 chars
-```
-
-### Create Rules
-```python
-govern(
-    action="add_rule",
-    trigger="adding new API endpoint",
-    must_do=["Add rate limiting", "Write integration test"],
-    must_not=["Use synchronous database calls"],
-    ask_first=["Is this a breaking change?"]
+```text
+memory_recall(
+    workspace_id="<workspace_id>",
+    query="authentication",
+    limit=10,
+    token_budget=2400
 )
 ```
+
+### Store a Memory
+
+Call directly; no preflight is needed for a benign write in guided mode:
+
+```text
+memory_store(
+    workspace_id="<workspace_id>",
+    record_type="decision",
+    content="Use signed session cookies",
+    rationale="Avoid server-side session state",
+    tags=["auth", "architecture"],
+    relative_file_path="src/auth/session.py",
+    idempotency_key="decision-auth-session-0001"
+)
+```
+
+If the response is `COUNSEL_REQUIRED`, review `error.counsel`, then call
+`error.remedy.tool` with exactly `error.remedy.arguments`. The remedy already
+includes its pre-minted token. `memory_preflight` remains available for advance
+planning and is required in strict mode. Keep the idempotency key on retries.
+
+Every failed call, `COUNSEL_REQUIRED` included, is an `ok: false` envelope and
+sets the MCP result's `isError: true`. The envelope is still delivered in full,
+as `structuredContent` and as JSON text; a client library that raises on
+`isError` must be told to return the result instead so the remedy can be read.
 
 ### Track Outcomes
-```python
-reflect(action="outcome", memory_id=42, outcome_text="JWT auth works great", worked=True)
-reflect(action="outcome", memory_id=43, outcome_text="Caching caused stale data", worked=False)
-# Failed decisions get 1.5x boost in future recalls
-```
 
-### Session Start
-```python
-commune(action="briefing", focus_areas=["authentication", "API"])
-# Returns: stats, recent decisions, warnings, failed approaches,
-# git changes, plus pre-fetched context for focus areas
-```
-
-### Active Context (Working Memory)
-```python
-inscribe(action="activate", memory_id=42, reason="Working on auth refactor",
-         priority=10, expires_in_hours=8)
-# Memory stays in always-hot context, auto-injected into briefings
-# Max 10 items, auto-expires, duplicate prevention
-
-commune(action="active_context")  # View all hot memories
-inscribe(action="deactivate", memory_id=42)  # Remove
-inscribe(action="clear_active")  # Clear all
-```
-
-### Cognitive Tools
-```python
-# Temporal Scrying: What would I decide differently today?
-simulate_decision(decision_id=42)
-
-# Rule Entropy: Which rules have grown stale?
-evolve_rule(rule_id=5)       # Single rule
-evolve_rule()                 # Batch: all enabled rules
-
-# Adversarial Council: Evidence-grounded debate
-debate_internal(
-    topic="Database choice for sessions",
-    advocate_position="Use Redis",
-    challenger_position="Use PostgreSQL"
+```text
+memory_record_outcome(
+    workspace_id="<workspace_id>",
+    record_id="<mem_id>",
+    outcome_text="The implementation passed integration tests",
+    worked=true,
+    idempotency_key="outcome-auth-session-0001"
 )
-```
-
-### Import External Docs
-```python
-inscribe(action="ingest", url="https://stripe.com/docs/api/charges", topic="stripe")
-# Later: consult(action="recall", topic="stripe") to retrieve
 ```
 
 ## AI Agent Protocol
 
 The recommended workflow for AI agents:
 
-```
-SESSION START
-    +-> commune(action="briefing")
-
-BEFORE CHANGES
-    +-> consult(action="preflight", description="what you're doing")
-    +-> consult(action="recall_file", file_path="path/to/file.py")
-
-AFTER DECISIONS
-    +-> inscribe(action="remember", category=..., content=..., rationale=..., file_path=...)
-
-AFTER IMPLEMENTATION
-    +-> reflect(action="outcome", memory_id=..., outcome_text=..., worked=...)
+```text
+first gated call (automatic brief)
+    -> memory_recall (when relevant)
+    -> protected tool directly
+    -> review error.counsel and retry error.remedy (only when challenged)
+    -> memory_record_outcome (after verification, replay-safe)
 ```
 
-See `Summon_Daem0n.md` for the complete protocol (with ritual theme for fun).
+Use `system_health` for bounded diagnostics. The complete protocol lives in
+`AGENTS.md` and `.claude/skills/daem0nmcp-protocol/SKILL.md`.
 
 ## Claude Code Integration
 
-### Automated Hook Installation (Recommended)
+### Hook Installation
 
 ```bash
 python -m daem0nmcp.cli install-claude-hooks
 ```
 
-This registers 5 hook modules in `~/.claude/settings.json`:
+This writes six hook entries to the user-level `~/.claude/settings.json`, so
+they run in every project; each runs `daem0nmcp.claude_hooks.<hook>`
+with the interpreter you installed from. A hook only acts inside a Daem0n
+project: the session directory, `CLAUDE_PROJECT_DIR`, or one of their parent
+directories contains `.daem0nmcp/` (your home directory does not count, since
+Daem0n keeps its own state in `~/.daem0nmcp/`). Other hooks in that file are kept, and any old
+`hooks/daem0n_*.py` entries are removed.
 
-| Event | Hook | Purpose |
-|-------|------|---------|
-| `SessionStart` | `session_start` | Auto-briefing summary |
-| `PreToolUse` (Edit/Write/NotebookEdit) | `pre_edit` | Preflight enforcement + file memory recall |
-| `PreToolUse` (Bash) | `pre_bash` | Rule enforcement on commands |
-| `PostToolUse` (Edit/Write) | `post_edit` | Suggest remembrance for significant changes |
-| `Stop`/`SubagentStop` | `stop` | Auto-capture decisions from conversation |
+Each command is `"<python>" -c "<bootstrap>"`: the bootstrap drops the working
+directory from `sys.path` and then runs the hook module, so a repository that
+contains its own `daem0nmcp/` directory cannot replace the installed hooks the
+way it could with `python -m`. Commands written by an earlier version keep the
+`-m` form until you re-run `install-claude-hooks`, which replaces them and
+reports how many it replaced; until then the `SessionStart` hook shows a
+one-line reminder in every session. The same `PYTHONPATH` limit as for the
+[registration command](#linux--macos-stdio-transport) applies.
 
-To remove: `python -m daem0nmcp.cli uninstall-claude-hooks`
+| Event (matcher) | Hook | What it does | Input | Reminds only |
+|-----------------|------|--------------|-------|--------------|
+| `SessionStart` | `session_start` | Explains that the first Daem0n call establishes the session and brief; `session_brief` returns the full brief | `CLAUDE_PROJECT_DIR` env | Yes |
+| `PreToolUse` (`Edit\|Write\|NotebookEdit`) | `pre_edit` | Inside a Daem0n project, adds a one-line `additionalContext` reminder to call `daem0n_tool_call` targeting `memory_recall_file`; silent elsewhere | stdin event | Yes |
+| `PreToolUse` (`Bash`) | `pre_bash` | Checks the command against Daem0n rules. Currently inert: it reads a `TOOL_INPUT` env var that Claude Code does not set | `TOOL_INPUT` env | Yes (always exits 0) |
+| `PostToolUse` (`mcp__.*__edit_preflight`) | `post_edit_preflight` | Edit-bridge plumbing: stages an `edit_preflight` receipt for a bridge edit request. Nothing in Claude Code creates those requests any more, so it is a no-op | stdin event | Yes |
+| `PostToolUse` (`Edit\|Write\|NotebookEdit`) | `post_edit` | Edit-bridge plumbing: reports a bridge-approved edit as a capture candidate. Only loads the bridge when the project is paired; a no-op in Claude Code today | stdin event | Yes |
+| `Stop`, `SubagentStop` | `stop` | When the transcript shows a finished task with no recorded outcome, suggests direct `memory_store` and `memory_record_outcome` calls with counsel-challenge retry guidance as a `systemMessage`. Never writes memory | stdin event (`transcript_path`) | Yes |
 
-### Manual Hooks (Legacy)
+No hook blocks a tool call or keeps the agent running: every hook exits 0 and none
+returns a `permissionDecision` or `decision`.
 
-Add to `.claude/settings.json`:
-```json
-{
-  "hooks": {
-    "PreToolUse": [{
-      "matcher": "Edit|Write|NotebookEdit",
-      "hooks": [{
-        "type": "command",
-        "command": "python3 \"$HOME/Daem0nMCP/hooks/daem0n_pre_edit_hook.py\""
-      }]
-    }],
-    "PostToolUse": [{
-      "matcher": "Edit|Write",
-      "hooks": [{
-        "type": "command",
-        "command": "python3 \"$HOME/Daem0nMCP/hooks/daem0n_post_edit_hook.py\""
-      }]
-    }],
-    "Stop": [{
-      "matcher": "",
-      "hooks": [{
-        "type": "command",
-        "command": "python3 \"$HOME/Daem0nMCP/hooks/daem0n_stop_hook.py\""
-      }]
-    }]
-  }
-}
+**What pairing writes.** The installer also pairs the current project (or
+`--project-path`) with the local edit bridge:
+
+- an owner-only credential at `~/.daem0nmcp/edit-bridges/<authority>/credential.json`
+  (the secret is never written into the project), with the bridge socket under
+  `~/.daem0nmcp/edit-bridges/run/<authority[:16]>/`;
+- the env keys `DAEM0NMCP_EDIT_BRIDGE_CREDENTIAL_FILE`,
+  `DAEM0NMCP_EDIT_BRIDGE_RUNTIME_DIR`, `DAEM0NMCP_PROJECT_ROOT` and
+  `DAEM0NMCP_STORAGE_PATH` in `<project>/.claude/settings.local.json`.
+
+To remove the hooks, the project's pairing env keys (only if the installer
+paired it) and, optionally, its credential (the project defaults to the current
+directory):
+
+```bash
+python -m daem0nmcp.cli uninstall-claude-hooks [--project-path <project>] [--remove-credentials]
 ```
+
+The old manual scripts in `hooks/` are deprecated stubs that only print a
+notice and exit 0. If your settings still point at them, re-run
+`install-claude-hooks`.
 
 ### Protocol Skill
 
@@ -645,7 +749,7 @@ Create `opencode.json` at your project root:
   "mcp": {
     "daem0nmcp": {
       "type": "local",
-      "command": ["python", "-m", "daem0nmcp"],
+      "command": ["python", "-c", "import sys; sys.path = [p for p in sys.path if p]; import runpy; runpy.run_module('daem0nmcp', run_name='__main__', alter_sys=True)"],
       "enabled": true,
       "environment": {
         "PYTHONUNBUFFERED": "1"
@@ -654,6 +758,12 @@ Create `opencode.json` at your project root:
   }
 }
 ```
+
+The command is the cwd-free equivalent of `python -m daem0nmcp`: OpenCode starts
+the server inside the opened project, and `-m` would import a `daem0nmcp/`
+directory found there. `install-opencode` writes the same command with the full
+path of the interpreter it ran under, and fixes that interpreter in the plugin
+it installs; the plugin never reads an interpreter from `opencode.json`.
 
 For Windows (where HTTP transport is required), use:
 
@@ -682,10 +792,11 @@ OpenCode uses a different tool name format than Claude Code:
 
 | Client | Format | Example |
 |--------|--------|---------|
-| Claude Code | `mcp__servername__toolname` | `mcp__daem0nmcp__commune` |
-| OpenCode | `servername_toolname` | `daem0nmcp_commune` |
+| Claude Code | `mcp__servername__toolname` | `mcp__daem0nmcp__session_brief` |
+| OpenCode | `servername_toolname` | `daem0nmcp_session_brief` |
 
-Both formats resolve to the same MCP server tools. Use the format matching your client. See the [Tool Names by Client](#tool-names-by-client) table in the Workflow Tools section for the complete mapping.
+Both formats resolve to the same MCP server tools. Use the exact form matching
+your client. See [Tool Names by Client](#tool-names-by-client).
 
 ## How It Works
 
@@ -731,6 +842,27 @@ Each project gets isolated storage at:
 
 All settings are configurable via environment variables with `DAEM0NMCP_` prefix.
 
+A `.env` file in the working directory is not read: the server is usually
+launched inside a project, so that file belongs to the repository, not to the
+operator. To keep settings in a file, set `DAEM0NMCP_ENV_FILE` to its absolute
+path in the server's environment. A relative path or a missing file is refused
+at startup, and real environment variables override values from the file.
+
+That file may hold only the settings listed in the tables below. Any other
+line stops startup, including variables the server reads straight from its
+environment: the transport and proxy settings (`DAEM0NMCP_ALLOWED_HOSTS`,
+`DAEM0NMCP_ALLOWED_ORIGINS`, `DAEM0NMCP_TRUSTED_PROXY_IPS`),
+`DAEM0NMCP_WORKSPACE_ACCESS_FILE`, `DAEM0NMCP_TOKEN_SECRET`, the
+`DAEM0NMCP_EDIT_BRIDGE_*` and task variables, and every `FASTMCP_*` variable.
+Keep those in the process environment.
+
+The FastMCP library has its own `.env` loading for `FASTMCP_*` settings. The
+server turns it off by setting `FASTMCP_ENV_FILE` to the null device when it is
+unset, so a project's `.env` cannot change them either. To load `FASTMCP_*`
+settings from a file, set `FASTMCP_ENV_FILE` yourself to an absolute path; a
+relative value is resolved against the working directory. Authentication
+variables (`FASTMCP_SERVER_AUTH*`) are read only from the process environment.
+
 ### Core Settings
 
 | Variable | Default | Description |
@@ -758,6 +890,7 @@ All settings are configurable via environment variables with `DAEM0NMCP_` prefix
 | `DAEM0NMCP_BM25_K1` | `1.5` | BM25 term frequency saturation |
 | `DAEM0NMCP_BM25_B` | `0.75` | BM25 document length normalization |
 | `DAEM0NMCP_RRF_K` | `60` | RRF fusion dampening constant |
+| `DAEM0NMCP_LEXICAL_CONTENT_TIERING` | `false` | Rank content/rationale matches ahead of tag-assisted matches in lexical recall |
 | `DAEM0NMCP_SEARCH_DIVERSITY_MAX_PER_FILE` | `3` | Max results from same file |
 
 ### Auto-Zoom Routing
@@ -803,15 +936,14 @@ See `Summon_Daem0n.md` for the complete configuration reference (~50 settings).
 
 ```
 daem0nmcp/
-├── server.py            # MCP server with 8 workflow + 3 cognitive tools (FastMCP)
+├── api/v7/              # Strict v7 models, handlers, policy, and adapters
+├── server.py            # MCP server composition and transport entry point
 ├── mcp_instance.py      # FastMCP instance creation
 ├── config.py            # Pydantic settings (~50 configurable options)
 ├── memory.py            # Memory storage & semantic retrieval
 ├── rules.py             # Rule engine with BM25 matching
 ├── similarity.py        # TF-IDF index, decay, conflict detection
 ├── vectors.py           # ModernBERT embeddings (ONNX/torch, asymmetric encoding)
-├── bm25_index.py        # BM25 Okapi keyword retrieval
-├── fusion.py            # Reciprocal Rank Fusion for hybrid search
 ├── surprise.py          # Titans-inspired novelty detection
 ├── recall_planner.py    # TiMem-style complexity classification
 ├── retrieval_router.py  # Auto-Zoom query-aware search dispatch
@@ -829,7 +961,7 @@ daem0nmcp/
 ├── enforcement.py       # Pre-commit enforcement & session tracking
 ├── hooks.py             # Git hook templates & installation
 ├── cli.py               # Command-line interface
-├── workflows/           # 8 consolidated workflow tools
+├── workflows/           # Legacy v6 compatibility implementation (migration only)
 │   ├── commune.py       # Session start & status
 │   ├── consult.py       # Pre-action intelligence
 │   ├── inscribe.py      # Memory writing & linking
@@ -839,7 +971,7 @@ daem0nmcp/
 │   ├── explore.py       # Graph & discovery
 │   └── maintain.py      # Housekeeping & federation
 ├── tools/               # MCP tool registrations
-│   ├── workflows.py     # 8 workflow tool definitions
+│   ├── workflows.py     # Legacy v6 workflow definitions (migration only)
 │   ├── cognitive_tools.py # simulate_decision, evolve_rule, debate_internal
 │   ├── memory.py        # Legacy memory tools (deprecated)
 │   ├── briefing.py      # Legacy briefing tools (deprecated)
@@ -863,11 +995,11 @@ daem0nmcp/
 │   └── persistence.py   # Dream session/result models & persistence
 ├── claude_hooks/        # Claude Code native hooks
 │   ├── install.py       # install/uninstall-claude-hooks CLI
-│   ├── session_start.py # Auto-briefing at session dawn
-│   ├── pre_edit.py      # Preflight enforcement + file recall
+│   ├── session_start.py # Suggest scoped v7 briefing
+│   ├── pre_edit.py      # Fail-closed v7 preflight guidance
 │   ├── pre_bash.py      # Rule enforcement on commands
 │   ├── post_edit.py     # Significance detection
-│   ├── stop.py          # Auto-capture decisions
+│   ├── stop.py          # Read-only outcome/memory suggestions
 │   └── _client.py       # Hook helper utilities
 ├── compression/         # LLMLingua-2 context compression
 ├── graph/               # Knowledge graph (NetworkX + Leiden)
@@ -891,10 +1023,10 @@ daem0nmcp/
 
 .opencode/
 ├── commands/
-│   ├── commune.md       # /commune slash command
-│   ├── counsel.md       # /counsel slash command
-│   ├── inscribe.md      # /inscribe slash command
-│   └── recall.md        # /recall slash command
+│   ├── commune.md       # Host shortcut for session_brief
+│   ├── counsel.md       # Host shortcut for memory_preflight
+│   ├── inscribe.md      # Host shortcut for memory_store
+│   └── recall.md        # Host shortcut for memory_recall
 └── plugins/
     └── daem0n.ts        # Covenant enforcement plugin
 
@@ -907,9 +1039,6 @@ start_server.py               # HTTP server launcher (streamable-http transport)
 ## CLI Commands
 
 ```bash
-# Session briefing/statistics
-python -m daem0nmcp.cli briefing
-
 # Index code entities
 python -m daem0nmcp.cli index [--path PATH] [--patterns **/*.py **/*.ts ...]
 
@@ -919,8 +1048,14 @@ python -m daem0nmcp.cli scan-todos [--auto-remember] [--path PATH]
 # Check a file against memories and rules
 python -m daem0nmcp.cli check <filepath>
 
-# Run database migrations (usually automatic)
+# Run database migrations (usually automatic; vector backfill is format 6 only)
 python -m daem0nmcp.cli migrate [--backfill-vectors]
+
+# Inspect a v7 retrieval projection
+python -m daem0nmcp.cli projection-status --workspace-id <workspace_id>
+
+# Rebuild a v7 retrieval projection from canonical events
+python -m daem0nmcp.cli rebuild-projection --projection dense --workspace-id <workspace_id>
 ```
 
 ### Hook & Enforcement Commands
@@ -943,14 +1078,10 @@ python -m daem0nmcp.cli install-hooks [--force]
 # Remove git pre-commit hooks
 python -m daem0nmcp.cli uninstall-hooks
 
-# Show pending decisions and blocking issues
-python -m daem0nmcp.cli status
-
-# Record outcome for a decision
-python -m daem0nmcp.cli record-outcome <id> "<outcome>" --worked|--failed
 ```
 
-All commands support `--json` for machine-readable output and `--project-path` to specify the project root.
+Use MCP `memory_record_outcome` for v7 outcomes. It requires an opaque
+`workspace_id`, a v7 `record_id`, and a stable idempotency key.
 
 ## Upgrading
 
@@ -962,21 +1093,47 @@ cd ~/Daem0n-MCP && git pull && pip install -e .
 
 ```
 
-### 2. Re-encode Embeddings (v6.6.6+ — REQUIRED for existing data)
+### 2. Re-encode Embeddings (legacy format 6 only)
 
-The embedding model changed from `all-MiniLM-L6-v2` (384-dim) to `nomic-ai/modernbert-embed-base` (256-dim). Existing embeddings must be re-encoded:
+The embedding model changed from `all-MiniLM-L6-v2` (384-dim) to `nomic-ai/modernbert-embed-base` (256-dim).
+
+> **Deprecated (format 6 only):** These legacy writers update the mutable
+> `memories.vector_embedding` column or legacy Qdrant collections. They refuse
+> an active format-7 database before making changes.
 
 ```bash
+# Re-encode the format-6 SQLite column (and local Qdrant, when present)
 python -m daem0nmcp.migrations.migrate_embedding_model --project-path /path/to/.daem0nmcp
+
+# Copy existing format-6 SQLite vectors to legacy Qdrant
+python -m daem0nmcp.migrations.migrate_vectors --project-path /path/to/project
+
+# Backfill missing format-6 SQLite vectors
+python -m daem0nmcp.cli --project-path /path/to/project migrate --backfill-vectors
 ```
 
-Qdrant collections are auto-recreated with the correct dimension on first startup.
+For architecture format 7, rebuild the dense retrieval projection from canonical
+events. Supply the registered workspace ID reported by the v7 migration/status
+commands:
+
+```bash
+python -m daem0nmcp.cli rebuild-projection --projection dense --workspace-id <workspace-id>
+```
 
 ### 3. Install Claude Code Hooks
 
 ```bash
 python -m daem0nmcp.cli install-claude-hooks
 ```
+
+Re-run this after upgrading. It replaces the hook commands earlier versions
+wrote, including the `python -m` form that imports a `daem0nmcp/` directory
+from any project you open. If you registered the stdio server at user scope as
+`<PYTHON_PATH> -m daem0nmcp.server`, remove it with
+`claude mcp remove daem0nmcp --scope user` and register the command under
+[Installation by Platform](#installation-by-platform) instead. In repositories
+where you ran `install-hooks`, re-run it as well: the git pre-commit hook it
+wrote used `python -m` too.
 
 ### 4. Restart Claude Code
 
@@ -988,11 +1145,36 @@ After updating, restart Claude Code to load the new MCP tools.
 python -m daem0nmcp.cli install-opencode --force
 ```
 
-This regenerates `opencode.json` and the plugin to match the latest version.
+This regenerates `opencode.json`, the plugin and the command files to match
+the latest version, discarding anything else you kept in them (other MCP
+servers in `opencode.json`, for example). Without `--force` the installer keeps
+existing files: it still rewrites a `python -m` server command in
+`opencode.json` (or reports one it cannot rewrite), and reports a plugin from an
+earlier version as outdated; delete `.opencode/plugins/daem0n.ts` and re-run to
+replace only the plugin.
 
-### 5. Migrations Run Automatically
+### 5. Migrations
 
-Database schema migrations are applied automatically when any MCP tool runs. No manual migration step required.
+A format 7 database is never upgraded in place. When a newer build needs a
+newer schema, the server and the legacy commands answer `MIGRATION_REQUIRED`
+until `migrate-v7 --apply` has run; that command snapshots the store first and
+can be rolled back. A retained format 6 database only receives format 6 schema
+migrations. If `active-db.json` is lost, commands answer
+`ACTIVE_POINTER_MISSING`; see `docs/v7-operations.md` for
+`migrate-v7 --recover-pointer`.
+
+Moving an existing v6 workspace to the v7 storage format is **not** automatic.
+It is an offline, reversible command, and a v6 workspace answers
+`MIGRATION_REQUIRED` until it has run:
+
+```bash
+# Stop the server first, then:
+python -m daem0nmcp.cli --project-path /path/to/project migrate-v7 --apply
+
+# Undo it; refuses if events were recorded since activation unless
+# --discard-v7-writes is passed.
+python -m daem0nmcp.cli --project-path /path/to/project migrate-v7 --rollback
+```
 
 ### 6. Index Your Codebase
 
@@ -1001,6 +1183,81 @@ python -m daem0nmcp.cli index
 ```
 
 Supports Python, TypeScript, JavaScript, Go, Rust, Java, C, C++, C#, Ruby, PHP via tree-sitter.
+
+## Outcome-informed memory
+
+`memory_store.informed_by` and `memory_record_outcome.informed_by` accept up to
+32 existing record IDs in the same workspace. They record explicit provenance;
+recall remains read-only. Outcomes may include
+`verification={"kind": "test", "command": "pytest", "exit_code": 0}`; verification
+is caller-reported evidence, not a command executed by the server.
+
+Schema 33 derives learning signals and provenance from canonical events. The
+v7 upgrader restores missing derived record parents only after complete canonical
+authority replay succeeds, then backfills learning evidence in the same
+transaction. Invalid authority fails closed; failed upgrades leave the active
+database and pointer unchanged.
+
+Utility ranking defaults to **shadow**: it reports estimates and diagnostics
+without changing retrieval order. Shadow still computes those estimates and can
+add database work and query latency; use `off` to skip that computation. Opt in
+to ranking changes with:
+
+```bash
+DAEM0NMCP_RETRIEVAL_UTILITY_MODE=apply
+DAEM0NMCP_RETRIEVAL_UTILITY_CREDIT=trace
+```
+
+`single_step` uses immediate outcome credit; `trace` also propagates bounded,
+discounted credit through explicit provenance. The default ranking weight is
+0.1. Set `DAEM0NMCP_RETRIEVAL_UTILITY_MODE=off` to disable computation. Failed
+decisions remain warnings rather than being demoted by their own failures.
+Utility only reorders candidates whose rank prior and fused score are within 5%
+of each other, so outcome history breaks near-ties and never outranks a clearly
+better match.
+
+### Bind guidance to repository code
+
+`memory_store.code_refs` accepts up to 16
+`{"relative_file_path": "src/x.py", "qualified_name": "f"}` references.
+Omit `qualified_name` to bind the whole file. Qualified names select a specific
+symbol; a bare name binds every matching declaration in that file. Fingerprints
+ignore CRLF/LF differences, and symbol bindings ignore edits to sibling symbols.
+The server manages `context.code_bindings`; callers cannot set it themselves.
+
+Recall reports `applicability` (`current`, `needs_revalidation`, or
+`unverifiable`) and `changed_bindings`. Parser unavailability is not proof that
+code changed. The default validity mode is `shadow`; set
+`DAEM0NMCP_MEMORY_VALIDITY_MODE=apply` to include revalidation labels in context,
+or `off` to skip checks. After checking changed code, record a successful
+outcome with `rebind_code=true` to refresh existing bindings.
+
+### Keep task-specific evidence under a context budget
+
+`memory_recall` accepts an optional `intent`: `explore`, `implement`, `debug`,
+or `review`. Implement/debug retention reserves room for procedures and matching
+code bindings, with shorter ordinary excerpts; review also bounds stale guidance.
+The default `DAEM0NMCP_RETRIEVAL_RETENTION_MODE=shadow` computes retention diagnostics
+without changing context or ranking. Set it to `apply` to change evidence packing,
+or `off` to skip computation. Without an intent, context packing is unchanged.
+These settings also apply to linked-workspace recall.
+
+### Optional ColBERT reranking
+
+Install `pip install "daem0nmcp[late-interaction]"` and set:
+
+```bash
+DAEM0NMCP_RETRIEVAL_RERANK_ENABLED=true
+DAEM0NMCP_RETRIEVAL_RERANKER=late_interaction
+```
+
+Request `memory_recall(..., rerank=true)`. The default model is
+`colbert-ir/colbertv2.0`, configured by
+`DAEM0NMCP_RETRIEVAL_LATE_INTERACTION_MODEL`. It loads lazily and may download
+weights on first use; warm the model before measuring latency. Cold downloads
+can exceed the provider timeout (`DAEM0NMCP_QDRANT_TIMEOUT_SECONDS`) and report
+`RERANKER_FAILED` while preserving the original order. An unavailable profile
+reports `RERANKER_UNAVAILABLE`; it never silently substitutes embedding reranking.
 
 ## Troubleshooting
 
@@ -1032,16 +1289,19 @@ Supports Python, TypeScript, JavaScript, Go, Rust, Java, C, C++, C#, Ruby, PHP v
 2. Hooks configured: check `~/.claude/settings.json` or `.claude/settings.json`
 3. Project has `.daem0nmcp/` directory
 
-### Communion/Counsel Errors
+### Covenant Errors
 
-- `COMMUNION_REQUIRED` → Call `commune(action="briefing", project_path="...")` first
-- `COUNSEL_REQUIRED` → Call `consult(action="preflight", description="...", project_path="...")` first
+- `COMMUNION_REQUIRED` → Call `session_brief(workspace_id="<workspace_id>")` first
+- `COUNSEL_REQUIRED` → Follow the returned remedy and call
+  `memory_preflight(workspace_id="<workspace_id>", target_tool="<exact-tool>", target_arguments={<exact-arguments>})`
 
 ### OpenCode: Tools Not Found
 
 **Symptom:** OpenCode reports "tool not found" when using `mcp__daem0nmcp__*` format.
 
-**Fix:** OpenCode uses single-underscore format: `daem0nmcp_commune` (not `mcp__daem0nmcp__commune`). See [Tool Names by Client](#tool-names-by-client) for the full mapping.
+**Fix:** OpenCode uses the exact single-underscore form
+`daem0nmcp_session_brief`; Claude Code uses
+`mcp__daem0nmcp__session_brief`. See [Tool Names by Client](#tool-names-by-client).
 
 ### OpenCode: MCP Connection Timeout
 
@@ -1073,6 +1333,46 @@ python -m daem0nmcp.server
 # Run HTTP server (Windows)
 python start_server.py --port 9876
 ```
+
+### Graded coding-memory evaluation
+
+```bash
+python -m benchmarks.coding_memory_eval --mode lexical_only --topics 24 --seed 20261004 --output coding-eval.json
+# Optional real-provider comparison (install local, models-local, graph and late-interaction):
+python -m benchmarks.coding_memory_eval --mode fully_enabled --topics 24 --seed 20261004 --output coding-eval-full.json
+```
+
+This isolated synthetic workload exercises outcome reuse, multi-hop provenance,
+symbol/file validity and budgeted procedure retention through the production
+writer and recall service. The lexical mode requires no model downloads.
+Event times are assigned in write order, not read from the wall clock, and the
+seed only shuffles the order of the writes: every
+seed reports the same metrics, so repeating a run with other seeds adds no
+evidence. Latency measurements are wall-clock and excluded from deterministic
+comparisons. Each run creates its own temporary directory and removes it when
+it ends, so concurrent runs never share storage and a directory left by a
+killed run does not block the next one.
+
+Reports expose all arm settings. Utility weight is **0.2 in the evaluation**
+(the product default stays 0.1). Retention distractors are same-category
+background procedure drafts with task tags: this prevents category diversity
+from automatically rescuing the actionable procedure and tests actual packing
+under a 256-token budget. Every arm uses the product default for lexical content
+tiering (off) except `tiering_apply` and `all_apply_tiering`, which turn it on:
+with the tier the procedure already ranks first, so those two arms retain the
+required fact without the retention policy and cannot show its effect. These
+synthetic gains are not a competitor comparison.
+The release-frozen retrieval corpus and its digest remain unchanged.
+
+`bash autoresearch.sh` runs the same offline lexical workload with 24 topics,
+seed 20261004 and a fixed event clock, emitting `METRIC coding_memory_ndcg`
+(higher is better) plus ranking, retention, validity and token metrics. A fresh
+offline MCP workspace also reports `listed_tool_count`, `guided_write_calls`,
+`strict_explicit_write_calls` and `destructive_challenge_calls`. The strict
+workload separately verifies rejection of an unbriefed direct write before
+measuring the explicit briefing/preflight/write flow; destructive call counts
+exclude the selection preview. It uses the project virtual environment and
+excludes wall-clock latency.
 
 ## Support
 

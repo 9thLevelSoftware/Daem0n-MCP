@@ -1,429 +1,41 @@
-"""
-CovenantTransform - FastMCP 3.0 Transform for Sacred Covenant Enforcement.
+"""FastMCP boundary for action-aware Sacred Covenant enforcement."""
 
-This transform implements middleware-style interception of MCP tool calls
-to enforce the Sacred Covenant protocol:
-
-    COMMUNE (get_briefing) -> SEEK COUNSEL (context_check) -> INSCRIBE (remember) -> SEAL (record_outcome)
-
-The transform can be used in two ways:
-1. Standalone: Call check_tool_access() directly to validate tool calls
-2. FastMCP Middleware: Use on_call_tool() hook when integrated with FastMCP 3.0
-
-The Sacred Covenant flow ensures:
-- AI agents commune with the Daem0n before any work (get briefing context)
-- AI agents seek counsel before mutations (check for conflicts/duplicates)
-- Decisions are inscribed with proper context
-- Outcomes are sealed to track what worked/failed
-"""
+from __future__ import annotations
 
 import json
 import logging
+import os
+import secrets
 from collections.abc import Callable
 from contextvars import ContextVar
-from datetime import datetime, timezone
+from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
+
+from ..covenant import (
+    COUNSEL_TTL_SECONDS,
+    COVENANT_POLICY,
+    ArgumentNormalizationError,
+    CovenantGate,
+    CovenantLevel,
+    CovenantStateStore,
+    CovenantViolation,
+    InvocationScope,
+    UnknownCovenantOperation,
+    admitted_call_var,
+    authority_from_environment,
+    covenant_gate_var,
+    invocation_scope_var,
+    workspace_resolver_var,
+)
+from ..covenant import _Admission as Admission
 
 logger = logging.getLogger(__name__)
 
-# ContextVar for client metadata extracted from tool args by CovenantMiddleware.
-# This allows transport-level metadata (_client_meta) to be stripped before
-# FastMCP's Pydantic validation and accessed by tool dispatch functions.
 client_meta_var: ContextVar[dict[str, Any] | None] = ContextVar(
     "client_meta_var", default=None
 )
-
-# TTL for context checks (5 minutes default, same as existing covenant.py)
-COUNSEL_TTL_SECONDS = 300
-
-
-# ============================================================================
-# TOOL CLASSIFICATION
-# ============================================================================
-
-# Tools exempt from all covenant enforcement (entry points and diagnostics)
-COVENANT_EXEMPT_TOOLS: set[str] = {
-    "get_briefing",  # Entry point - starts communion
-    "health",  # Diagnostic - always available
-    "context_check",  # Part of the covenant flow
-    "recall",  # Read-only query
-    "recall_for_file",  # Read-only query
-    "search_memories",  # Read-only query
-    "find_related",  # Read-only query
-    "check_rules",  # Read-only query
-    "list_rules",  # Read-only query
-    "find_code",  # Read-only query
-    "analyze_impact",  # Read-only analysis
-    "export_data",  # Read-only export
-    "scan_todos",  # Read-only scan (unless auto_remember=True)
-    "propose_refactor",  # Read-only analysis
-    "get_graph",  # Read-only query
-    "trace_chain",  # Read-only query
-    "recall_hierarchical",  # Read-only query
-    "list_communities",  # Read-only query
-    "get_community_details",  # Read-only query
-    "recall_by_entity",  # Read-only query
-    "list_entities",  # Read-only query
-    "get_memory_versions",  # Read-only query
-    "get_memory_at_time",  # Read-only query
-    "list_context_triggers",  # Read-only query
-    "check_context_triggers",  # Read-only query
-    "get_active_context",  # Read-only query
-    "list_linked_projects",  # Read-only query
-    # Cognitive tools (Phase 17) -- analytical, read-only instruments
-    "simulate_decision",
-    "evolve_rule",
-    "debate_internal",
-}
-
-# Tools that REQUIRE communion (must call get_briefing first)
-# These are all mutating tools - they change state
-COMMUNION_REQUIRED_TOOLS: set[str] = {
-    "remember",
-    "remember_batch",
-    "add_rule",
-    "update_rule",
-    "record_outcome",
-    "link_memories",
-    "unlink_memories",
-    "pin_memory",
-    "archive_memory",
-    "prune_memories",
-    "cleanup_memories",
-    "compact_memories",
-    "import_data",
-    "rebuild_index",
-    "index_project",
-    "ingest_doc",
-    "set_active_context",
-    "remove_from_active_context",
-    "clear_active_context",
-    "link_projects",
-    "unlink_projects",
-    "consolidate_linked_databases",
-    "rebuild_communities",
-    "backfill_entities",
-    "add_context_trigger",
-    "remove_context_trigger",
-}
-
-# Tools that REQUIRE counsel (must call context_check before mutating)
-# These are the most important mutations that could cause conflicts
-COUNSEL_REQUIRED_TOOLS: set[str] = {
-    "remember",
-    "remember_batch",
-    "add_rule",
-    "update_rule",
-    "prune_memories",
-    "cleanup_memories",
-    "compact_memories",
-    "import_data",
-    "ingest_doc",
-}
-
-
-# ============================================================================
-# COVENANT VIOLATION RESPONSES
-# ============================================================================
-
-
-class CovenantViolation:
-    """
-    Standard violation response structures for covenant breaches.
-
-    Returns structured dicts that block tool execution and guide
-    the AI toward proper covenant adherence. The responses include
-    clear explanations and remedies.
-    """
-
-    @staticmethod
-    def communion_required(project_path: str) -> dict[str, Any]:
-        """
-        Response when tool is called without prior get_briefing().
-
-        The Sacred Covenant demands communion before any meaningful work.
-        This ensures the AI has context about existing memories, warnings,
-        and rules before making changes.
-
-        Args:
-            project_path: The project path being accessed
-
-        Returns:
-            Blocking response with remedy instructions
-        """
-        return {
-            "status": "blocked",
-            "violation": "COMMUNION_REQUIRED",
-            "message": (
-                "The Sacred Covenant demands communion before work begins. "
-                "You must first call get_briefing() to commune with the Daem0n "
-                "and receive context about this realm's memories, warnings, and rules."
-            ),
-            "project_path": project_path,
-            "remedy": {
-                "tool": "get_briefing",
-                "args": {"project_path": project_path},
-                "description": "Begin communion with the Daem0n",
-            },
-        }
-
-    @staticmethod
-    def counsel_required(tool_name: str, project_path: str) -> dict[str, Any]:
-        """
-        Response when mutating tool is called without prior context_check().
-
-        Before inscribing new memories, one must seek counsel on what
-        already exists to avoid contradictions and duplications.
-
-        Args:
-            tool_name: The tool that was blocked
-            project_path: The project path being accessed
-
-        Returns:
-            Blocking response with remedy instructions
-        """
-        return {
-            "status": "blocked",
-            "violation": "COUNSEL_REQUIRED",
-            "message": (
-                f"The Sacred Covenant requires seeking counsel before using '{tool_name}'. "
-                f"You must first call context_check() to understand existing memories "
-                f"and rules related to your intended action. This prevents contradictions "
-                f"and honors the wisdom already inscribed."
-            ),
-            "project_path": project_path,
-            "tool_blocked": tool_name,
-            "remedy": {
-                "tool": "context_check",
-                "args": {
-                    "description": f"About to use {tool_name}",
-                    "project_path": project_path,
-                },
-                "description": f"Seek counsel before {tool_name}",
-            },
-        }
-
-    @staticmethod
-    def counsel_expired(
-        tool_name: str, project_path: str, age_seconds: int
-    ) -> dict[str, Any]:
-        """
-        Response when context_check was done but has expired.
-
-        Counsel becomes stale after COUNSEL_TTL_SECONDS (default 5 minutes).
-        The context may have changed, requiring fresh consultation.
-
-        Args:
-            tool_name: The tool that was blocked
-            project_path: The project path being accessed
-            age_seconds: How old the most recent counsel is
-
-        Returns:
-            Blocking response with remedy instructions
-        """
-        return {
-            "status": "blocked",
-            "violation": "COUNSEL_EXPIRED",
-            "message": (
-                f"Your counsel has grown stale ({age_seconds}s old, limit is {COUNSEL_TTL_SECONDS}s). "
-                f"The context may have changed. Please seek fresh counsel before '{tool_name}'."
-            ),
-            "project_path": project_path,
-            "tool_blocked": tool_name,
-            "remedy": {
-                "tool": "context_check",
-                "args": {
-                    "description": f"Refreshing counsel before {tool_name}",
-                    "project_path": project_path,
-                },
-                "description": "Seek fresh counsel",
-            },
-        }
-
-
-# ============================================================================
-# COVENANT TRANSFORM
-# ============================================================================
-
-
-class CovenantTransform:
-    """
-    FastMCP 3.0 Transform for Sacred Covenant enforcement.
-
-    This transform intercepts tool calls to enforce the covenant protocol:
-    1. Exempt tools (health, get_briefing, read-only) always pass
-    2. Communion-required tools block until get_briefing() is called
-    3. Counsel-required tools block until context_check() is called
-
-    The transform tracks state per-project, allowing multiple projects
-    to be served concurrently with independent covenant states.
-
-    Usage (standalone):
-        transform = CovenantTransform()
-
-        result = transform.check_tool_access(
-            tool_name="remember",
-            project_path="/my/project",
-            get_state=lambda p: {"briefed": True, "context_checks": [...]}
-        )
-
-        if result is not None:
-            return result  # Blocked, return violation response
-        # Otherwise proceed with tool execution
-
-    Usage (FastMCP middleware):
-        # Will be implemented in Task 2.2 when integrating with server.py
-    """
-
-    def __init__(
-        self,
-        counsel_ttl_seconds: int = COUNSEL_TTL_SECONDS,
-        exempt_tools: set[str] | None = None,
-        communion_required_tools: set[str] | None = None,
-        counsel_required_tools: set[str] | None = None,
-    ):
-        """
-        Initialize the CovenantTransform.
-
-        Args:
-            counsel_ttl_seconds: How long context_check remains valid
-            exempt_tools: Override the default exempt tools set
-            communion_required_tools: Override the default communion tools set
-            counsel_required_tools: Override the default counsel tools set
-        """
-        self.counsel_ttl_seconds = counsel_ttl_seconds
-        self.exempt_tools = exempt_tools or COVENANT_EXEMPT_TOOLS
-        self.communion_required_tools = (
-            communion_required_tools or COMMUNION_REQUIRED_TOOLS
-        )
-        self.counsel_required_tools = counsel_required_tools or COUNSEL_REQUIRED_TOOLS
-
-    def check_tool_access(
-        self,
-        tool_name: str,
-        project_path: str | None,
-        get_state: Callable[[str | None], dict[str, Any] | None],
-    ) -> dict[str, Any] | None:
-        """
-        Check if a tool call is allowed under the Sacred Covenant.
-
-        This is the main enforcement method. It checks tool classification
-        and session state to determine if the call should proceed.
-
-        Args:
-            tool_name: Name of the tool being called
-            project_path: Project root path (may be None for some tools)
-            get_state: Callback to get session state for a project path.
-                      Should return dict with 'briefed' (bool) and
-                      'context_checks' (list of dicts with 'timestamp')
-
-        Returns:
-            None if tool is allowed, or a violation dict if blocked.
-            The violation dict includes status, violation type, message,
-            and remedy instructions.
-        """
-        # Step 1: Check if tool is exempt
-        if tool_name in self.exempt_tools:
-            logger.debug(f"Tool '{tool_name}' is exempt from covenant enforcement")
-            return None  # Allowed
-
-        # Step 2: Get session state
-        state = get_state(project_path)
-
-        # Step 3: Check communion requirement
-        if tool_name in self.communion_required_tools and (state is None or not state.get("briefed", False)):
-            logger.info(
-                f"Communion required for tool '{tool_name}' on project '{project_path}'"
-            )
-            return CovenantViolation.communion_required(project_path or "unknown")
-
-        # Step 4: Check counsel requirement
-        if tool_name in self.counsel_required_tools:
-            # Must first check communion (counsel implies communion)
-            if state is None or not state.get("briefed", False):
-                logger.info(f"Communion required before counsel for tool '{tool_name}'")
-                return CovenantViolation.communion_required(project_path or "unknown")
-
-            # Check for fresh counsel
-            context_checks = state.get("context_checks", [])
-
-            if not context_checks:
-                logger.info(f"Counsel required for tool '{tool_name}'")
-                return CovenantViolation.counsel_required(
-                    tool_name, project_path or "unknown"
-                )
-
-            # Find the most recent context check with a valid timestamp
-            most_recent_age = self._get_freshest_counsel_age(context_checks)
-
-            if most_recent_age is None:
-                # No valid timestamped checks
-                logger.info(f"No valid timestamped counsel found for '{tool_name}'")
-                return CovenantViolation.counsel_required(
-                    tool_name, project_path or "unknown"
-                )
-
-            if most_recent_age > self.counsel_ttl_seconds:
-                logger.info(
-                    f"Counsel expired ({most_recent_age:.0f}s old) for '{tool_name}'"
-                )
-                return CovenantViolation.counsel_expired(
-                    tool_name, project_path or "unknown", int(most_recent_age)
-                )
-
-        # All checks passed
-        logger.debug(f"Tool '{tool_name}' allowed under covenant")
-        return None
-
-    def _get_freshest_counsel_age(
-        self,
-        context_checks: list,
-    ) -> float | None:
-        """
-        Find the age of the most recent valid context check.
-
-        Args:
-            context_checks: List of context check entries
-
-        Returns:
-            Age in seconds of the freshest check, or None if no valid checks
-        """
-        now = datetime.now(timezone.utc)
-        most_recent_age: float | None = None
-
-        for check in context_checks:
-            if isinstance(check, dict) and "timestamp" in check:
-                try:
-                    check_time = datetime.fromisoformat(check["timestamp"])
-                    # Handle timezone-naive timestamps
-                    if check_time.tzinfo is None:
-                        check_time = check_time.replace(tzinfo=timezone.utc)
-                    age = (now - check_time).total_seconds()
-                    if most_recent_age is None or age < most_recent_age:
-                        most_recent_age = age
-                except (ValueError, TypeError) as e:
-                    logger.warning(f"Invalid timestamp in context check: {e}")
-                    continue
-            elif isinstance(check, str):
-                # Legacy format - treat as valid (backwards compatibility)
-                return 0.0  # Age 0 = always fresh for legacy
-
-        return most_recent_age
-
-    def __repr__(self) -> str:
-        return (
-            f"CovenantTransform("
-            f"counsel_ttl={self.counsel_ttl_seconds}s, "
-            f"exempt={len(self.exempt_tools)}, "
-            f"communion={len(self.communion_required_tools)}, "
-            f"counsel={len(self.counsel_required_tools)}"
-            f")"
-        )
-
-
-# ============================================================================
-# COVENANT MIDDLEWARE (FastMCP 3.0)
-# ============================================================================
+_PROCESS_PRINCIPAL = secrets.token_urlsafe(24)
 
 try:
     from fastmcp.server.middleware import CallNext, Middleware, MiddlewareContext
@@ -433,182 +45,306 @@ try:
     _FASTMCP_MIDDLEWARE_AVAILABLE = True
 except ImportError:
     _FASTMCP_MIDDLEWARE_AVAILABLE = False
-    # Define stubs for type hints when FastMCP 3.0 middleware is not available
-    Middleware = object  # type: ignore
-    MiddlewareContext = Any  # type: ignore
-    CallNext = Any  # type: ignore
-    ToolResult = Any  # type: ignore
+    Middleware = object  # type: ignore[assignment]
+    MiddlewareContext = Any  # type: ignore[assignment,misc]
+    CallNext = Any  # type: ignore[assignment,misc]
+
+    @dataclass
+    class ToolResult:  # type: ignore[no-redef]
+        structured_content: dict[str, Any]
+
+
+def _default_workspace_resolver(selector: str | None) -> str:
+    from ..context_manager import workspace_registry
+
+    return str(workspace_registry.resolve(selector).root)
+
+
+def _as_workspace_root(value: Any) -> str:
+    root = getattr(value, "root", value)
+    return str(Path(root).resolve())
+
+
+class CovenantTransform:
+    """Compatibility facade that resolves only the authoritative policy."""
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        self.policy = COVENANT_POLICY
+
+    def check_tool_access(
+        self,
+        tool_name: str,
+        project_path: str | None = None,
+        get_state: Callable[[str | None], dict[str, Any] | None] | None = None,
+        *,
+        action: str | None = None,
+        arguments: dict[str, Any] | None = None,
+    ) -> dict[str, Any] | None:
+        operation = f"{tool_name}.{action}" if action else tool_name
+        try:
+            level = self.policy.resolve(operation, arguments)
+        except (ArgumentNormalizationError, UnknownCovenantOperation):
+            return CovenantViolation.build(
+                "UNKNOWN_COVENANT_OPERATION"
+                if operation not in self.policy.operations
+                else "TOKEN_ARGUMENT_MISMATCH",
+                operation,
+                project_path,
+            )
+        if level is CovenantLevel.EXEMPT:
+            return None
+        return CovenantViolation.build("IDENTITY_UNAVAILABLE", operation, project_path)
+
+    def __repr__(self) -> str:
+        return f"CovenantTransform(operations={len(self.policy.operations)})"
 
 
 class CovenantMiddleware(Middleware if _FASTMCP_MIDDLEWARE_AVAILABLE else object):
-    """
-    FastMCP 3.0 Middleware for Sacred Covenant enforcement.
-
-    This middleware intercepts tool calls via the on_call_tool() hook to enforce
-    the Sacred Covenant protocol at the MCP layer, before tools are executed.
-
-    The middleware provides centralized enforcement, complementing (or eventually
-    replacing) the decorator-based approach in covenant.py.
-
-    Usage:
-        from daem0nmcp.transforms.covenant import CovenantMiddleware
-
-        # Create middleware with state callback
-        middleware = CovenantMiddleware(
-            get_state=lambda project_path: {
-                "briefed": True,
-                "context_checks": [{"timestamp": "..."}]
-            }
-        )
-
-        # Register with FastMCP server
-        mcp.add_middleware(middleware)
-
-    The middleware will:
-    1. Extract tool_name and project_path from the request
-    2. Check the covenant via CovenantTransform.check_tool_access()
-    3. Block with violation response if covenant is broken
-    4. Allow through to call_next() if covenant is satisfied
-    """
+    """Resolve and authorize every consolidated workflow before dispatch."""
 
     def __init__(
         self,
-        get_state: Callable[[str | None], dict[str, Any] | None],
+        get_state: Callable[[str | None], dict[str, Any] | None] | None = None,
         counsel_ttl_seconds: int = COUNSEL_TTL_SECONDS,
         exempt_tools: set[str] | None = None,
         communion_required_tools: set[str] | None = None,
         counsel_required_tools: set[str] | None = None,
-        dream_scheduler: Any
-        | None = None,  # IdleDreamScheduler, typed as Any to avoid circular import
-    ):
-        """
-        Initialize the CovenantMiddleware.
-
-        Args:
-            get_state: Callback to get session state for a project path.
-                      Should return dict with 'briefed' (bool) and
-                      'context_checks' (list of dicts with 'timestamp'),
-                      or None if no state exists for the project.
-            counsel_ttl_seconds: How long context_check remains valid (default 300s)
-            exempt_tools: Override the default exempt tools set
-            communion_required_tools: Override the default communion tools set
-            counsel_required_tools: Override the default counsel tools set
-            dream_scheduler: Optional IdleDreamScheduler for idle timer notifications.
-                            Typed as Any to avoid circular imports.
-        """
+        dream_scheduler: Any | None = None,
+        *,
+        gate: CovenantGate | None = None,
+        scope_provider: Callable[[Any, str], InvocationScope | None] | None = None,
+        workspace_resolver: Callable[[str | None], Any] | None = None,
+        transport_mode: str = "remote",
+        access_token_provider: Callable[[], Any] | None = None,
+    ) -> None:
         if _FASTMCP_MIDDLEWARE_AVAILABLE:
             super().__init__()
-
-        self._get_state = get_state
         self._dream_scheduler = dream_scheduler
-        self._client_name: str | None = None
-        self._client_version: str | None = None
-        self._transform = CovenantTransform(
-            counsel_ttl_seconds=counsel_ttl_seconds,
-            exempt_tools=exempt_tools,
-            communion_required_tools=communion_required_tools,
-            counsel_required_tools=counsel_required_tools,
-        )
+        self._scope_provider = scope_provider
+        self._workspace_resolver = workspace_resolver or _default_workspace_resolver
+        self._transport_mode = transport_mode
+        self._access_token_provider = access_token_provider
+        self._stdio_session_id: str | None = None
+        self._gate_injected = gate is not None
+        self._gate = gate or self._build_gate(local_stdio=transport_mode == "stdio")
 
-    def set_dream_scheduler(self, scheduler) -> None:
-        """Set the dream scheduler for idle timer notifications.
-
-        Supports late binding when the scheduler is created after
-        middleware registration.
-
-        Args:
-            scheduler: IdleDreamScheduler instance (or None to clear).
-        """
-        self._dream_scheduler = scheduler
+    @staticmethod
+    def _build_gate(*, local_stdio: bool) -> CovenantGate | None:
+        authority = authority_from_environment(local_stdio=local_stdio)
+        if authority is None:
+            return None
+        return CovenantGate(state_store=CovenantStateStore(), authority=authority)
 
     @property
-    def client_name(self) -> str | None:
-        """MCP client name from the initialize handshake (e.g., 'opencode', 'claude-code')."""
-        return self._client_name
+    def gate(self) -> CovenantGate | None:
+        return self._gate
+
+    @property
+    def client_name(self) -> None:
+        """Deprecated diagnostic property; clientInfo is never an identity."""
+        return None
+
+    def configure_transport(self, transport_mode: str) -> None:
+        self._transport_mode = transport_mode
+        self._stdio_session_id = None
+        if not self._gate_injected:
+            self._gate = self._build_gate(local_stdio=transport_mode == "stdio")
+
+    def set_dream_scheduler(self, scheduler: Any) -> None:
+        self._dream_scheduler = scheduler
 
     async def on_initialize(
         self,
-        context: "MiddlewareContext[mt.InitializeRequest]",
-        call_next: "CallNext[mt.InitializeRequest, mt.InitializeResult | None]",
-    ) -> "mt.InitializeResult | None":
-        """Capture MCP client identity from the initialize handshake."""
+        context: MiddlewareContext[mt.InitializeRequest],
+        call_next: CallNext[mt.InitializeRequest, mt.InitializeResult | None],
+    ) -> mt.InitializeResult | None:
+        result = await call_next(context)
+        if self._transport_mode == "stdio":
+            self._stdio_session_id = secrets.token_urlsafe(24)
+        return result
+
+    def _resolve_workspace(self, selector: str | None) -> str:
+        return _as_workspace_root(self._workspace_resolver(selector))
+
+    def _scope_for(self, context: Any, workspace: str) -> InvocationScope | None:
+        if self._scope_provider is not None:
+            scope = self._scope_provider(context, workspace)
+            if scope is None:
+                return None
+            if scope.canonical_workspace != os.path.normcase(
+                str(Path(workspace).resolve())
+            ):
+                return None
+            return scope
+        if self._transport_mode == "stdio" and self._stdio_session_id:
+            return InvocationScope(
+                _PROCESS_PRINCIPAL,
+                self._stdio_session_id,
+                workspace,
+            )
+        if self._transport_mode != "remote":
+            return None
         try:
-            client_info = getattr(context.message, "clientInfo", None)
-            if client_info:
-                self._client_name = getattr(client_info, "name", None)
-                self._client_version = getattr(client_info, "version", None)
+            provider = self._access_token_provider
+            if provider is None:
+                from fastmcp.server.dependencies import get_access_token
+
+                provider = get_access_token
+            access_token = provider()
+            fastmcp_context = context.fastmcp_context
+            if fastmcp_context.request_context is None:
+                return None
+            session_id = fastmcp_context.session_id
         except Exception:
-            pass  # Never block initialization
-        return await call_next(context)
+            return None
+        if not isinstance(session_id, str) or not session_id.strip():
+            return None
+        claims = getattr(access_token, "claims", None)
+        if not isinstance(claims, dict):
+            return None
+        subject = claims.get("sub")
+        if isinstance(subject, str) and subject.strip():
+            principal = f"oauth-sub:{subject.strip()}"
+        else:
+            client_id = getattr(access_token, "client_id", None)
+            if not isinstance(client_id, str) or not client_id.strip():
+                return None
+            principal = f"oauth-client:{client_id.strip()}"
+        return InvocationScope(
+            principal,
+            f"mcp-session:{session_id.strip()}",
+            workspace,
+        )
+
+    @staticmethod
+    def _parse_client_meta(raw_meta: Any) -> dict[str, Any] | None:
+        if raw_meta is None:
+            return None
+        try:
+            parsed = json.loads(raw_meta) if isinstance(raw_meta, str) else raw_meta
+        except (TypeError, ValueError):
+            return None
+        return parsed if isinstance(parsed, dict) else None
+
+    @staticmethod
+    def _tool_result(violation: dict[str, Any]) -> ToolResult:
+        return ToolResult(structured_content=violation)
+
+    @staticmethod
+    def _call_succeeded(result: Any) -> bool:
+        if isinstance(result, dict):
+            return "error" not in result and result.get("status") != "blocked"
+        structured = getattr(result, "structured_content", None)
+        return not (
+            isinstance(structured, dict)
+            and ("error" in structured or structured.get("status") == "blocked")
+        )
 
     async def on_call_tool(
         self,
-        context: "MiddlewareContext[mt.CallToolRequestParams]",
-        call_next: "CallNext[mt.CallToolRequestParams, ToolResult]",
-    ) -> "ToolResult":
-        """
-        Intercept tool calls to enforce the Sacred Covenant.
-
-        This method is called by FastMCP before each tool execution.
-        It checks whether the covenant is satisfied and either:
-        - Blocks the call with a violation response
-        - Allows the call to proceed via call_next()
-
-        Args:
-            context: Middleware context containing the request message
-            call_next: Callback to proceed with the tool call
-
-        Returns:
-            ToolResult - either the violation response or the actual tool result
-        """
-        # Reset idle timer FIRST -- before any blocking checks.
-        # This ensures the dream scheduler knows a tool call arrived,
-        # even if the call ends up blocked by covenant enforcement.
+        context: MiddlewareContext[mt.CallToolRequestParams],
+        call_next: CallNext[mt.CallToolRequestParams, ToolResult],
+    ) -> ToolResult:
         if self._dream_scheduler is not None:
             self._dream_scheduler.notify_tool_call()
 
-        # Extract tool name and arguments from the request
-        tool_name = context.message.name
-        arguments = context.message.arguments or {}
-        project_path = arguments.get("project_path")
-
-        # Strip _client_meta from arguments before FastMCP's Pydantic validation.
-        # Client plugins (e.g. OpenCode) inject this for provenance tracking, but
-        # it's not part of any tool's schema. We stash it in a ContextVar so that
-        # tool dispatch functions (inscribe) can read it without polluting signatures.
-        raw_meta = arguments.pop("_client_meta", None)
-        if raw_meta is not None:
-            try:
-                parsed = json.loads(raw_meta) if isinstance(raw_meta, str) else raw_meta
-            except (ValueError, TypeError):
-                parsed = None
-            client_meta_var.set(parsed)
-        else:
-            client_meta_var.set(None)
-
-        logger.debug(
-            f"CovenantMiddleware: Checking tool '{tool_name}' for project '{project_path}'"
-        )
-
-        # Check covenant via the transform
-        violation = self._transform.check_tool_access(
-            tool_name=tool_name,
-            project_path=project_path,
-            get_state=self._get_state,
-        )
-
-        if violation is not None:
-            # Covenant violated - return blocking response
-            logger.info(
-                f"CovenantMiddleware: Blocked '{tool_name}' - {violation.get('violation', 'UNKNOWN')}"
+        workflow = context.message.name
+        original_arguments = context.message.arguments or {}
+        arguments = dict(original_arguments)
+        action = arguments.get("action")
+        operation = f"{workflow}.{action}" if isinstance(action, str) else workflow
+        try:
+            level = COVENANT_POLICY.resolve(operation, arguments)
+        except (ArgumentNormalizationError, UnknownCovenantOperation):
+            return self._tool_result(
+                CovenantViolation.build(
+                    "UNKNOWN_COVENANT_OPERATION"
+                    if operation not in COVENANT_POLICY.operations
+                    else "TOKEN_ARGUMENT_MISMATCH",
+                    operation,
+                    None,
+                )
             )
-            # Return the violation as a ToolResult with structured_content
-            # FastMCP 3.0 requires structured_content for tools with return type annotations
-            return ToolResult(structured_content=violation)
 
-        # Covenant satisfied - proceed with the tool call
-        logger.debug(f"CovenantMiddleware: Allowed '{tool_name}'")
-        return await call_next(context)
+        try:
+            workspace = self._resolve_workspace(arguments.get("project_path"))
+        except (OSError, RuntimeError, ValueError) as exc:
+            code = getattr(exc, "code", "UNAUTHORIZED_WORKSPACE")
+            return self._tool_result(CovenantViolation.build(code, operation, None))
+        scope = self._scope_for(context, workspace)
+        preflight_token = arguments.get("preflight_token")
+        if self._gate is None:
+            violation = (
+                None
+                if level is CovenantLevel.EXEMPT
+                else CovenantViolation.build(
+                    "IDENTITY_UNAVAILABLE", operation, workspace
+                )
+            )
+        else:
+            violation = self._gate.authorize(
+                operation,
+                arguments,
+                scope,
+                preflight_token=preflight_token,
+            )
+        if violation is not None:
+            logger.info(
+                "Covenant blocked %s: %s",
+                operation,
+                violation.get("violation", "UNKNOWN"),
+            )
+            return self._tool_result(violation)
+
+        filtered_arguments = {
+            key: value
+            for key, value in arguments.items()
+            if key not in {"_client_meta", "preflight_token"}
+        }
+        context.message.arguments = filtered_arguments
+        admission = None
+        if self._gate is not None and scope is not None:
+            try:
+                fingerprint = self._gate.fingerprint(operation, arguments, scope)
+            except ArgumentNormalizationError:
+                return self._tool_result(
+                    CovenantViolation.build(
+                        "TOKEN_ARGUMENT_MISMATCH", operation, workspace
+                    )
+                )
+            except UnknownCovenantOperation:
+                return self._tool_result(
+                    CovenantViolation.build(
+                        "UNKNOWN_COVENANT_OPERATION", operation, workspace
+                    )
+                )
+            admission = Admission(operation, fingerprint)
+        meta_token = client_meta_var.set(
+            self._parse_client_meta(arguments.get("_client_meta"))
+        )
+        scope_token = invocation_scope_var.set(scope)
+        gate_token = covenant_gate_var.set(self._gate)
+        resolver_token = workspace_resolver_var.set(self._workspace_resolver)
+        admitted_token = admitted_call_var.set(admission)
+        try:
+            result = await call_next(context)
+            if (
+                operation == "commune.briefing"
+                and self._gate is not None
+                and scope is not None
+                and self._call_succeeded(result)
+            ):
+                self._gate.record_briefing(scope)
+            return result
+        finally:
+            admitted_call_var.reset(admitted_token)
+            workspace_resolver_var.reset(resolver_token)
+            covenant_gate_var.reset(gate_token)
+            invocation_scope_var.reset(scope_token)
+            client_meta_var.reset(meta_token)
 
     def __repr__(self) -> str:
-        return f"CovenantMiddleware({self._transform!r})"
+        return (
+            f"CovenantMiddleware(transport={self._transport_mode!r}, "
+            f"identity={'ready' if self._scope_provider else 'transport-derived'})"
+        )

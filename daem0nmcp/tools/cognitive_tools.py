@@ -10,6 +10,7 @@ try:
         _missing_project_path_error,
         get_project_context,
     )
+    from ..covenant import authorize_operation_call
     from ..logging_config import with_request_id
     from ..mcp_instance import mcp
 except ImportError:
@@ -19,6 +20,7 @@ except ImportError:
         _missing_project_path_error,
         get_project_context,
     )
+    from daem0nmcp.covenant import authorize_operation_call
     from daem0nmcp.logging_config import with_request_id
     from daem0nmcp.mcp_instance import mcp
 
@@ -42,10 +44,14 @@ async def simulate_decision(
         decision_id: Memory ID of the decision to scry
         project_path: Project root
     """
-    if not project_path and not _default_project_path:
+    pp = project_path or _default_project_path
+    if not pp:
         return _missing_project_path_error()
+    violation = authorize_operation_call("simulate_decision", locals())
+    if violation is not None:
+        return violation
 
-    ctx = await get_project_context(project_path)
+    ctx = await get_project_context(pp)
 
     try:
         from ..cognitive.simulate import run_simulation
@@ -73,10 +79,14 @@ async def evolve_rule(
         rule_id: Specific rule ID to analyze (omit for batch analysis of all rules)
         project_path: Project root
     """
-    if not project_path and not _default_project_path:
+    pp = project_path or _default_project_path
+    if not pp:
         return _missing_project_path_error()
+    violation = authorize_operation_call("evolve_rule", locals())
+    if violation is not None:
+        return violation
 
-    ctx = await get_project_context(project_path)
+    ctx = await get_project_context(pp)
 
     try:
         from ..cognitive.evolve import run_evolution
@@ -94,6 +104,7 @@ async def debate_internal(
     advocate_position: str,
     challenger_position: str,
     project_path: str | None = None,
+    preflight_token: str | None = None,
 ) -> dict[str, Any]:
     """
     Adversarial Council -- convene an internal debate grounded in memory evidence.
@@ -109,10 +120,14 @@ async def debate_internal(
         challenger_position: The position the challenger will defend
         project_path: Project root
     """
-    if not project_path and not _default_project_path:
+    pp = project_path or _default_project_path
+    if not pp:
         return _missing_project_path_error()
+    violation = authorize_operation_call("debate_internal", locals(), preflight_token)
+    if violation is not None:
+        return violation
 
-    ctx = await get_project_context(project_path)
+    ctx = await get_project_context(pp)
 
     try:
         from ..cognitive.debate import run_debate

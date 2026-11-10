@@ -1,22 +1,47 @@
-"""Tests for backward compatibility — deprecated tools removed from MCP, accessible as Python functions."""
+"""Tests for the v7 cutover and lazy legacy Python compatibility exports."""
 
 import pytest
 
 
 class TestDeprecatedToolsRemovedFromMCP:
-    """Verify deprecated individual tools are NOT exposed as MCP tools (v6.0+).
-
-    Individual tools (get_briefing, remember, recall, etc.) are replaced by
-    workflow tools (commune, consult, inscribe, etc.). The old functions remain
-    importable as Python for use by workflow dispatchers, but are not MCP tools.
-    """
+    """Verify the wire registry is exact v7 while Python adapters stay lazy."""
 
     @pytest.mark.asyncio
-    async def test_workflow_tools_exposed(self):
+    async def test_exact_v7_tools_exposed(self):
+        from daem0nmcp.api.v7.gateway_operations import CORE_LISTED_TOOLS
+        from daem0nmcp.api.v7.policy import V7_TOOL_LEVELS
         from daem0nmcp.server import mcp
 
         tools = {t.name for t in await mcp.list_tools()}
-        for wf in (
+        assert tools == set(CORE_LISTED_TOOLS)
+        assert len(tools) == 9
+        registered = {(await mcp.get_tool(name)).name for name in V7_TOOL_LEVELS}
+        assert registered == set(V7_TOOL_LEVELS)
+        assert len(registered) == 77
+        assert registered.isdisjoint(
+            {
+                "commune",
+                "consult",
+                "inscribe",
+                "reflect",
+                "understand",
+                "govern",
+                "explore",
+                "maintain",
+            }
+        )
+
+    @pytest.mark.asyncio
+    async def test_deprecated_tools_not_in_mcp(self):
+        from daem0nmcp.server import mcp
+
+        tools = {t.name for t in await mcp.list_tools()}
+        retired = [
+            "get_briefing",
+            "remember",
+            "recall",
+            "context_check",
+            "record_outcome",
             "commune",
             "consult",
             "inscribe",
@@ -25,24 +50,10 @@ class TestDeprecatedToolsRemovedFromMCP:
             "govern",
             "explore",
             "maintain",
-        ):
-            assert wf in tools, f"Workflow tool '{wf}' missing from MCP registry"
-
-    @pytest.mark.asyncio
-    async def test_deprecated_tools_not_in_mcp(self):
-        from daem0nmcp.server import mcp
-
-        tools = {t.name for t in await mcp.list_tools()}
-        deprecated = [
-            "get_briefing",
-            "remember",
-            "recall",
-            "context_check",
-            "record_outcome",
         ]
-        for name in deprecated:
+        for name in retired:
             assert name not in tools, (
-                f"Deprecated tool '{name}' should not be in MCP registry"
+                f"Retired tool '{name}' should not be in MCP registry"
             )
 
     def test_deprecated_functions_still_importable(self):

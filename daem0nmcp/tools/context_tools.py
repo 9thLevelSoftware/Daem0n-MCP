@@ -11,6 +11,7 @@ try:
         _missing_project_path_error,
         get_project_context,
     )
+    from ..covenant import legacy_entrypoint
     from ..logging_config import with_request_id
     from ..mcp_instance import mcp
 except ImportError:
@@ -20,6 +21,7 @@ except ImportError:
         _missing_project_path_error,
         get_project_context,
     )
+    from daem0nmcp.covenant import legacy_entrypoint
     from daem0nmcp.logging_config import with_request_id
     from daem0nmcp.mcp_instance import mcp
 
@@ -28,6 +30,7 @@ logger = logging.getLogger(__name__)
 
 @mcp.tool(version=__version__)
 @with_request_id
+@legacy_entrypoint("set_active_context")
 async def set_active_context(
     memory_id: int,
     reason: str | None = None,
@@ -71,6 +74,7 @@ async def set_active_context(
 
 @mcp.tool(version=__version__)
 @with_request_id
+@legacy_entrypoint("get_active_context")
 async def get_active_context(project_path: str | None = None) -> dict[str, Any]:
     """
     Get all always-hot memories ordered by priority.
@@ -94,6 +98,7 @@ async def get_active_context(project_path: str | None = None) -> dict[str, Any]:
 
 @mcp.tool(version=__version__)
 @with_request_id
+@legacy_entrypoint("remove_from_active_context")
 async def remove_from_active_context(
     memory_id: int, project_path: str | None = None
 ) -> dict[str, Any]:
@@ -120,6 +125,7 @@ async def remove_from_active_context(
 
 @mcp.tool(version=__version__)
 @with_request_id
+@legacy_entrypoint("clear_active_context")
 async def clear_active_context(project_path: str | None = None) -> dict[str, Any]:
     """
     Clear all active context memories. Use when switching focus.
@@ -146,6 +152,7 @@ async def clear_active_context(project_path: str | None = None) -> dict[str, Any
 # ============================================================================
 @mcp.tool(version=__version__)
 @with_request_id
+@legacy_entrypoint("add_context_trigger")
 async def add_context_trigger(
     trigger_type: str,
     pattern: str,
@@ -190,6 +197,7 @@ async def add_context_trigger(
 
 @mcp.tool(version=__version__)
 @with_request_id
+@legacy_entrypoint("list_context_triggers")
 async def list_context_triggers(
     active_only: bool = True, project_path: str | None = None
 ) -> dict[str, Any]:
@@ -222,6 +230,7 @@ async def list_context_triggers(
 
 @mcp.tool(version=__version__)
 @with_request_id
+@legacy_entrypoint("remove_context_trigger")
 async def remove_context_trigger(
     trigger_id: int, project_path: str | None = None
 ) -> dict[str, Any]:
@@ -250,6 +259,7 @@ async def remove_context_trigger(
 
 @mcp.tool(version=__version__)
 @with_request_id
+@legacy_entrypoint("check_context_triggers")
 async def check_context_triggers(
     file_path: str | None = None,
     tags: list[str] | None = None,

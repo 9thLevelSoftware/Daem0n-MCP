@@ -2,12 +2,48 @@
 
 from __future__ import annotations
 
-from daem0nmcp.opencode_install import PLUGIN_TEMPLATE, install_opencode
+import json
+import ssl
+import sys
+from pathlib import Path
+
+import pytest
+
+from daem0nmcp.claude_hooks.install import module_launch_args
+from daem0nmcp.edit_bridge_transport import provision_bridge_credential
+from daem0nmcp.opencode_install import (
+    COMMAND_TEMPLATES,
+    PLUGIN_TEMPLATE,
+    install_opencode,
+    render_plugin,
+    select_opencode_interface,
+)
+
+
+def test_installer_selects_only_released_v1_and_rejects_v2_plan():
+    assert select_opencode_interface("1.18.21") == "v1"
+    assert select_opencode_interface("1.18.21", "v1") == "v1"
+    with pytest.raises(ValueError, match="V2"):
+        select_opencode_interface("1.18.21", "v2")
+
+
+def test_live_installer_rejects_v2_without_native_tool_hooks(tmp_path):
+    ok, message = install_opencode(
+        str(tmp_path),
+        interface="v2",
+        opencode_version="1.18.21",
+        bridge_config_root=tmp_path / "host-config",
+    )
+    assert not ok
+    assert "does not expose tool execution hooks" in message
+    assert not (tmp_path / ".opencode").exists()
 
 
 def test_install_creates_plugin_file(tmp_path):
     """Running install-opencode creates the plugin file automatically."""
-    ok, msg = install_opencode(str(tmp_path))
+    ok, msg = install_opencode(
+        str(tmp_path), bridge_config_root=tmp_path / "host-config"
+    )
     assert ok, msg
 
     plugin = tmp_path / ".opencode" / "plugins" / "daem0n.ts"
@@ -19,36 +55,270 @@ def test_install_creates_plugin_file(tmp_path):
     assert "pre_edit" in content
     assert "pre_bash" in content
 
+    config = json.loads((tmp_path / "opencode.json").read_text(encoding="utf-8"))
+    environment = config["mcp"]["daem0nmcp"]["environment"]
+    assert config["mcp"]["daem0nmcp"]["command"] == [
+        sys.executable,
+        *module_launch_args("daem0nmcp"),
+    ]
+    # The hook interpreter is fixed in the plugin, never read from this file.
+    assert "DAEM0NMCP_PYTHON_EXECUTABLE" not in environment
+    assert content == render_plugin(sys.executable)
+    assert content != PLUGIN_TEMPLATE
+    credential = Path(environment["DAEM0NMCP_EDIT_BRIDGE_CREDENTIAL_FILE"])
+    assert credential.is_file()
+    secret = json.loads(credential.read_text(encoding="utf-8"))["secret"]
+    assert secret not in (tmp_path / "opencode.json").read_text(encoding="utf-8")
+    assert environment["DAEM0NMCP_PROJECT_ROOT"] == str(tmp_path.resolve())
+
+
+def test_install_remote_pairing_passes_only_protected_host_paths(tmp_path, monkeypatch):
+    project = tmp_path / "desktop-project"
+    project.mkdir()
+    credential = tmp_path / "host" / "credential.json"
+    secret, _identity = provision_bridge_credential(
+        credential,
+        principal_id="remote-principal",
+        transports=frozenset({"remote-https"}),
+    )
+    ca_file = tmp_path / "ca.pem"
+    ca_file.write_text("test CA", encoding="utf-8")
+    monkeypatch.setattr(
+        "daem0nmcp.edit_host.ssl.create_default_context",
+        lambda **_kwargs: ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT),
+    )
+
+    ok, message = install_opencode(
+        str(project),
+        remote_workspace_id="ws_" + "6" * 24,
+        remote_credential_path=credential,
+        remote_base_url="https://server.example:7443",
+        remote_ca_file=ca_file,
+        remote_origin="https://desktop.example",
+        opencode_version="1.18.21",
+    )
+
+    assert ok, message
+    config = json.loads((project / "opencode.json").read_text(encoding="utf-8"))
+    host_config = project / ".opencode" / "daem0n-host.json"
+    environment = json.loads(host_config.read_text(encoding="utf-8"))["environment"]
+    assert environment["DAEM0NMCP_EDIT_BRIDGE_MODE"] == "remote-https"
+    for name in (
+        "DAEM0NMCP_EDIT_BRIDGE_REMOTE_URL",
+        "DAEM0NMCP_EDIT_BRIDGE_CA_FILE",
+        "DAEM0NMCP_EDIT_BRIDGE_ORIGIN",
+        "DAEM0NMCP_PYTHON_EXECUTABLE",
+    ):
+        assert name not in environment
+    assert "DAEM0NMCP_EDIT_BRIDGE_MODE" not in config["mcp"]["daem0nmcp"]["environment"]
+    binding = Path(environment["DAEM0NMCP_EDIT_HOST_WORKSPACE_BINDING_FILE"])
+    assert secret not in (project / "opencode.json").read_text(encoding="utf-8")
+    assert secret not in host_config.read_text(encoding="utf-8")
+    assert secret not in binding.read_text(encoding="utf-8")
+
 
 def test_install_plugin_idempotent(tmp_path):
     """Running install-opencode twice reports [exists] on second run."""
-    ok1, _msg1 = install_opencode(str(tmp_path))
+    ok1, _msg1 = install_opencode(
+        str(tmp_path), bridge_config_root=tmp_path / "host-config"
+    )
     assert ok1
 
     plugin = tmp_path / ".opencode" / "plugins" / "daem0n.ts"
     content_after_first = plugin.read_text(encoding="utf-8")
 
-    ok2, msg2 = install_opencode(str(tmp_path))
+    ok2, msg2 = install_opencode(
+        str(tmp_path), bridge_config_root=tmp_path / "host-config"
+    )
     assert ok2
 
     assert "[exists] .opencode/plugins/daem0n.ts" in msg2
     assert plugin.read_text(encoding="utf-8") == content_after_first
+    assert "[outdated]" not in msg2
+    assert "server command" not in msg2
+
+
+# The hook launch lines of the plugins earlier releases installed.
+_SHELL_PLUGIN = (
+    "const mod = `daem0nmcp.claude_hooks.${module}`;\n"
+    "const result = await shell`python -m ${mod}`.quiet();\n"
+)
+_PROJECT_INTERPRETER_PLUGIN = (
+    "const python = configured ?? 'python';\n"
+    "const mod = `daem0nmcp.claude_hooks.${module}`;\n"
+    "child = Bun.spawn([python, '-m', mod], { cwd: directory });\n"
+)
+
+
+@pytest.mark.parametrize("older_plugin", [_SHELL_PLUGIN, _PROJECT_INTERPRETER_PLUGIN])
+def test_reinstall_flags_every_plugin_without_the_current_launcher(
+    tmp_path, older_plugin
+):
+    """Any earlier plugin is reported, however it spelled its ``-m`` launch."""
+    plugin = tmp_path / ".opencode" / "plugins" / "daem0n.ts"
+    plugin.parent.mkdir(parents=True)
+    plugin.write_text(older_plugin, encoding="utf-8")
+
+    ok, msg = install_opencode(
+        str(tmp_path), bridge_config_root=tmp_path / "host-config"
+    )
+
+    assert ok, msg
+    assert "[outdated] .opencode/plugins/daem0n.ts" in msg
+    assert plugin.read_text(encoding="utf-8") == older_plugin
+
+
+@pytest.mark.parametrize(
+    "older",
+    [
+        ["python", "-u", "-m", "daem0nmcp"],
+        ["py", "-3", "-m", "daem0nmcp.server"],
+        ["uv", "run", "python", "-m", "daem0nmcp"],
+        ["python", "-m", "daem0nmcp.server", "--transport", "stdio"],
+    ],
+)
+def test_reinstall_upgrades_a_server_command_with_other_arguments(tmp_path, older):
+    config_path = tmp_path / "opencode.json"
+    config_path.write_text(
+        json.dumps({"mcp": {"daem0nmcp": {"type": "local", "command": older}}}),
+        encoding="utf-8",
+    )
+
+    ok, msg = install_opencode(
+        str(tmp_path), bridge_config_root=tmp_path / "host-config"
+    )
+
+    assert ok, msg
+    at = older.index("-m")
+    command = json.loads(config_path.read_text(encoding="utf-8"))["mcp"]["daem0nmcp"][
+        "command"
+    ]
+    assert command == [
+        *older[:at],
+        *module_launch_args(older[at + 1]),
+        *older[at + 2 :],
+    ]
+    assert "[update] opencode.json Daem0n server command" in msg
+
+
+def test_reinstall_reports_a_server_command_it_cannot_rewrite(tmp_path):
+    """A config with comments is not rewritten, so the user is told to."""
+    older = (
+        "{\n  // my servers\n"
+        '  "mcp": {"daem0nmcp": {"type": "local",'
+        ' "command": ["python", "-m", "daem0nmcp"]}}\n}\n'
+    )
+    config_path = tmp_path / "opencode.json"
+    config_path.write_text(older, encoding="utf-8")
+
+    ok, msg = install_opencode(
+        str(tmp_path), bridge_config_root=tmp_path / "host-config"
+    )
+
+    assert ok, msg
+    assert config_path.read_text(encoding="utf-8") == older
+    assert "[outdated] opencode.json" in msg
+
+
+def test_reinstall_upgrades_an_older_server_command_and_flags_an_older_plugin(
+    tmp_path,
+):
+    """Files from an older install are kept; only their ``-m`` launches are not."""
+    older_plugin = (
+        "const mod = `daem0nmcp.claude_hooks.${module}`;\n"
+        'child = Bun.spawn([python, "-m", mod], { cwd: directory });\n'
+    )
+    plugin = tmp_path / ".opencode" / "plugins" / "daem0n.ts"
+    plugin.parent.mkdir(parents=True)
+    plugin.write_text(older_plugin, encoding="utf-8")
+    config_path = tmp_path / "opencode.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "theme": "mine",
+                "mcp": {
+                    "other": {"type": "remote", "url": "https://example.test/mcp"},
+                    "daem0nmcp": {
+                        "type": "local",
+                        "command": ["/opt/python", "-m", "daem0nmcp"],
+                    },
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    ok, dry_run = install_opencode(str(tmp_path), dry_run=True)
+    assert ok, dry_run
+    assert "[update] opencode.json Daem0n server command" in dry_run
+    assert json.loads(config_path.read_text(encoding="utf-8"))["mcp"]["daem0nmcp"][
+        "command"
+    ] == ["/opt/python", "-m", "daem0nmcp"]
+
+    ok, msg = install_opencode(
+        str(tmp_path), bridge_config_root=tmp_path / "host-config"
+    )
+
+    assert ok, msg
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    assert config["theme"] == "mine"
+    assert config["mcp"]["other"] == {
+        "type": "remote",
+        "url": "https://example.test/mcp",
+    }
+    assert config["mcp"]["daem0nmcp"]["command"] == [
+        "/opt/python",
+        *module_launch_args("daem0nmcp"),
+    ]
+    assert "[update] opencode.json Daem0n server command" in msg
+    assert plugin.read_text(encoding="utf-8") == older_plugin
+    assert "[outdated] .opencode/plugins/daem0n.ts" in msg
+    # --force would also replace opencode.json and the user's other servers.
+    assert "--force" not in msg
+    assert "delete it and re-run" in msg
+
+    ok, again = install_opencode(
+        str(tmp_path), bridge_config_root=tmp_path / "host-config"
+    )
+    assert ok, again
+    assert "server command" not in again
+
+
+def test_reinstall_leaves_a_custom_server_command_alone(tmp_path):
+    config_path = tmp_path / "opencode.json"
+    original = {
+        "mcp": {"daem0nmcp": {"type": "local", "command": ["uvx", "daem0nmcp"]}}
+    }
+    config_path.write_text(json.dumps(original), encoding="utf-8")
+
+    ok, msg = install_opencode(
+        str(tmp_path), bridge_config_root=tmp_path / "host-config"
+    )
+
+    assert ok, msg
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    assert config["mcp"]["daem0nmcp"]["command"] == ["uvx", "daem0nmcp"]
+    assert "server command" not in msg
 
 
 def test_install_plugin_force_overwrites(tmp_path):
     """Running install-opencode --force overwrites an existing plugin file."""
-    ok1, _msg1 = install_opencode(str(tmp_path))
+    ok1, _msg1 = install_opencode(
+        str(tmp_path), bridge_config_root=tmp_path / "host-config"
+    )
     assert ok1
 
     plugin = tmp_path / ".opencode" / "plugins" / "daem0n.ts"
     plugin.write_text("// corrupted content", encoding="utf-8")
 
-    ok2, msg2 = install_opencode(str(tmp_path), force=True)
+    ok2, msg2 = install_opencode(
+        str(tmp_path), force=True, bridge_config_root=tmp_path / "host-config"
+    )
     assert ok2
     assert "[overwrite] .opencode/plugins/daem0n.ts" in msg2
 
     restored = plugin.read_text(encoding="utf-8")
-    assert restored == PLUGIN_TEMPLATE
+    assert restored == render_plugin(sys.executable)
 
 
 def test_install_dry_run_no_plugin_file(tmp_path):
@@ -70,12 +340,42 @@ def test_plugin_template_matches_canonical():
     assert "tool.execute.after" in PLUGIN_TEMPLATE
     assert "pre_edit" in PLUGIN_TEMPLATE
     assert "pre_bash" in PLUGIN_TEMPLATE
+    assert "post_edit_preflight" in PLUGIN_TEMPLATE
+    assert 'stdin: "pipe"' in PLUGIN_TEMPLATE
+    assert "child.stdin.write(JSON.stringify(event))" in PLUGIN_TEMPLATE
+    assert "child.stdin.end()" in PLUGIN_TEMPLATE
+    for name in (
+        "DAEM0NMCP_EDIT_BRIDGE_MODE",
+        "DAEM0NMCP_EDIT_BRIDGE_REMOTE_URL",
+        "DAEM0NMCP_EDIT_BRIDGE_CA_FILE",
+        "DAEM0NMCP_EDIT_HOST_WORKSPACE_BINDING_FILE",
+    ):
+        assert name in PLUGIN_TEMPLATE
+    assert (
+        'new Set(["edit", "write", "notebookedit", "apply_patch"])' in PLUGIN_TEMPLATE
+    )
+    assert 't.includes("edit")' not in PLUGIN_TEMPLATE
     assert "COVENANT_RULES" in PLUGIN_TEMPLATE
     assert "daem0n-covenant" in PLUGIN_TEMPLATE
 
     # Must be TypeScript, not Python
     assert "import asyncio" not in PLUGIN_TEMPLATE
     assert "from daem0nmcp" not in PLUGIN_TEMPLATE
+
+
+def test_plugin_template_is_the_exact_v7_repo_plugin_without_forged_metadata():
+    canonical = (
+        Path(__file__).resolve().parents[1] / ".opencode" / "plugins" / "daem0n.ts"
+    ).read_text(encoding="utf-8")
+    assert canonical == PLUGIN_TEMPLATE
+    for retired in (
+        "daem0nmcp_commune",
+        "daem0nmcp_consult",
+        "daem0nmcp_inscribe",
+        "daem0nmcp_reflect",
+        "_client_meta",
+    ):
+        assert retired not in PLUGIN_TEMPLATE
 
 
 def test_install_preserves_existing_opencode_json(tmp_path):
@@ -85,7 +385,9 @@ def test_install_preserves_existing_opencode_json(tmp_path):
     json_path = tmp_path / "opencode.json"
     json_path.write_text(custom_json, encoding="utf-8")
 
-    ok, msg = install_opencode(str(tmp_path))
+    ok, msg = install_opencode(
+        str(tmp_path), bridge_config_root=tmp_path / "host-config"
+    )
     assert ok, msg
 
     # opencode.json should be untouched (no --force)
@@ -97,3 +399,80 @@ def test_install_preserves_existing_opencode_json(tmp_path):
     assert plugin.exists(), (
         "Plugin file should be created even when opencode.json exists"
     )
+
+
+def test_install_creates_repo_command_files_without_overwriting(tmp_path):
+    """The installer ships the repo's slash commands and keeps user edits."""
+    expected = _repo_commands()
+    assert set(expected) == {"commune.md", "counsel.md", "inscribe.md", "recall.md"}
+    commands = tmp_path / ".opencode" / "commands"
+    commands.mkdir(parents=True)
+    (commands / "recall.md").write_text("my recall", encoding="utf-8")
+
+    ok, msg = install_opencode(
+        str(tmp_path), bridge_config_root=tmp_path / "host-config"
+    )
+
+    assert ok, msg
+    assert "[exists] .opencode/commands/recall.md" in msg
+    assert "[create] .opencode/commands/commune.md" in msg
+    assert (commands / "recall.md").read_text(encoding="utf-8") == "my recall"
+    for name in ("commune.md", "counsel.md", "inscribe.md"):
+        assert (commands / name).read_text(encoding="utf-8") == expected[name]
+
+
+def _repo_commands() -> dict[str, str]:
+    repo_commands = Path(__file__).resolve().parents[1] / ".opencode" / "commands"
+    return {
+        path.name: path.read_text(encoding="utf-8")
+        for path in repo_commands.glob("*.md")
+    }
+
+
+def test_packaged_commands_match_the_repo_commands():
+    """The shipped copies must not drift from the ones the repo uses."""
+    assert _repo_commands() == COMMAND_TEMPLATES
+
+
+def test_force_overwrites_commands_and_dry_run_writes_nothing(tmp_path):
+    ok, msg = install_opencode(
+        str(tmp_path), dry_run=True, bridge_config_root=tmp_path / "host-config"
+    )
+    assert ok, msg
+    assert "[create] .opencode/commands/recall.md" in msg
+    assert not (tmp_path / ".opencode" / "commands" / "recall.md").exists()
+
+    assert install_opencode(str(tmp_path), bridge_config_root=tmp_path / "host-config")[
+        0
+    ]
+    recall = tmp_path / ".opencode" / "commands" / "recall.md"
+    recall.write_text("edited", encoding="utf-8")
+
+    ok, msg = install_opencode(
+        str(tmp_path), force=True, bridge_config_root=tmp_path / "host-config"
+    )
+
+    assert ok, msg
+    assert "[overwrite] .opencode/commands/recall.md" in msg
+    assert recall.read_text(encoding="utf-8") == COMMAND_TEMPLATES["recall.md"]
+
+
+def test_installer_refuses_to_write_through_a_symlink(tmp_path):
+    """A cloned repo must not steer the installer outside the project."""
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    project = tmp_path / "project"
+    (project / ".opencode" / "commands").mkdir(parents=True)
+    link = project / ".opencode" / "commands" / "recall.md"
+    try:
+        link.symlink_to(outside / "stolen.md")
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks are unavailable")
+
+    ok, msg = install_opencode(
+        str(project), bridge_config_root=tmp_path / "host-config"
+    )
+
+    assert not ok
+    assert "link" in msg
+    assert not (outside / "stolen.md").exists()

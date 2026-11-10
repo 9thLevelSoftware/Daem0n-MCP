@@ -16,7 +16,7 @@ Usage:
     python -m daem0nmcp.cli install-hooks [--force]
     python -m daem0nmcp.cli uninstall-hooks
     python -m daem0nmcp.cli install-claude-hooks [--dry-run]
-    python -m daem0nmcp.cli uninstall-claude-hooks [--dry-run]
+    python -m daem0nmcp.cli [--project-path P] uninstall-claude-hooks [--dry-run] [--remove-credentials]
     python -m daem0nmcp.cli install-opencode [--dry-run] [--force]
     python -m daem0nmcp.cli watch [--debounce SECONDS] [--no-system] [--no-log] [--no-poll]
     python -m daem0nmcp.cli index [--path PATH] [--patterns *.py *.ts ...]
@@ -27,6 +27,8 @@ Global Options:
     --project-path PATH Specify project root path (sets DAEM0NMCP_PROJECT_ROOT)
 """
 
+from __future__ import annotations
+
 import argparse
 import asyncio
 import json
@@ -34,11 +36,31 @@ import os
 import sys
 from datetime import datetime
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from .config import Settings, settings
-from .database import DatabaseManager
-from .memory import MemoryManager
-from .rules import RulesEngine
+
+if TYPE_CHECKING:
+    from .database import DatabaseManager
+    from .memory import MemoryManager
+    from .rules import RulesEngine
+
+
+_V6_VECTOR_MIGRATION_ERROR = (
+    "Deprecated v6-only vector migration cannot run against format 7; use "
+    "`python -m daem0nmcp.cli rebuild-projection --projection dense "
+    "--workspace-id <workspace-id>` instead."
+)
+
+
+def _v7_batch_size(value: str) -> int:
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("batch size must be an integer") from exc
+    if not 1 <= parsed <= 10_000:
+        raise argparse.ArgumentTypeError("batch size must be between 1 and 10000")
+    return parsed
 
 
 def safe_print(text: str, file=None) -> None:
@@ -311,7 +333,107 @@ def main():
     migrate_parser.add_argument(
         "--backfill-vectors",
         action="store_true",
-        help="Backfill vector embeddings for existing memories",
+        help="Deprecated: backfill vector embeddings for format 6 only",
+    )
+
+    migrate_v7_parser = subparsers.add_parser(
+        "migrate-v7", help="Inspect or explicitly activate architecture format 7"
+    )
+    migration_action = migrate_v7_parser.add_mutually_exclusive_group()
+    migration_action.add_argument(
+        "--apply",
+        action="store_true",
+        help="Apply or resume an offline format or schema upgrade",
+    )
+    migration_action.add_argument(
+        "--rollback",
+        nargs="?",
+        const="latest",
+        metavar="MIGRATION_ID",
+        help="Roll back the active migration run (default: latest)",
+    )
+    migration_action.add_argument(
+        "--recover-pointer",
+        action="store_true",
+        help=(
+            "Republish active-db.json for a format 7 database that lost it "
+            "(refused when a migration candidate may have been active)"
+        ),
+    )
+    migrate_v7_parser.add_argument(
+        "--discard-v7-writes",
+        action="store_true",
+        help=(
+            "Roll back even though events recorded after activation would "
+            "become unreachable"
+        ),
+    )
+    migrate_v7_parser.add_argument(
+        "--batch-size",
+        type=_v7_batch_size,
+        default=500,
+        help="Rows per checkpoint batch",
+    )
+
+    verify_v7_parser = subparsers.add_parser(
+        "verify-v7", help="Verify all format-7 authority and projection state"
+    )
+    verify_v7_parser.add_argument(
+        "--workspace-id", required=True, help="Registered opaque workspace ID"
+    )
+    verify_v7_parser.add_argument(
+        "--repair-projections",
+        action="store_true",
+        help="Offline replay, validate, and atomically activate repaired projections",
+    )
+
+    projection_status_parser = subparsers.add_parser(
+        "projection-status", help="Show v7 retrieval projection state"
+    )
+    projection_status_parser.add_argument(
+        "--workspace-id", required=True, help="Registered opaque workspace ID"
+    )
+
+    compact_projections_parser = subparsers.add_parser(
+        "compact-projections",
+        help="Offline: drop every superseded projection generation and VACUUM",
+    )
+    compact_projections_parser.add_argument(
+        "--workspace-id", required=True, help="Registered opaque workspace ID"
+    )
+    compact_projections_parser.add_argument(
+        "--no-vacuum",
+        action="store_true",
+        help="Drop the superseded generations without reclaiming the file",
+    )
+
+    rebuild_projection_parser = subparsers.add_parser(
+        "rebuild-projection", help="Build and activate one v7 retrieval projection"
+    )
+    rebuild_projection_parser.add_argument(
+        "--projection",
+        required=True,
+        choices=["lexical", "dense", "graph", "temporal", "procedure", "outcome"],
+    )
+    rebuild_projection_parser.add_argument(
+        "--workspace-id", required=True, help="Registered opaque workspace ID"
+    )
+    rebuild_projection_parser.add_argument(
+        "--dry-run", action="store_true", help="Report changes without writing"
+    )
+
+    recover_consolidation_parser = subparsers.add_parser(
+        "recover-consolidation",
+        help="Resume committed workspace consolidation archive events",
+    )
+    recover_consolidation_parser.add_argument(
+        "--project-path",
+        dest="consolidation_project_path",
+        required=True,
+        help="Target workspace project root",
+    )
+    recover_consolidation_parser.add_argument(
+        "--run-id", help="Recover one consolidation run (default: all pending runs)"
     )
 
     # pre-commit command
@@ -377,6 +499,16 @@ def main():
     uninstall_claude_parser.add_argument(
         "--dry-run", action="store_true", help="Show what would change"
     )
+    uninstall_claude_parser.add_argument(
+        "--remove-credentials",
+        action="store_true",
+        help="Also delete the project's local edit-bridge credential",
+    )
+    for claude_parser in (install_claude_parser, uninstall_claude_parser):
+        # Also accept --project-path after the subcommand (default: cwd).
+        claude_parser.add_argument(
+            "--project-path", default=argparse.SUPPRESS, help="Project root path"
+        )
 
     # install-opencode command
     install_oc_parser = subparsers.add_parser(
@@ -393,6 +525,11 @@ def main():
         "-f",
         action="store_true",
         help="Overwrite existing configuration files",
+    )
+    install_oc_parser.add_argument(
+        "--interface",
+        choices=("v1", "v2"),
+        help="OpenCode plugin interface (native edit hooks require v1)",
     )
 
     # watch command
@@ -463,6 +600,367 @@ def main():
         # Create new settings instance to pick up the env var
         active_settings = Settings()
 
+    if args.command == "verify-v7":
+        from .storage_activation import DatabaseInUseError, PointerValidationError
+        from .verification_v7 import VerificationV7Error, verify_v7
+        from .workspace import (
+            WorkspaceAccessError,
+            WorkspacePathError,
+            WorkspaceRegistry,
+        )
+
+        try:
+            registry = WorkspaceRegistry.from_settings(active_settings)
+            workspace = registry.resolve(args.workspace_id)
+            workspace_settings = active_settings
+            if workspace.workspace_id != registry.default.workspace_id:
+                if getattr(active_settings, "storage_path", None):
+                    raise VerificationV7Error("WORKSPACE_STORAGE_AMBIGUOUS")
+                workspace_settings = active_settings.model_copy(
+                    update={"project_root": str(workspace.root)}
+                )
+            payload = verify_v7(
+                Path(workspace_settings.get_storage_path()),
+                workspace.workspace_id,
+                repair_projections=args.repair_projections,
+            )
+            exit_code = 0 if payload["status"] in {"verified", "repaired"} else 1
+        except (
+            DatabaseInUseError,
+            PointerValidationError,
+            VerificationV7Error,
+            WorkspaceAccessError,
+            WorkspacePathError,
+        ) as exc:
+            code = getattr(exc, "code", type(exc).__name__)
+            payload = {"status": "error", "error": {"code": code, "message": code}}
+            exit_code = (
+                2
+                if code
+                in {
+                    "DATABASE_IN_USE",
+                    "UNAUTHORIZED_WORKSPACE",
+                    "WORKSPACE_PATH_ESCAPE",
+                }
+                else 1
+            )
+        except Exception:
+            payload = {
+                "status": "error",
+                "error": {
+                    "code": "VERIFICATION_FAILED",
+                    "message": "VERIFICATION_FAILED",
+                },
+            }
+            exit_code = 1
+        if args.json:
+            print(json.dumps(payload, sort_keys=True, separators=(",", ":")))
+        elif payload.get("error"):
+            print(f"Error: {payload['error']['code']}")
+        else:
+            print(f"Status: {payload['status']}")
+            print(f"Workspace: {payload['workspace_id']}")
+            print(f"Generation: {payload['active_generation']}")
+        sys.exit(exit_code)
+
+    if args.command == "migrate-v7":
+        from .migrations import MigrationV7Error, MigrationV7Service
+        from .storage_activation import DatabaseInUseError, PointerValidationError
+        from .workspace import (
+            WorkspaceAccessError,
+            WorkspacePathError,
+            WorkspaceRegistry,
+        )
+
+        registry = WorkspaceRegistry.from_settings(active_settings)
+        service = MigrationV7Service(registry)
+        try:
+            if args.rollback is not None:
+                result = service.rollback(
+                    args.project_path,
+                    args.rollback,
+                    discard_v7_writes=args.discard_v7_writes,
+                )
+            elif args.recover_pointer:
+                result = service.recover_pointer(args.project_path)
+            elif args.apply:
+                result = service.apply(args.project_path, batch_size=args.batch_size)
+            else:
+                result = service.dry_run(args.project_path)
+            payload = result.as_dict()
+            exit_code = 0
+        except (
+            DatabaseInUseError,
+            PointerValidationError,
+            WorkspaceAccessError,
+            WorkspacePathError,
+        ) as exc:
+            code = getattr(exc, "code", type(exc).__name__)
+            payload = {
+                "status": "error",
+                "action": "rollback"
+                if args.rollback is not None
+                else "recover_pointer"
+                if args.recover_pointer
+                else "migrate",
+                "workspace_id": None,
+                "source_format": None,
+                "target_format": 7,
+                "migration_run_id": None,
+                "active_generation": None,
+                "inventory": {},
+                "checkpoints": {},
+                "validation": {},
+                "warnings": [],
+                "error": {"code": code, "message": code},
+            }
+            exit_code = 2
+        except MigrationV7Error as exc:
+            payload = {
+                "status": "error",
+                "action": "rollback"
+                if args.rollback is not None
+                else "recover_pointer"
+                if args.recover_pointer
+                else "migrate",
+                "workspace_id": None,
+                "source_format": None,
+                "target_format": 7,
+                "migration_run_id": None,
+                "active_generation": None,
+                "inventory": {},
+                "checkpoints": {},
+                "validation": {},
+                "warnings": [],
+                # Migration details stay redacted to the code, except the
+                # rollback refusal, whose detail is the operator signal: a
+                # count and the storage-relative candidate, never a host path;
+                # a lost pointer, whose detail is the recovery step; and an
+                # unreadable source, whose detail is the way out (file names).
+                "error": {
+                    "code": exc.code,
+                    "message": str(exc)
+                    if exc.code
+                    in {
+                        "ROLLBACK_WOULD_HIDE_WRITES",
+                        "ACTIVE_POINTER_MISSING",
+                        "POINTER_RECOVERY_AMBIGUOUS",
+                        "SOURCE_UNREADABLE",
+                    }
+                    else exc.code,
+                },
+            }
+            exit_code = 2 if exc.code == "UNSAFE_MIGRATION_PATH" else 1
+        except Exception:
+            payload = {
+                "status": "error",
+                "action": "rollback"
+                if args.rollback is not None
+                else "recover_pointer"
+                if args.recover_pointer
+                else "migrate",
+                "workspace_id": None,
+                "source_format": None,
+                "target_format": 7,
+                "migration_run_id": None,
+                "active_generation": None,
+                "inventory": {},
+                "checkpoints": {},
+                "validation": {},
+                "warnings": [],
+                "error": {"code": "MIGRATION_FAILED", "message": "MIGRATION_FAILED"},
+            }
+            exit_code = 1
+        if args.json:
+            print(
+                json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
+            )
+        else:
+            print(f"Status: {payload['status']}")
+            print(f"Action: {payload['action']}")
+            if payload.get("workspace_id"):
+                print(f"Workspace: {payload['workspace_id']}")
+            if payload.get("source_format") is not None:
+                print(
+                    f"Format: {payload['source_format']} -> {payload['target_format']}"
+                )
+            if payload.get("active_generation") is not None:
+                print(f"Generation: {payload['active_generation']}")
+            for warning in payload.get("warnings") or ():
+                print(f"Warning: {warning}")
+            if payload.get("error"):
+                print(f"Error: {payload['error']['message']}")
+        sys.exit(exit_code)
+
+    if args.command == "recover-consolidation":
+        from .api.v7.consolidation_operations import (
+            ConsolidationOperationError,
+            recover_consolidation,
+        )
+        from .workspace import (
+            WorkspaceAccessError,
+            WorkspacePathError,
+            WorkspaceRegistry,
+        )
+
+        try:
+            recovery_settings = active_settings.model_copy(
+                update={"project_root": args.consolidation_project_path}
+            )
+            registry = WorkspaceRegistry.from_settings(recovery_settings)
+            target = registry.default
+            runs = recover_consolidation(registry, target, run_id=args.run_id)
+            payload = {
+                "status": "recovered",
+                "workspace_id": target.workspace_id,
+                "runs": runs,
+            }
+            exit_code = 0
+        except (
+            ConsolidationOperationError,
+            WorkspaceAccessError,
+            WorkspacePathError,
+        ) as exc:
+            code = getattr(exc, "code", type(exc).__name__)
+            payload = {"status": "error", "error": {"code": code, "message": code}}
+            exit_code = (
+                2 if code in {"UNAUTHORIZED_WORKSPACE", "WORKSPACE_PATH_ESCAPE"} else 1
+            )
+        except Exception:
+            payload = {
+                "status": "error",
+                "error": {
+                    "code": "CAPABILITY_DEGRADED",
+                    "message": "CAPABILITY_DEGRADED",
+                },
+            }
+            exit_code = 1
+        if args.json:
+            print(json.dumps(payload, sort_keys=True, separators=(",", ":")))
+        elif payload.get("error"):
+            print(f"Error: {payload['error']['code']}")
+        else:
+            print(f"Status: {payload['status']}")
+            print(f"Workspace: {payload['workspace_id']}")
+            print(f"Runs: {len(payload['runs'])}")
+        sys.exit(exit_code)
+
+    if args.command in {
+        "compact-projections",
+        "projection-status",
+        "rebuild-projection",
+    }:
+        import sqlite3
+
+        from .retrieval.operations import (
+            ProjectionOperationError,
+            compact_projections,
+            projection_status,
+            rebuild_projection,
+        )
+        from .retrieval.runtime import create_projection_builders
+        from .storage_activation import (
+            DatabaseFileLock,
+            DatabaseInUseError,
+            PointerValidationError,
+            resolve_active_database,
+        )
+        from .workspace import (
+            WorkspaceAccessError,
+            WorkspacePathError,
+            WorkspaceRegistry,
+        )
+
+        try:
+            registry = WorkspaceRegistry.from_settings(active_settings)
+            workspace = registry.resolve(args.workspace_id)
+            workspace_settings = active_settings
+            if workspace.workspace_id != registry.default.workspace_id:
+                if getattr(active_settings, "storage_path", None):
+                    raise ProjectionOperationError("WORKSPACE_STORAGE_AMBIGUOUS")
+                workspace_settings = active_settings.model_copy(
+                    update={"project_root": str(workspace.root)}
+                )
+            storage_path = Path(workspace_settings.get_storage_path())
+            # Compaction drops generations a running server could be reading,
+            # so it takes the offline exclusive lock.
+            lock_mode = (
+                "exclusive" if args.command == "compact-projections" else "shared"
+            )
+            with DatabaseFileLock(storage_path, lock_mode):
+                active = resolve_active_database(storage_path)
+                if active.format_version != 7:
+                    raise ProjectionOperationError("FORMAT_7_REQUIRED")
+                connection = sqlite3.connect(active.path)
+                connection.row_factory = sqlite3.Row
+                builders = None
+                try:
+                    connection.execute("PRAGMA foreign_keys=ON")
+                    if args.command == "projection-status":
+                        payload = projection_status(connection, workspace.workspace_id)
+                    elif args.command == "compact-projections":
+                        payload = compact_projections(
+                            connection,
+                            workspace.workspace_id,
+                            vacuum=not args.no_vacuum,
+                        )
+                    else:
+                        builders = create_projection_builders(
+                            connection,
+                            active.path,
+                            config=workspace_settings,
+                            include_optional=True,
+                        )
+                        payload = rebuild_projection(
+                            connection,
+                            workspace_id=workspace.workspace_id,
+                            projection=args.projection,
+                            dry_run=args.dry_run,
+                            builders=builders,
+                        )
+                finally:
+                    close = getattr(builders, "close", None)
+                    if callable(close):
+                        close()
+                    connection.close()
+            exit_code = 0
+        except (
+            DatabaseInUseError,
+            PointerValidationError,
+            ProjectionOperationError,
+            WorkspaceAccessError,
+            WorkspacePathError,
+        ) as exc:
+            code = getattr(exc, "code", type(exc).__name__)
+            payload = {"error": {"code": code, "message": code}, "status": "error"}
+            exit_code = (
+                2
+                if code
+                in {
+                    "DATABASE_IN_USE",
+                    "UNAUTHORIZED_WORKSPACE",
+                    "WORKSPACE_PATH_ESCAPE",
+                }
+                else 1
+            )
+        except Exception:
+            payload = {
+                "error": {
+                    "code": "PROJECTION_OPERATION_FAILED",
+                    "message": "PROJECTION_OPERATION_FAILED",
+                },
+                "status": "error",
+            }
+            exit_code = 1
+        if args.json:
+            print(json.dumps(payload, sort_keys=True, separators=(",", ":")))
+        elif payload.get("error"):
+            print(f"Error: {payload['error']['code']}")
+        else:
+            print(f"Status: {payload.get('status', 'ready')}")
+            print(f"Workspace: {workspace.workspace_id}")
+        sys.exit(exit_code)
+
     # --- Commands that do NOT need database/memory initialization ---
     # Handle these before get_storage_path() to avoid creating .daem0nmcp/
     # in the target project directory.
@@ -475,6 +973,7 @@ def main():
             project_path,
             dry_run=getattr(args, "dry_run", False),
             force=getattr(args, "force", False),
+            interface=getattr(args, "interface", None),
         )
         if args.json:
             print(json.dumps({"success": success, "message": message}))
@@ -507,7 +1006,10 @@ def main():
     elif args.command == "install-claude-hooks":
         from .claude_hooks.install import install_claude_hooks
 
-        success, message = install_claude_hooks(dry_run=getattr(args, "dry_run", False))
+        success, message = install_claude_hooks(
+            dry_run=getattr(args, "dry_run", False),
+            project_path=args.project_path or os.getcwd(),
+        )
         if args.json:
             print(json.dumps({"success": success, "message": message}))
         else:
@@ -518,7 +1020,9 @@ def main():
         from .claude_hooks.install import uninstall_claude_hooks
 
         success, message = uninstall_claude_hooks(
-            dry_run=getattr(args, "dry_run", False)
+            dry_run=getattr(args, "dry_run", False),
+            project_path=args.project_path or os.getcwd(),
+            remove_credentials=args.remove_credentials,
         )
         if args.json:
             print(json.dumps({"success": success, "message": message}))
@@ -528,8 +1032,23 @@ def main():
 
     # --- Commands that require database/memory initialization ---
     # Initialize components
+    from .database import DatabaseManager
+    from .memory import MemoryManager
+    from .rules import RulesEngine
+    from .storage_activation import ACTIVE_POINTER_MISSING_CODE
+
     storage_path = active_settings.get_storage_path()
-    db = DatabaseManager(storage_path)
+    try:
+        db = DatabaseManager(storage_path)
+    except RuntimeError as exc:
+        if getattr(exc, "code", None) != ACTIVE_POINTER_MISSING_CODE:
+            raise
+        # The refusal is the operator's instruction, not a crash.
+        if args.json:
+            print(json.dumps({"error": str(exc)}))
+        else:
+            print(f"ERROR: {exc}", file=sys.stderr)
+        sys.exit(1)
     memory = MemoryManager(db)
     rules = RulesEngine(db)
 
@@ -568,12 +1087,33 @@ def main():
                 print(f"  ... and {len(todos) - 20} more")
 
     elif args.command == "migrate":
-        from .migrations import migrate_and_backfill_vectors, run_migrations
+        from .migrations import run_migrations
 
-        db_path = str(Path(storage_path) / "daem0nmcp.db")
+        db_path = str(db.db_path)
 
         if args.backfill_vectors:
-            result = migrate_and_backfill_vectors(db_path)
+            if db.format_version != 6:
+                if args.json:
+                    print(
+                        json.dumps(
+                            {
+                                "database": db_path,
+                                "error": {
+                                    "code": "LEGACY_VECTOR_MIGRATION_V6_ONLY",
+                                    "message": _V6_VECTOR_MIGRATION_ERROR,
+                                },
+                            },
+                            sort_keys=True,
+                            separators=(",", ":"),
+                        )
+                    )
+                else:
+                    print(_V6_VECTOR_MIGRATION_ERROR)
+                sys.exit(1)
+
+            from .migrations import migrate_and_backfill_vectors
+
+            result = migrate_and_backfill_vectors(db_path, workspace_id=db.workspace_id)
             if args.json:
                 result["database"] = db_path
                 print(json.dumps(result, default=str))
@@ -587,7 +1127,42 @@ def main():
                 print(f"  Vectors available: {result['vectors_available']}")
                 safe_print(f"\n{result['message']}")
         else:
-            count, applied = run_migrations(db_path)
+            from .database import SchemaUpgradeRequiredError
+            from .schema_version import CURRENT_SCHEMA_VERSION
+
+            schema_version = db._schema_version() if db.db_path.exists() else 0
+            if (
+                db.format_version == 7
+                and db.db_path.exists()
+                and schema_version < CURRENT_SCHEMA_VERSION
+            ):
+                # Only `migrate-v7 --apply` upgrades an active format-7 store:
+                # it works on a verified copy and keeps what rollback needs.
+                refusal = SchemaUpgradeRequiredError(schema_version)
+                if args.json:
+                    print(
+                        json.dumps(
+                            {
+                                "database": db_path,
+                                "error": {
+                                    "code": refusal.code,
+                                    "message": str(refusal),
+                                },
+                            },
+                            sort_keys=True,
+                            separators=(",", ":"),
+                        )
+                    )
+                else:
+                    print(f"ERROR: {refusal}", file=sys.stderr)
+                sys.exit(1)
+            count, applied = run_migrations(
+                db_path,
+                workspace_id=db.workspace_id,
+                # A format-6 store is what `migrate-v7` snapshots; it stops at
+                # the last v6 version here exactly as it does at start.
+                maximum_version=db._v6_migration_ceiling(schema_version),
+            )
             if args.json:
                 result = {
                     "database": db_path,
@@ -603,9 +1178,17 @@ def main():
                     print(f"  - {m}")
                 if count == 0:
                     print("Database is up to date.")
-                print(
-                    "\nTo also backfill vectors, run: python -m daem0nmcp.cli migrate --backfill-vectors"
-                )
+                if db.format_version == 6:
+                    print(
+                        "\nDeprecated format-6 backfill: "
+                        "python -m daem0nmcp.cli migrate --backfill-vectors"
+                    )
+                else:
+                    print(
+                        "\nFor format 7 dense retrieval, run: python -m "
+                        "daem0nmcp.cli rebuild-projection --projection dense "
+                        "--workspace-id <workspace-id>"
+                    )
 
     elif args.command == "status":
         project_path = args.project_path or os.getcwd()
@@ -774,15 +1357,18 @@ def main():
             if args.json:
                 print(
                     json.dumps(
-                        {"error": "tree-sitter-languages not installed", "indexed": 0}
+                        {
+                            "error": "tree-sitter-language-pack not installed",
+                            "indexed": 0,
+                        }
                     )
                 )
             else:
                 print(
-                    "ERROR: Code indexing requires tree-sitter-languages",
+                    "ERROR: Code indexing requires tree-sitter-language-pack",
                     file=sys.stderr,
                 )
-                print("Install with: pip install tree-sitter-languages")
+                print("Install with: pip install 'daem0nmcp[apps]'")
             sys.exit(1)
 
         project_path = Path(args.project_path or os.getcwd()).resolve()

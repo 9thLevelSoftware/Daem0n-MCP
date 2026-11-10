@@ -3,12 +3,13 @@
 import json
 import logging
 import subprocess
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 try:
     from .. import __version__, vectors
+    from ..capabilities import get_capabilities
     from ..context_manager import (
         ProjectContext,
         _default_project_path,
@@ -16,17 +17,30 @@ try:
         _project_contexts,
         get_project_context,
     )
+    from ..covenant import (
+        current_covenant_status,
+        issue_current_preflight_response,
+        legacy_entrypoint,
+        record_current_briefing,
+    )
     from ..logging_config import with_request_id
     from ..mcp_instance import mcp
     from ..models import CodeEntity, Memory, Rule
 except ImportError:
     from daem0nmcp import __version__, vectors
+    from daem0nmcp.capabilities import get_capabilities
     from daem0nmcp.context_manager import (
         ProjectContext,
         _default_project_path,
         _missing_project_path_error,
         _project_contexts,
         get_project_context,
+    )
+    from daem0nmcp.covenant import (
+        current_covenant_status,
+        issue_current_preflight_response,
+        legacy_entrypoint,
+        record_current_briefing,
     )
     from daem0nmcp.logging_config import with_request_id
     from daem0nmcp.mcp_instance import mcp
@@ -1036,7 +1050,12 @@ async def _get_linked_projects_summary(ctx: ProjectContext) -> list[dict[str, An
     summaries = []
     for link in links:
         linked_path = link["linked_path"]
-        linked_storage = Path(linked_path) / ".daem0nmcp" / "storage"
+        try:
+            from ..workspace import resolve_derived_path
+        except ImportError:
+            from daem0nmcp.workspace import resolve_derived_path
+
+        linked_storage = resolve_derived_path(linked_path, ".daem0nmcp", "storage")
 
         summary = {
             "path": linked_path,
@@ -1144,6 +1163,7 @@ def _build_briefing_message(
 # ============================================================================
 @mcp.tool(version=__version__)
 @with_request_id
+@legacy_entrypoint("get_briefing")
 async def get_briefing(
     project_path: str | None = None, focus_areas: list[str] | None = None
 ) -> dict[str, Any]:
@@ -1201,6 +1221,8 @@ async def get_briefing(
     )
 
     # Mark this project as briefed (Sacred Covenant: communion complete)
+    record_current_briefing()
+    # Retained temporarily for legacy display/pre-commit compatibility only.
     ctx.briefed = True
 
     # Get active working context (limited to 5 items for token efficiency)
@@ -1249,6 +1271,7 @@ async def get_briefing(
 # ============================================================================
 @mcp.tool(version=__version__)
 @with_request_id
+@legacy_entrypoint("get_briefing_visual")
 async def get_briefing_visual(
     project_path: str | None = None, focus_areas: list[str] | None = None
 ) -> dict[str, Any]:
@@ -1293,6 +1316,7 @@ async def get_briefing_visual(
 # ============================================================================
 @mcp.tool(version=__version__)
 @with_request_id
+@legacy_entrypoint("get_covenant_status")
 async def get_covenant_status(project_path: str | None = None) -> dict[str, Any]:
     """
     [DEPRECATED] Use commune(action='covenant') instead.
@@ -1308,20 +1332,17 @@ async def get_covenant_status(project_path: str | None = None) -> dict[str, Any]
     Returns:
         Dict with phase info, token status, and message
     """
-    try:
-        from ..covenant import COUNSEL_TTL_SECONDS
-    except ImportError:
-        from daem0nmcp.covenant import COUNSEL_TTL_SECONDS
-
     if not project_path and not _default_project_path:
         return _missing_project_path_error()
 
-    ctx = await get_project_context(project_path)
+    await get_project_context(project_path)
 
-    # Determine covenant phase from session state
-    if not ctx.briefed:
+    scoped_state = current_covenant_status()
+
+    # Authorization phase is invocation-scoped, never project-context scoped.
+    if not scoped_state["briefed"]:
         covenant_phase = "commune"
-    elif not ctx.context_checks:
+    elif scoped_state["active_capabilities"] == 0:
         covenant_phase = "counsel"
     else:
         covenant_phase = "inscribe"
@@ -1348,19 +1369,8 @@ async def get_covenant_status(project_path: str | None = None) -> dict[str, Any]
     preflight_expires = None
     preflight_remaining = None
 
-    if ctx.context_checks:
-        latest = ctx.context_checks[-1]
-        check_time = datetime.fromisoformat(latest["timestamp"].replace("Z", "+00:00"))
-        expires_at = check_time + timedelta(seconds=COUNSEL_TTL_SECONDS)
-
-        if datetime.now(timezone.utc) < expires_at:
-            preflight_status = "valid"
-            preflight_expires = expires_at.isoformat()
-            preflight_remaining = int(
-                (expires_at - datetime.now(timezone.utc)).total_seconds()
-            )
-        else:
-            preflight_status = "expired"
+    if scoped_state["active_capabilities"]:
+        preflight_status = "issued"
 
     # Build status message
     messages = {
@@ -1374,14 +1384,14 @@ async def get_covenant_status(project_path: str | None = None) -> dict[str, Any]
         "phase": covenant_phase,
         "phase_label": phase_info["label"],
         "phase_description": phase_info["description"],
-        "is_briefed": ctx.briefed,
-        "context_check_count": len(ctx.context_checks),
+        "is_briefed": scoped_state["briefed"],
+        "context_check_count": scoped_state["active_capabilities"],
         "preflight": {
             "status": preflight_status,
             "expires_at": preflight_expires,
             "remaining_seconds": preflight_remaining,
         },
-        "can_mutate": preflight_status == "valid",
+        "can_mutate": preflight_status == "issued",
         "message": messages.get(covenant_phase, messages["commune"]),
     }
     return add_deprecation(result, "get_covenant_status", "commune(action='covenant')")
@@ -1392,6 +1402,7 @@ async def get_covenant_status(project_path: str | None = None) -> dict[str, Any]
 # ============================================================================
 @mcp.tool(version=__version__)
 @with_request_id
+@legacy_entrypoint("get_covenant_status_visual")
 async def get_covenant_status_visual(
     project_path: str | None = None,
 ) -> dict[str, Any]:
@@ -1408,6 +1419,7 @@ async def get_covenant_status_visual(
         Dict with covenant data + ui_resource hint + text fallback
     """
     from daem0nmcp.ui.fallback import format_covenant_status_text, format_with_ui_hint
+    from daem0nmcp.ui.rendering import APP_SPECS, build_compat_ui_uri
 
     # Get covenant status using existing function
     result = await get_covenant_status(project_path=project_path)
@@ -1419,13 +1431,9 @@ async def get_covenant_status_visual(
     # Generate text fallback
     text = format_covenant_status_text(result)
 
-    # Create UI resource URI with encoded data
-    import json
-    import urllib.parse
-
-    data_json = json.dumps(result)
-    encoded_data = urllib.parse.quote(data_json)
-    ui_resource = f"ui://daem0n/covenant/{encoded_data}"
+    ui_resource = (
+        build_compat_ui_uri("covenant", result) or APP_SPECS["covenant"].resource_uri
+    )
 
     return format_with_ui_hint(data=result, ui_resource=ui_resource, text=text)
 
@@ -1435,8 +1443,12 @@ async def get_covenant_status_visual(
 # ============================================================================
 @mcp.tool(version=__version__)
 @with_request_id
+@legacy_entrypoint("context_check")
 async def context_check(
-    description: str, project_path: str | None = None
+    description: str | None = None,
+    project_path: str | None = None,
+    target_operation: str | None = None,
+    target_args: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """
     [DEPRECATED] Use consult(action='preflight') instead.
@@ -1452,16 +1464,21 @@ async def context_check(
         return _missing_project_path_error()
 
     ctx = await get_project_context(project_path)
+    advisory_description = description or (
+        f"Preparing to call {target_operation}"
+        if target_operation
+        else "Preflight context review"
+    )
 
     # Get relevant memories (with defensive None check)
     memories = await ctx.memory_manager.recall(
-        description, limit=5, project_path=ctx.project_path
+        advisory_description, limit=5, project_path=ctx.project_path
     )
     if memories is None:
         memories = {}
 
     # Check rules (with defensive None check)
-    rules = await ctx.rules_engine.check_rules(description)
+    rules = await ctx.rules_engine.check_rules(advisory_description)
     if not isinstance(rules, dict):
         rules = {}
 
@@ -1493,27 +1510,13 @@ async def context_check(
     # Record this context check (Sacred Covenant: counsel sought)
     ctx.context_checks.append(
         {
-            "description": description,
+            "description": advisory_description,
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }
     )
 
-    # Issue preflight token as proof of consultation
-    try:
-        from ..covenant import PreflightToken
-        from ..enforcement import get_session_id
-    except ImportError:
-        from daem0nmcp.covenant import PreflightToken
-        from daem0nmcp.enforcement import get_session_id
-
-    token = PreflightToken.issue(
-        action=description,
-        session_id=get_session_id(ctx.project_path),
-        project_path=ctx.project_path,
-    )
-
     result = {
-        "description": description,
+        "description": advisory_description,
         "has_concerns": has_concerns,
         "memories_found": memories.get("found", 0),
         "rules_matched": rules.get("matched_rules", 0) if rules else 0,
@@ -1521,13 +1524,19 @@ async def context_check(
         "must_do": guidance.get("must_do", []) if guidance else [],
         "must_not": guidance.get("must_not", []) if guidance else [],
         "ask_first": guidance.get("ask_first", []) if guidance else [],
-        "preflight_token": token.serialize(),
         "message": (
             "\u26a0\ufe0f Review warnings before proceeding"
             if has_concerns
             else "\u2713 No concerns found, but always use good judgment"
         ),
     }
+    if target_operation:
+        capability_result = issue_current_preflight_response(
+            target_operation, target_args
+        )
+        if capability_result.get("status") == "blocked":
+            return capability_result
+        result.update(capability_result)
     return add_deprecation(result, "context_check", "consult(action='preflight')")
 
 
@@ -1536,6 +1545,7 @@ async def context_check(
 # ============================================================================
 @mcp.tool(version=__version__)
 @with_request_id
+@legacy_entrypoint("check_for_updates")
 async def check_for_updates(
     since: str | None = None,
     interval_seconds: int = 10,
@@ -1580,6 +1590,7 @@ async def check_for_updates(
 # ============================================================================
 @mcp.tool(version=__version__)
 @with_request_id
+@legacy_entrypoint("health")
 async def health(project_path: str | None = None) -> dict[str, Any]:
     """
     [DEPRECATED] Use commune(action='health') instead.
@@ -1635,6 +1646,7 @@ async def health(project_path: str | None = None) -> dict[str, Any]:
         "by_category": stats.get("by_category", {}),
         "contexts_cached": len(_project_contexts),
         "vectors_enabled": vectors.is_available(),
+        "capabilities": get_capabilities(),
         "timestamp": time.time(),
         # Code index stats
         "code_entities_count": entity_count,

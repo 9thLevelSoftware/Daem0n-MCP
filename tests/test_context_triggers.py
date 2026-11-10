@@ -438,15 +438,14 @@ async def test_check_triggers_glob_patterns(trigger_manager, temp_storage):
 
 
 @pytest.fixture
-async def covenant_compliant_project_for_triggers(tmp_path):
+async def covenant_compliant_project_for_triggers(tmp_path, covenant_workspace_factory):
     """Create project that passes communion checks."""
     from daem0nmcp import server
 
-    project_path = str(tmp_path)
     server._project_contexts.clear()
-    await server.get_briefing(project_path=project_path)
-    await server.context_check(description="Test triggers", project_path=project_path)
-    yield project_path
+    workspace = covenant_workspace_factory(tmp_path)
+    await workspace.brief()
+    yield workspace
 
 
 @pytest.mark.asyncio
@@ -454,7 +453,8 @@ async def test_mcp_add_context_trigger(covenant_compliant_project_for_triggers):
     """Test MCP tool for adding context triggers."""
     from daem0nmcp import server
 
-    result = await server.add_context_trigger(
+    result = await covenant_compliant_project_for_triggers.call(
+        server.add_context_trigger,
         trigger_type="file_pattern",
         pattern="src/auth/**/*.py",
         recall_topic="authentication",
@@ -471,15 +471,17 @@ async def test_mcp_list_context_triggers(covenant_compliant_project_for_triggers
     from daem0nmcp import server
 
     # Add a trigger first
-    await server.add_context_trigger(
+    await covenant_compliant_project_for_triggers.call(
+        server.add_context_trigger,
         trigger_type="file_pattern",
         pattern="src/auth/**/*.py",
         recall_topic="authentication",
         project_path=covenant_compliant_project_for_triggers,
     )
 
-    result = await server.list_context_triggers(
-        project_path=covenant_compliant_project_for_triggers
+    result = await covenant_compliant_project_for_triggers.call(
+        server.list_context_triggers,
+        project_path=covenant_compliant_project_for_triggers,
     )
 
     assert "triggers" in result
@@ -493,7 +495,8 @@ async def test_mcp_remove_context_trigger(covenant_compliant_project_for_trigger
     from daem0nmcp import server
 
     # Add a trigger first
-    add_result = await server.add_context_trigger(
+    add_result = await covenant_compliant_project_for_triggers.call(
+        server.add_context_trigger,
         trigger_type="file_pattern",
         pattern="src/auth/**/*.py",
         recall_topic="authentication",
@@ -502,15 +505,18 @@ async def test_mcp_remove_context_trigger(covenant_compliant_project_for_trigger
     trigger_id = add_result["trigger_id"]
 
     # Remove it
-    result = await server.remove_context_trigger(
-        trigger_id=trigger_id, project_path=covenant_compliant_project_for_triggers
+    result = await covenant_compliant_project_for_triggers.call(
+        server.remove_context_trigger,
+        trigger_id=trigger_id,
+        project_path=covenant_compliant_project_for_triggers,
     )
 
     assert result["status"] == "removed"
 
     # Verify it's gone
-    list_result = await server.list_context_triggers(
-        project_path=covenant_compliant_project_for_triggers
+    list_result = await covenant_compliant_project_for_triggers.call(
+        server.list_context_triggers,
+        project_path=covenant_compliant_project_for_triggers,
     )
     assert len(list_result["triggers"]) == 0
 
@@ -521,7 +527,8 @@ async def test_mcp_check_context_triggers(covenant_compliant_project_for_trigger
     from daem0nmcp import server
 
     # Add a trigger
-    await server.add_context_trigger(
+    await covenant_compliant_project_for_triggers.call(
+        server.add_context_trigger,
         trigger_type="file_pattern",
         pattern="src/auth/*.py",
         recall_topic="authentication",
@@ -529,7 +536,8 @@ async def test_mcp_check_context_triggers(covenant_compliant_project_for_trigger
     )
 
     # Check with matching file
-    result = await server.check_context_triggers(
+    result = await covenant_compliant_project_for_triggers.call(
+        server.check_context_triggers,
         file_path="src/auth/service.py",
         project_path=covenant_compliant_project_for_triggers,
     )
@@ -547,7 +555,8 @@ async def test_mcp_check_context_triggers_no_match(
     from daem0nmcp import server
 
     # Add a trigger
-    await server.add_context_trigger(
+    await covenant_compliant_project_for_triggers.call(
+        server.add_context_trigger,
         trigger_type="file_pattern",
         pattern="src/auth/*.py",
         recall_topic="authentication",
@@ -555,7 +564,8 @@ async def test_mcp_check_context_triggers_no_match(
     )
 
     # Check with non-matching file
-    result = await server.check_context_triggers(
+    result = await covenant_compliant_project_for_triggers.call(
+        server.check_context_triggers,
         file_path="src/api/routes.py",
         project_path=covenant_compliant_project_for_triggers,
     )
@@ -572,7 +582,8 @@ async def test_mcp_resource_triggered_context(covenant_compliant_project_for_tri
     from daem0nmcp import server
 
     # Add a trigger
-    await server.add_context_trigger(
+    await covenant_compliant_project_for_triggers.call(
+        server.add_context_trigger,
         trigger_type="file_pattern",
         pattern="*.py",
         recall_topic="python",
@@ -580,7 +591,8 @@ async def test_mcp_resource_triggered_context(covenant_compliant_project_for_tri
     )
 
     # Create a memory that matches the topic
-    await server.remember(
+    await covenant_compliant_project_for_triggers.call(
+        server.remember,
         category="pattern",
         content="Use type hints in Python",
         tags=["python"],
@@ -588,9 +600,10 @@ async def test_mcp_resource_triggered_context(covenant_compliant_project_for_tri
     )
 
     # Access the resource directly (simulates MCP resource access)
-    result_json = await server.get_triggered_context_resource(
-        file_path="test.py", project_path=covenant_compliant_project_for_triggers
-    )
+    with covenant_compliant_project_for_triggers.installed():
+        result_json = await server.get_triggered_context_resource(
+            file_path="test.py", project_path=covenant_compliant_project_for_triggers
+        )
 
     result = json.loads(result_json)
     assert result["file"] == "test.py"

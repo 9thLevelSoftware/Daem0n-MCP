@@ -20,7 +20,9 @@ class TestProjectContextConcurrency:
             shutil.rmtree(d, ignore_errors=True)
 
     @pytest.mark.asyncio
-    async def test_concurrent_context_creation_uses_lock(self, temp_projects):
+    async def test_concurrent_context_creation_uses_lock(
+        self, temp_projects, covenant_workspace_factory
+    ):
         """Verify that concurrent calls to get_project_context don't race."""
         from daem0nmcp.server import (
             _context_locks,
@@ -50,8 +52,11 @@ class TestProjectContextConcurrency:
 
         original_init = DatabaseManager.init_db
 
-        with patch.object(DatabaseManager, "init_db", counting_init):
-            # Launch concurrent requests
+        workspace = covenant_workspace_factory(project_path)
+        with (
+            workspace.installed(),
+            patch.object(DatabaseManager, "init_db", counting_init),
+        ):
             tasks = [get_project_context(project_path) for _ in range(5)]
             contexts = await asyncio.gather(*tasks)
 
@@ -76,7 +81,9 @@ class TestProjectContextEviction:
             shutil.rmtree(d, ignore_errors=True)
 
     @pytest.mark.asyncio
-    async def test_lru_eviction_when_max_contexts_exceeded(self, temp_projects):
+    async def test_lru_eviction_when_max_contexts_exceeded(
+        self, temp_projects, covenant_workspace_factory
+    ):
         """Verify oldest contexts are evicted when max is exceeded."""
         from daem0nmcp.server import (
             MAX_PROJECT_CONTEXTS,
@@ -87,20 +94,23 @@ class TestProjectContextEviction:
 
         _project_contexts.clear()
 
-        # Create contexts up to max + 2
-        for i, project_path in enumerate(temp_projects[: MAX_PROJECT_CONTEXTS + 2]):
-            ctx = await get_project_context(project_path)
-            ctx.last_accessed = i  # Simulate access order
-
-        # Evict stale contexts
-        evicted = await evict_stale_contexts()
+        workspace = covenant_workspace_factory(
+            temp_projects[0], additional_roots=temp_projects[1:]
+        )
+        with workspace.installed():
+            for i, project_path in enumerate(temp_projects[: MAX_PROJECT_CONTEXTS + 2]):
+                ctx = await get_project_context(project_path)
+                ctx.last_accessed = i
+            evicted = await evict_stale_contexts()
 
         # Should have evicted oldest contexts
         assert len(_project_contexts) <= MAX_PROJECT_CONTEXTS
         assert evicted >= 2
 
     @pytest.mark.asyncio
-    async def test_ttl_eviction_for_old_contexts(self, temp_projects):
+    async def test_ttl_eviction_for_old_contexts(
+        self, temp_projects, covenant_workspace_factory
+    ):
         """Verify contexts older than TTL are evicted."""
         import time
 
@@ -113,15 +123,14 @@ class TestProjectContextEviction:
 
         _project_contexts.clear()
 
-        # Create a context with old last_accessed time
-        ctx = await get_project_context(temp_projects[0])
-        ctx.last_accessed = time.time() - CONTEXT_TTL_SECONDS - 100
-
-        # Create a recent context
-        await get_project_context(temp_projects[1])
-
-        # Evict
-        await evict_stale_contexts()
+        workspace = covenant_workspace_factory(
+            temp_projects[0], additional_roots=[temp_projects[1]]
+        )
+        with workspace.installed():
+            ctx = await get_project_context(temp_projects[0])
+            ctx.last_accessed = time.time() - CONTEXT_TTL_SECONDS - 100
+            await get_project_context(temp_projects[1])
+            await evict_stale_contexts()
 
         # Old context should be gone, new one should remain
         assert len(_project_contexts) == 1
@@ -156,7 +165,9 @@ class TestPathResolution:
         assert os.path.isabs(result)
 
     @pytest.mark.asyncio
-    async def test_different_projects_get_different_contexts(self):
+    async def test_different_projects_get_different_contexts(
+        self, covenant_workspace_factory
+    ):
         """Verify each project gets its own context."""
         import tempfile
 
@@ -164,9 +175,14 @@ class TestPathResolution:
 
         _project_contexts.clear()
 
-        with tempfile.TemporaryDirectory() as dir1, tempfile.TemporaryDirectory() as dir2:
-            ctx1 = await get_project_context(dir1)
-            ctx2 = await get_project_context(dir2)
+        with (
+            tempfile.TemporaryDirectory() as dir1,
+            tempfile.TemporaryDirectory() as dir2,
+        ):
+            workspace = covenant_workspace_factory(dir1, additional_roots=[dir2])
+            with workspace.installed():
+                ctx1 = await get_project_context(dir1)
+                ctx2 = await get_project_context(dir2)
 
             assert ctx1 is not ctx2
             assert ctx1.project_path != ctx2.project_path

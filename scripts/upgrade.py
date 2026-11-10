@@ -34,11 +34,22 @@ from pathlib import Path
 from typing import NamedTuple, Optional, List, Dict, Any
 
 
+# Direct script execution sets sys.path[0] to ``scripts/``.  Make the adjacent
+# source package available to dependency-free Phase 1 even before installation,
+# including under Python's isolated ``-I`` mode.
+_SOURCE_CHECKOUT_ROOT = Path(__file__).resolve().parents[1]
+if (_SOURCE_CHECKOUT_ROOT / "daem0nmcp" / "storage_activation.py").is_file():
+    source_root = str(_SOURCE_CHECKOUT_ROOT)
+    if source_root not in sys.path:
+        sys.path.insert(0, source_root)
+
+from daem0nmcp.schema_version import CURRENT_SCHEMA_VERSION
+
+
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
 
-CURRENT_SCHEMA_VERSION = 15
 CURRENT_EMBEDDING_DIM = 256
 OLD_EMBEDDING_DIM = 384
 BACKUP_DIR_NAME = ".daem0nmcp_upgrade_backup"
@@ -50,12 +61,13 @@ MANIFEST_FILE = "manifest.json"
 # ---------------------------------------------------------------------------
 
 class VersionFingerprint(NamedTuple):
-    schema_version: int           # 0-15
+    schema_version: int           # 0-current
     embedding_dim: Optional[int]  # 384, 256, or None
     memory_count: int
     vector_count: int
     has_qdrant: bool
     db_path: str
+    format_version: int           # 0 (absent), 6, or 7
     hook_format: str              # "none" | "legacy_shell" | "module"
     estimated_version: str        # "pre-v4" | "v4.0" | "v5.0" | "v6.0" | "v6.6.6"
 
@@ -77,7 +89,7 @@ class ProjectState:
 
     def classify(self) -> None:
         fp = self.fingerprint
-        if fp.estimated_version == "v6.6.6":
+        if fp.format_version == 7 or fp.estimated_version == "v6.6.6":
             self.skipped = True
         elif fp.estimated_version == "pre-v4":
             self.needs_fresh_start = True
@@ -139,22 +151,75 @@ def discover_projects(explicit_dirs: List[str]) -> List[str]:
     return result
 
 
-def resolve_db_path(project_path: str) -> str:
+_V6_ONLY_ERROR = (
+    "Deprecated v6-only vector migration cannot run against format 7; use "
+    "`python -m daem0nmcp.cli rebuild-projection --projection dense "
+    "--workspace-id <workspace-id>` instead."
+)
+
+
+def _resolve_db_selection(project_path: str) -> tuple[str, int]:
     """
-    Find daem0nmcp.db from a project path, accepting any of:
+    Find the authoritative database and architecture format from a project path.
+
+    Accepted paths are any of:
       - /path/to/project                 (.daem0nmcp/storage/daem0nmcp.db)
       - /path/to/project/.daem0nmcp      (storage/daem0nmcp.db)
       - /path/to/project/.daem0nmcp/storage  (daem0nmcp.db)
     """
-    candidates = [
-        os.path.join(project_path, ".daem0nmcp", "storage", "daem0nmcp.db"),
-        os.path.join(project_path, "storage", "daem0nmcp.db"),
-        os.path.join(project_path, "daem0nmcp.db"),
+    storage_candidates = [
+        Path(project_path) / ".daem0nmcp" / "storage",
+        Path(project_path) / "storage",
+        Path(project_path),
     ]
-    for path in candidates:
-        if os.path.exists(path):
-            return path
-    return ""
+    from daem0nmcp.storage_activation import (
+        has_canonical_v7_state,
+        resolve_active_database,
+    )
+
+    # The shared validator owns canonical active-db.json decoding, including
+    # the pointer.get("format_version") relationship checks used by v7 activation.
+    for storage in storage_candidates:
+        pointer_path = storage / "active-db.json"
+        if pointer_path.exists() or pointer_path.is_symlink():
+            active = resolve_active_database(storage)
+            return str(active.path), active.format_version
+    for storage in storage_candidates:
+        if (storage / "daem0nmcp.db").is_file():
+            active = resolve_active_database(storage)
+            format_version = (
+                7 if has_canonical_v7_state(active.path) else active.format_version
+            )
+            return str(active.path), format_version
+    return "", 0
+
+
+def resolve_db_path(project_path: str) -> str:
+    """Return the authoritative database path for compatibility callers."""
+
+    return _resolve_db_selection(project_path)[0]
+
+
+def _active_selection_for_database(db_path: str) -> tuple[Path, int]:
+    """Return the governing storage directory and active architecture format."""
+
+    from daem0nmcp.storage_activation import (
+        has_canonical_v7_state,
+        resolve_active_database,
+    )
+
+    target = Path(db_path).resolve()
+    for storage in target.parents:
+        pointer = storage / "active-db.json"
+        if not pointer.exists() and not pointer.is_symlink():
+            continue
+        active = resolve_active_database(storage)
+        if active.path.resolve() != target:
+            raise RuntimeError(
+                "Legacy vector migration requires the selected active database."
+            )
+        return storage, active.format_version
+    return target.parent, 7 if has_canonical_v7_state(target) else 6
 
 
 def _detect_embedding_dim(conn: sqlite3.Connection) -> Optional[int]:
@@ -228,7 +293,7 @@ def detect_version(project_path: str) -> VersionFingerprint:
     Reads schema version, embedding dimensions, counts, and hook format
     directly from the database without importing daem0nmcp.
     """
-    db_path = resolve_db_path(project_path)
+    db_path, format_version = _resolve_db_selection(project_path)
     has_legacy_dir = os.path.isdir(os.path.join(project_path, ".devilmcp"))
     storage_dir = os.path.dirname(db_path) if db_path else os.path.join(project_path, ".daem0nmcp", "storage")
     has_qdrant = os.path.isdir(os.path.join(storage_dir, "qdrant"))
@@ -274,7 +339,11 @@ def detect_version(project_path: str) -> VersionFingerprint:
             pass  # corrupt or not a sqlite file
 
     hook_format = _detect_hook_format()
-    estimated = _estimate_version(schema_version, embedding_dim, has_legacy_dir)
+    estimated = (
+        "v7"
+        if format_version == 7
+        else _estimate_version(schema_version, embedding_dim, has_legacy_dir)
+    )
 
     return VersionFingerprint(
         schema_version=schema_version,
@@ -283,6 +352,7 @@ def detect_version(project_path: str) -> VersionFingerprint:
         vector_count=vector_count,
         has_qdrant=has_qdrant,
         db_path=db_path,
+        format_version=format_version,
         hook_format=hook_format,
         estimated_version=estimated,
     )
@@ -571,6 +641,7 @@ def run_phase3(
     """
     from daem0nmcp.migrations.schema import run_migrations
     from daem0nmcp.claude_hooks.install import install_claude_hooks
+    from daem0nmcp.workspace import WorkspaceRegistry
 
     for state in states:
         if state.skipped:
@@ -581,7 +652,13 @@ def run_phase3(
         # --- Schema migration ---
         if state.needs_schema_migration and fp.db_path:
             try:
-                count, descriptions = run_migrations(fp.db_path)
+                workspace_root = Path(state.project_path).resolve()
+                workspace_id = WorkspaceRegistry(
+                    [workspace_root], default_root=workspace_root
+                ).default.workspace_id
+                count, descriptions = run_migrations(
+                    fp.db_path, workspace_id=workspace_id
+                )
                 if count > 0:
                     state.actions_taken.append(
                         "Applied {} schema migration(s): {}".format(
@@ -595,7 +672,15 @@ def run_phase3(
                 continue  # Don't attempt embedding migration if schema failed
 
         # --- Embedding re-encoding ---
-        if state.needs_embedding_migration and fp.db_path and not skip_embeddings:
+        if (
+            state.needs_embedding_migration
+            and fp.db_path
+            and not skip_embeddings
+            and fp.format_version != 6
+        ):
+            state.errors.append("Embedding migration refused: " + _V6_ONLY_ERROR)
+
+        elif state.needs_embedding_migration and fp.db_path and not skip_embeddings:
             if fp.vector_count > 500 and not auto_yes:
                 print("\n  Project: {}".format(state.project_path))
                 print("  {} vectors need re-encoding (384->256 dim).".format(
@@ -611,7 +696,9 @@ def run_phase3(
                     continue
 
             try:
-                migrated, failed = _migrate_embeddings(fp.db_path)
+                migrated, failed = _migrate_embeddings(
+                    fp.db_path, format_version=fp.format_version
+                )
                 state.actions_taken.append(
                     "Re-encoded embeddings: {} migrated, {} failed".format(
                         migrated, failed
@@ -646,12 +733,32 @@ def run_phase3(
                     state.errors.append("Hook installation error: {}".format(exc))
 
 
-def _migrate_embeddings(db_path: str, batch_size: int = 100) -> tuple[int, int]:
+def _migrate_embeddings(
+    db_path: str,
+    batch_size: int = 100,
+    *,
+    format_version: int,
+) -> tuple[int, int]:
     """
-    Re-encode all embeddings from 384-dim to 256-dim.
+    Re-encode format-6 embeddings from 384-dim to 256-dim.
 
     Returns (migrated_count, failed_count).
     """
+    from daem0nmcp.storage_activation import DatabaseFileLock
+
+    storage, _ = _active_selection_for_database(db_path)
+    with DatabaseFileLock(storage, "shared"):
+        locked_storage, active_format = _active_selection_for_database(db_path)
+        if locked_storage.resolve() != storage.resolve():
+            raise RuntimeError("Active database storage changed during migration.")
+        if format_version != active_format or active_format != 6:
+            raise RuntimeError(_V6_ONLY_ERROR)
+        return _migrate_embeddings_v6(db_path, batch_size)
+
+
+def _migrate_embeddings_v6(db_path: str, batch_size: int) -> tuple[int, int]:
+    """Perform the format-6 write while the caller holds the storage lock."""
+
     from daem0nmcp import vectors
     from daem0nmcp.qdrant_store import QdrantVectorStore
 

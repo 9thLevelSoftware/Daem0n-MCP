@@ -1,8 +1,9 @@
 """Agency tools: execute_python, compress_context, ingest_doc."""
 
+import asyncio
 import logging
 import re
-import sys
+from functools import partial
 from typing import Any
 
 try:
@@ -13,12 +14,14 @@ try:
         SandboxExecutor,
         check_capability,
     )
+    from ..bounded_workers import BoundedWorkerPool
     from ..config import settings
     from ..context_manager import (
         _default_project_path,
         _missing_project_path_error,
         get_project_context,
     )
+    from ..covenant import legacy_entrypoint
     from ..logging_config import with_request_id
     from ..mcp_instance import mcp
 except ImportError:
@@ -29,12 +32,14 @@ except ImportError:
         SandboxExecutor,
         check_capability,
     )
+    from daem0nmcp.bounded_workers import BoundedWorkerPool
     from daem0nmcp.config import settings
     from daem0nmcp.context_manager import (
         _default_project_path,
         _missing_project_path_error,
         get_project_context,
     )
+    from daem0nmcp.covenant import legacy_entrypoint
     from daem0nmcp.logging_config import with_request_id
     from daem0nmcp.mcp_instance import mcp
 
@@ -49,170 +54,126 @@ MAX_CONTENT_SIZE = settings.max_content_size
 MAX_CHUNKS = settings.max_chunks
 INGEST_TIMEOUT = settings.ingest_timeout
 ALLOWED_URL_SCHEMES = settings.allowed_url_schemes
+_HTML_WORKER_POOL = BoundedWorkerPool(
+    max_workers=2,
+    thread_name_prefix="daem0nmcp-html",
+)
 
 
-def _resolve_public_ips(hostname: str) -> set[str]:
-    """Resolve a hostname and ensure all IPs are public/global."""
-    import ipaddress
-    import socket
+def _extract_html_text(
+    body: bytes,
+    encoding: str | None,
+    beautiful_soup: Any,
+) -> str:
+    """Decode, parse, and normalize one bounded HTML response off-loop."""
+    text = body.decode(encoding or "utf-8", errors="replace")
+    soup = beautiful_soup(text, "html.parser")
 
+    for element in soup(["script", "style", "nav", "footer", "header"]):
+        element.decompose()
+
+    text = soup.get_text(separator="\n", strip=True)
+    lines = [line.strip() for line in text.split("\n") if line.strip()]
+    return "\n".join(lines)
+
+
+async def _validate_url(url: str, *, resolver: Any | None = None) -> str | None:
+    """Validate syntax and all admission-time answers without authorizing a dial."""
     try:
-        addr_infos = socket.getaddrinfo(hostname, None, proto=socket.IPPROTO_TCP)
-    except socket.gaierror as err:
-        raise ValueError("Host could not be resolved") from err
-
-    if not addr_infos:
-        raise ValueError("Host could not be resolved")
-
-    ips: set[str] = set()
-    for _, _, _, _, sockaddr in addr_infos:
-        ip_str = sockaddr[0]
+        from ..pinned_http import validate_public_url
+    except ImportError:
         try:
-            ip_obj = ipaddress.ip_address(ip_str)
-        except ValueError as exc:
-            raise ValueError(f"Invalid IP address for host: {ip_str}") from exc
-        if not ip_obj.is_global:
-            raise ValueError(f"Non-public IP addresses are not allowed: {ip_obj}")
-        ips.add(str(ip_obj))
+            from daem0nmcp.pinned_http import validate_public_url
+        except ImportError:
+            return "URL ingestion dependencies are not installed"
 
-    return ips
-
-
-def _validate_url(url: str) -> tuple[str | None, set[str] | None]:
-    """
-    Validate URL for ingestion.
-    Returns (error_message, resolved_public_ips).
-
-    Security checks:
-    - Scheme validation (no file://, etc.)
-    - SSRF protection: Blocks localhost and private IPs
-    - Cloud metadata endpoint protection
-    """
-    import ipaddress
-    from urllib.parse import urlparse
-
-    try:
-        parsed = urlparse(url)
-    except Exception:
-        return "Invalid URL format", None
-
-    if parsed.scheme.lower() not in ALLOWED_URL_SCHEMES:
-        return (
-            f"Invalid URL scheme '{parsed.scheme}'. Allowed: {ALLOWED_URL_SCHEMES}",
-            None,
-        )
-
-    if not parsed.netloc:
-        return "URL must have a host", None
-
-    # Extract hostname from netloc (remove port)
-    hostname = parsed.hostname
-    if not hostname:
-        return "URL must have a valid hostname", None
-
-    # Block localhost
-    if hostname.lower() in ["localhost", "localhost.localdomain", "127.0.0.1", "::1"]:
-        return "Localhost URLs are not allowed", None
-
-    # If hostname is an IP literal, validate directly
-    try:
-        ip_obj = ipaddress.ip_address(hostname)
-        if not ip_obj.is_global:
-            return f"Non-public IP addresses are not allowed: {ip_obj}", None
-        return None, {str(ip_obj)}
-    except ValueError:
-        pass
-
-    try:
-        allowed_ips = _resolve_public_ips(hostname)
-    except ValueError as exc:
-        return str(exc), None
-
-    return None, allowed_ips
+    return await validate_public_url(
+        url,
+        allowed_schemes=ALLOWED_URL_SCHEMES,
+        resolver=resolver,
+    )
 
 
 async def _fetch_and_extract(
-    url: str, allowed_ips: set[str] | None = None
+    url: str,
+    *,
+    resolver: Any | None = None,
+    delegate: Any | None = None,
 ) -> str | None:
     """Fetch URL and extract text content with size limits."""
     try:
         import httpx
         from bs4 import BeautifulSoup
+
+        from ..pinned_http import (
+            PinnedAsyncHTTPTransport,
+            pinned_dependency_log_scope,
+            read_bounded_identity_body,
+        )
     except ImportError:
-        return None
+        try:
+            import httpx
+            from bs4 import BeautifulSoup
+
+            from daem0nmcp.pinned_http import (
+                PinnedAsyncHTTPTransport,
+                pinned_dependency_log_scope,
+                read_bounded_identity_body,
+            )
+        except ImportError:
+            return None
 
     response = None
     try:
-        limits = httpx.Limits(max_connections=1, max_keepalive_connections=0)
-        async with (
-            httpx.AsyncClient(
-                timeout=float(INGEST_TIMEOUT),
-                follow_redirects=False,
-                trust_env=False,
-                limits=limits,
-                headers={"Accept-Encoding": "identity"},
-            ) as client,
-            client.stream("GET", url) as response,
-        ):
-            response.raise_for_status()
-
-            # Check content length header first
-            content_length = response.headers.get("content-length")
-            if content_length:
-                try:
-                    if int(content_length) > MAX_CONTENT_SIZE:
-                        logger.warning(f"Content too large: {content_length} bytes")
-                        return None
-                except ValueError:
-                    pass
-
-            size = 0
-            chunks: list[bytes] = []
-            async for chunk in response.aiter_bytes():
-                size += len(chunk)
-                if size > MAX_CONTENT_SIZE:
-                    logger.warning(f"Content too large: {size} bytes")
-                    return None
-                chunks.append(chunk)
-
-            stream = response.extensions.get("network_stream")
-            if allowed_ips and stream and hasattr(stream, "get_extra_info"):
-                peer = stream.get_extra_info("peername")
-                peer_ip = None
-                if isinstance(peer, (tuple, list)) and peer:
-                    peer_ip = peer[0]
-                elif peer:
-                    peer_ip = str(peer)
-                if peer_ip:
-                    try:
-                        import ipaddress
-
-                        peer_ip = str(ipaddress.ip_address(peer_ip))
-                    except ValueError:
-                        peer_ip = None
-                if peer_ip and peer_ip not in allowed_ips:
-                    logger.warning(f"Resolved IP mismatch for {url}: {peer_ip}")
-                    return None
+        transport = PinnedAsyncHTTPTransport(
+            resolver=resolver,
+            delegate=delegate,
+        )
+        with pinned_dependency_log_scope():
+            async with (
+                httpx.AsyncClient(
+                    timeout=float(INGEST_TIMEOUT),
+                    follow_redirects=False,
+                    trust_env=False,
+                    headers={"Accept-Encoding": "identity"},
+                    transport=transport,
+                ) as client,
+                client.stream("GET", url) as response,
+            ):
+                response.raise_for_status()
+                body = await read_bounded_identity_body(
+                    response,
+                    max_bytes=MAX_CONTENT_SIZE,
+                )
 
         encoding = response.encoding if response else "utf-8"
-        text = b"".join(chunks).decode(encoding or "utf-8", errors="replace")
+        return await _HTML_WORKER_POOL.run(
+            partial(_extract_html_text, body, encoding, BeautifulSoup)
+        )
 
-        soup = BeautifulSoup(text, "html.parser")
-
-        # Remove script and style elements
-        for element in soup(["script", "style", "nav", "footer", "header"]):
-            element.decompose()
-
-        # Get text
-        text = soup.get_text(separator="\n", strip=True)
-
-        # Clean up whitespace
-        lines = [line.strip() for line in text.split("\n") if line.strip()]
-        return "\n".join(lines)
-
-    except Exception as e:
-        logger.error(f"Failed to fetch {url}: {e}")
+    except Exception as error:
+        logger.error("URL ingestion fetch failed (%s)", type(error).__name__)
         return None
+
+
+async def _validate_and_fetch_with_deadline(
+    url: str,
+    *,
+    timeout_seconds: float | None = None,
+) -> tuple[str | None, str | None]:
+    """Share one wall-clock deadline across admission DNS and response fetch."""
+    timeout = float(INGEST_TIMEOUT if timeout_seconds is None else timeout_seconds)
+
+    async def operation() -> tuple[str | None, str | None]:
+        url_error = await _validate_url(url)
+        if url_error:
+            return url_error, None
+        return None, await _fetch_and_extract(url)
+
+    try:
+        return await asyncio.wait_for(operation(), timeout=timeout)
+    except asyncio.TimeoutError:
+        return None, None
 
 
 def _chunk_markdown_content(
@@ -304,6 +265,7 @@ def _chunk_markdown_content(
 # ============================================================================
 @mcp.tool(version=__version__)
 @with_request_id
+@legacy_entrypoint("compress_context")
 async def compress_context(
     context: str,
     rate: float | None = None,
@@ -369,6 +331,7 @@ async def compress_context(
 # ============================================================================
 @mcp.tool(version=__version__)
 @with_request_id
+@legacy_entrypoint("execute_python")
 async def execute_python(
     code: str,
     project_path: str | None = None,
@@ -455,6 +418,7 @@ async def execute_python(
 # ============================================================================
 @mcp.tool(version=__version__)
 @with_request_id
+@legacy_entrypoint("ingest_doc")
 async def ingest_doc(
     url: str, topic: str, chunk_size: int = 2000, project_path: str | None = None
 ) -> dict[str, Any]:
@@ -481,17 +445,12 @@ async def ingest_doc(
     if not topic or not topic.strip():
         return {"error": "topic cannot be empty", "url": url}
 
-    # Validate URL
-    url_error, allowed_ips = _validate_url(url)
-    if url_error:
-        return {"error": url_error, "url": url}
-
     ctx = await get_project_context(project_path)
 
-    # Use module-level lookup so tests can patch via daem0nmcp.server._fetch_and_extract
-    _mod = sys.modules.get("daem0nmcp.server", sys.modules[__name__])
-    _fetch_fn = getattr(_mod, "_fetch_and_extract", _fetch_and_extract)
-    content = await _fetch_fn(url, allowed_ips=allowed_ips)
+    # Admission DNS and the fetch share one total wall-clock deadline.
+    url_error, content = await _validate_and_fetch_with_deadline(url)
+    if url_error:
+        return {"error": url_error, "url": url}
 
     if content is None:
         return {

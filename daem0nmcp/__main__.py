@@ -14,10 +14,12 @@ if sys.platform == "win32":
     import io
 
     sys.stdout = io.TextIOWrapper(
-        open(sys.stdout.fileno(), "wb", buffering=0), write_through=True  # noqa: SIM115
+        open(sys.stdout.fileno(), "wb", buffering=0),  # noqa: SIM115
+        write_through=True,
     )
     sys.stderr = io.TextIOWrapper(
-        open(sys.stderr.fileno(), "wb", buffering=0), write_through=True  # noqa: SIM115
+        open(sys.stderr.fileno(), "wb", buffering=0),  # noqa: SIM115
+        write_through=True,
     )
 
     # Also set environment variable for any subprocesses

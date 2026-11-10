@@ -4,6 +4,7 @@ These tests exercise the full reflexion loop, verifying that all components
 work together: claim extraction -> verification -> persistence -> consolidation.
 """
 
+from importlib.util import find_spec
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -27,6 +28,16 @@ from daem0nmcp.reflexion import (
     summarize_verification,
     verify_claims,
 )
+
+requires_models_local = pytest.mark.skipif(
+    find_spec("sentence_transformers") is None,
+    reason="models-local profile is not installed",
+)
+
+
+@pytest.fixture(autouse=True)
+def models_local_enabled(monkeypatch):
+    monkeypatch.setenv("DAEM0NMCP_MODELS_LOCAL_ENABLED", "true")
 
 
 @pytest.fixture
@@ -95,9 +106,7 @@ class TestClaimExtractionToVerification:
                 "daem0nmcp.reflexion.verification.encode_document"
             ) as mock_encode_doc,
             patch("daem0nmcp.reflexion.verification.decode") as mock_decode,
-            patch(
-                "daem0nmcp.reflexion.verification.cosine_similarity"
-            ) as mock_sim,
+            patch("daem0nmcp.reflexion.verification.cosine_similarity") as mock_sim,
         ):
             mock_encode.return_value = b"embedding"
             mock_encode_doc.return_value = b"embedding"
@@ -119,6 +128,7 @@ class TestClaimExtractionToVerification:
         assert pg_result is not None
         assert pg_result.status == "verified"
 
+    @requires_models_local
     @pytest.mark.asyncio
     async def test_unverified_claim_no_evidence(self, mock_memory_manager):
         """Claims with no supporting memories should be unverified."""
@@ -152,9 +162,7 @@ class TestClaimExtractionToVerification:
                 "daem0nmcp.reflexion.verification.encode_document"
             ) as mock_encode_doc,
             patch("daem0nmcp.reflexion.verification.decode") as mock_decode,
-            patch(
-                "daem0nmcp.reflexion.verification.cosine_similarity"
-            ) as mock_sim,
+            patch("daem0nmcp.reflexion.verification.cosine_similarity") as mock_sim,
         ):
             mock_encode.return_value = b"embedding"
             mock_encode_doc.return_value = b"embedding"
@@ -205,9 +213,7 @@ class TestFullReflexionLoop:
 
         with (
             patch("daem0nmcp.reflexion.nodes.verify_claims") as mock_verify,
-            patch(
-                "daem0nmcp.reflexion.nodes.summarize_verification"
-            ) as mock_summary,
+            patch("daem0nmcp.reflexion.nodes.summarize_verification") as mock_summary,
         ):
             # High quality on first try -> should exit early
             mock_verify.return_value = []
@@ -259,9 +265,7 @@ class TestFullReflexionLoop:
 
         with (
             patch("daem0nmcp.reflexion.nodes.verify_claims") as mock_verify,
-            patch(
-                "daem0nmcp.reflexion.nodes.summarize_verification"
-            ) as mock_summary,
+            patch("daem0nmcp.reflexion.nodes.summarize_verification") as mock_summary,
         ):
             # Always return low quality -> should hit max iterations
             mock_verify.return_value = []
@@ -287,9 +291,7 @@ class TestFullReflexionLoop:
         """Test run_reflexion convenience function."""
         with (
             patch("daem0nmcp.reflexion.nodes.verify_claims") as mock_verify,
-            patch(
-                "daem0nmcp.reflexion.nodes.summarize_verification"
-            ) as mock_summary,
+            patch("daem0nmcp.reflexion.nodes.summarize_verification") as mock_summary,
         ):
             mock_verify.return_value = []
             mock_summary.return_value = {
@@ -519,6 +521,7 @@ class TestConsolidationIntegration:
 class TestVerifyFactsToolIntegration:
     """Tests for verify_facts MCP tool (via direct import)."""
 
+    @requires_models_local
     @pytest.mark.asyncio
     async def test_verify_facts_returns_structure(self, mock_memory_manager):
         """Test verify_facts returns expected structure."""
@@ -554,9 +557,7 @@ class TestVerifyFactsToolIntegration:
                 "daem0nmcp.reflexion.verification.encode_document"
             ) as mock_encode_doc,
             patch("daem0nmcp.reflexion.verification.decode") as mock_decode,
-            patch(
-                "daem0nmcp.reflexion.verification.cosine_similarity"
-            ) as mock_sim,
+            patch("daem0nmcp.reflexion.verification.cosine_similarity") as mock_sim,
         ):
             mock_encode.return_value = b"embedding"
             mock_encode_doc.return_value = b"embedding"
@@ -599,6 +600,7 @@ class TestVerifyFactsToolIntegration:
 class TestGraphRAGIntegration:
     """Tests for GraphRAG integration in verification."""
 
+    @requires_models_local
     @pytest.mark.asyncio
     async def test_verification_with_knowledge_graph(
         self, mock_memory_manager, mock_knowledge_graph
@@ -623,6 +625,7 @@ class TestGraphRAGIntegration:
         # Should have called ensure_loaded on knowledge graph
         mock_knowledge_graph.ensure_loaded.assert_called()
 
+    @requires_models_local
     @pytest.mark.asyncio
     async def test_verification_without_knowledge_graph(self, mock_memory_manager):
         """Test verification works without knowledge graph."""

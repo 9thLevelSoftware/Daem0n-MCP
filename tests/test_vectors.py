@@ -1,9 +1,20 @@
 """Tests for the vector embeddings module."""
 
+import gc
+import os
+import shutil
+from importlib.util import find_spec
 from unittest.mock import MagicMock, patch
+
+import pytest
 
 from daem0nmcp import vectors
 from daem0nmcp.config import settings
+
+requires_numpy = pytest.mark.skipif(
+    find_spec("numpy") is None,
+    reason="numpy ([models-local] extra) is not installed",
+)
 
 
 class TestVectorAvailability:
@@ -54,11 +65,16 @@ class TestHybridSearch:
 class TestEncodeDecode:
     """Test vector encoding and decoding."""
 
-    def test_encode_returns_none_when_unavailable(self):
-        """encode returns None when vectors not available."""
-        if not vectors.is_available():
-            result = vectors.encode("test text")
-            assert result is None
+    def test_encode_reports_models_local_remediation_when_unavailable(
+        self, monkeypatch
+    ):
+        """The disabled models-local profile exposes its explicit remediation."""
+        from daem0nmcp.capabilities import CapabilityUnavailableError
+
+        monkeypatch.setenv("DAEM0NMCP_MODELS_LOCAL_ENABLED", "false")
+        with pytest.raises(CapabilityUnavailableError, match="models-local") as error:
+            vectors.encode("test text")
+        assert "DAEM0NMCP_MODELS_LOCAL_ENABLED" in str(error.value)
 
     def test_decode_empty_returns_none(self):
         """decode returns None for empty bytes."""
@@ -74,12 +90,11 @@ class TestEncodeDecode:
 class TestCosineSimWithoutVectors:
     """Test cosine similarity when numpy not available."""
 
-    def test_cosine_returns_zero_when_unavailable(self):
-        """cosine_similarity returns 0.0 when numpy not available."""
-        if not vectors.is_available():
-            result = vectors.cosine_similarity([1, 2, 3], [1, 2, 3])
-            # Without numpy, should return 0
-            assert result == 0.0
+    def test_cosine_math_does_not_depend_on_model_profile(self):
+        """Cosine remains correct when the embedding model profile is disabled."""
+        assert vectors.cosine_similarity([1, 2, 3], [1, 2, 3]) == pytest.approx(1.0)
+        assert vectors.cosine_similarity([1, 0], [0, 1]) == pytest.approx(0.0)
+        assert vectors.cosine_similarity([0, 0], [1, 0]) == pytest.approx(0.0)
 
 
 class TestGlobalVectorIndex:
@@ -110,6 +125,7 @@ class TestGlobalVectorIndex:
 class TestEncodeQueryDocument:
     """Test encode_query and encode_document use correct prefixes."""
 
+    @requires_numpy
     @patch("daem0nmcp.vectors._get_model")
     def test_encode_document_prepends_document_prefix(self, mock_get_model):
         import numpy as np
@@ -128,6 +144,7 @@ class TestEncodeQueryDocument:
         call_text = fake_model.encode.call_args[0][0]
         assert call_text == f"{settings.embedding_document_prefix}hello world"
 
+    @requires_numpy
     @patch("daem0nmcp.vectors._get_model")
     def test_encode_query_prepends_query_prefix(self, mock_get_model):
         import numpy as np
@@ -144,6 +161,7 @@ class TestEncodeQueryDocument:
         call_text = fake_model.encode.call_args[0][0]
         assert call_text == f"{settings.embedding_query_prefix}hello world"
 
+    @requires_numpy
     @patch("daem0nmcp.vectors._get_model")
     def test_encode_returns_correct_byte_length(self, mock_get_model):
         import numpy as np
@@ -165,3 +183,52 @@ class TestGetDimension:
         from daem0nmcp.vectors import get_dimension
 
         assert get_dimension() == settings.embedding_dimension
+
+
+@pytest.mark.skipif(os.name != "nt", reason="native Windows storage ownership")
+def test_local_dimension_replacement_releases_storage_without_cyclic_gc(tmp_path):
+    qdrant = pytest.importorskip("qdrant_client")
+    from daem0nmcp.qdrant_store import QdrantVectorStore
+
+    class ReconfiguredStore(QdrantVectorStore):
+        EMBEDDING_DIMENSION = 2
+
+    storage = tmp_path / "qdrant"
+    seed = qdrant.QdrantClient(path=str(storage))
+    store = None
+    gc_was_enabled = gc.isenabled()
+    gc.disable()
+    try:
+        collections = (
+            QdrantVectorStore.COLLECTION_MEMORIES,
+            QdrantVectorStore.COLLECTION_CODE,
+        )
+        for collection_name in collections:
+            seed.create_collection(
+                collection_name=collection_name,
+                vectors_config=qdrant.models.VectorParams(
+                    size=3, distance=qdrant.models.Distance.COSINE
+                ),
+            )
+            seed.upsert(
+                collection_name=collection_name,
+                points=[qdrant.models.PointStruct(id=1, vector=[1.0, 0.0, 0.0])],
+                wait=True,
+            )
+        seed.close()
+        store = ReconfiguredStore(path=str(storage))
+        for collection_name in collections:
+            info = store.client.get_collection(collection_name)
+            assert info.config.params.vectors.size == 2
+            count = store.client.count(collection_name=collection_name, exact=True)
+            assert count.count == 0
+        store.close()
+        released_storage = storage.with_name("released-qdrant")
+        storage.rename(released_storage)
+        shutil.rmtree(released_storage)
+    finally:
+        if store is not None:
+            store.close()
+        seed.close()
+        if gc_was_enabled:
+            gc.enable()

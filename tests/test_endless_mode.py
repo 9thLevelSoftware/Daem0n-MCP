@@ -3,7 +3,6 @@
 
 import shutil
 import tempfile
-from unittest.mock import patch
 
 import pytest
 
@@ -189,7 +188,9 @@ class TestEndlessModeMCP:
         return DatabaseManager(str(tmp_path / "storage"))
 
     @pytest.mark.asyncio
-    async def test_recall_tool_accepts_condensed(self, db_manager):
+    async def test_recall_tool_accepts_condensed(
+        self, db_manager, covenant_workspace_factory
+    ):
         """MCP recall tool should accept condensed parameter."""
         await db_manager.init_db()
 
@@ -197,32 +198,30 @@ class TestEndlessModeMCP:
 
         server._project_contexts.clear()
 
-        project_path = str(db_manager.storage_path.parent.parent)
-
-        # First, call get_briefing to satisfy Sacred Covenant
-        await server.get_briefing(project_path=project_path)
+        project_path = str(db_manager.storage_path.parent)
+        workspace = covenant_workspace_factory(project_path)
+        await workspace.brief()
 
         # Disable Qdrant to avoid dimension mismatch (384-dim bootstrap vs 256-dim model)
-        ctx = await server.get_project_context(project_path)
+        with workspace.installed():
+            ctx = await server.get_project_context(workspace)
         ctx.memory_manager._qdrant = None
 
-        # Use context_check to satisfy counsel requirement
-        with patch.object(ctx.rules_engine, "check_rules", return_value={}):
-            await server.context_check(
-                description="Testing condensed parameter", project_path=project_path
-            )
-
-        await server.remember(
+        await workspace.call(
+            server.remember,
             category="decision",
             content="Use JWT tokens for authentication",
             rationale="Need stateless auth for horizontal scaling",
-            project_path=project_path,
+            project_path=workspace,
         )
 
         # Call recall with condensed=True via MCP tool
         # Search with content keywords for reliable matching
-        result = await server.recall(
-            topic="JWT authentication", project_path=project_path, condensed=True
+        result = await workspace.call(
+            server.recall,
+            topic="JWT authentication",
+            project_path=workspace,
+            condensed=True,
         )
 
         # Should have results
@@ -236,7 +235,9 @@ class TestEndlessModeMCP:
         )
 
     @pytest.mark.asyncio
-    async def test_recall_tool_condensed_vs_full(self, db_manager):
+    async def test_recall_tool_condensed_vs_full(
+        self, db_manager, covenant_workspace_factory
+    ):
         """Verify condensed=True strips fields, condensed=False preserves them."""
         await db_manager.init_db()
 
@@ -244,36 +245,37 @@ class TestEndlessModeMCP:
 
         server._project_contexts.clear()
 
-        project_path = str(db_manager.storage_path.parent.parent)
-
-        # First, call get_briefing to satisfy Sacred Covenant
-        await server.get_briefing(project_path=project_path)
+        project_path = str(db_manager.storage_path.parent)
+        workspace = covenant_workspace_factory(project_path)
+        await workspace.brief()
 
         # Disable Qdrant to avoid dimension mismatch (384-dim bootstrap vs 256-dim model)
-        ctx = await server.get_project_context(project_path)
+        with workspace.installed():
+            ctx = await server.get_project_context(workspace)
         ctx.memory_manager._qdrant = None
 
-        # Use context_check to satisfy counsel requirement
-        with patch.object(ctx.rules_engine, "check_rules", return_value={}):
-            await server.context_check(
-                description="Testing condensed vs full mode", project_path=project_path
-            )
-
-        await server.remember(
+        await workspace.call(
+            server.remember,
             category="decision",
             content="Use PostgreSQL database for persistence",
             rationale="We chose PostgreSQL because of ACID compliance",
-            project_path=project_path,
+            project_path=workspace,
         )
 
         # Call with condensed=False (default)
-        full_result = await server.recall(
-            topic="PostgreSQL database", project_path=project_path, condensed=False
+        full_result = await workspace.call(
+            server.recall,
+            topic="PostgreSQL database",
+            project_path=workspace,
+            condensed=False,
         )
 
         # Call with condensed=True
-        condensed_result = await server.recall(
-            topic="PostgreSQL database", project_path=project_path, condensed=True
+        condensed_result = await workspace.call(
+            server.recall,
+            topic="PostgreSQL database",
+            project_path=workspace,
+            condensed=True,
         )
 
         # Full should have rationale

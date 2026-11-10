@@ -175,7 +175,7 @@ class EntityManager:
                 select(MemoryEntityRef).where(MemoryEntityRef.entity_id.in_(entity_ids))
             )
             refs = refs_result.scalars().all()
-            memory_ids = list(set(r.memory_id for r in refs))
+            memory_ids = list({r.memory_id for r in refs})
 
             # Get full memory content
             if not memory_ids:

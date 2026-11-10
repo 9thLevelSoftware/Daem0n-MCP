@@ -10,6 +10,7 @@ try:
         _missing_project_path_error,
         get_project_context,
     )
+    from ..covenant import legacy_entrypoint
     from ..logging_config import with_request_id
     from ..mcp_instance import mcp
 except ImportError:
@@ -19,6 +20,7 @@ except ImportError:
         _missing_project_path_error,
         get_project_context,
     )
+    from daem0nmcp.covenant import legacy_entrypoint
     from daem0nmcp.logging_config import with_request_id
     from daem0nmcp.mcp_instance import mcp
 
@@ -32,6 +34,7 @@ logger = logging.getLogger(__name__)
 # ============================================================================
 @mcp.tool(version=__version__)
 @with_request_id
+@legacy_entrypoint("add_rule")
 async def add_rule(
     trigger: str,
     must_do: list[str] | None = None,
@@ -77,6 +80,7 @@ async def add_rule(
 # ============================================================================
 @mcp.tool(version=__version__)
 @with_request_id
+@legacy_entrypoint("check_rules")
 async def check_rules(
     action: str,
     context: dict[str, Any] | None = None,
@@ -106,6 +110,7 @@ async def check_rules(
 # ============================================================================
 @mcp.tool(version=__version__)
 @with_request_id
+@legacy_entrypoint("list_rules")
 async def list_rules(
     enabled_only: bool = True, limit: int = 50, project_path: str | None = None
 ) -> list[dict[str, Any]]:
@@ -130,6 +135,7 @@ async def list_rules(
 # ============================================================================
 @mcp.tool(version=__version__)
 @with_request_id
+@legacy_entrypoint("update_rule")
 async def update_rule(
     rule_id: int,
     must_do: list[str] | None = None,

@@ -12,13 +12,31 @@ Available migrations:
 
 # Re-export schema migration functions from the original migrations module
 # The original migrations.py was renamed to schema.py to avoid module name conflicts
-# Export vector migration function
-from .migrate_vectors import migrate_vectors_to_qdrant
-from .schema import MIGRATIONS, migrate_and_backfill_vectors, run_migrations
+from .schema import (
+    CURRENT_SCHEMA_VERSION,
+    MIGRATIONS,
+    backfill_retained_public_object_ids,
+    migrate_and_backfill_vectors,
+    run_migrations,
+)
+from .v7 import MigrationResult, MigrationV7Error, MigrationV7Service
+
+
+async def migrate_vectors_to_qdrant(*args, **kwargs):
+    """Lazy compatibility export; v7 offline migration must not import models."""
+    from .migrate_vectors import migrate_vectors_to_qdrant as implementation
+
+    return await implementation(*args, **kwargs)
+
 
 __all__ = [
     "run_migrations",
     "migrate_and_backfill_vectors",
     "MIGRATIONS",
+    "CURRENT_SCHEMA_VERSION",
+    "backfill_retained_public_object_ids",
     "migrate_vectors_to_qdrant",
+    "MigrationResult",
+    "MigrationV7Error",
+    "MigrationV7Service",
 ]

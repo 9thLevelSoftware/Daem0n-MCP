@@ -12,6 +12,7 @@ try:
         get_project_context,
         hold_context,
     )
+    from ..covenant import legacy_entrypoint
     from ..logging_config import with_request_id
     from ..mcp_instance import mcp
 except ImportError:
@@ -22,6 +23,7 @@ except ImportError:
         get_project_context,
         hold_context,
     )
+    from daem0nmcp.covenant import legacy_entrypoint
     from daem0nmcp.logging_config import with_request_id
     from daem0nmcp.mcp_instance import mcp
 
@@ -64,6 +66,7 @@ def _build_verification_message(summary: dict[str, Any]) -> str:
 # ============================================================================
 @mcp.tool(version=__version__)
 @with_request_id
+@legacy_entrypoint("verify_facts")
 async def verify_facts(
     text: str,
     categories: list[str] | None = None,

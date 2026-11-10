@@ -5,9 +5,7 @@ Manages triggers that automatically recall memories when certain
 patterns match the current context (file paths, tags, entities).
 """
 
-import fnmatch
 import logging
-import re
 from datetime import datetime, timezone
 from typing import Any
 
@@ -15,11 +13,21 @@ from sqlalchemy import delete, select
 
 from .database import DatabaseManager
 from .models import ContextTrigger
+from .trigger_security import (
+    MAX_ACTIVE_TRIGGERS,
+    SafeUserPattern,
+    TriggerPatternError,
+    bounded_glob_match,
+    validate_active_trigger_count,
+    validate_file_path,
+    validate_glob_pattern,
+)
 
 logger = logging.getLogger(__name__)
 
 # Valid trigger types
 VALID_TRIGGER_TYPES = frozenset({"file_pattern", "tag_match", "entity_match"})
+_SAFE_USER_PATTERNS = SafeUserPattern()
 
 
 class ContextTriggerManager:
@@ -27,7 +35,7 @@ class ContextTriggerManager:
     Manages context triggers for auto-recall functionality.
 
     Triggers can be:
-    - file_pattern: Glob pattern matching file paths (uses fnmatch)
+    - file_pattern: Bounded glob matching for file paths
     - tag_match: Regex pattern matching memory tags
     - entity_match: Regex pattern matching entity names
 
@@ -35,8 +43,13 @@ class ContextTriggerManager:
     category filters for memory retrieval.
     """
 
-    def __init__(self, db_manager: DatabaseManager):
+    def __init__(
+        self,
+        db_manager: DatabaseManager,
+        pattern_matcher: SafeUserPattern | None = None,
+    ):
         self.db = db_manager
+        self._pattern_matcher = pattern_matcher or _SAFE_USER_PATTERNS
 
     async def add_trigger(
         self,
@@ -68,16 +81,13 @@ class ContextTriggerManager:
                 f"Valid types: {', '.join(sorted(VALID_TRIGGER_TYPES))}"
             }
 
-        # Validate pattern
-        if not pattern or not pattern.strip():
-            return {"error": "Pattern cannot be empty"}
-
-        # Validate regex patterns compile
-        if trigger_type in ("tag_match", "entity_match"):
-            try:
-                re.compile(pattern)
-            except re.error as e:
-                return {"error": f"Invalid regex pattern: {e}"}
+        try:
+            if trigger_type in ("tag_match", "entity_match"):
+                self._pattern_matcher.validate(pattern)
+            else:
+                validate_glob_pattern(pattern)
+        except TriggerPatternError as error:
+            return {"error": error.as_dict()}
 
         async with self.db.get_session() as session:
             trigger = ContextTrigger(
@@ -147,6 +157,29 @@ class ContextTriggerManager:
         Returns:
             List of trigger dicts
         """
+        return await self._query_triggers(
+            project_path=project_path,
+            active_only=active_only,
+            limit=None,
+        )
+
+    async def _list_active_triggers_for_evaluation(
+        self, project_path: str, *, limit: int
+    ) -> list[dict[str, Any]]:
+        """Fetch only enough active rows to detect evaluation overflow."""
+        return await self._query_triggers(
+            project_path=project_path,
+            active_only=True,
+            limit=limit,
+        )
+
+    async def _query_triggers(
+        self,
+        *,
+        project_path: str,
+        active_only: bool,
+        limit: int | None,
+    ) -> list[dict[str, Any]]:
         async with self.db.get_session() as session:
             query = select(ContextTrigger).where(
                 ContextTrigger.project_path == project_path
@@ -156,6 +189,8 @@ class ContextTriggerManager:
                 query = query.where(ContextTrigger.is_active == True)  # noqa: E712
 
             query = query.order_by(ContextTrigger.priority.desc())
+            if limit is not None:
+                query = query.limit(limit)
 
             result = await session.execute(query)
             triggers = result.scalars().all()
@@ -184,60 +219,7 @@ class ContextTriggerManager:
 
         Supports ** for recursive directory matching.
         """
-        # Normalize path separators
-        file_path = file_path.replace("\\", "/")
-        pattern = pattern.replace("\\", "/")
-
-        # Use fnmatch for glob matching
-        # For ** patterns, we need special handling
-        if "**" in pattern:
-            # Split pattern and path by /
-            pattern_parts = pattern.split("/")
-            path_parts = file_path.split("/")
-
-            return self._match_glob_recursive(pattern_parts, path_parts)
-
-        return fnmatch.fnmatch(file_path, pattern)
-
-    def _match_glob_recursive(
-        self, pattern_parts: list[str], path_parts: list[str]
-    ) -> bool:
-        """
-        Recursively match glob pattern with ** support.
-        """
-        if not pattern_parts:
-            return not path_parts
-
-        if not path_parts:
-            # Pattern has more parts but path is exhausted
-            # Only match if remaining pattern is all **
-            return all(p == "**" for p in pattern_parts)
-
-        first_pattern = pattern_parts[0]
-
-        if first_pattern == "**":
-            # ** matches zero or more directories
-            # Try matching rest of pattern at current position
-            if self._match_glob_recursive(pattern_parts[1:], path_parts):
-                return True
-            # Try matching after consuming one path part
-            return self._match_glob_recursive(pattern_parts, path_parts[1:])
-
-        # Normal fnmatch for this part
-        if fnmatch.fnmatch(path_parts[0], first_pattern):
-            return self._match_glob_recursive(pattern_parts[1:], path_parts[1:])
-
-        return False
-
-    def _matches_regex(self, pattern: str, values: list[str]) -> bool:
-        """
-        Check if any value matches the regex pattern.
-        """
-        try:
-            compiled = re.compile(pattern)
-            return any(compiled.search(v) for v in values)
-        except re.error:
-            return False
+        return bounded_glob_match(pattern, file_path).matched
 
     async def check_triggers(
         self,
@@ -245,7 +227,7 @@ class ContextTriggerManager:
         file_path: str | None = None,
         tags: list[str] | None = None,
         entities: list[str] | None = None,
-    ) -> list[dict[str, Any]]:
+    ) -> list[dict[str, Any]] | dict[str, Any]:
         """
         Check which triggers match the given context.
 
@@ -258,35 +240,74 @@ class ContextTriggerManager:
         Returns:
             List of matching triggers with recall info, sorted by priority
         """
-        triggers = await self.list_triggers(project_path, active_only=True)
+        try:
+            if file_path is not None:
+                validate_file_path(file_path)
+            if tags is not None:
+                self._pattern_matcher.validate_candidates(tags, field="tags")
+            if entities is not None:
+                self._pattern_matcher.validate_candidates(entities, field="entities")
+            self._pattern_matcher.validate_candidate_total(
+                (len(tags) if tags is not None else 0)
+                + (len(entities) if entities is not None else 0)
+            )
+        except TriggerPatternError as error:
+            return {"triggers": [], "error": error.as_dict()}
 
-        matches = []
-        matched_ids = []
+        triggers = await self._list_active_triggers_for_evaluation(
+            project_path,
+            limit=MAX_ACTIVE_TRIGGERS + 1,
+        )
+        try:
+            validate_active_trigger_count(len(triggers))
+        except TriggerPatternError as error:
+            return {"triggers": [], "error": error.as_dict()}
 
-        for trigger in triggers:
-            matched = False
+        matches: list[dict[str, Any]] = []
+        matched_ids: list[int] = []
 
-            if trigger["trigger_type"] == "file_pattern" and file_path and self._matches_file_pattern(trigger["pattern"], file_path):
-                matched = True
+        try:
+            for trigger in triggers:
+                matched = False
 
-            elif trigger["trigger_type"] == "tag_match" and tags and self._matches_regex(trigger["pattern"], tags):
-                matched = True
+                if (
+                    trigger["trigger_type"] == "file_pattern"
+                    and file_path is not None
+                    and self._matches_file_pattern(trigger["pattern"], file_path)
+                ):
+                    matched = True
 
-            elif trigger["trigger_type"] == "entity_match" and entities and self._matches_regex(trigger["pattern"], entities):
-                matched = True
+                elif trigger["trigger_type"] == "tag_match" and tags is not None:
+                    matched = (
+                        await self._pattern_matcher.matches_async(
+                            trigger["id"], trigger["pattern"], tags, field="tags"
+                        )
+                    ).matched
 
-            if matched:
-                matches.append(
-                    {
-                        "trigger_id": trigger["id"],
-                        "trigger_type": trigger["trigger_type"],
-                        "pattern": trigger["pattern"],
-                        "recall_topic": trigger["recall_topic"],
-                        "recall_categories": trigger["recall_categories"],
-                        "priority": trigger["priority"],
-                    }
-                )
-                matched_ids.append(trigger["id"])
+                elif trigger["trigger_type"] == "entity_match" and entities is not None:
+                    matched = (
+                        await self._pattern_matcher.matches_async(
+                            trigger["id"],
+                            trigger["pattern"],
+                            entities,
+                            field="entities",
+                        )
+                    ).matched
+
+                if matched:
+                    matches.append(
+                        {
+                            "trigger_id": trigger["id"],
+                            "trigger_type": trigger["trigger_type"],
+                            "pattern": trigger["pattern"],
+                            "recall_topic": trigger["recall_topic"],
+                            "recall_categories": trigger["recall_categories"],
+                            "priority": trigger["priority"],
+                        }
+                    )
+                    matched_ids.append(trigger["id"])
+        except TriggerPatternError as error:
+            return {"triggers": [], "error": error.as_dict()}
 
         # Update trigger stats
         if matched_ids:
@@ -333,12 +354,19 @@ class ContextTriggerManager:
         Returns:
             Dict with triggers and their associated memories
         """
-        from .memory import MemoryManager
-
         # Check which triggers match
         matches = await self.check_triggers(
             project_path=project_path, file_path=file_path, tags=tags, entities=entities
         )
+
+        if isinstance(matches, dict):
+            return {
+                "triggers": [],
+                "memories": {},
+                "total_triggers": 0,
+                "error": matches["error"],
+                "message": "Trigger evaluation was rejected.",
+            }
 
         if not matches:
             return {
@@ -347,6 +375,8 @@ class ContextTriggerManager:
                 "total_triggers": 0,
                 "message": "No triggers matched the current context",
             }
+
+        from .memory import MemoryManager
 
         # Get memory manager for recall
         memory_mgr = MemoryManager(self.db)

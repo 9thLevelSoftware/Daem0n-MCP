@@ -7,29 +7,35 @@ from typing import Any
 try:
     from .. import __version__
     from ..context_manager import (
-        _check_covenant_communion,
-        _check_covenant_counsel,
         _default_project_path,
         _missing_project_path_error,
         get_project_context,
+    )
+    from ..covenant import legacy_entrypoint
+    from ..event_store import (
+        apply_compatibility_memory_update,
+        delete_compatibility_memory,
     )
     from ..logging_config import with_request_id
     from ..mcp_instance import mcp
-    from ..models import Memory
+    from ..models import Memory, MemoryVersion
 except ImportError:
     from daem0nmcp import __version__
     from daem0nmcp.context_manager import (
-        _check_covenant_communion,
-        _check_covenant_counsel,
         _default_project_path,
         _missing_project_path_error,
         get_project_context,
     )
+    from daem0nmcp.covenant import legacy_entrypoint
+    from daem0nmcp.event_store import (
+        apply_compatibility_memory_update,
+        delete_compatibility_memory,
+    )
     from daem0nmcp.logging_config import with_request_id
     from daem0nmcp.mcp_instance import mcp
-    from daem0nmcp.models import Memory
+    from daem0nmcp.models import Memory, MemoryVersion
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from ._deprecation import add_deprecation
 
@@ -41,6 +47,7 @@ logger = logging.getLogger(__name__)
 # ============================================================================
 @mcp.tool(version=__version__)
 @with_request_id
+@legacy_entrypoint("remember")
 async def remember(
     category: str,
     content: str,
@@ -72,13 +79,6 @@ async def remember(
     if not project_path and not _default_project_path:
         return _missing_project_path_error()
 
-    effective_path = project_path or _default_project_path
-
-    # Covenant enforcement: remember requires counsel (which implies communion)
-    violation = _check_covenant_counsel("remember", effective_path)
-    if violation:
-        return violation
-
     # Parse happened_at datetime if provided
     happened_at_dt = None
     if happened_at:
@@ -109,6 +109,7 @@ async def remember(
 # ============================================================================
 @mcp.tool(version=__version__)
 @with_request_id
+@legacy_entrypoint("remember_batch")
 async def remember_batch(
     memories: list[dict[str, Any]], project_path: str | None = None
 ) -> dict[str, Any]:
@@ -153,6 +154,7 @@ async def remember_batch(
 # ============================================================================
 @mcp.tool(version=__version__)
 @with_request_id
+@legacy_entrypoint("recall")
 async def recall(
     topic: str,
     categories: list[str] | None = None,
@@ -188,13 +190,6 @@ async def recall(
     # Require project_path for multi-project support
     if not project_path and not _default_project_path:
         return _missing_project_path_error()
-
-    effective_path = project_path or _default_project_path
-
-    # Covenant enforcement: recall requires communion (briefing)
-    violation = _check_covenant_communion(effective_path)
-    if violation:
-        return violation
 
     # Parse date strings if provided
     since_dt = None
@@ -248,6 +243,7 @@ async def recall(
 # ============================================================================
 @mcp.tool(version=__version__)
 @with_request_id
+@legacy_entrypoint("recall_visual")
 async def recall_visual(
     topic: str,
     categories: list[str] | None = None,
@@ -292,13 +288,6 @@ async def recall_visual(
     # Require project_path for multi-project support
     if not project_path and not _default_project_path:
         return _missing_project_path_error()
-
-    effective_path = project_path or _default_project_path
-
-    # Covenant enforcement: recall requires communion (briefing)
-    violation = _check_covenant_communion(effective_path)
-    if violation:
-        return violation
 
     ctx = await get_project_context(project_path)
 
@@ -355,6 +344,7 @@ async def recall_visual(
 # ============================================================================
 @mcp.tool(version=__version__)
 @with_request_id
+@legacy_entrypoint("record_outcome")
 async def record_outcome(
     memory_id: int, outcome: str, worked: bool, project_path: str | None = None
 ) -> dict[str, Any]:
@@ -390,6 +380,7 @@ async def record_outcome(
 # ============================================================================
 @mcp.tool(version=__version__)
 @with_request_id
+@legacy_entrypoint("recall_for_file")
 async def recall_for_file(
     file_path: str, limit: int = 10, project_path: str | None = None
 ) -> dict[str, Any]:
@@ -416,6 +407,7 @@ async def recall_for_file(
 # ============================================================================
 @mcp.tool(version=__version__)
 @with_request_id
+@legacy_entrypoint("recall_by_entity")
 async def recall_by_entity(
     entity_name: str,
     entity_type: str | None = None,
@@ -451,6 +443,7 @@ async def recall_by_entity(
 # ============================================================================
 @mcp.tool(version=__version__)
 @with_request_id
+@legacy_entrypoint("recall_hierarchical")
 async def recall_hierarchical(
     topic: str,
     include_members: bool = False,
@@ -484,6 +477,7 @@ async def recall_hierarchical(
 # ============================================================================
 @mcp.tool(version=__version__)
 @with_request_id
+@legacy_entrypoint("search_memories")
 async def search_memories(
     query: str,
     limit: int = 20,
@@ -556,6 +550,7 @@ async def search_memories(
 # ============================================================================
 @mcp.tool(version=__version__)
 @with_request_id
+@legacy_entrypoint("find_related")
 async def find_related(
     memory_id: int, limit: int = 5, project_path: str | None = None
 ) -> list[dict[str, Any]]:
@@ -580,6 +575,7 @@ async def find_related(
 # ============================================================================
 @mcp.tool(version=__version__)
 @with_request_id
+@legacy_entrypoint("get_related_memories")
 async def get_related_memories(
     memory_id: int,
     relationship_types: list[str] | None = None,
@@ -616,6 +612,7 @@ async def get_related_memories(
 # ============================================================================
 @mcp.tool(version=__version__)
 @with_request_id
+@legacy_entrypoint("get_memory_versions")
 async def get_memory_versions(
     memory_id: int, limit: int = 50, project_path: str | None = None
 ) -> dict[str, Any]:
@@ -642,6 +639,7 @@ async def get_memory_versions(
 
 @mcp.tool(version=__version__)
 @with_request_id
+@legacy_entrypoint("get_memory_at_time")
 async def get_memory_at_time(
     memory_id: int, timestamp: str, project_path: str | None = None
 ) -> dict[str, Any]:
@@ -678,6 +676,7 @@ async def get_memory_at_time(
 # ============================================================================
 @mcp.tool(version=__version__)
 @with_request_id
+@legacy_entrypoint("compact_memories")
 async def compact_memories(
     summary: str,
     limit: int = 10,
@@ -710,6 +709,7 @@ async def compact_memories(
 # ============================================================================
 @mcp.tool(version=__version__)
 @with_request_id
+@legacy_entrypoint("cleanup_memories")
 async def cleanup_memories(
     dry_run: bool = True,
     merge_duplicates: bool = True,
@@ -783,40 +783,83 @@ async def cleanup_memories(
                 # Pick the most recent outcome across duplicates (if any)
                 outcome_source = None
                 for candidate in mems:
-                    if candidate.outcome and (outcome_source is None or _outcome_timestamp(
-                        candidate
-                    ) > _outcome_timestamp(outcome_source)):
+                    if candidate.outcome and (
+                        outcome_source is None
+                        or _outcome_timestamp(candidate)
+                        > _outcome_timestamp(outcome_source)
+                    ):
                         outcome_source = candidate
 
+                changes: dict[str, Any] = {}
                 if outcome_source:
-                    keeper.outcome = outcome_source.outcome
-                    keeper.worked = outcome_source.worked
+                    changes["outcome"] = outcome_source.outcome
+                    changes["worked"] = outcome_source.worked
 
                 # Merge outcomes, tags, and metadata from others
+                merged_tags = set(keeper.tags or [])
+                merged_pinned = bool(keeper.pinned)
+                merged_archived = bool(keeper.archived)
                 for dupe in mems[1:]:
                     # Preserve pinned status (if any duplicate is pinned, keep pinned)
-                    if dupe.pinned and not keeper.pinned:
-                        keeper.pinned = True
+                    merged_pinned = merged_pinned or bool(dupe.pinned)
 
                     # If keeper is archived but duplicate isn't, unarchive
-                    if not dupe.archived and keeper.archived:
-                        keeper.archived = False
+                    merged_archived = merged_archived and bool(dupe.archived)
 
                     # Merge tags (union of all tags)
-                    if dupe.tags:
-                        keeper_tags = set(keeper.tags or [])
-                        keeper_tags.update(dupe.tags or [])
-                        keeper.tags = list(keeper_tags)
+                    merged_tags.update(dupe.tags or [])
+
+                changes["tags"] = sorted(merged_tags)
+                changes["pinned"] = merged_pinned
+                changes["is_permanent"] = bool(keeper.is_permanent) or merged_pinned
+                changes["archived"] = merged_archived
 
                 # Update keeper's updated_at timestamp
-                keeper.updated_at = datetime.now(timezone.utc)
+                changes["updated_at"] = datetime.now(timezone.utc)
+                apply_compatibility_memory_update(keeper, **changes)
 
                 # Flush changes to keeper before deleting duplicates
                 await session.flush()
+                max_version = await session.execute(
+                    select(func.max(MemoryVersion.version_number)).where(
+                        MemoryVersion.memory_id == keeper.id
+                    )
+                )
+                session.add(
+                    MemoryVersion(
+                        memory_id=keeper.id,
+                        version_number=(max_version.scalar() or 0) + 1,
+                        content=keeper.content,
+                        rationale=keeper.rationale,
+                        context=keeper.context,
+                        tags=keeper.tags,
+                        outcome=keeper.outcome,
+                        worked=keeper.worked,
+                        change_type="state_changed",
+                        change_description="Merged duplicate memories",
+                    )
+                )
+                await ctx.memory_manager._append_v7_memory_event(
+                    session,
+                    keeper,
+                    "memory.merged",
+                    extra_payload={"merged_legacy_ids": [dupe.id for dupe in mems[1:]]},
+                )
 
                 # Delete duplicates
                 for dupe in mems[1:]:
-                    await session.delete(dupe)
+                    deleted_at_us = ctx.memory_manager._datetime_us()
+                    await ctx.memory_manager._append_v7_memory_event(
+                        session,
+                        dupe,
+                        "memory.deleted",
+                        extra_payload={
+                            "reason": "duplicate_cleanup",
+                            "keeper_id": keeper.id,
+                        },
+                        deleted_at_us=deleted_at_us,
+                    )
+                    await delete_compatibility_memory(session, dupe)
                     merged += 1
 
     # Rebuild index to reflect merged/deleted documents
@@ -834,6 +877,7 @@ async def cleanup_memories(
 # ============================================================================
 @mcp.tool(version=__version__)
 @with_request_id
+@legacy_entrypoint("archive_memory")
 async def archive_memory(
     memory_id: int, archived: bool = True, project_path: str | None = None
 ) -> dict[str, Any]:
@@ -857,7 +901,32 @@ async def archive_memory(
         if not memory:
             return {"error": f"Memory {memory_id} not found"}
 
-        memory.archived = archived
+        apply_compatibility_memory_update(memory, archived=archived)
+        max_version = await session.execute(
+            select(func.max(MemoryVersion.version_number)).where(
+                MemoryVersion.memory_id == memory.id
+            )
+        )
+        session.add(
+            MemoryVersion(
+                memory_id=memory.id,
+                version_number=(max_version.scalar() or 0) + 1,
+                content=memory.content,
+                rationale=memory.rationale,
+                context=memory.context,
+                tags=memory.tags,
+                outcome=memory.outcome,
+                worked=memory.worked,
+                change_type="state_changed",
+                change_description="Archive state changed",
+            )
+        )
+        await ctx.memory_manager._append_v7_memory_event(
+            session,
+            memory,
+            "memory.archived_set",
+            extra_payload={"archived": archived},
+        )
 
         return {
             "id": memory_id,
@@ -872,6 +941,7 @@ async def archive_memory(
 # ============================================================================
 @mcp.tool(version=__version__)
 @with_request_id
+@legacy_entrypoint("pin_memory")
 async def pin_memory(
     memory_id: int, pinned: bool = True, project_path: str | None = None
 ) -> dict[str, Any]:
@@ -895,8 +965,32 @@ async def pin_memory(
         if not memory:
             return {"error": f"Memory {memory_id} not found"}
 
-        memory.pinned = pinned
-        memory.is_permanent = pinned  # Pinned = permanent
+        apply_compatibility_memory_update(memory, pinned=pinned, is_permanent=pinned)
+        max_version = await session.execute(
+            select(func.max(MemoryVersion.version_number)).where(
+                MemoryVersion.memory_id == memory.id
+            )
+        )
+        session.add(
+            MemoryVersion(
+                memory_id=memory.id,
+                version_number=(max_version.scalar() or 0) + 1,
+                content=memory.content,
+                rationale=memory.rationale,
+                context=memory.context,
+                tags=memory.tags,
+                outcome=memory.outcome,
+                worked=memory.worked,
+                change_type="state_changed",
+                change_description="Pinned state changed",
+            )
+        )
+        await ctx.memory_manager._append_v7_memory_event(
+            session,
+            memory,
+            "memory.pinned_set",
+            extra_payload={"pinned": pinned},
+        )
 
         return {
             "id": memory_id,

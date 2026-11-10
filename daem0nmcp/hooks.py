@@ -13,8 +13,9 @@ PRE_COMMIT_HOOK = """#!/bin/sh
 # Get the project root
 PROJECT_ROOT="$(git rev-parse --show-toplevel)"
 
-# Run the pre-commit check
-python -m daem0nmcp.cli --project-path "$PROJECT_ROOT" pre-commit
+# Run the pre-commit check. Not "python -m": git runs this inside the
+# repository, and -m would import a daem0nmcp/ directory found there.
+python -c "import sys; sys.path = [p for p in sys.path if p]; import runpy; runpy.run_module('daem0nmcp.cli', run_name='__main__', alter_sys=True)" --project-path "$PROJECT_ROOT" pre-commit
 
 # Exit with the same code
 exit $?

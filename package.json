@@ -1,12 +1,13 @@
 {
   "name": "daem0nmcp-ui",
-  "version": "6.0.0",
+  "version": "7.0.0-dev.0",
   "private": true,
   "description": "UI build tooling for Daem0n-MCP MCP Apps",
   "type": "module",
   "scripts": {
     "build:ui": "node daem0nmcp/ui/build/bundle.mjs",
-    "build:ui:dev": "node daem0nmcp/ui/build/bundle.mjs --dev"
+    "build:ui:dev": "node daem0nmcp/ui/build/bundle.mjs --dev",
+    "test:ui": "node --test tests/js/test_ui_renderers.mjs"
   },
   "devDependencies": {
     "esbuild": "^0.24.0",

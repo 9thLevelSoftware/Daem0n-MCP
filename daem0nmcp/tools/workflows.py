@@ -1,6 +1,7 @@
 """Consolidated workflow tools: commune, consult, inscribe, reflect, understand, govern, explore, maintain."""
 
 import logging
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 try:
@@ -9,6 +10,10 @@ try:
         _default_project_path,
         _missing_project_path_error,
     )
+    from ..covenant import (
+        authorize_workflow_call,
+        installed_operation_admission,
+    )
     from ..logging_config import with_request_id
     from ..mcp_instance import mcp
 except ImportError:
@@ -16,6 +21,10 @@ except ImportError:
     from daem0nmcp.context_manager import (
         _default_project_path,
         _missing_project_path_error,
+    )
+    from daem0nmcp.covenant import (
+        authorize_workflow_call,
+        installed_operation_admission,
     )
     from daem0nmcp.logging_config import with_request_id
     from daem0nmcp.mcp_instance import mcp
@@ -29,6 +38,16 @@ except ImportError:
     from daem0nmcp.workflows.errors import WorkflowError
 
 logger = logging.getLogger(__name__)
+
+
+async def _run_with_admission(
+    operation: str,
+    arguments: dict[str, Any],
+    dispatch: Callable[[], Awaitable[dict[str, Any]]],
+) -> dict[str, Any]:
+    """Keep exact direct-call admission installed only during dispatch."""
+    with installed_operation_admission(operation, arguments):
+        return await dispatch()
 
 
 # ----------------------------------------------------------------------------
@@ -48,7 +67,6 @@ async def commune(
     limit: int = 5,
     since: str | None = None,
     interval_seconds: int = 10,
-    parent_community_id: int | None = None,
 ) -> dict[str, Any]:
     """
     Session start & status operations.
@@ -58,6 +76,9 @@ async def commune(
     pp = project_path or _default_project_path
     if not pp:
         return _missing_project_path_error()
+    violation = authorize_workflow_call("commune", action, locals())
+    if violation is not None:
+        return violation
 
     try:
         try:
@@ -65,18 +86,21 @@ async def commune(
         except ImportError:
             from daem0nmcp.workflows import commune as commune_mod
         with WorkflowCall():
-            return await commune_mod.dispatch(
-                action=action,
-                project_path=pp,
-                focus_areas=focus_areas,
-                visual=visual,
-                file_path=file_path,
-                tags=tags,
-                entities=entities,
-                limit=limit,
-                since=since,
-                interval_seconds=interval_seconds,
-                parent_community_id=parent_community_id,
+            return await _run_with_admission(
+                f"commune.{action}",
+                locals(),
+                lambda: commune_mod.dispatch(
+                    action=action,
+                    project_path=pp,
+                    focus_areas=focus_areas,
+                    visual=visual,
+                    file_path=file_path,
+                    tags=tags,
+                    entities=entities,
+                    limit=limit,
+                    since=since,
+                    interval_seconds=interval_seconds,
+                ),
             )
     except WorkflowError as e:
         return {"error": str(e), "recovery_hint": e.recovery_hint}
@@ -94,6 +118,8 @@ async def consult(
     project_path: str | None = None,
     # preflight params
     description: str | None = None,
+    target_operation: str | None = None,
+    target_args: dict[str, Any] | None = None,
     # recall params
     topic: str | None = None,
     categories: list[str] | None = None,
@@ -106,6 +132,7 @@ async def consult(
     include_linked: bool = False,
     visual: bool = False,
     condensed: bool = False,
+    as_of_time: str | None = None,
     # recall_entity params
     entity_name: str | None = None,
     entity_type: str | None = None,
@@ -135,6 +162,9 @@ async def consult(
     pp = project_path or _default_project_path
     if not pp:
         return _missing_project_path_error()
+    violation = authorize_workflow_call("consult", action, locals())
+    if violation is not None:
+        return violation
 
     try:
         try:
@@ -142,35 +172,42 @@ async def consult(
         except ImportError:
             from daem0nmcp.workflows import consult as consult_mod
         with WorkflowCall():
-            return await consult_mod.dispatch(
-                action=action,
-                project_path=pp,
-                description=description,
-                topic=topic,
-                categories=categories,
-                tags=tags,
-                file_path=file_path,
-                offset=offset,
-                limit=limit,
-                since=since,
-                until=until,
-                include_linked=include_linked,
-                visual=visual,
-                condensed=condensed,
-                entity_name=entity_name,
-                entity_type=entity_type,
-                include_members=include_members,
-                query=query,
-                include_meta=include_meta,
-                highlight=highlight,
-                highlight_start=highlight_start,
-                highlight_end=highlight_end,
-                action_desc=action_desc,
-                context=context,
-                compress_text=compress_text,
-                rate=rate,
-                content_type=content_type,
-                preserve_code=preserve_code,
+            return await _run_with_admission(
+                f"consult.{action}",
+                locals(),
+                lambda: consult_mod.dispatch(
+                    action=action,
+                    project_path=pp,
+                    description=description,
+                    target_operation=target_operation,
+                    target_args=target_args,
+                    topic=topic,
+                    categories=categories,
+                    tags=tags,
+                    file_path=file_path,
+                    offset=offset,
+                    limit=limit,
+                    since=since,
+                    until=until,
+                    include_linked=include_linked,
+                    visual=visual,
+                    condensed=condensed,
+                    as_of_time=as_of_time,
+                    entity_name=entity_name,
+                    entity_type=entity_type,
+                    include_members=include_members,
+                    query=query,
+                    include_meta=include_meta,
+                    highlight=highlight,
+                    highlight_start=highlight_start,
+                    highlight_end=highlight_end,
+                    action_desc=action_desc,
+                    context=context,
+                    compress_text=compress_text,
+                    rate=rate,
+                    content_type=content_type,
+                    preserve_code=preserve_code,
+                ),
             )
     except WorkflowError as e:
         return {"error": str(e), "recovery_hint": e.recovery_hint}
@@ -212,6 +249,7 @@ async def inscribe(
     url: str | None = None,
     topic: str | None = None,
     chunk_size: int = 2000,
+    preflight_token: str | None = None,
 ) -> dict[str, Any]:
     """
     Memory writing & linking operations.
@@ -222,6 +260,9 @@ async def inscribe(
     pp = project_path or _default_project_path
     if not pp:
         return _missing_project_path_error()
+    violation = authorize_workflow_call("inscribe", action, locals(), preflight_token)
+    if violation is not None:
+        return violation
 
     try:
         try:
@@ -229,29 +270,33 @@ async def inscribe(
         except ImportError:
             from daem0nmcp.workflows import inscribe as inscribe_mod
         with WorkflowCall():
-            return await inscribe_mod.dispatch(
-                action=action,
-                project_path=pp,
-                category=category,
-                content=content,
-                rationale=rationale,
-                context=context,
-                tags=tags,
-                file_path=file_path,
-                happened_at=happened_at,
-                memories=memories,
-                source_id=source_id,
-                target_id=target_id,
-                relationship=relationship,
-                description=description,
-                memory_id=memory_id,
-                pinned=pinned,
-                reason=reason,
-                priority=priority,
-                expires_in_hours=expires_in_hours,
-                url=url,
-                topic=topic,
-                chunk_size=chunk_size,
+            return await _run_with_admission(
+                f"inscribe.{action}",
+                locals(),
+                lambda: inscribe_mod.dispatch(
+                    action=action,
+                    project_path=pp,
+                    category=category,
+                    content=content,
+                    rationale=rationale,
+                    context=context,
+                    tags=tags,
+                    file_path=file_path,
+                    happened_at=happened_at,
+                    memories=memories,
+                    source_id=source_id,
+                    target_id=target_id,
+                    relationship=relationship,
+                    description=description,
+                    memory_id=memory_id,
+                    pinned=pinned,
+                    reason=reason,
+                    priority=priority,
+                    expires_in_hours=expires_in_hours,
+                    url=url,
+                    topic=topic,
+                    chunk_size=chunk_size,
+                ),
             )
     except WorkflowError as e:
         return {"error": str(e), "recovery_hint": e.recovery_hint}
@@ -277,6 +322,7 @@ async def reflect(
     # execute params
     code: str | None = None,
     timeout_seconds: int | None = None,
+    preflight_token: str | None = None,
 ) -> dict[str, Any]:
     """
     Outcomes & verification operations.
@@ -286,6 +332,9 @@ async def reflect(
     pp = project_path or _default_project_path
     if not pp:
         return _missing_project_path_error()
+    violation = authorize_workflow_call("reflect", action, locals(), preflight_token)
+    if violation is not None:
+        return violation
 
     try:
         try:
@@ -293,17 +342,21 @@ async def reflect(
         except ImportError:
             from daem0nmcp.workflows import reflect as reflect_mod
         with WorkflowCall():
-            return await reflect_mod.dispatch(
-                action=action,
-                project_path=pp,
-                memory_id=memory_id,
-                outcome_text=outcome_text,
-                worked=worked,
-                text=text,
-                categories=categories,
-                as_of_time=as_of_time,
-                code=code,
-                timeout_seconds=timeout_seconds,
+            return await _run_with_admission(
+                f"reflect.{action}",
+                locals(),
+                lambda: reflect_mod.dispatch(
+                    action=action,
+                    project_path=pp,
+                    memory_id=memory_id,
+                    outcome_text=outcome_text,
+                    worked=worked,
+                    text=text,
+                    categories=categories,
+                    as_of_time=as_of_time,
+                    code=code,
+                    timeout_seconds=timeout_seconds,
+                ),
             )
     except WorkflowError as e:
         return {"error": str(e), "recovery_hint": e.recovery_hint}
@@ -331,6 +384,7 @@ async def understand(
     types: list[str] | None = None,
     # refactor params
     file_path: str | None = None,
+    preflight_token: str | None = None,
 ) -> dict[str, Any]:
     """
     Code comprehension operations.
@@ -340,6 +394,9 @@ async def understand(
     pp = project_path or _default_project_path
     if not pp:
         return _missing_project_path_error()
+    violation = authorize_workflow_call("understand", action, locals(), preflight_token)
+    if violation is not None:
+        return violation
 
     try:
         try:
@@ -347,17 +404,21 @@ async def understand(
         except ImportError:
             from daem0nmcp.workflows import understand as understand_mod
         with WorkflowCall():
-            return await understand_mod.dispatch(
-                action=action,
-                project_path=pp,
-                path=path,
-                patterns=patterns,
-                query=query,
-                limit=limit,
-                entity_name=entity_name,
-                auto_remember=auto_remember,
-                types=types,
-                file_path=file_path,
+            return await _run_with_admission(
+                f"understand.{action}",
+                locals(),
+                lambda: understand_mod.dispatch(
+                    action=action,
+                    project_path=pp,
+                    path=path,
+                    patterns=patterns,
+                    query=query,
+                    limit=limit,
+                    entity_name=entity_name,
+                    auto_remember=auto_remember,
+                    types=types,
+                    file_path=file_path,
+                ),
             )
     except WorkflowError as e:
         return {"error": str(e), "recovery_hint": e.recovery_hint}
@@ -395,6 +456,7 @@ async def govern(
     active_only: bool = True,
     # remove_trigger params
     trigger_id: int | None = None,
+    preflight_token: str | None = None,
 ) -> dict[str, Any]:
     """
     Rules & triggers management.
@@ -405,6 +467,9 @@ async def govern(
     pp = project_path or _default_project_path
     if not pp:
         return _missing_project_path_error()
+    violation = authorize_workflow_call("govern", action, locals(), preflight_token)
+    if violation is not None:
+        return violation
 
     try:
         try:
@@ -412,25 +477,29 @@ async def govern(
         except ImportError:
             from daem0nmcp.workflows import govern as govern_mod
         with WorkflowCall():
-            return await govern_mod.dispatch(
-                action=action,
-                project_path=pp,
-                trigger=trigger,
-                must_do=must_do,
-                must_not=must_not,
-                ask_first=ask_first,
-                warnings=warnings,
-                priority=priority,
-                rule_id=rule_id,
-                enabled=enabled,
-                enabled_only=enabled_only,
-                limit=limit,
-                trigger_type=trigger_type,
-                pattern=pattern,
-                recall_topic=recall_topic,
-                recall_categories=recall_categories,
-                active_only=active_only,
-                trigger_id=trigger_id,
+            return await _run_with_admission(
+                f"govern.{action}",
+                locals(),
+                lambda: govern_mod.dispatch(
+                    action=action,
+                    project_path=pp,
+                    trigger=trigger,
+                    must_do=must_do,
+                    must_not=must_not,
+                    ask_first=ask_first,
+                    warnings=warnings,
+                    priority=priority,
+                    rule_id=rule_id,
+                    enabled=enabled,
+                    enabled_only=enabled_only,
+                    limit=limit,
+                    trigger_type=trigger_type,
+                    pattern=pattern,
+                    recall_topic=recall_topic,
+                    recall_categories=recall_categories,
+                    active_only=active_only,
+                    trigger_id=trigger_id,
+                ),
             )
     except WorkflowError as e:
         return {"error": str(e), "recovery_hint": e.recovery_hint}
@@ -478,6 +547,7 @@ async def explore(
     entity_id: int | None = None,
     # at_time params
     timestamp: str | None = None,
+    preflight_token: str | None = None,
 ) -> dict[str, Any]:
     """
     Graph & discovery operations.
@@ -489,6 +559,9 @@ async def explore(
     pp = project_path or _default_project_path
     if not pp:
         return _missing_project_path_error()
+    violation = authorize_workflow_call("explore", action, locals(), preflight_token)
+    if violation is not None:
+        return violation
 
     try:
         try:
@@ -496,31 +569,35 @@ async def explore(
         except ImportError:
             from daem0nmcp.workflows import explore as explore_mod
         with WorkflowCall():
-            return await explore_mod.dispatch(
-                action=action,
-                project_path=pp,
-                memory_id=memory_id,
-                relationship_types=relationship_types,
-                direction=direction,
-                max_depth=max_depth,
-                start_memory_id=start_memory_id,
-                end_memory_id=end_memory_id,
-                memory_ids=memory_ids,
-                topic=topic,
-                format=format,
-                visual=visual,
-                include_orphans=include_orphans,
-                level=level,
-                parent_community_id=parent_community_id,
-                community_id=community_id,
-                min_community_size=min_community_size,
-                resolution=resolution,
-                entity_type=entity_type,
-                limit=limit,
-                entity_name=entity_name,
-                include_invalidated=include_invalidated,
-                entity_id=entity_id,
-                timestamp=timestamp,
+            return await _run_with_admission(
+                f"explore.{action}",
+                locals(),
+                lambda: explore_mod.dispatch(
+                    action=action,
+                    project_path=pp,
+                    memory_id=memory_id,
+                    relationship_types=relationship_types,
+                    direction=direction,
+                    max_depth=max_depth,
+                    start_memory_id=start_memory_id,
+                    end_memory_id=end_memory_id,
+                    memory_ids=memory_ids,
+                    topic=topic,
+                    format=format,
+                    visual=visual,
+                    include_orphans=include_orphans,
+                    level=level,
+                    parent_community_id=parent_community_id,
+                    community_id=community_id,
+                    min_community_size=min_community_size,
+                    resolution=resolution,
+                    entity_type=entity_type,
+                    limit=limit,
+                    entity_name=entity_name,
+                    include_invalidated=include_invalidated,
+                    entity_id=entity_id,
+                    timestamp=timestamp,
+                ),
             )
     except WorkflowError as e:
         return {"error": str(e), "recovery_hint": e.recovery_hint}
@@ -563,6 +640,7 @@ async def maintain(
     label: str | None = None,
     # consolidate params
     archive_sources: bool = False,
+    preflight_token: str | None = None,
 ) -> dict[str, Any]:
     """
     Housekeeping & federation operations.
@@ -574,6 +652,9 @@ async def maintain(
     pp = project_path or _default_project_path
     if not pp:
         return _missing_project_path_error()
+    violation = authorize_workflow_call("maintain", action, locals(), preflight_token)
+    if violation is not None:
+        return violation
 
     try:
         try:
@@ -581,27 +662,31 @@ async def maintain(
         except ImportError:
             from daem0nmcp.workflows import maintain as maintain_mod
         with WorkflowCall():
-            return await maintain_mod.dispatch(
-                action=action,
-                project_path=pp,
-                older_than_days=older_than_days,
-                categories=categories,
-                min_recall_count=min_recall_count,
-                protect_successful=protect_successful,
-                dry_run=dry_run,
-                memory_id=memory_id,
-                archived=archived,
-                merge_duplicates=merge_duplicates,
-                summary=summary,
-                limit=limit,
-                topic=topic,
-                include_vectors=include_vectors,
-                data=data,
-                merge=merge,
-                linked_path=linked_path,
-                relationship=relationship,
-                label=label,
-                archive_sources=archive_sources,
+            return await _run_with_admission(
+                f"maintain.{action}",
+                locals(),
+                lambda: maintain_mod.dispatch(
+                    action=action,
+                    project_path=pp,
+                    older_than_days=older_than_days,
+                    categories=categories,
+                    min_recall_count=min_recall_count,
+                    protect_successful=protect_successful,
+                    dry_run=dry_run,
+                    memory_id=memory_id,
+                    archived=archived,
+                    merge_duplicates=merge_duplicates,
+                    summary=summary,
+                    limit=limit,
+                    topic=topic,
+                    include_vectors=include_vectors,
+                    data=data,
+                    merge=merge,
+                    linked_path=linked_path,
+                    relationship=relationship,
+                    label=label,
+                    archive_sources=archive_sources,
+                ),
             )
     except WorkflowError as e:
         return {"error": str(e), "recovery_hint": e.recovery_hint}

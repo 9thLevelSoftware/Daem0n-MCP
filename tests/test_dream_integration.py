@@ -18,28 +18,35 @@ from daem0nmcp.transforms.covenant import (
     _FASTMCP_MIDDLEWARE_AVAILABLE,
     CovenantMiddleware,
 )
+from tests.covenant_test_support import CovenantTestWorkspace
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
 
-def _make_get_state(briefed=True, context_checks=None):
-    """Return a get_state callback for CovenantMiddleware."""
-    state = {
-        "briefed": briefed,
-        "context_checks": context_checks
-        or [{"timestamp": datetime.now(timezone.utc).isoformat()}],
-    }
-    return lambda _path: state
-
-
-def _make_mock_context(tool_name="remember", project_path="/test"):
+def _make_mock_context(tool_name="consult", action="recall", project_path="/test"):
     """Create a mock MiddlewareContext for on_call_tool."""
     context = MagicMock()
     context.message.name = tool_name
-    context.message.arguments = {"project_path": project_path}
+    context.message.arguments = {
+        "action": action,
+        "project_path": project_path,
+    }
     return context
+
+
+def _make_scoped_middleware(*, dream_scheduler=None, briefed=True):
+    workspace = CovenantTestWorkspace("/test")
+    if briefed:
+        workspace.gate.record_briefing(workspace.scope)
+    middleware = CovenantMiddleware(
+        gate=workspace.gate,
+        scope_provider=lambda _context, _workspace: workspace.scope,
+        workspace_resolver=workspace._registry.resolve,
+        dream_scheduler=dream_scheduler,
+    )
+    return middleware, workspace
 
 
 # ---------------------------------------------------------------------------
@@ -51,20 +58,17 @@ class TestCovenantMiddlewareDreamSchedulerHook:
     def test_middleware_stores_dream_scheduler(self):
         """CovenantMiddleware should store the dream_scheduler argument."""
         mock_scheduler = MagicMock(spec=IdleDreamScheduler)
-        mw = CovenantMiddleware(
-            get_state=_make_get_state(),
-            dream_scheduler=mock_scheduler,
-        )
+        mw = CovenantMiddleware(dream_scheduler=mock_scheduler)
         assert mw._dream_scheduler is mock_scheduler
 
     def test_middleware_default_no_scheduler(self):
         """Without dream_scheduler arg, _dream_scheduler should be None."""
-        mw = CovenantMiddleware(get_state=_make_get_state())
+        mw = CovenantMiddleware()
         assert mw._dream_scheduler is None
 
     def test_set_dream_scheduler(self):
         """set_dream_scheduler should update the stored scheduler."""
-        mw = CovenantMiddleware(get_state=_make_get_state())
+        mw = CovenantMiddleware()
         assert mw._dream_scheduler is None
 
         mock_scheduler = MagicMock(spec=IdleDreamScheduler)
@@ -87,12 +91,9 @@ class TestMiddlewareOnCallToolNotify:
         mock_scheduler = MagicMock(spec=IdleDreamScheduler)
         mock_scheduler.notify_tool_call = MagicMock()
 
-        mw = CovenantMiddleware(
-            get_state=_make_get_state(),
-            dream_scheduler=mock_scheduler,
-        )
+        mw, workspace = _make_scoped_middleware(dream_scheduler=mock_scheduler)
 
-        context = _make_mock_context(tool_name="recall")
+        context = _make_mock_context(project_path=workspace)
         call_next = AsyncMock(return_value=MagicMock())
 
         await mw.on_call_tool(context, call_next)
@@ -106,12 +107,15 @@ class TestMiddlewareOnCallToolNotify:
         mock_scheduler.notify_tool_call = MagicMock()
 
         # Not briefed -- covenant will block "remember"
-        mw = CovenantMiddleware(
-            get_state=_make_get_state(briefed=False, context_checks=[]),
-            dream_scheduler=mock_scheduler,
+        mw, workspace = _make_scoped_middleware(
+            dream_scheduler=mock_scheduler, briefed=False
         )
 
-        context = _make_mock_context(tool_name="remember")
+        context = _make_mock_context(
+            tool_name="inscribe",
+            action="remember",
+            project_path=workspace,
+        )
         call_next = AsyncMock()
 
         await mw.on_call_tool(context, call_next)
@@ -125,9 +129,9 @@ class TestMiddlewareOnCallToolNotify:
     @pytest.mark.asyncio
     async def test_no_scheduler_no_error(self):
         """on_call_tool should work fine when no scheduler is set."""
-        mw = CovenantMiddleware(get_state=_make_get_state())
+        mw, workspace = _make_scoped_middleware()
 
-        context = _make_mock_context(tool_name="recall")
+        context = _make_mock_context(project_path=workspace)
         call_next = AsyncMock(return_value=MagicMock())
 
         # Should not raise

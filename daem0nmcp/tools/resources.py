@@ -295,6 +295,20 @@ async def get_triggered_context_resource(
             project_path=project_path, file_path=file_path
         )
 
+        if "error" in result:
+            return json.dumps(
+                {
+                    "file": file_path,
+                    "triggers_matched": 0,
+                    "context": [],
+                    "error": result["error"],
+                    "message": result.get(
+                        "message", "Trigger evaluation was rejected."
+                    ),
+                },
+                indent=2,
+            )
+
         if not result["triggers"]:
             return json.dumps(
                 {

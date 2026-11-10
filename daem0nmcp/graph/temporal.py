@@ -172,7 +172,14 @@ async def invalidate_version(
     """
     from sqlalchemy import update
 
-    from ..models import MemoryVersion
+    from ..event_store import (
+        EventCommand,
+        append_and_project_async,
+        compatibility_memory_record,
+        invalidate_compatibility_memory_version,
+        resolve_compatibility_stream_async,
+    )
+    from ..models import Memory, MemoryVersion
 
     if invalidation_time is None:
         invalidation_time = datetime.now(timezone.utc)
@@ -180,10 +187,61 @@ async def invalidate_version(
     if invalidation_time.tzinfo is None:
         invalidation_time = invalidation_time.replace(tzinfo=timezone.utc)
 
+    if session.info.get("daem0nmcp_format_version") == 7:
+        version_result = await session.execute(
+            select(MemoryVersion).where(MemoryVersion.id == version_id)
+        )
+        version = version_result.scalar_one_or_none()
+        if version is None or version.valid_to is not None:
+            return False
+        memory_result = await session.execute(
+            select(Memory).where(Memory.id == version.memory_id)
+        )
+        memory = memory_result.scalar_one_or_none()
+        if memory is None:
+            raise RuntimeError("VERSION_MEMORY_MISSING")
+        workspace_id = session.info.get("daem0nmcp_workspace_id")
+        if not isinstance(workspace_id, str) or not workspace_id.startswith("ws_"):
+            raise RuntimeError("V7_WORKSPACE_CONTEXT_REQUIRED")
+
+        stream_id = await resolve_compatibility_stream_async(
+            session, workspace_id, "memory", "memories", memory.id
+        )
+        if stream_id is None:
+            raise RuntimeError("V7_MEMORY_STREAM_MISSING")
+        invalidation_us = int(invalidation_time.timestamp() * 1_000_000)
+        await append_and_project_async(
+            session,
+            EventCommand(
+                workspace_id=workspace_id,
+                stream_id=stream_id,
+                stream_kind="memory",
+                event_type="memory.version_invalidated",
+                occurred_at_us=invalidation_us,
+                recorded_at_us=invalidation_us,
+                actor_type="system",
+                payload={
+                    "record": compatibility_memory_record(memory),
+                    "compatibility": {"legacy_memory_id": memory.id},
+                    "invalidation": {
+                        "legacy_version_id": version_id,
+                        "valid_to_us": invalidation_us,
+                        "invalidated_by_legacy_version_id": invalidated_by_version_id,
+                    },
+                },
+            ),
+        )
+        invalidate_compatibility_memory_version(
+            version,
+            valid_to=invalidation_time,
+            invalidated_by_version_id=invalidated_by_version_id,
+        )
+        return True
+
     result = await session.execute(
         update(MemoryVersion)
         .where(MemoryVersion.id == version_id)
-        .where(MemoryVersion.valid_to.is_(None))  # Only invalidate current versions
+        .where(MemoryVersion.valid_to.is_(None))
         .values(
             valid_to=invalidation_time,
             invalidated_by_version_id=invalidated_by_version_id,

@@ -1,46 +1,28 @@
-"""Tests for consolidated workflow tools registered in MCP server."""
+"""Wire-registry cutover tests for the exact v7 granular tool surface."""
 
 import pytest
 
 
-class TestWorkflowToolsRegistered:
-    """Verify 8 workflow tools are registered in the MCP server."""
+class TestV7ToolsRegistered:
+    """Verify the eight v6 workflow routers cannot re-enter the wire surface."""
 
     @pytest.fixture
     async def tool_names(self):
         """Get all registered tool names from the MCP server."""
+        from daem0nmcp.api.v7.policy import V7_TOOL_LEVELS
         from daem0nmcp.server import mcp
 
-        tools = await mcp.list_tools()
+        tools = [await mcp.get_tool(name) for name in V7_TOOL_LEVELS]
         return {t.name for t in tools}
 
-    async def test_commune_tool_registered(self, tool_names):
-        assert "commune" in tool_names
+    async def test_exact_v7_tool_set_registered(self, tool_names):
+        from daem0nmcp.api.v7.policy import V7_TOOL_LEVELS
 
-    async def test_consult_tool_registered(self, tool_names):
-        assert "consult" in tool_names
+        assert tool_names == set(V7_TOOL_LEVELS)
+        assert len(tool_names) == 77
 
-    async def test_inscribe_tool_registered(self, tool_names):
-        assert "inscribe" in tool_names
-
-    async def test_reflect_tool_registered(self, tool_names):
-        assert "reflect" in tool_names
-
-    async def test_understand_tool_registered(self, tool_names):
-        assert "understand" in tool_names
-
-    async def test_govern_tool_registered(self, tool_names):
-        assert "govern" in tool_names
-
-    async def test_explore_tool_registered(self, tool_names):
-        assert "explore" in tool_names
-
-    async def test_maintain_tool_registered(self, tool_names):
-        assert "maintain" in tool_names
-
-    async def test_all_eight_workflow_tools_registered(self, tool_names):
-        """All 8 workflow tools should be present."""
-        expected = {
+    async def test_retired_workflow_routers_are_absent(self, tool_names):
+        retired = {
             "commune",
             "consult",
             "inscribe",
@@ -50,5 +32,4 @@ class TestWorkflowToolsRegistered:
             "explore",
             "maintain",
         }
-        missing = expected - tool_names
-        assert not missing, f"Missing workflow tools: {missing}"
+        assert tool_names.isdisjoint(retired)

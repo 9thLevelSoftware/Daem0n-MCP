@@ -1,0 +1,720 @@
+# Daem0nMCP v7 operations guide
+
+This guide describes the current development surface. It is not a release
+certificate: the P0–P10 ledger remains pending in
+[the release inventory](release/v7/inventory.md). The source of truth for
+input and output shapes is the MCP schema: use `daem0n_tools_search` for hidden
+tools, or set `DAEM0NMCP_TOOL_SURFACE=full` for a complete `tools/list`. The
+inventory is generated with `python scripts/v7_release_inventory.py --write`.
+
+## Install and configure the server
+
+v7 is not published yet. Install from a source checkout or a locally built
+wheel while working with this branch:
+
+```bash
+pip install .
+# or: python -m build && pip install dist/daem0nmcp-7.0.0.dev0-py3-none-any.whl
+```
+
+After v7 is published, `pip install daem0nmcp` will be the small-core command.
+
+Install profiles only for enabled capabilities:
+
+| Profile | Enables |
+| --- | --- |
+| `tasks` | FastMCP durable-task support; also requires an authenticated loopback Redis URL. |
+| `local` | Local Qdrant and BM25 support. |
+| `graph` | Graph, communities, and LangGraph dependencies. |
+| `apps` | Pinned URL ingestion, HTML extraction, watcher, and language-pack support. |
+| `models-local` | Local sentence-transformer/ONNX vectors and compression. |
+| `models-hosted` | Hosted-model token support. |
+| `agency-e2b` | E2B sandbox execution. |
+| `observability` | OpenTelemetry exporters. |
+| `dev` | Test and lint tools. |
+| `tracing` | Compatibility alias for the observability dependencies. |
+
+For example: `pip install "daem0nmcp[apps,graph]"`. `models-local` remains
+optional and requires Python 3.11 or newer. Its secure ONNX runtime dependency
+has no CPython 3.10 distribution. On Python 3.10, the resolver omits this
+profile's dependencies and the runtime reports the Python-version remediation;
+core installation remains supported.
+
+The server, not an MCP caller, establishes the workspace set. Configure the
+default root and any allowed additional roots before launch:
+
+```bash
+export DAEM0NMCP_PROJECT_ROOT=/srv/project-a
+export DAEM0NMCP_WORKSPACE_ROOTS='["/srv/project-b"]'
+# Keep storage derived per workspace. Do not set one shared STORAGE_PATH here.
+python -m daem0nmcp.server
+```
+
+`session_brief` requires an ID and therefore cannot be used to discover one.
+`system_health()` without an ID deliberately reports service state only. The
+operator obtains the stable ID from the same configured root with:
+
+```bash
+python -c "from daem0nmcp.config import Settings; from daem0nmcp.workspace import WorkspaceRegistry; print(WorkspaceRegistry.from_settings(Settings()).default.workspace_id)"
+```
+
+Give that ID to an authorized client through its managed local configuration or
+protected bridge pairing. A remote client must not derive it from a filesystem
+path or enumerate roots. `session_brief(workspace_id="ws_<opaque>")` confirms
+the configured selection after connection.
+
+The ID is not a credential. It is a truncated SHA-256 of the canonical root
+path and can be computed by anyone who knows that path; do not rely on keeping
+it private. What protects a workspace is the authenticated principal and the
+grants file below.
+
+`DAEM0NMCP_SYNC_TIMEOUT_SECONDS` controls foreground work and accepts 1–60
+seconds, defaulting to 15. Calls which exceed their foreground admission limits
+need the durable-task capability. To enable it, install the `tasks` profile and
+set `DAEM0NMCP_TASK_REDIS_URL` to an authenticated loopback Redis endpoint.
+Without it, the server reports `TASKS_UNAVAILABLE`; a tool must not pretend a
+disabled task path completed.
+
+Use stdio by default. The reviewed HTTP launcher is local by default:
+
+```bash
+python -m daem0nmcp.server --transport streamable-http --host 127.0.0.1 --port 9876
+```
+
+It uses Streamable HTTP. Remote binds need the configured authentication and
+HTTP security layers. There is no redirect URL or URL-based pairing shortcut.
+Unauthenticated loopback HTTP trusts every process and user on the host, so use
+stdio or configure authentication on a shared machine. A loopback bind with
+`DAEM0NMCP_TRUSTED_PROXY_IPS`, or with a non-loopback name in
+`DAEM0NMCP_ALLOWED_HOSTS`, is treated as remotely reachable: without a
+production token verifier the server exits with
+`PROXIED_LISTENER_REQUIRES_AUTH`. Those two settings are the only signal: a
+proxy that forwards the loopback authority as `Host` needs neither and is not
+detected, so configure authentication for every proxied deployment.
+
+For a remote HTTPS deployment, terminate TLS at a reverse proxy and make the
+backend listener and proxy addresses explicit. This is an environment example,
+not an authorization grant:
+
+```bash
+export FASTMCP_SERVER_AUTH=fastmcp.server.auth.providers.jwt.JWTVerifier
+export FASTMCP_SERVER_AUTH_JWT_JWKS_URI=https://issuer.example/jwks
+export FASTMCP_SERVER_AUTH_JWT_ISSUER=https://issuer.example
+export FASTMCP_SERVER_AUTH_JWT_AUDIENCE=daem0nmcp
+export DAEM0NMCP_ALLOWED_HOSTS=mcp.example
+export DAEM0NMCP_ALLOWED_ORIGINS=https://client.example
+export DAEM0NMCP_TRUSTED_PROXY_IPS=127.0.0.1
+export DAEM0NMCP_WORKSPACE_ACCESS_FILE=/secure/daem0n/workspace-access.json
+python -m daem0nmcp.server --transport streamable-http --host 127.0.0.1 --port 8765
+```
+
+`FASTMCP_SERVER_AUTH_JWT_JWKS_URI` must be an `https://` URL; plain `http://` is
+accepted only for a loopback host. Any other value stops startup with
+`INVALID_AUTH_CONFIGURATION`.
+
+The access file and its parent directory must be owner-only. Its exact JSON
+shape is `{"schema_version":1,"grants":{"oauth-sub:<subject>":["ws_<opaque>"]}}`.
+This example runs the HTTPS proxy on the same host and keeps the backend on
+loopback. Preserve the public Host and Origin headers when proxying. Trusted
+proxy settings control forwarded-header interpretation; they are not a network
+firewall. A proxy on another host requires a private backend interface and a
+firewall allowing only that proxy to reach it. The server applies Host policy,
+strict JSON body limits, and origin policy as three HTTP middleware layers.
+
+## Session, recall, and exact authorization
+
+The six pinned tools are a startup and diagnostics set, not the whole schema:
+`session_brief`, `memory_preflight`, `memory_recall`, `memory_store`,
+`memory_record_outcome`, and `system_health`. They belong to the full 77-tool
+registry shown below. By default, nine tools are listed: these six,
+`edit_preflight`, `daem0n_tools_search`, and `daem0n_tool_call`. All registered
+tools remain callable; `DAEM0NMCP_TOOL_SURFACE=full` lists every tool.
+
+The first gated call briefs automatically and returns the compact brief in
+`meta.covenant.auto_brief`. Call `session_brief` for a full or focused brief,
+using the workspace identifier supplied by the operator:
+
+```text
+session_brief(workspace_id="ws_<opaque>", focus_areas=["authentication"])
+memory_recall(workspace_id="ws_<opaque>", query="authentication", limit=10)
+```
+
+In the default guided mode, call a protected tool directly:
+
+```text
+memory_store(
+  workspace_id="ws_<opaque>",
+  record_type="decision",
+  content="Use signed session cookies",
+  rationale="Avoid server-side session state",
+  idempotency_key="decision-auth-cookie-0001"
+)
+```
+
+Benign calls proceed with inline counsel. If the response is
+`COUNSEL_REQUIRED`, read `error.counsel` and retry exactly `error.remedy`.
+Relevant risk and every destructive operation require this explicit retry.
+Discover other capabilities with `daem0n_tools_search(query)` and invoke them
+with `daem0n_tool_call(workspace_id, tool, arguments)`.
+
+`DAEM0NMCP_COVENANT_MODE=strict` restores explicit briefing and preflight.
+`memory_preflight` also remains available for advance planning in guided mode.
+Preflight matches the normalized target arguments exactly. Do not include
+`workspace_id` or `preflight_token` inside `target_arguments`; do include every
+other supplied argument, including the stable idempotency key:
+
+```text
+memory_preflight(
+  workspace_id="ws_<opaque>",
+  target_tool="memory_store",
+  target_arguments={
+    "record_type":"decision",
+    "content":"Use signed session cookies",
+    "rationale":"Avoid server-side session state",
+    "idempotency_key":"decision-auth-cookie-0001"
+  },
+  description="Record the authentication decision"
+)
+
+memory_store(
+  workspace_id="ws_<opaque>",
+  record_type="decision",
+  content="Use signed session cookies",
+  rationale="Avoid server-side session state",
+  idempotency_key="decision-auth-cookie-0001",
+  preflight_token="<returned token>"
+)
+```
+
+The token cannot authorize an edited payload, changed key, or another tool.
+Record a verified result with `memory_record_outcome`, using a new stable
+idempotency key. For authorized federation, `memory_recall` accepts
+`linked_workspace_ids`; returned evidence remains attributed to its source
+workspace.
+
+Lexical recall ranks by weighted BM25 over content, rationale and tags by
+default; record IDs break ties and the reported score does not increase with
+rank. Set `DAEM0NMCP_LEXICAL_CONTENT_TIERING=true` to opt in to content-tier
+ordering: records whose content or rationale satisfy the selected full-text
+expression rank first, ordered by the content/rationale BM25 weights without a
+tag contribution, then tag-assisted matches by ordinary weighted BM25. With the
+tier on, the weighted scores remain diagnostics, not a guarantee of rank order.
+Tags are searchable either way, and no projection rebuild is required for this
+query-side ordering setting.
+Direct and linked-workspace recall expose provider channels in canonical sorted
+order, including retained contexts, so equivalent evidence does not acquire
+different channel-array order after a server restart.
+
+Intent-aware context packing is staged with
+`DAEM0NMCP_RETRIEVAL_RETENTION_MODE=shadow` by default. Set it to `apply` to
+reserve evidence capacity for `implement` and `debug` requests. A query naming
+`src/http/router.ts`, `http/router.ts`, or `router.ts` can retain its bound
+evidence. Path and qualified-symbol queries preserve the supplied scope rather
+than promoting same-named files or symbols elsewhere. Bare names remain
+intentionally broader. This affects context selection, not stored-record
+retention or authorization.
+Query path tokens normalize Windows separators and repeated slashes. An explicit
+`./` remains workspace-root scoped: `./router.ts` does not match
+`src/http/router.ts`, while the bare `router.ts` may. These query-text aliases
+do not relax normalized POSIX path arguments or workspace containment.
+Explore requests retain baseline packing in every retention mode; shadow mode
+reuses that identical composition instead of packing the same evidence twice.
+Enabled retention reports `RETENTION_NOT_APPLICABLE` for explore rather than
+implying an alternate packing was applied. Other intents still compute their
+distinct shadow variant.
+Structured outcomes and each procedure step use the same source-aware excerpt
+limit as body text, including the reduced limit for stale evidence. Step counts
+and short facts remain unchanged; longer facts are prefix excerpts, not complete
+procedures. Full record views retain the original facts. No-intent and explore
+packing remain unchanged.
+
+Entity-backed recall can report retryable `DATABASE_IN_USE` while lexical
+evidence catches up, including when a newer generation publishes between
+retrieval and readiness inspection. Retry after the reported delay; a genuine
+indexed miss in the same generation remains a terminal capability failure.
+
+Repository code-binding checks validate current bounded source content rather
+than trusting file size and modification time. Parsed fingerprints are reused
+only when normalized source bytes match, so timestamp-preserving edits still
+produce `needs_revalidation`.
+
+Each recall shares successfully read files within its worker-local validation
+batch; the next recall reads them afresh. After exact byte verification, unchanged
+files share the cached byte object, avoiding repeated full-file comparisons
+inside that batch. The batch permits 32 MiB of raw source bytes plus one
+overflow-detection byte. Unread bindings beyond that budget are
+`unverifiable`, not asserted current or changed. Oversized files and environmental
+access failures are also `unverifiable`: inability to read does not prove a
+content change. Missing files, directory substitutions, and workspace escapes
+remain `needs_revalidation`. Parsed source caching holds at most 32 MiB of
+normalized bytes and 256 files; this is not a total-heap limit. The batch is not
+an atomic filesystem snapshot, a trusted test receipt, or proof that recorded
+guidance remains correct.
+Unchanged files also share one parsed symbol-span set per workspace root, rather
+than reparsing for every symbol. Qualified-identity and fingerprint caches remain
+root scoped, including package initializers; cached symbols still require an
+available parser. Edits replace the snapshot before fingerprints are reused.
+
+Citation-like strings stored inside evidence or binding filenames are displayed
+with neutralized brackets, not interpreted as manifest citations. Direct and
+linked-workspace recall apply the same presentation rule; canonical content and
+typed `changed_bindings` paths remain unchanged for follow-up operations.
+Public retrieval envelopes also require exactly one rendered marker per manifest
+entry in the same order. Missing, repeated, reordered or unbacked markers fail
+validation rather than becoming an apparently valid cited response.
+
+Symbol fingerprints include decorators owned by the parsed definition, including
+multiline Python decorators and TypeScript decorators separated by comments.
+Navigation spans and projection identities remain unchanged. Previously stored
+decorated-symbol fingerprints may require revalidation once after this change;
+review the guidance before recording a successful outcome with `rebind_code`.
+
+Symbol capture fails with retryable `CAPABILITY_DEGRADED` when the parser is
+unavailable, fails, returns unusable entities, or source access is temporarily
+unavailable; failed captures write no memory or outcome events. Parser failure
+can include syntactically invalid source. Repair the source or restore the
+capability/access before obtaining fresh counsel and retrying with the same
+idempotency key; an immediate retry cannot fix unchanged malformed source.
+Missing symbols, unsupported symbol-file extensions, and sources above the
+5 MiB raw-file limit remain `INVALID_ARGUMENT`.
+Fully qualified symbol identities take precedence. A dotted name that is one
+symbol's full identity and also names another symbol without its module prefix
+is ambiguous. A short name is accepted only when it identifies one canonical
+symbol; ambiguous names are `INVALID_ARGUMENT`,
+not a binding to every same-named definition. If an existing short binding
+becomes ambiguous, recall reports `unverifiable` until it is rebound explicitly.
+Multiple definition spans belonging to the same qualified identity remain grouped.
+Each store or outcome rebind captures one fresh source view per resolved file,
+sharing it across that request's references. This prevents mixed versions of one
+file inside a binding set; the next capture reads afresh. Every reference still
+validates workspace containment. The existing 16-reference and 5 MiB raw-file
+limits remain; this is not an atomic snapshot of multiple files or Git HEAD.
+
+## Resources and diagnostics
+
+The four bounded data resources require an authorized workspace session:
+
+- `memory://workspaces/{workspace_id}/warnings`
+- `memory://workspaces/{workspace_id}/failures`
+- `memory://workspaces/{workspace_id}/rules`
+- `memory://workspaces/{workspace_id}/active-context`
+
+Six UI resources expose dashboard shells: `ui://daem0n/briefing`,
+`ui://daem0n/community`, `ui://daem0n/covenant`, `ui://daem0n/graph`,
+`ui://daem0n/search`, and `ui://daem0n/test`.
+
+A useful diagnostic walk-through is: read the automatic brief (or request the
+full `session_brief`); read warnings and failures; call bounded `memory_recall`;
+call a protected write directly and follow any counsel challenge; record its
+outcome; then call `system_health(workspace_id="ws_<opaque>")`.
+`system_health` reports the enabled services and capability states. Missing
+profiles are remediation signals, not successful execution.
+
+## Migration, projections, exports, and consolidation
+
+Use the explicit v7 lifecycle commands against a registered project root:
+
+```bash
+python -m daem0nmcp.cli --project-path /srv/project-a migrate-v7
+python -m daem0nmcp.cli --project-path /srv/project-a migrate-v7 --apply --batch-size 500
+python -m daem0nmcp.cli --project-path /srv/project-a verify-v7 --workspace-id ws_<opaque>
+python -m daem0nmcp.cli --project-path /srv/project-a verify-v7 --workspace-id ws_<opaque> --repair-projections
+python -m daem0nmcp.cli --project-path /srv/project-a migrate-v7 --rollback latest
+```
+
+The first command inspects; `--apply` applies or resumes. On a retained format 6
+database it creates format 7. On an active format 7 database with an older,
+supported schema it creates a separate upgraded candidate, verifies its
+authoritative ledgers and replayed projections, and advances `active-db.json` by
+one generation. The source database and a SQLite snapshot remain in
+`.daem0nmcp/storage/migrations/v7/<migration-id>/`; no authoritative event is
+rewritten in place. Running `migrate-v7 --apply` again recovers a stopped run or
+reports `already_active` when the active schema is current.
+
+Opening a format 7 database never upgrades its schema as a side effect. After
+a Daem0nMCP upgrade that raises the schema version, `system_health` reports
+`STORAGE_SCHEMA_OUTDATED`, and the legacy CLI commands (`status`, `check`,
+`briefing`, `pre-commit`, `remember`, `record-outcome`, `index`, `watch`,
+`migrate`) and
+Python helpers stop with `MIGRATION_REQUIRED`, naming this command, before
+they write anything to the database.
+
+Keep enough free space for the retained source, snapshot, and candidate shown by
+the dry-run inventory. `FUTURE_V7_SCHEMA`, `UNSUPPORTED_V7_SCHEMA`, and
+`SCHEMA_UPGRADE_AUTHORITY_INVALID` require operator inspection or a newer
+Daem0nMCP build; they are not repaired automatically. After an interrupted run,
+repeat the same `migrate-v7 --apply` command. Use `migrate-v7 --rollback latest`
+to return to the retained predecessor and `--apply` to reactivate its verified
+candidate. Rollback refuses with `ROLLBACK_WOULD_HIDE_WRITES`, naming the count
+and the candidate that retains them, when events were recorded after
+activation; `--discard-v7-writes` proceeds and reports what stayed behind.
+
+Rolling back to a format 7 predecessor (after a schema upgrade or a
+`verify-v7 --repair-projections` activation) republishes the exact
+`active-db.json` that predecessor had, so the reported generation returns to
+the predecessor's. A schema upgrade's predecessor is still on its older schema:
+the Daem0nMCP build that wrote it serves it again, and a newer build answers
+`MIGRATION_REQUIRED` until `--apply` reactivates the candidate. Repeating
+`--rollback latest` reports `already_rolled_back` instead of unwinding a second
+run; pass a migration ID to roll back the run underneath, which works while
+that database is still on its older schema. A reactivation that stops after
+writing the pointer leaves the start failing with `V7_ACTIVATION_INCOMPLETE`
+until `migrate-v7 --apply` (or `--rollback`) is run again. A workspace that an
+earlier development build left failing with `V7_ACTIVATION_INCOMPLETE` or
+`ACTIVE_V7_INVALID` after such a rollback is repaired by running
+`migrate-v7 --apply` or `migrate-v7 --rollback` once. The
+generic `migrate` command remains an in-place additive migration entry point
+for format 6 only, capped at the last v6 schema version so it cannot rewrite
+what `migrate-v7` snapshots. On a format 7 store whose schema is older than
+the build it changes nothing and answers `MIGRATION_REQUIRED`, like every
+other legacy command: `migrate-v7 --apply` is the one command that upgrades a
+format 7 schema, with retention, verification, atomic activation, and rollback.
+
+`active-db.json` is part of the store: back it up and copy it together with
+`daem0nmcp.db` and `migrations/`. A format 7 `daem0nmcp.db` found without it is
+never opened as a format 6 store, because format 6 writes bypass the event log.
+The legacy CLI commands, hooks and Python helpers, and `migrate-v7` itself, stop
+with `ACTIVE_POINTER_MISSING` before writing anything; the v7 tools keep
+answering `MIGRATION_REQUIRED`. Restore `active-db.json` from a backup, or stop
+the server and run:
+
+```bash
+python -m daem0nmcp.cli --project-path /srv/project-a migrate-v7 --recover-pointer
+```
+
+It republishes the generation-one pointer for `daem0nmcp.db`, which is right
+when that file is the whole store (a copy made without the pointer, or a store
+that never ran a schema upgrade or projection repair, or whose runs were all
+rolled back). If the schema is older than the build, follow it with
+`migrate-v7 --apply`. When `migrations/v7/` holds a candidate that was not
+rolled back, the lost pointer may have named that candidate and
+`daem0nmcp.db` may be its stale predecessor, so the command answers
+`POINTER_RECOVERY_AMBIGUOUS`, naming the candidate, and changes nothing: only
+the backed-up `active-db.json` settles which database was active. A store
+that was migrated from format 6 keeps the format 6 file as `daem0nmcp.db` and
+runs on the candidate. Without the pointer that file is not opened or migrated
+again while the candidate's run is still recorded as active: every command
+answers `ACTIVE_POINTER_MISSING`, naming the candidate, `--recover-pointer`
+answers `POINTER_RECOVERY_AMBIGUOUS`, and the pointer has to come from a
+backup. A published `candidate.db` that cannot be read at all (in use by
+another process, or damaged) is treated the same way, because it may be that
+active database: stop the process holding it and retry, restore the pointer
+from a backup, or, when that run was never activated, move its
+`migrations/v7/<migration-id>/` directory out of the storage directory. A
+`migrations/v7/` directory that exists but cannot be listed is refused too,
+until it is made readable or the pointer is restored. When `daem0nmcp.db`
+itself cannot be read without a pointer (not a database, held by another
+process, or left with an unfinished `daem0nmcp.db-journal`), `migrate-v7`
+answers `SOURCE_UNREADABLE` rather than guess its format; the dry run and
+`--rollback` never write that file, while `--apply` rolls an unfinished
+journal back and continues. A brand-new,
+still empty database whose first start stopped before its pointer was written
+is the one case finished automatically on the next start.
+
+Stop the server before applying or rolling back: both commands take the
+storage lock, and a running server on the old pointer sees the generation
+change. Until a v6 workspace is migrated, `session_brief` answers
+`MIGRATION_REQUIRED` (non-retryable) with the command to run, and every other
+tool is blocked behind it with `COMMUNION_REQUIRED`. The export/import path
+answers `MIGRATION_REQUIRED` too, without the command, because the generic
+router returns the code alone. The four data resources answer the single
+invariant `RESOURCE_UNAVAILABLE` for every failure by design, so that a caller
+cannot enumerate workspaces by reading their errors; `session_brief` is where
+the reason is named.
+
+The migration keeps the v6 row exactly as it was inside the migrated
+database — in the event log's `legacy` payload and in the retained v6 tables —
+but that copy is not part of `workspace_export`, which carries the v7
+projection. Host paths are never exported: the columns that hold one are
+recorded as a digest, and the usable form is derived into
+`relative_file_path`. A workspace migrated before this release keeps the raw
+value inside its own hash-chained events, so its exports need a re-migration
+to be path-free; reads, recall, outcomes and resources do not.
+
+`migrate-v7 --apply` reports what it could not copy faithfully in `warnings`
+and counts it in `validation`: memory file links that pointed outside the
+workspace (kept only in the event's legacy payload), context triggers
+belonging to another project path, and rules or triggers reconciled because
+the v6 tables changed after an earlier in-place upgrade.
+
+`verify-v7` checks authority and projections; `--repair-projections` performs
+offline replay and atomic activation. Rollback retains the v7 write history
+required by the migration service. For dense retrieval use the v7 projection
+command rather than the old embedding migration:
+
+```bash
+python -m daem0nmcp.cli rebuild-projection --projection dense --workspace-id ws_<opaque>
+```
+
+`workspace_export` and `workspace_import` operate on the same workspace
+identity. A v7 import bundle from another workspace is rejected with
+`CROSS_WORKSPACE_IMPORT_UNSUPPORTED`; use `workspace_consolidation_preview`,
+then `workspace_consolidate` (or the archive-sources variant) with the returned
+`selection_token`, the same `source_workspace_ids`, an `idempotency_key`, and
+an exact preflight. Vector and compatibility data travel through the versioned
+export/import bundle and canonical legacy projection exports, not an ad-hoc
+database copy.
+
+Exports paginate. Start at page zero; pass `include_vectors=true` only when
+the vector export is wanted, and preserve every returned bundle page and cursor:
+
+```text
+workspace_export(workspace_id="ws_<opaque>", include_legacy_projection=true,
+  include_vectors=true, page_index=0)
+workspace_export(workspace_id="ws_<opaque>", export_session_id="xpt_<returned session>",
+  page_index=1, cursor="<returned cursor>")
+```
+
+For each import page, preflight the exact `workspace_import` request (bundle,
+`merge`, `finalize`, and `idempotency_key`) before submitting it. A paginated
+import ends with `workspace_import(workspace_id="ws_<opaque>",
+import_session_id="ipt_<returned session>", finalize=true, idempotency_key="...",
+preflight_token="...")`; that finalization has no `bundle`. A format-1 bundle
+is one atomic import and cannot carry an import session.
+
+Check and reactivate projections with the flags the CLI actually supports:
+
+```bash
+python -m daem0nmcp.cli projection-status --workspace-id ws_<opaque>
+python -m daem0nmcp.cli rebuild-projection --workspace-id ws_<opaque> --projection dense --dry-run
+python -m daem0nmcp.cli rebuild-projection --workspace-id ws_<opaque> --projection dense
+python -m daem0nmcp.cli verify-v7 --workspace-id ws_<opaque> --repair-projections
+```
+
+There is no `--retry` flag. Re-run the same `rebuild-projection` command after
+examining status, or use `verify-v7 --repair-projections` for offline repair
+and atomic reactivation.
+
+## Claude Code and OpenCode
+
+Install Claude hooks for one project:
+
+```bash
+python -m daem0nmcp.cli --project-path /srv/project-a install-claude-hooks
+```
+
+The hooks go into the user-level `~/.claude/settings.json` and run in every
+project, staying silent unless the session directory, `CLAUDE_PROJECT_DIR`, or
+one of their parents (not your home directory) contains `.daem0nmcp/`. They
+remind only:
+
+| Event (matcher) | Hook | What it does | Input | Reminds only |
+|-----------------|------|--------------|-------|--------------|
+| `SessionStart` | `session_start` | Explains that the first gated call briefs automatically and `session_brief` returns the full brief | `CLAUDE_PROJECT_DIR` env | Yes |
+| `PreToolUse` (`Edit\|Write\|NotebookEdit`) | `pre_edit` | Inside a Daem0n project, adds a one-line `additionalContext` reminder to use `daem0n_tool_call` for `memory_recall_file`; silent elsewhere | stdin event | Yes |
+| `PreToolUse` (`Bash`) | `pre_bash` | Checks the command against Daem0n rules. Currently inert: it reads a `TOOL_INPUT` env var that Claude Code does not set | `TOOL_INPUT` env | Yes (always exits 0) |
+| `PostToolUse` (`mcp__.*__edit_preflight`) | `post_edit_preflight` | Edit-bridge plumbing: stages an `edit_preflight` receipt for a bridge edit request. Nothing in Claude Code creates those requests any more, so it is a no-op | stdin event | Yes |
+| `PostToolUse` (`Edit\|Write\|NotebookEdit`) | `post_edit` | Edit-bridge plumbing: reports a bridge-approved edit as a capture candidate. Only loads the bridge when the project is paired; a no-op in Claude Code today | stdin event | Yes |
+| `Stop`, `SubagentStop` | `stop` | When the transcript shows a finished task with no recorded outcome, suggests direct replay-safe `memory_store`/`memory_record_outcome` calls and counsel-challenge retry guidance as a `systemMessage`. Never writes memory | stdin event (`transcript_path`) | Yes |
+
+No hook blocks a tool call or keeps the agent running: every hook exits 0 and none
+returns a `permissionDecision` or `decision`.
+
+Pairing writes an owner-only credential to
+`~/.daem0nmcp/edit-bridges/<authority>/credential.json`, uses
+`~/.daem0nmcp/edit-bridges/run/<authority[:16]>/` for the bridge socket, and
+adds `DAEM0NMCP_EDIT_BRIDGE_CREDENTIAL_FILE`, `DAEM0NMCP_EDIT_BRIDGE_RUNTIME_DIR`,
+`DAEM0NMCP_PROJECT_ROOT` and `DAEM0NMCP_STORAGE_PATH` to
+`<project>/.claude/settings.local.json`. Remove the hooks, those env keys and
+(with `--remove-credentials`) the credential and socket directories with:
+
+```bash
+python -m daem0nmcp.cli uninstall-claude-hooks --project-path /srv/project-a --remove-credentials
+```
+
+Install OpenCode V1 locally:
+
+```bash
+python -m daem0nmcp.cli --project-path /srv/project-a install-opencode --interface v1
+```
+
+The installer copies the packaged `daem0n.ts` asset and provisions host-side
+credentials. Native edit flow is exact: the host creates an edit request,
+`edit_preflight` returns a one-use receipt for that native edit, the identical
+edit is retried, capture is listed with `memory_capture_list`, and promotion
+uses `memory_capture_promote` after a matching `memory_preflight`. Do not add
+forgeable `_client_meta` fields to a plugin or tool call.
+
+Protected remote pairing uses the installer’s explicit remote credential,
+workspace, URL, CA-file, and origin options through `install_opencode`; it is
+not established by a redirect. The project CLI covers local installation; use
+the installer module for the protected remote arguments:
+
+```bash
+python -m daem0nmcp.opencode_install --project-path /srv/project-a --interface v1 \
+  --remote-workspace-id ws_<opaque> \
+  --remote-credential-file /secure/credential.json \
+  --remote-url https://mcp.example:7443 \
+  --remote-ca-file /secure/ca.pem \
+  --remote-origin https://opencode.example
+```
+
+OpenCode V2 is currently unsupported because the released interface does not
+expose native tool-execution hooks.
+
+Claude Code uses the same protected bridge parameters through its installer
+module:
+
+```bash
+python -m daem0nmcp.claude_hooks.install --project-path /srv/project-a \
+  --remote-workspace-id ws_<opaque> \
+  --remote-credential-file /secure/credential.json \
+  --remote-url https://mcp.example:7443 \
+  --remote-ca-file /secure/ca.pem \
+  --remote-origin https://claude.example
+```
+
+The remote native-edit bridge is a separate authenticated HTTPS listener owned
+by the MCP server lifecycle. Provision its credential as an operator, outside
+the project and model context; the principal must equal the MCP JWT subject's
+`oauth-sub:<subject>` identity:
+
+```python
+from pathlib import Path
+from daem0nmcp.edit_bridge_transport import provision_bridge_credential
+
+provision_bridge_credential(
+    Path("/secure/daem0n/bridge-credential.json"),
+    principal_id="oauth-sub:<subject>",
+    transports=frozenset({"remote-https"}),
+)
+```
+
+Run this as a script without printing its return value. Transfer the credential
+to the paired desktop through an operator-controlled secure channel and retain
+owner-only file and directory permissions. Use its desktop path in the installer
+commands above. Configure the application server before launch:
+
+```bash
+export DAEM0NMCP_EDIT_BRIDGE_MODE=remote-https
+export DAEM0NMCP_EDIT_BRIDGE_CREDENTIAL_FILE=/secure/daem0n/bridge-credential.json
+export DAEM0NMCP_EDIT_BRIDGE_REMOTE_HOST=0.0.0.0
+export DAEM0NMCP_EDIT_BRIDGE_REMOTE_PORT=7443
+export DAEM0NMCP_EDIT_BRIDGE_TLS_CERT=/secure/tls/bridge-chain.pem
+export DAEM0NMCP_EDIT_BRIDGE_TLS_KEY=/secure/tls/bridge-key.pem
+export DAEM0NMCP_EDIT_BRIDGE_ALLOWED_HOSTS='["mcp.example"]'
+export DAEM0NMCP_EDIT_BRIDGE_ALLOWED_ORIGINS='["https://claude.example","https://opencode.example"]'
+```
+
+This listener serves TLS directly. Its certificate must cover `mcp.example`,
+and the desktop CA file must trust its issuer. Pairing pins the server authority,
+Origin, CA path and bytes, workspace, and desktop directory identity. Editing
+project configuration cannot change that recipient; intentional changes require
+operator reprovisioning. A workspace grant in the server's access file is still
+required. The desktop client connects to that authority directly: it ignores
+`HTTPS_PROXY` and other proxy settings and treats any redirect as a failed
+call, so the bearer is never sent to another host. The current bridge
+configuration provisions one credential identity per application server. See the [bridge implementation and verification
+report](release/v7/p6-edit-capture.md) for enforcement boundaries.
+
+## Durable-task lifecycle
+
+When the `tasks` profile and authenticated loopback Redis configuration are
+ready, `tools/list` marks supported operations as MCP `taskSupport: "optional"`.
+The client submits the ordinary tool call with standard MCP task metadata; the
+owned dispatcher validates the admitted normalized arguments, task TTL, and
+execution timeout, then returns an MCP task object. Retrieve it with the MCP
+task-get operation, list only tasks authorized for the current principal and
+workspace, or request cancellation through the MCP task protocol. The normal
+foreground call remains bounded by `DAEM0NMCP_SYNC_TIMEOUT_SECONDS`; a durable
+task is not a client-side retry or a claim that an unavailable task service ran.
+
+## CLI inventory
+
+The current CLI commands are `briefing`, `check`, `index`,
+`install-claude-hooks`, `install-hooks`, `install-opencode`, `migrate`,
+`migrate-v7`, `pre-commit`, `projection-status`, `rebuild-projection`,
+`record-outcome`, `recover-consolidation`, `remember`, `scan-todos`, `status`,
+`uninstall-claude-hooks`, `uninstall-hooks`, `verify-v7`, and `watch`.
+The deprecated `migrate --backfill-vectors` is format-6-only; v7 uses projection
+rebuilds.
+
+## Full registered v7 tool inventory
+
+This schema-derived table lists every current tool. Covenant levels are
+`exempt`, `communion`, `counsel`, and `destructive`; schema fields and defaults
+come from `tools/list` and the generated release inventory.
+
+| Tool | Category | Covenant |
+| --- | --- | --- |
+| `active_context_add` | context | counsel |
+| `active_context_clear` | context | destructive |
+| `active_context_list` | context | communion |
+| `active_context_remove` | context | destructive |
+| `code_impact_analyze` | code | communion |
+| `code_index` | code | communion |
+| `code_refactor_propose` | code | communion |
+| `code_search` | code | communion |
+| `code_todos_scan` | code | communion |
+| `code_todos_scan_and_store` | code | counsel |
+| `community_get` | communities | communion |
+| `community_list` | communities | communion |
+| `community_rebuild` | communities | counsel |
+| `context_compress` | context | communion |
+| `context_trigger_create` | rules | counsel |
+| `context_trigger_delete` | rules | destructive |
+| `context_trigger_list` | rules | communion |
+| `context_triggers_match` | context | communion |
+| `covenant_status` | covenant | exempt |
+| `daem0n_tool_call` | system | exempt |
+| `daem0n_tools_search` | system | exempt |
+| `decision_debate` | cognitive | counsel |
+| `decision_simulate` | cognitive | communion |
+| `document_ingest_url` | external | counsel |
+| `dream_duplicates_preview` | maintenance | communion |
+| `dream_duplicates_purge` | maintenance | destructive |
+| `edit_preflight` | edit | communion |
+| `entity_backfill` | entities | counsel |
+| `entity_evolution_trace` | entities | communion |
+| `entity_list` | entities | communion |
+| `knowledge_graph_get` | graph | communion |
+| `knowledge_graph_render` | graph | communion |
+| `knowledge_graph_stats` | graph | communion |
+| `memory_archive_set` | maintenance | destructive |
+| `memory_at_time_get` | memory | communion |
+| `memory_capture_list` | memory | communion |
+| `memory_capture_promote` | memory | counsel |
+| `memory_chain_trace` | memory | communion |
+| `memory_compact` | maintenance | destructive |
+| `memory_compaction_preview` | maintenance | communion |
+| `memory_duplicates_cleanup` | maintenance | destructive |
+| `memory_duplicates_preview` | maintenance | communion |
+| `memory_link` | memory | counsel |
+| `memory_pin_set` | memory | counsel |
+| `memory_preflight` | covenant | communion |
+| `memory_prune` | maintenance | destructive |
+| `memory_prune_preview` | maintenance | communion |
+| `memory_recall` | retrieval | communion |
+| `memory_recall_entity` | retrieval | communion |
+| `memory_recall_file` | retrieval | communion |
+| `memory_recall_hierarchical` | retrieval | communion |
+| `memory_record_outcome` | memory | communion |
+| `memory_related` | memory | communion |
+| `memory_search_text` | retrieval | communion |
+| `memory_store` | memory | counsel |
+| `memory_store_batch` | memory | counsel |
+| `memory_unlink` | memory | destructive |
+| `memory_verify` | memory | communion |
+| `memory_versions_list` | memory | communion |
+| `projection_rebuild` | projection | communion |
+| `rule_check` | rules | communion |
+| `rule_create` | rules | counsel |
+| `rule_evolution_analyze` | cognitive | communion |
+| `rule_list` | rules | communion |
+| `rule_update` | rules | counsel |
+| `sandbox_execute_python` | sandbox | destructive |
+| `session_brief` | session | exempt |
+| `session_updates_get` | session | communion |
+| `system_health` | system | exempt |
+| `workspace_consolidate` | workspace | counsel |
+| `workspace_consolidate_and_archive_sources` | workspace | destructive |
+| `workspace_consolidation_preview` | workspace | communion |
+| `workspace_export` | workspace | communion |
+| `workspace_import` | workspace | destructive |
+| `workspace_link` | workspace | counsel |
+| `workspace_links_list` | workspace | communion |
+| `workspace_unlink` | workspace | destructive |
+
+For each tool’s required and optional fields, consult the current MCP schema or
+the machine-readable matrix in `docs/release/v7/requirements.json`; registration
+alone is not acceptance evidence.

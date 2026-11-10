@@ -8,6 +8,8 @@ host doesn't support MCP Apps visual rendering.
 from datetime import datetime
 from typing import Any
 
+from ..config import settings
+
 
 def format_with_ui_hint(
     data: dict[str, Any], ui_resource: str, text: str
@@ -28,11 +30,11 @@ def format_with_ui_hint(
     Returns:
         Dict with data, ui_resource hint, and text fallback
     """
-    return {
-        **data,
-        "ui_resource": ui_resource,
-        "text": text,
-    }
+    result = {**data, "text": text}
+    result.pop("ui_resource", None)
+    if settings.ui_rendering_enabled:
+        result["ui_resource"] = ui_resource
+    return result
 
 
 def format_search_results(

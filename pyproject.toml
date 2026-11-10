@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "daem0nmcp"
-version = "6.6.6"
+version = "7.0.0.dev0"
 description = "AI Memory & Decision System - Give AI agents persistent memory and consistent decision-making"
 readme = "README.md"
 license = {text = "MIT"}
@@ -23,48 +23,69 @@ classifiers = [
 ]
 
 dependencies = [
-    "fastmcp>=3.0.0b1",
+    "fastmcp==3.4.7",
     "sqlalchemy>=2.0.0",
     "aiosqlite>=0.19.0",
     "greenlet>=3.0.0",  # Required for SQLAlchemy async
     "pydantic-settings>=2.0.0",
-    # Web ingestion
-    "httpx>=0.25.0",
-    "beautifulsoup4>=4.12.0",
-    # Vector embeddings
-    "sentence-transformers>=3.0.0",
-    "onnxruntime>=1.24.1",
-    "numpy>=1.24.0",
-    # Vector database
-    "qdrant-client>=1.7.0",
-    # Phase 1: File watching + notifications
-    "watchdog>=3.0.0",
-    "plyer>=2.1.0",
-    # Phase 2: Code understanding (tree-sitter-language-pack has Python 3.14 wheels)
-    "tree-sitter-language-pack>=0.13.0",
-    # BM25 for hybrid retrieval
-    "rank-bm25>=0.2.2",
-    # Phase 1: GraphRAG
-    "networkx>=3.0",
-    "leidenalg>=0.10.0",
-    "python-igraph>=0.11.0",
-    # Phase 3: Metacognitive Architecture (Reflexion)
-    "langgraph>=1.0.7",
-    "langgraph-checkpoint-sqlite>=3.0.3",
-    # Phase 4: Context Engineering
-    "llmlingua>=0.2.2",
-    "tiktoken>=0.5.0",
-    # Phase 5: Dynamic Agency
-    "e2b-code-interpreter>=1.0.0",
+    "regex>=2024.11.6",
 ]
 
 [project.optional-dependencies]
+tasks = [
+    "fastmcp[tasks]==3.4.7",
+]
+local = [
+    "qdrant-client>=1.7.0",
+]
+graph = [
+    "networkx>=3.0",
+    "leidenalg>=0.10.0",
+    "python-igraph>=0.11.0",
+    "langgraph>=1.0.7",
+    "langgraph-checkpoint-sqlite>=3.0.3",
+]
+apps = [
+    "httpx>=0.28.1,<0.29",
+    "httpcore>=1.0.9,<1.1",
+    "packaging>=24.0",
+    "beautifulsoup4>=4.12.0",
+    "watchdog>=3.0.0",
+    "plyer>=2.1.0",
+    "tree-sitter-language-pack>=0.13.0",
+]
+models-local = [
+    # Secure ONNX runtime wheels start at CPython 3.11.
+    "sentence-transformers[onnx]>=3.2.0; python_version >= '3.11'",
+    "onnxruntime>=1.24.1; python_version >= '3.11'",
+    "numpy>=1.24.0; python_version >= '3.11'",
+    "llmlingua>=0.2.2; python_version >= '3.11'",
+]
+late-interaction = [
+    # Secure ONNX runtime wheels start at CPython 3.11.
+    "fastembed>=0.8.1; python_version >= '3.11'",
+    "numpy>=1.26; python_version >= '3.11'",
+]
+models-hosted = [
+    "tiktoken>=0.5.0",
+]
+agency-e2b = [
+    "e2b-code-interpreter==2.10.0",
+]
+observability = [
+    "opentelemetry-api>=1.20.0",
+    "opentelemetry-sdk>=1.20.0",
+    "opentelemetry-exporter-otlp>=1.20.0",
+]
 dev = [
     "pytest>=7.0.0",
     "pytest-asyncio>=0.23.0",
-    "ruff>=0.9.0",
+    "ruff==0.16.8",  # keep in sync with ci.yml and .pre-commit-config.yaml
+    "mypy==2.3.1",  # keep in sync with ci.yml and .pre-commit-config.yaml
     "pre-commit>=3.0.0",
 ]
+
+# Compatibility alias retained for existing tracing-enabled installations.
 tracing = [
     "opentelemetry-api>=1.20.0",
     "opentelemetry-sdk>=1.20.0",
@@ -82,6 +103,15 @@ Repository = "https://github.com/DasBluEyedDevil/Daem0n-MCP"
 where = ["."]
 include = ["daem0nmcp*"]
 
+[tool.setuptools.package-data]
+"daem0nmcp.ui" = [
+    "templates/app.html",
+    "static/*.css",
+    "static/*.js",
+    "static/renderers/*.js",
+]
+"daem0nmcp.opencode_assets" = ["*.ts", "commands/*.md"]
+
 # Ruff configuration
 [tool.ruff]
 target-version = "py310"
@@ -92,13 +122,8 @@ select = ["E", "F", "I", "N", "W", "UP", "B", "C4", "SIM"]
 ignore = ["E501"]  # line too long (handled by formatter)
 
 [tool.ruff.format]
+exclude = ["tests/fixtures/retrieval/qdrant_fake.py"] # Frozen, checksum-verified fixture.
 quote-style = "double"
 indent-style = "space"
 skip-magic-trailing-comma = false
 
-[tool.pytest.ini_options]
-asyncio_mode = "auto"
-asyncio_default_fixture_loop_scope = "function"
-testpaths = ["tests"]
-python_files = ["test_*.py"]
-python_functions = ["test_*"]

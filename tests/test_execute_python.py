@@ -5,6 +5,7 @@ Tests capability enforcement, sandbox availability handling, and logging.
 Integration tests require E2B_API_KEY and e2b-code-interpreter installed.
 """
 
+import inspect
 import logging
 import os
 from unittest.mock import AsyncMock, patch
@@ -176,72 +177,97 @@ class TestExecutePythonTool:
     """Test execute_python MCP tool."""
 
     @pytest.mark.asyncio
-    async def test_missing_project_path_error(self):
+    async def test_missing_project_path_error(
+        self, tmp_path, covenant_workspace_factory
+    ):
         """Tool should return error without project_path."""
         # Mock the _default_project_path to be None
         from daem0nmcp import server
 
-        original = server._default_project_path
+        handler_globals = inspect.unwrap(server.execute_python).__globals__
+        original = handler_globals.get("_default_project_path")
         try:
-            server._default_project_path = None
+            handler_globals["_default_project_path"] = None
+            workspace = covenant_workspace_factory(tmp_path)
+            await workspace.brief()
 
-            result = await server.execute_python(
-                code="print('hello')", project_path=None
+            result = await workspace.call(
+                server.execute_python, code="print('hello')", project_path=None
             )
 
             assert "error" in result or "MISSING_PROJECT_PATH" in str(result)
         finally:
-            server._default_project_path = original
+            handler_globals["_default_project_path"] = original
 
     @pytest.mark.asyncio
-    async def test_capability_denied_returns_violation(self):
+    async def test_capability_denied_returns_violation(
+        self, tmp_path, covenant_workspace_factory
+    ):
         """Tool should return violation when capability revoked."""
         from daem0nmcp import server
+        from daem0nmcp.tools import agency_tools
+
+        workspace = covenant_workspace_factory(tmp_path)
+        await workspace.brief()
 
         # Revoke capability
-        server._capability_manager.revoke_capability(
-            "/test/project", CapabilityScope.EXECUTE_CODE
+        agency_tools._capability_manager.revoke_capability(
+            workspace, CapabilityScope.EXECUTE_CODE
         )
 
         try:
-            result = await server.execute_python(
-                code="print('hello')", project_path="/test/project"
+            result = await workspace.call(
+                server.execute_python,
+                code="print('hello')",
+                project_path=workspace,
             )
 
             assert result["status"] == "blocked"
             assert result["violation"] == "CAPABILITY_DENIED"
         finally:
             # Restore
-            server._capability_manager.reset_capabilities("/test/project")
+            agency_tools._capability_manager.reset_capabilities(workspace)
 
     @pytest.mark.asyncio
-    async def test_sandbox_unavailable_returns_error(self):
+    async def test_sandbox_unavailable_returns_error(
+        self, tmp_path, covenant_workspace_factory
+    ):
         """Tool should return error when sandbox unavailable."""
         from daem0nmcp import server
+        from daem0nmcp.tools import agency_tools
+
+        workspace = covenant_workspace_factory(tmp_path)
+        await workspace.brief()
 
         # Ensure capability is granted
-        server._capability_manager.grant_capability(
-            "/test/project", CapabilityScope.EXECUTE_CODE
+        agency_tools._capability_manager.grant_capability(
+            workspace, CapabilityScope.EXECUTE_CODE
         )
 
         # Mock sandbox as unavailable
-        original_available = server._sandbox_executor._sandbox_available
+        original_available = agency_tools._sandbox_executor._sandbox_available
         try:
-            server._sandbox_executor._sandbox_available = False
+            agency_tools._sandbox_executor._sandbox_available = False
 
-            result = await server.execute_python(
-                code="print('hello')", project_path="/test/project"
+            result = await workspace.call(
+                server.execute_python,
+                code="print('hello')",
+                project_path=workspace,
             )
 
             assert result["status"] == "error"
             assert result["error"] == "SANDBOX_UNAVAILABLE"
         finally:
-            server._sandbox_executor._sandbox_available = original_available
+            agency_tools._sandbox_executor._sandbox_available = original_available
 
     @pytest.mark.asyncio
-    async def test_execution_logged(self, caplog):
+    async def test_execution_logged(self, caplog, tmp_path, covenant_workspace_factory):
         """Tool should log execution for anomaly detection."""
         from daem0nmcp import server
+        from daem0nmcp.tools import agency_tools
+
+        workspace = covenant_workspace_factory(tmp_path)
+        await workspace.brief()
 
         # Mock sandbox to allow execution with mock result
         mock_result = ExecutionResult(
@@ -252,12 +278,14 @@ class TestExecutePythonTool:
             mock.return_value = mock_result
 
             # Force sandbox available
-            original = server._sandbox_executor._sandbox_available
-            server._sandbox_executor._sandbox_available = True
+            original = agency_tools._sandbox_executor._sandbox_available
+            agency_tools._sandbox_executor._sandbox_available = True
             try:
                 with caplog.at_level(logging.INFO):
-                    await server.execute_python(
-                        code="print('hello')", project_path="/test/project"
+                    await workspace.call(
+                        server.execute_python,
+                        code="print('hello')",
+                        project_path=workspace,
                     )
 
                 # Should have logged the execution attempt and result
@@ -267,7 +295,7 @@ class TestExecutePythonTool:
                     for msg in log_messages
                 ), f"Expected execute_python log, got: {log_messages}"
             finally:
-                server._sandbox_executor._sandbox_available = original
+                agency_tools._sandbox_executor._sandbox_available = original
 
 
 # Integration tests - skip without E2B_API_KEY
@@ -278,58 +306,77 @@ class TestExecutePythonIntegration:
     """Integration tests requiring E2B sandbox."""
 
     @pytest.mark.asyncio
-    async def test_simple_print(self):
+    async def test_simple_print(self, tmp_path, covenant_workspace_factory):
         """Test executing simple print statement."""
         from daem0nmcp.server import execute_python
 
-        result = await execute_python(code="print('hello')", project_path="/test")
+        workspace = covenant_workspace_factory(tmp_path)
+        await workspace.brief()
+        result = await workspace.call(
+            execute_python, code="print('hello')", project_path=workspace
+        )
 
         assert result["success"]
         assert "hello" in result["output"]
 
     @pytest.mark.asyncio
-    async def test_math_calculation(self):
+    async def test_math_calculation(self, tmp_path, covenant_workspace_factory):
         """Test executing math calculation."""
         from daem0nmcp.server import execute_python
 
-        result = await execute_python(code="print(2 + 2)", project_path="/test")
+        workspace = covenant_workspace_factory(tmp_path)
+        await workspace.brief()
+        result = await workspace.call(
+            execute_python, code="print(2 + 2)", project_path=workspace
+        )
 
         assert result["success"]
         assert "4" in result["output"]
 
     @pytest.mark.asyncio
-    async def test_syntax_error(self):
+    async def test_syntax_error(self, tmp_path, covenant_workspace_factory):
         """Test handling syntax error."""
         from daem0nmcp.server import execute_python
 
-        result = await execute_python(
-            code="print('unclosed string", project_path="/test"
+        workspace = covenant_workspace_factory(tmp_path)
+        await workspace.brief()
+        result = await workspace.call(
+            execute_python,
+            code="print('unclosed string",
+            project_path=workspace,
         )
 
         assert not result["success"]
         assert result["error"] is not None
 
     @pytest.mark.asyncio
-    async def test_runtime_error(self):
+    async def test_runtime_error(self, tmp_path, covenant_workspace_factory):
         """Test handling runtime error."""
         from daem0nmcp.server import execute_python
 
-        result = await execute_python(
-            code="raise ValueError('test error')", project_path="/test"
+        workspace = covenant_workspace_factory(tmp_path)
+        await workspace.brief()
+        result = await workspace.call(
+            execute_python,
+            code="raise ValueError('test error')",
+            project_path=workspace,
         )
 
         assert not result["success"]
         assert "ValueError" in str(result["error"])
 
     @pytest.mark.asyncio
-    async def test_timeout_respected(self):
+    async def test_timeout_respected(self, tmp_path, covenant_workspace_factory):
         """Test that timeout is respected."""
         from daem0nmcp.server import execute_python
 
         # This should timeout (if sandbox actually runs)
-        result = await execute_python(
+        workspace = covenant_workspace_factory(tmp_path)
+        await workspace.brief()
+        result = await workspace.call(
+            execute_python,
             code="import time; time.sleep(100)",
-            project_path="/test",
+            project_path=workspace,
             timeout_seconds=5,
         )
 

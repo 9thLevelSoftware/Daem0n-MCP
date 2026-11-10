@@ -278,7 +278,7 @@ async def _do_purge_dream_spam(project_path: str, dry_run: bool) -> dict[str, An
     Returns:
         Dict with counts of deleted/would-delete re-evaluations and summaries.
     """
-    from sqlalchemy import delete, select
+    from sqlalchemy import select
 
     try:
         from ..context_manager import get_project_context
@@ -286,8 +286,10 @@ async def _do_purge_dream_spam(project_path: str, dry_run: bool) -> dict[str, An
         from daem0nmcp.context_manager import get_project_context
 
     try:
+        from ..event_store import delete_compatibility_memory
         from ..models import Memory
     except ImportError:
+        from daem0nmcp.event_store import delete_compatibility_memory
         from daem0nmcp.models import Memory
 
     ctx = await get_project_context(project_path)
@@ -344,9 +346,19 @@ async def _do_purge_dream_spam(project_path: str, dry_run: bool) -> dict[str, An
         total_to_delete = reeval_to_delete + summary_to_delete
 
         if not dry_run and total_to_delete:
-            await db_session.execute(
-                delete(Memory).where(Memory.id.in_(total_to_delete))
-            )
+            selected_ids = set(total_to_delete)
+            for memory in all_learning:
+                if memory.id not in selected_ids:
+                    continue
+                deleted_at = ctx.memory_manager._datetime_us()
+                await ctx.memory_manager._append_v7_memory_event(
+                    db_session,
+                    memory,
+                    "memory.deleted",
+                    deleted_at_us=deleted_at,
+                    extra_payload={"reason": "dream_spam_purge"},
+                )
+                await delete_compatibility_memory(db_session, memory)
 
     # Rebuild index after deletion
     if not dry_run and total_to_delete:

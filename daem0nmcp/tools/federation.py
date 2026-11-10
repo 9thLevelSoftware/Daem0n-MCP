@@ -9,7 +9,9 @@ try:
         _default_project_path,
         _missing_project_path_error,
         get_project_context,
+        workspace_registry,
     )
+    from ..covenant import legacy_entrypoint
     from ..logging_config import with_request_id
     from ..mcp_instance import mcp
 except ImportError:
@@ -18,7 +20,9 @@ except ImportError:
         _default_project_path,
         _missing_project_path_error,
         get_project_context,
+        workspace_registry,
     )
+    from daem0nmcp.covenant import legacy_entrypoint
     from daem0nmcp.logging_config import with_request_id
     from daem0nmcp.mcp_instance import mcp
 
@@ -27,6 +31,7 @@ logger = logging.getLogger(__name__)
 
 @mcp.tool(version=__version__)
 @with_request_id
+@legacy_entrypoint("link_projects")
 async def link_projects(
     linked_path: str,
     relationship: str = "related",
@@ -52,7 +57,7 @@ async def link_projects(
     except ImportError:
         from daem0nmcp.links import LinkManager
 
-    link_mgr = LinkManager(ctx.db_manager)
+    link_mgr = LinkManager(ctx.db_manager, registry=workspace_registry)
     return await link_mgr.link_projects(
         source_path=ctx.project_path,
         linked_path=linked_path,
@@ -63,6 +68,7 @@ async def link_projects(
 
 @mcp.tool(version=__version__)
 @with_request_id
+@legacy_entrypoint("unlink_projects")
 async def unlink_projects(
     linked_path: str, project_path: str | None = None
 ) -> dict[str, Any]:
@@ -83,7 +89,7 @@ async def unlink_projects(
     except ImportError:
         from daem0nmcp.links import LinkManager
 
-    link_mgr = LinkManager(ctx.db_manager)
+    link_mgr = LinkManager(ctx.db_manager, registry=workspace_registry)
     return await link_mgr.unlink_projects(
         source_path=ctx.project_path, linked_path=linked_path
     )
@@ -91,6 +97,7 @@ async def unlink_projects(
 
 @mcp.tool(version=__version__)
 @with_request_id
+@legacy_entrypoint("list_linked_projects")
 async def list_linked_projects(project_path: str | None = None) -> dict[str, Any]:
     """
     List all linked projects.
@@ -108,13 +115,14 @@ async def list_linked_projects(project_path: str | None = None) -> dict[str, Any
     except ImportError:
         from daem0nmcp.links import LinkManager
 
-    link_mgr = LinkManager(ctx.db_manager)
+    link_mgr = LinkManager(ctx.db_manager, registry=workspace_registry)
     links = await link_mgr.list_linked_projects(source_path=ctx.project_path)
     return {"links": links}
 
 
 @mcp.tool(version=__version__)
 @with_request_id
+@legacy_entrypoint("consolidate_linked_databases")
 async def consolidate_linked_databases(
     archive_sources: bool = False, project_path: str | None = None
 ) -> dict[str, Any]:
@@ -135,7 +143,7 @@ async def consolidate_linked_databases(
     except ImportError:
         from daem0nmcp.links import LinkManager
 
-    link_mgr = LinkManager(ctx.db_manager)
+    link_mgr = LinkManager(ctx.db_manager, registry=workspace_registry)
     return await link_mgr.consolidate_linked_databases(
         target_path=ctx.project_path, archive_sources=archive_sources
     )

@@ -1,15 +1,144 @@
-# daem0nmcp/tool_search.py
-"""
-Tool Search Index - Dynamic tool discovery for MCP.
+"""Deterministic, dependency-free discovery index for MCP tools."""
 
-Inspired by Anthropic's MCP Tool Search feature.
-Reduces context bloat by allowing clients to search for relevant tools
-instead of loading all tool definitions upfront.
-"""
+from __future__ import annotations
 
+import hashlib
+import math
+import re
+from collections.abc import Mapping
 from dataclasses import dataclass, field
+from types import MappingProxyType
 
-from .bm25_index import BM25Index
+_TOKEN = re.compile(r"[a-z0-9]+")
+# Function words say nothing about which tool is meant, and every written
+# description contains them, so they must not count as a match.
+_STOP_WORDS = frozenset(
+    {
+        "a",
+        "about",
+        "all",
+        "also",
+        "am",
+        "an",
+        "and",
+        "any",
+        "are",
+        "as",
+        "at",
+        "be",
+        "been",
+        "being",
+        "but",
+        "by",
+        "can",
+        "could",
+        "did",
+        "do",
+        "does",
+        "doing",
+        "for",
+        "from",
+        "get",
+        "had",
+        "has",
+        "have",
+        "how",
+        "i",
+        "if",
+        "in",
+        "into",
+        "is",
+        "it",
+        "its",
+        "me",
+        "my",
+        "no",
+        "not",
+        "of",
+        "on",
+        "or",
+        "our",
+        "should",
+        "so",
+        "some",
+        "such",
+        "than",
+        "that",
+        "the",
+        "their",
+        "them",
+        "then",
+        "there",
+        "these",
+        "they",
+        "this",
+        "those",
+        "to",
+        "too",
+        "us",
+        "was",
+        "we",
+        "were",
+        "what",
+        "when",
+        "where",
+        "which",
+        "who",
+        "why",
+        "will",
+        "with",
+        "would",
+        "you",
+        "your",
+    }
+)
+# A term in the tool's name, title or tags outweighs one in its description.
+_NAME_WEIGHT = 2.0
+
+
+def _stem(token: str) -> str:
+    """Fold plural and verb endings so "deleted" finds "delete"."""
+
+    if len(token) > 4 and token.endswith("ies"):
+        token = token[:-3] + "y"
+    else:
+        for suffix in ("ing", "ed", "es", "s"):
+            if token.endswith(suffix) and len(token) - len(suffix) >= 3:
+                # "class" and "status" are singular: stripping their last
+                # letter would stop them meeting "classes" and "statuses".
+                if suffix != "s" or not token.endswith(("ss", "us")):
+                    token = token[: -len(suffix)]
+                break
+    if len(token) > 3 and token.endswith("e"):
+        token = token[:-1]
+    return token
+
+
+def _raw_terms(value: str) -> frozenset[str]:
+    return frozenset(_stem(token) for token in _TOKEN.findall(value.casefold()))
+
+
+def _function_words(value: str) -> frozenset[str]:
+    return frozenset(
+        token for token in _TOKEN.findall(value.casefold()) if token in _STOP_WORDS
+    )
+
+
+def _tokens(value: str) -> frozenset[str]:
+    """Return the stemmed content words of ``value``."""
+
+    return frozenset(
+        _stem(token)
+        for token in _TOKEN.findall(value.casefold())
+        if token not in _STOP_WORDS
+    )
+
+
+def _document_id(name: str) -> int:
+    """Return a stable positive SQLite-compatible identifier for ``name``."""
+
+    digest = hashlib.sha256(name.encode("utf-8", errors="strict")).digest()
+    return int.from_bytes(digest[:8], "big") & 0x7FFF_FFFF_FFFF_FFFF
 
 
 @dataclass
@@ -22,91 +151,156 @@ class ToolMetadata:
     tags: list[str] = field(default_factory=list)
     parameters: dict | None = None
     examples: list[str] = field(default_factory=list)
+    title: str | None = None
+
+
+def _searchable(tool: ToolMetadata) -> str:
+    return " ".join(
+        (
+            tool.name,
+            tool.title or "",
+            tool.description,
+            *tool.tags,
+            *tool.examples,
+        )
+    )
 
 
 class ToolSearchIndex:
-    """
-    Search index for MCP tools.
+    """Small deterministic search index derived from the registered manifest."""
 
-    Enables dynamic tool discovery:
-    1. Tools register with metadata
-    2. Clients search by natural language query
-    3. Only relevant tools are loaded into context
-
-    Expected context savings: 85% for large tool libraries.
-    """
-
-    def __init__(self):
+    def __init__(self) -> None:
         self._tools: dict[str, ToolMetadata] = {}
-        self._bm25 = BM25Index()
-        self._categories: set[str] = set()
+        self._documents: dict[int, frozenset[str]] = {}
+        self._function_words: dict[int, frozenset[str]] = {}
+        self._name_terms: dict[int, frozenset[str]] = {}
+        self._doc_to_name: dict[int, str] = {}
+
+    @property
+    def document_ids(self) -> Mapping[str, int]:
+        """Expose a read-only, stable name-to-document-id mapping for audits."""
+
+        return MappingProxyType(
+            {name: _document_id(name) for name in sorted(self._tools)}
+        )
 
     def add_tool(self, tool: ToolMetadata) -> None:
-        """Add a tool to the search index."""
-        self._tools[tool.name] = tool
+        """Add or atomically replace a tool in the search index."""
 
-        # Build searchable text
-        search_text = f"{tool.name} {tool.description}"
-        if tool.tags:
-            search_text += " " + " ".join(tool.tags)
-        if tool.examples:
-            search_text += " " + " ".join(tool.examples)
+        if not isinstance(tool.name, str) or not tool.name.strip():
+            raise ValueError("tool name must be a non-empty string")
+        if not isinstance(tool.description, str):
+            raise ValueError("tool description must be a string")
 
-        # Use tool name as doc_id (hash for BM25)
-        doc_id = hash(tool.name) & 0x7FFFFFFF  # Positive int
-        self._bm25.add_document(doc_id, search_text, tags=tool.tags)
+        name = tool.name
+        doc_id = _document_id(name)
+        owner = self._doc_to_name.get(doc_id)
+        if owner is not None and owner != name:
+            raise ValueError("stable tool document identifier collision")
 
-        if tool.category:
-            self._categories.add(tool.category)
+        if tool.title is not None and not isinstance(tool.title, str):
+            raise ValueError("tool title must be a string")
+
+        self._tools[name] = tool
+        # Function words are indexed apart from content words, so a content
+        # word whose stem equals one ("notes" and "not") cannot match it.
+        text = _searchable(tool)
+        self._documents[doc_id] = _tokens(text)
+        self._function_words[doc_id] = _function_words(text)
+        self._name_terms[doc_id] = _raw_terms(
+            " ".join((name, tool.title or "", *tool.tags))
+        )
+        self._doc_to_name[doc_id] = name
 
     def remove_tool(self, name: str) -> None:
-        """Remove a tool from the index."""
-        if name in self._tools:
-            doc_id = hash(name) & 0x7FFFFFFF
-            self._bm25.remove_document(doc_id)
-            del self._tools[name]
+        """Remove a tool and every corresponding search document."""
+
+        if name not in self._tools:
+            return
+        doc_id = _document_id(name)
+        del self._tools[name]
+        self._documents.pop(doc_id, None)
+        self._function_words.pop(doc_id, None)
+        self._name_terms.pop(doc_id, None)
+        self._doc_to_name.pop(doc_id, None)
 
     def search(
         self, query: str, top_k: int = 10, category: str | None = None
     ) -> list[ToolMetadata]:
-        """
-        Search for tools matching the query.
+        """Return deterministic matches for a natural-language query.
 
-        Args:
-            query: Natural language search query
-            top_k: Maximum results
-            category: Optional category filter
-
-        Returns:
-            List of matching ToolMetadata objects
+        Each query word that a tool's text contains scores by how rare the
+        word is among the indexed tools, doubled when the tool's name, title
+        or tags contain it.  Function words are ignored unless the query has
+        nothing else, and plural and verb endings are folded.
         """
+
+        if not isinstance(top_k, int) or isinstance(top_k, bool) or top_k <= 0:
+            raise ValueError("top_k must be a positive integer")
         if not self._tools:
             return []
+        query_tokens = _tokens(query)
+        documents = self._documents
+        if not query_tokens:
+            query_tokens = _function_words(query)
+            documents = self._function_words
+        if not query_tokens:
+            return []
+        normalized_query = " ".join(_TOKEN.findall(query.casefold()))
 
-        results = self._bm25.search(query, top_k=top_k * 2)
+        total = len(documents)
+        weights = {
+            token: math.log(
+                1.0 + total / sum(token in document for document in documents.values())
+            )
+            for token in sorted(query_tokens)
+            if any(token in document for document in documents.values())
+        }
 
-        # Map back to tools
-        matched_tools = []
-        for doc_id, _score in results:
-            for name, tool in self._tools.items():
-                if (hash(name) & 0x7FFFFFFF) == doc_id:
-                    if category is None or tool.category == category:
-                        matched_tools.append(tool)
-                    break
+        ranked: list[tuple[float, int, str, ToolMetadata]] = []
+        for doc_id, document_tokens in documents.items():
+            name = self._doc_to_name[doc_id]
+            tool = self._tools[name]
+            if category is not None and tool.category != category:
+                continue
+            matched = sorted(weights.keys() & document_tokens)
+            if not matched:
+                continue
+            name_terms = self._name_terms[doc_id]
+            score = sum(
+                weights[token] * (_NAME_WEIGHT if token in name_terms else 1.0)
+                for token in matched
+            )
+            phrase = int(normalized_query in _searchable(tool).casefold())
+            ranked.append((-round(score, 9), -phrase, name, tool))
 
-        return matched_tools[:top_k]
+        ranked.sort(key=lambda item: item[:3])
+        return [item[3] for item in ranked[:top_k]]
 
     def get_tool(self, name: str) -> ToolMetadata | None:
         """Get a specific tool by name."""
+
         return self._tools.get(name)
 
     def get_categories(self) -> list[str]:
-        """Get all tool categories."""
-        return sorted(self._categories)
+        """Get all currently represented tool categories."""
+
+        return sorted(
+            {
+                tool.category
+                for tool in self._tools.values()
+                if tool.category is not None
+            }
+        )
 
     def get_tools_by_category(self, category: str) -> list[ToolMetadata]:
-        """Get all tools in a category."""
-        return [tool for tool in self._tools.values() if tool.category == category]
+        """Get tools in a category in deterministic name order."""
+
+        return [
+            self._tools[name]
+            for name in sorted(self._tools)
+            if self._tools[name].category == category
+        ]
 
     def __len__(self) -> int:
         return len(self._tools)

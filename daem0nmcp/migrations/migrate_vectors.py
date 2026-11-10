@@ -1,5 +1,4 @@
-"""
-SQLite to Qdrant Vector Migration.
+"""Deprecated format-6 SQLite-to-Qdrant vector migration.
 
 One-time migration script to transfer vector embeddings from SQLite's
 vector_embedding column to Qdrant vector store.
@@ -7,8 +6,9 @@ vector_embedding column to Qdrant vector store.
 Usage:
     python -m daem0nmcp.migrations.migrate_vectors [--project-path PATH]
 
-The migration is idempotent - running it multiple times is safe and will
-only migrate vectors that aren't already in Qdrant.
+The migration is idempotent for architecture format 6.  Architecture format 7
+uses rebuildable dense projections and is refused before optional vector,
+database, or Qdrant dependencies are imported.
 """
 
 import argparse
@@ -17,21 +17,29 @@ import logging
 import sys
 from collections.abc import Callable
 from pathlib import Path
+from typing import TYPE_CHECKING
 
-from sqlalchemy import select
-
-from daem0nmcp import vectors
-from daem0nmcp.config import Settings, settings
-from daem0nmcp.database import DatabaseManager
-from daem0nmcp.models import Memory
-from daem0nmcp.qdrant_store import QdrantVectorStore
+if TYPE_CHECKING:
+    from daem0nmcp.database import DatabaseManager
+    from daem0nmcp.qdrant_store import QdrantVectorStore
 
 logger = logging.getLogger(__name__)
 
+_V6_ONLY_ERROR = (
+    "Deprecated v6-only vector migration cannot run against format 7; use "
+    "`python -m daem0nmcp.cli rebuild-projection --projection dense "
+    "--workspace-id <workspace-id>` instead."
+)
+
+
+def _require_v6(format_version: int) -> None:
+    if format_version != 6:
+        raise RuntimeError(_V6_ONLY_ERROR)
+
 
 async def migrate_vectors_to_qdrant(
-    db: DatabaseManager,
-    qdrant: QdrantVectorStore,
+    db: "DatabaseManager",
+    qdrant: "QdrantVectorStore",
     batch_size: int = 100,
     progress_callback: Callable[[int, int], None] | None = None,
 ) -> dict:
@@ -52,10 +60,20 @@ async def migrate_vectors_to_qdrant(
         - total: Total memories processed
         - errors: List of error messages for failed migrations
     """
+    _require_v6(getattr(db, "format_version", 0))
+
+    from sqlalchemy import select
+
+    from daem0nmcp import vectors
+    from daem0nmcp.config import settings
+    from daem0nmcp.models import Memory
+
     result = {"migrated": 0, "skipped": 0, "failed": 0, "total": 0, "errors": []}
 
-    # Ensure database is initialized
-    await db.init_db()
+    # This deprecated copier must not publish v7 schema into the source before
+    # reading it.  The dedicated initializer caps migrations at the last v6
+    # schema and deliberately avoids current-model ``create_all``.
+    await db.init_legacy_v6()
 
     async with db.get_session() as session:
         # Query all memories with vector embeddings
@@ -141,35 +159,60 @@ async def run_migration(project_path: str | None = None) -> dict:
     Returns:
         Migration result dictionary.
     """
-    # Resolve project path
+    from daem0nmcp.config import Settings
+    from daem0nmcp.storage_activation import (
+        DatabaseFileLock,
+        has_canonical_v7_state,
+        resolve_active_database,
+    )
+
+    # Resolve and authenticate the active database before constructing either
+    # legacy database machinery or a Qdrant client.
     project_dir = Path(project_path).resolve() if project_path else Path.cwd()
 
     logger.info(f"Running vector migration for project: {project_dir}")
 
     # Initialize settings with project path
-    settings = Settings(project_root=str(project_dir))
-    storage_path = settings.get_storage_path()
-    qdrant_path = settings.get_qdrant_path()
-
-    logger.info(f"SQLite storage path: {storage_path}")
-    logger.info(f"Qdrant storage path: {qdrant_path}")
-
-    # Initialize database and Qdrant
-    db = DatabaseManager(storage_path=storage_path)
-    qdrant = QdrantVectorStore(path=qdrant_path)
-
-    def progress_reporter(current: int, total: int):
-        percent = (current / total) * 100 if total > 0 else 0
-        logger.info(f"Migration progress: {current}/{total} ({percent:.1f}%)")
-
-    try:
-        result = await migrate_vectors_to_qdrant(
-            db=db, qdrant=qdrant, progress_callback=progress_reporter
+    project_settings = Settings(project_root=str(project_dir))
+    storage_path = project_settings.get_storage_path()
+    with DatabaseFileLock(storage_path, "shared"):
+        active = resolve_active_database(storage_path)
+        active_format = (
+            7
+            if active.pointer is None and has_canonical_v7_state(active.path)
+            else active.format_version
         )
-        return result
-    finally:
-        await db.close()
-        qdrant.close()
+        _require_v6(active_format)
+
+        from daem0nmcp.database import DatabaseManager
+
+        db = DatabaseManager(storage_path=storage_path)
+        try:
+            # Recheck the manager's authoritative selection before even resolving
+            # or constructing the legacy Qdrant target.
+            _require_v6(db.format_version)
+            qdrant_path = project_settings.get_qdrant_path()
+            logger.info(f"SQLite storage path: {storage_path}")
+            logger.info(f"Qdrant storage path: {qdrant_path}")
+
+            from daem0nmcp.qdrant_store import QdrantVectorStore
+
+            qdrant = QdrantVectorStore(path=qdrant_path)
+            try:
+
+                def progress_reporter(current: int, total: int):
+                    percent = (current / total) * 100 if total > 0 else 0
+                    logger.info(
+                        f"Migration progress: {current}/{total} ({percent:.1f}%)"
+                    )
+
+                return await migrate_vectors_to_qdrant(
+                    db=db, qdrant=qdrant, progress_callback=progress_reporter
+                )
+            finally:
+                qdrant.close()
+        finally:
+            await db.close()
 
 
 def main():

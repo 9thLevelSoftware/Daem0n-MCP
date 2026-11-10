@@ -18,10 +18,8 @@ It sits between the MCP instance and the tool implementations in the DAG.
 import asyncio
 import contextlib
 import logging
-import os
 import time
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -33,6 +31,11 @@ try:
     from .memory import MemoryManager
     from .rules import RulesEngine
     from .rwlock import RWLock
+    from .workspace import (
+        WorkspaceAccessError,
+        WorkspaceRegistry,
+        resolve_derived_path,
+    )
 except ImportError:
     from daem0nmcp.config import settings
     from daem0nmcp.covenant import set_context_callback
@@ -41,6 +44,11 @@ except ImportError:
     from daem0nmcp.memory import MemoryManager
     from daem0nmcp.rules import RulesEngine
     from daem0nmcp.rwlock import RWLock
+    from daem0nmcp.workspace import (
+        WorkspaceAccessError,
+        WorkspaceRegistry,
+        resolve_derived_path,
+    )
 
 logger = logging.getLogger(__name__)
 
@@ -57,6 +65,7 @@ class ProjectContext:
     db_manager: DatabaseManager
     memory_manager: MemoryManager
     rules_engine: RulesEngine
+    workspace_id: str | None = None
     initialized: bool = False
     last_accessed: float = 0.0  # For LRU tracking
     active_requests: int = 0  # Prevent eviction while in use
@@ -79,8 +88,13 @@ _task_contexts_lock = asyncio.Lock()
 _last_eviction: float = 0.0
 _EVICTION_INTERVAL_SECONDS: float = 60.0
 
-# Default project path (ONLY used if DAEM0NMCP_PROJECT_ROOT is explicitly set)
-_default_project_path: str | None = os.environ.get("DAEM0NMCP_PROJECT_ROOT")
+# Settings already include the environment, the file DAEM0NMCP_ENV_FILE names
+# (a `.env` in the working directory is not read), and the default directory.
+workspace_registry = WorkspaceRegistry.from_settings(settings)
+try:
+    _default_project_path: str | None = str(workspace_registry.default.root)
+except WorkspaceAccessError:
+    _default_project_path = None
 
 # Configuration constants (read from settings)
 MAX_PROJECT_CONTEXTS = settings.max_project_contexts
@@ -94,9 +108,9 @@ def _get_context_for_covenant(project_path: str) -> ProjectContext | None:
     This is called by the covenant decorators to check session state.
     """
     try:
-        normalized = str(Path(project_path).resolve())
+        normalized = str(workspace_registry.resolve(project_path).root)
         return _project_contexts.get(normalized)
-    except Exception:
+    except (OSError, RuntimeError, ValueError):
         return None
 
 
@@ -146,7 +160,9 @@ def _missing_project_path_error() -> dict[str, Any]:
     }
 
 
-def _check_covenant_communion(project_path: str) -> dict[str, Any] | None:
+def _check_covenant_communion(
+    project_path: str, tool_name: str = "recall"
+) -> dict[str, Any] | None:
     """
     Check if communion (get_briefing) was performed for this project.
 
@@ -159,12 +175,9 @@ def _check_covenant_communion(project_path: str) -> dict[str, Any] | None:
     Returns:
         Violation dict if communion required, None if communion complete
     """
-    from .covenant import CovenantViolation
+    from .covenant import authorize_legacy_call
 
-    ctx = _get_context_for_covenant(project_path)
-    if ctx is None or not ctx.briefed:
-        return CovenantViolation.communion_required(project_path)
-    return None
+    return authorize_legacy_call(tool_name, {"project_path": project_path})
 
 
 def _check_covenant_counsel(tool_name: str, project_path: str) -> dict[str, Any] | None:
@@ -181,46 +194,9 @@ def _check_covenant_counsel(tool_name: str, project_path: str) -> dict[str, Any]
     Returns:
         Violation dict if counsel required, None if counsel is fresh
     """
-    from .covenant import COUNSEL_TTL_SECONDS, CovenantViolation
+    from .covenant import authorize_legacy_call
 
-    # First check communion
-    communion_violation = _check_covenant_communion(project_path)
-    if communion_violation:
-        return communion_violation
-
-    ctx = _get_context_for_covenant(project_path)
-    if ctx is None:
-        return CovenantViolation.counsel_required(tool_name, project_path)
-
-    context_checks = ctx.context_checks
-    if not context_checks:
-        return CovenantViolation.counsel_required(tool_name, project_path)
-
-    # Find the most recent context check and verify it's still fresh
-    now = datetime.now(timezone.utc)
-    most_recent_age = None
-
-    for check in context_checks:
-        if isinstance(check, dict) and "timestamp" in check:
-            try:
-                check_time = datetime.fromisoformat(check["timestamp"])
-                if check_time.tzinfo is None:
-                    check_time = check_time.replace(tzinfo=timezone.utc)
-                age = (now - check_time).total_seconds()
-                if most_recent_age is None or age < most_recent_age:
-                    most_recent_age = age
-            except (ValueError, TypeError):
-                continue
-
-    if most_recent_age is None:
-        return CovenantViolation.counsel_required(tool_name, project_path)
-
-    if most_recent_age > COUNSEL_TTL_SECONDS:
-        return CovenantViolation.counsel_expired(
-            tool_name, project_path, int(most_recent_age)
-        )
-
-    return None  # Counsel is fresh
+    return authorize_legacy_call(tool_name, {"project_path": project_path})
 
 
 def _normalize_path(path: str) -> str:
@@ -232,7 +208,7 @@ def _normalize_path(path: str) -> str:
 
 def _get_storage_for_project(project_path: str) -> str:
     """Get the storage path for a project."""
-    return str(Path(project_path) / ".daem0nmcp" / "storage")
+    return str(resolve_derived_path(project_path, ".daem0nmcp", "storage"))
 
 
 def _resolve_within_project(
@@ -351,16 +327,11 @@ async def get_project_context(project_path: str | None = None) -> ProjectContext
         ProjectContext with initialized managers for that project.
     """
 
-    # Use default if not specified
-    if not project_path:
-        project_path = _default_project_path
-
-    # Normalize for consistent caching - validate project_path is not None
-    if not project_path:
-        raise ValueError(
-            "project_path is required when DAEM0NMCP_PROJECT_ROOT is not set"
-        )
-    normalized = _normalize_path(project_path)
+    # Authorize the selector before deriving storage or constructing a database.
+    if not project_path and not _default_project_path:
+        raise WorkspaceAccessError()
+    workspace = workspace_registry.resolve(project_path or _default_project_path)
+    normalized = str(workspace.root)
 
     # Fast path with read lock: context exists and is initialized
     # Multiple concurrent readers can check simultaneously
@@ -419,6 +390,7 @@ async def get_project_context(project_path: str | None = None) -> ProjectContext
             db_manager=db_mgr,
             memory_manager=mem_mgr,
             rules_engine=rules_eng,
+            workspace_id=workspace.workspace_id,
             initialized=False,
             last_accessed=time.time(),
         )

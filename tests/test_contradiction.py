@@ -3,6 +3,7 @@
 import shutil
 import tempfile
 from datetime import datetime, timezone
+from importlib.util import find_spec
 
 import pytest
 
@@ -14,6 +15,17 @@ from daem0nmcp.graph.contradiction import (
     invalidate_contradicted_facts,
 )
 from daem0nmcp.models import Memory, MemoryVersion
+
+requires_models_local = pytest.mark.skipif(
+    find_spec("sentence_transformers") is None,
+    reason="models-local profile is not installed",
+)
+
+
+@pytest.fixture(autouse=True)
+def models_local_enabled(monkeypatch):
+    """This suite exercises real vector similarity, so opt into its profile."""
+    monkeypatch.setenv("DAEM0NMCP_MODELS_LOCAL_ENABLED", "true")
 
 
 @pytest.fixture
@@ -142,6 +154,7 @@ class TestContradictionDataclass:
         assert c.negation_pattern is None
 
 
+@requires_models_local
 @pytest.mark.asyncio
 async def test_detect_contradictions_high_similarity_with_negation(db_manager):
     """High similarity + negation pattern = contradiction detected."""
@@ -178,6 +191,7 @@ async def test_detect_contradictions_high_similarity_with_negation(db_manager):
         assert contradictions[0].negation_pattern is not None
 
 
+@requires_models_local
 @pytest.mark.asyncio
 async def test_detect_contradictions_no_contradiction_without_negation(db_manager):
     """High similarity without negation = no contradiction."""
@@ -211,6 +225,7 @@ async def test_detect_contradictions_no_contradiction_without_negation(db_manage
         assert len(contradictions) == 0
 
 
+@requires_models_local
 @pytest.mark.asyncio
 async def test_detect_contradictions_skips_invalidated_versions(db_manager):
     """Already invalidated versions should not be checked for contradictions."""
@@ -244,6 +259,7 @@ async def test_detect_contradictions_skips_invalidated_versions(db_manager):
         assert len(contradictions) == 0
 
 
+@requires_models_local
 @pytest.mark.asyncio
 async def test_detect_contradictions_excludes_same_memory(db_manager):
     """Can exclude versions from the same memory (avoid self-contradiction)."""
@@ -278,6 +294,7 @@ async def test_detect_contradictions_excludes_same_memory(db_manager):
         assert len(contradictions) == 0
 
 
+@requires_models_local
 @pytest.mark.asyncio
 async def test_detect_contradictions_low_similarity_no_contradiction(db_manager):
     """Low similarity = no contradiction even with negation patterns."""
@@ -314,36 +331,55 @@ async def test_detect_contradictions_low_similarity_no_contradiction(db_manager)
 @pytest.mark.asyncio
 async def test_invalidate_contradicted_facts(db_manager):
     """invalidate_contradicted_facts should set valid_to and link versions."""
-    async with db_manager.get_session() as session:
-        # Create memories and versions
-        memory1 = Memory(category="decision", content="Old fact")
-        memory2 = Memory(category="decision", content="New fact")
-        session.add_all([memory1, memory2])
-        await session.flush()
+    from sqlalchemy import select
 
-        old_version = MemoryVersion(
-            memory_id=memory1.id,
-            version_number=1,
-            content="Old fact",
-            change_type="created",
-            valid_to=None,
-        )
-        new_version = MemoryVersion(
-            memory_id=memory2.id,
-            version_number=1,
-            content="New contradicting fact",
-            change_type="created",
-            valid_to=None,
-        )
-        session.add_all([old_version, new_version])
-        await session.commit()
+    from daem0nmcp.memory import MemoryManager
+
+    manager = MemoryManager(db_manager)
+    old_record = await manager.remember(
+        category="decision",
+        content="Old fact",
+        project_path=str(db_manager.storage_path),
+    )
+    new_record = await manager.remember(
+        category="decision",
+        content="New contradicting fact",
+        project_path=str(db_manager.storage_path),
+    )
+    async with db_manager.get_session() as session:
+        versions = {
+            version.content: version
+            for version in (
+                await session.execute(
+                    select(MemoryVersion).where(
+                        MemoryVersion.content.in_(
+                            ("Old fact", "New contradicting fact")
+                        )
+                    )
+                )
+            ).scalars()
+        }
+        old_version = versions["Old fact"]
+        new_version = versions["New contradicting fact"]
+        memories = {
+            memory.id: memory
+            for memory in (
+                await session.execute(
+                    select(Memory).where(
+                        Memory.id.in_((old_version.memory_id, new_version.memory_id))
+                    )
+                )
+            ).scalars()
+        }
+        assert old_record["id"]
+        assert new_record["id"]
 
         # Create contradiction manually
         contradiction = Contradiction(
             new_content="New contradicting fact",
             existing_version_id=old_version.id,
             existing_content="Old fact",
-            existing_memory_id=memory1.id,
+            existing_memory_id=memories[old_version.memory_id].id,
             similarity_score=0.9,
         )
 
@@ -412,6 +448,7 @@ async def test_invalidate_skips_already_invalidated(db_manager):
         assert version.valid_to.day == 1
 
 
+@requires_models_local
 @pytest.mark.asyncio
 async def test_check_and_invalidate_combined(db_manager):
     """check_and_invalidate_contradictions combines detection and invalidation."""

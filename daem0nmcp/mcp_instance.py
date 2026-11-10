@@ -30,9 +30,11 @@ except ImportError:
 try:
     from .config import settings
     from .logging_config import StructuredFormatter
+    from .transport_security import build_fastmcp_auth
 except ImportError:
     from daem0nmcp.config import settings
     from daem0nmcp.logging_config import StructuredFormatter
+    from daem0nmcp.transport_security import build_fastmcp_auth
 
 # Configure logging
 logging.basicConfig(
@@ -49,5 +51,5 @@ if os.getenv("DAEM0NMCP_STRUCTURED_LOGS"):
     daem0n_logger.addHandler(handler)
     daem0n_logger.setLevel(logging.INFO)
 
-# Initialize FastMCP server
-mcp = FastMCP("Daem0nMCP")
+# Use FastMCP's supported provider boundary for HTTP authentication.
+mcp = FastMCP("Daem0nMCP", auth=build_fastmcp_auth())

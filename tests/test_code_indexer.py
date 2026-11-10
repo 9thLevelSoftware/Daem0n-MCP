@@ -139,6 +139,18 @@ fn helper() {}
     shutil.rmtree(temp_dir)
 
 
+@pytest.fixture
+async def db_manager(temp_project):
+    from daem0nmcp.database import DatabaseManager
+
+    db = DatabaseManager(str(temp_project / ".daem0nmcp" / "storage"))
+    try:
+        await db.init_db()
+        yield db
+    finally:
+        await db.close()
+
+
 class TestTreeSitterIndexer:
     """Tests for TreeSitterIndexer."""
 
@@ -318,16 +330,6 @@ class TestTreeSitterIndexer:
 
 class TestCodeIndexManager:
     """Tests for CodeIndexManager."""
-
-    @pytest.fixture
-    async def db_manager(self, temp_project):
-        """Create a database manager for testing."""
-        from daem0nmcp.database import DatabaseManager
-
-        db = DatabaseManager(str(temp_project / ".daem0nmcp" / "storage"))
-        await db.init_db()
-        yield db
-        await db.close()
 
     @pytest.mark.asyncio
     async def test_index_project(self, temp_project, db_manager):
@@ -589,20 +591,6 @@ class TestLanguageConfig:
 class TestCodeEntityModel:
     """Tests for the CodeEntity model (no tree-sitter required)."""
 
-    @pytest.fixture
-    async def db_manager(self):
-        """Create a database manager for testing."""
-        import tempfile
-
-        from daem0nmcp.database import DatabaseManager
-
-        temp_dir = Path(tempfile.mkdtemp())
-        db = DatabaseManager(str(temp_dir / ".daem0nmcp" / "storage"))
-        await db.init_db()
-        yield db
-        await db.close()
-        shutil.rmtree(temp_dir, ignore_errors=True)
-
     @pytest.mark.asyncio
     async def test_create_code_entity(self, db_manager):
         """Test creating a CodeEntity."""
@@ -637,20 +625,6 @@ class TestCodeEntityModel:
 
 class TestMemoryCodeRefModel:
     """Tests for the MemoryCodeRef model (no tree-sitter required)."""
-
-    @pytest.fixture
-    async def db_manager(self):
-        """Create a database manager for testing."""
-        import tempfile
-
-        from daem0nmcp.database import DatabaseManager
-
-        temp_dir = Path(tempfile.mkdtemp())
-        db = DatabaseManager(str(temp_dir / ".daem0nmcp" / "storage"))
-        await db.init_db()
-        yield db
-        await db.close()
-        shutil.rmtree(temp_dir, ignore_errors=True)
 
     @pytest.mark.asyncio
     async def test_create_memory_code_ref(self, db_manager):
