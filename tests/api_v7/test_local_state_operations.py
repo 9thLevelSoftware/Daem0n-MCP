@@ -287,8 +287,9 @@ class ActiveContextOperationTests(unittest.IsolatedAsyncioTestCase):
             )
             connection.commit()
             events_before = connection.execute(
-                "SELECT count(*) FROM memory_events"
-            ).fetchone()[0]
+                "SELECT (SELECT count(*) FROM memory_events),"
+                "(SELECT count(*) FROM governance_events)"
+            ).fetchone()
 
         for refused in (
             self._add_request(never_added),
@@ -304,7 +305,10 @@ class ActiveContextOperationTests(unittest.IsolatedAsyncioTestCase):
         with closing(sqlite3.connect(self.fixture.database)) as connection:
             self.assertEqual(
                 events_before,
-                connection.execute("SELECT count(*) FROM memory_events").fetchone()[0],
+                connection.execute(
+                    "SELECT (SELECT count(*) FROM memory_events),"
+                    "(SELECT count(*) FROM governance_events)"
+                ).fetchone(),
             )
             self.assertEqual(
                 [(added_first, 4)],

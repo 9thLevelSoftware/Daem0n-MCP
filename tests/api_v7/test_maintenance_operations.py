@@ -2344,6 +2344,66 @@ class MaintenanceOperationTests(unittest.IsolatedAsyncioTestCase):
             ).fetchone()[0]
         self.assertEqual(0, deleted)
 
+    async def test_dream_purge_preview_survives_unrelated_writes_only(self) -> None:
+        """The purge shares the freshness rule of the other cleanups."""
+        from daem0nmcp.api.v7.maintenance_operations import (
+            MaintenanceOperationError,
+        )
+
+        superseded = [
+            await self._promote_candidate(
+                source_kind="dreaming",
+                key=f"dream-{strategy}-old",
+                source_event="1",
+                promoted_at=NOW - timedelta(days=3),
+                strategy=strategy,
+            )
+            for strategy in ("failed_decision", "pending_outcome")
+        ]
+        for strategy in ("failed_decision", "pending_outcome"):
+            await self._promote_candidate(
+                source_kind="dreaming",
+                key=f"dream-{strategy}-new",
+                source_event="2",
+                promoted_at=NOW - timedelta(days=2),
+                strategy=strategy,
+            )
+        bystander = self._append_record("e", "Unrelated note.", created_at=NOW)
+        operations = self._operations()
+        relationships = self._relationship_operations()
+
+        async def preview():
+            return await operations["dream_duplicates_preview"](
+                workspace=self.workspace,
+                request=_request(
+                    "dream_duplicates_preview",
+                    workspace_id=self.workspace.workspace_id,
+                ),
+            )
+
+        async def purge(token: str):
+            return await operations["dream_duplicates_purge"](
+                workspace=self.workspace,
+                request=self._apply_request("dream_duplicates_purge", token),
+            )
+
+        stale = await preview()
+        self.assertEqual(sorted(superseded), sorted(stale.sample_ids))
+        await self._link(
+            relationships, bystander, superseded[0], "depends_on", "link-dream-01"
+        )
+        with self.assertRaises(MaintenanceOperationError) as refused:
+            await purge(stale.selection_token)
+        self.assertEqual("CONFLICT", refused.exception.code)
+
+        fresh = await preview()
+        newcomer = self._append_record("f", "A brand new warning.", created_at=NOW)
+        await self._link(
+            relationships, bystander, newcomer, "related_to", "link-dream-02"
+        )
+        receipt = await purge(fresh.selection_token)
+        self.assertEqual(sorted(superseded), sorted(receipt.affected_ids))
+
     async def test_a_preview_too_far_behind_the_log_is_refused(self) -> None:
         """Past the bounded look-back the apply cannot prove freshness."""
         from unittest.mock import patch

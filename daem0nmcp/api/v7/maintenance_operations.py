@@ -426,11 +426,13 @@ def _require_untouched_since_preview(
     The apply has already re-run the selection and matched every selected
     record and state to the preview, so a write that changed the selection is
     refused before this point.  What that comparison cannot see is a write
-    that leaves a record's own state alone: a relationship, citation or
-    active-context entry naming it.  Every event appended since the preview
-    is therefore checked, and one on a depended-on record's stream or naming
-    its ID anywhere in its payload is a conflict.  Any other write is
-    unrelated and leaves the preview valid.
+    that leaves a record's own state alone: a relationship or citation
+    naming it.  Every memory event appended since the preview is therefore
+    checked, and one on a depended-on record's stream or naming its ID
+    anywhere in its payload is a conflict.  Any other write is unrelated and
+    leaves the preview valid.  Writes outside the memory event log are not
+    seen here, as they never were: an active-context entry lives in the
+    governance log.
     """
 
     appended = _events_since_preview(connection, workspace_id, claims.source_high_water)
