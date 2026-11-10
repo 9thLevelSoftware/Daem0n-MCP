@@ -1818,6 +1818,142 @@ class MaintenanceOperationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((1,), streams)
         self._assert_replay_reproduces_projections()
 
+    async def _promote_candidate(
+        self,
+        *,
+        source_kind: str,
+        key: str,
+        source_event: str,
+        promoted_at: datetime,
+        strategy: str = "failed_decision",
+        tags: list[str] | None = None,
+    ) -> str:
+        """Stage and promote one capture candidate; return the new record ID."""
+        from daem0nmcp.capture_candidates import (
+            CaptureCandidateRequest,
+            CaptureCandidateStore,
+        )
+
+        store = CaptureCandidateStore(clock=lambda: promoted_at)
+        record = {
+            "record_type": "learning",
+            "content": f"Re-evaluated the retry decision ({key}).",
+            "rationale": "The later evidence contradicts it.",
+            "context": {},
+            "tags": ["dreaming", "failed-decision"] if tags is None else tags,
+        }
+        candidate = await store.stage(
+            self.workspace,
+            CaptureCandidateRequest(
+                source_kind=source_kind,
+                record=record,
+                provenance={
+                    "strategy": strategy,
+                    "strategy_version": 1,
+                    "sources": [
+                        {
+                            "record_id": "mem_" + "9" * 64,
+                            "event_id": "evt_" + source_event * 64,
+                            "content_hash": "c" * 64,
+                            "state_hash": "d" * 64,
+                        }
+                    ],
+                },
+                idempotency_key=f"candidate-{key}-0001",
+            ),
+        )
+        promotion = await store.promote(
+            self.workspace,
+            candidate_id=candidate.candidate_id,
+            record=record,
+            idempotency_key=f"promotion-{key}-0001",
+        )
+        return promotion.record.record_id
+
+    async def test_dream_purge_recognises_promoted_dreaming_output(self) -> None:
+        """Only records dreaming itself produced are purgeable, newest kept."""
+        older = await self._promote_candidate(
+            source_kind="dreaming",
+            key="dream-older",
+            source_event="1",
+            promoted_at=NOW - timedelta(days=3),
+        )
+        newer = await self._promote_candidate(
+            source_kind="dreaming",
+            key="dream-newer",
+            source_event="2",
+            promoted_at=NOW - timedelta(days=2),
+            # The promoter may retag; the capture provenance still marks it.
+            tags=["reviewed"],
+        )
+        other_strategy = await self._promote_candidate(
+            source_kind="dreaming",
+            key="dream-pending",
+            source_event="3",
+            promoted_at=NOW - timedelta(days=4),
+            strategy="pending_outcome",
+        )
+        # Same shape and tags, but captured from a tool result, not a dream.
+        captured = [
+            await self._promote_candidate(
+                source_kind="tool_result",
+                key=f"tool-{index}",
+                source_event=str(index),
+                promoted_at=NOW - timedelta(days=5 - index),
+            )
+            for index in (1, 2)
+        ]
+        # Tagged like dream output by hand, with no capture provenance.
+        hand_tagged = [
+            self._append_record(
+                suffix,
+                "Hand-written note about the retry decision.",
+                created_at=NOW - timedelta(days=6),
+                record_type="learning",
+                tags=["dreaming", "failed-decision"],
+            )
+            for suffix in "ab"
+        ]
+        operations = self._operations()
+
+        preview = await operations["dream_duplicates_preview"](
+            workspace=self.workspace,
+            request=_request(
+                "dream_duplicates_preview",
+                workspace_id=self.workspace.workspace_id,
+            ),
+        )
+
+        self.assertEqual([older], preview.sample_ids)
+        self.assertEqual(
+            (1, 1, 0, 0),
+            (
+                preview.counts["selected"],
+                preview.counts["dreaming_duplicates"],
+                preview.counts["reevaluation_duplicates"],
+                preview.counts["summary_duplicates"],
+            ),
+        )
+        receipt = await operations["dream_duplicates_purge"](
+            workspace=self.workspace,
+            request=_request(
+                "dream_duplicates_purge",
+                workspace_id=self.workspace.workspace_id,
+                selection_token=preview.selection_token,
+                preflight_token=PREFLIGHT_TOKEN,
+            ),
+        )
+        self.assertEqual([older], receipt.affected_ids)
+        with closing(sqlite3.connect(self.database)) as connection:
+            live = {
+                row[0]
+                for row in connection.execute(
+                    "SELECT record_id FROM memory_records WHERE deleted_at_us IS NULL"
+                )
+            }
+        self.assertEqual({newer, other_strategy, *captured, *hand_tagged}, live)
+        self._assert_replay_reproduces_projections()
+
     async def test_dream_purge_closes_relationships_of_purged_records(self) -> None:
         """Purged dream duplicates must not leave dangling relationships."""
         source_id = "mem_" + "f" * 64

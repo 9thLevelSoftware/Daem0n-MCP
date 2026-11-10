@@ -840,12 +840,86 @@ def _dream_criteria(_request: AdmittedRequest) -> dict[str, Any]:
     return {}
 
 
+def _promoted_dreaming_records(
+    connection: sqlite3.Connection,
+    workspace_id: str,
+    scan_limit: int | None,
+    cancelled: threading.Event | None,
+) -> Iterator[tuple[tuple[str, str], _RecordSnapshot]]:
+    """Yield the live records v7 dreaming produced, keyed by what they re-examine.
+
+    v7 dreaming stages capture candidates; a record is its output only when
+    it was created by promoting a candidate whose ``source_kind`` is
+    ``dreaming``.  Tags are not consulted: the promoter may change them, and
+    anyone may write them.  Records of one strategy about the same source
+    records share a key; a later run over newer versions of those sources
+    supersedes the earlier one.
+    """
+
+    if (
+        connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' "
+            "AND name='memory_capture_candidates'"
+        ).fetchone()
+        is None
+    ):
+        return
+    scope = (
+        "FROM memory_capture_candidates AS candidate "
+        "WHERE candidate.workspace_id=? AND candidate.source_kind='dreaming' "
+        "AND candidate.status='promoted'"
+    )
+    if scan_limit is not None:
+        counted = connection.execute(
+            f"SELECT count(*) FROM (SELECT 1 {scope} LIMIT ?)",
+            (workspace_id, scan_limit + 1),
+        ).fetchone()
+        if counted is None or int(counted[0]) > scan_limit:
+            raise MaintenanceOperationError("TASK_REQUIRED")
+    promoted = connection.execute(
+        "SELECT candidate.candidate_id,candidate.provenance_json,"
+        f"candidate.promoted_event_id {scope} ORDER BY candidate.candidate_id",
+        (workspace_id,),
+    ).fetchall()
+    for candidate_id, provenance_json, promoted_event_id in promoted:
+        if cancelled is not None and cancelled.is_set():
+            raise _WorkerCancelledError()
+        created = connection.execute(
+            "SELECT event_id,stream_id,payload_json,payload_hash FROM memory_events "
+            "WHERE workspace_id=? AND event_id=? AND stream_kind='memory' "
+            "AND event_type='memory.created' AND stream_version=1",
+            (workspace_id, promoted_event_id),
+        ).fetchone()
+        if created is None:
+            continue
+        if _verified_payload(created).get("capture_candidate_id") != candidate_id:
+            continue
+        try:
+            provenance = json.loads(str(provenance_json))
+            strategy = provenance["strategy"]
+            source_ids = sorted(
+                {source["record_id"] for source in provenance["sources"]}
+            )
+        except (KeyError, TypeError, ValueError, RecursionError):
+            continue
+        if (
+            not isinstance(strategy, str)
+            or not source_ids
+            or not all(isinstance(source_id, str) for source_id in source_ids)
+        ):
+            continue
+        record = _load_snapshot(connection, workspace_id, str(created["stream_id"]))
+        if record.state["deleted_at_us"] is not None:
+            continue
+        yield ("v7", f"{strategy}:{sha256_json(source_ids)}"), record
+
+
 def _dream_candidates(
     connection: sqlite3.Connection,
     workspace_id: str,
     scan_limit: int | None,
     cancelled: threading.Event | None = None,
-) -> tuple[list[_RecordSnapshot], int, int, int]:
+) -> tuple[list[_RecordSnapshot], int, int, int, int]:
     grouped: dict[tuple[str, str], list[_RecordSnapshot]] = {}
     for record in _scan_snapshots(
         connection,
@@ -876,9 +950,17 @@ def _dream_candidates(
             group_key = ("summary", day)
         if group_key is not None:
             grouped.setdefault(group_key, []).append(record)
+    for group_key, record in _promoted_dreaming_records(
+        connection, workspace_id, scan_limit, cancelled
+    ):
+        grouped.setdefault(group_key, []).append(record)
     candidates: list[_RecordSnapshot] = []
+    selected_ids: set[str] = set()
     reevaluation_duplicates = 0
     summary_duplicates = 0
+    dreaming_duplicates = 0
+    # The v6 tag groups sort before the "v7" groups, so a store without v7
+    # dream output selects exactly what it always did.
     for key in sorted(grouped):
         members = grouped[key]
         if len(members) <= 1:
@@ -888,19 +970,34 @@ def _dream_candidates(
             key=lambda record: (record.created_at_us, record.record_id),
         )
         duplicates = sorted(
-            (record for record in members if record.record_id != keeper.record_id),
+            (
+                record
+                for record in members
+                if record.record_id != keeper.record_id
+                and record.record_id not in selected_ids
+                # A promoted dream record someone pinned or made permanent
+                # is no longer only dream output.
+                and not (
+                    key[0] == "v7"
+                    and (record.state["pinned"] or record.state["is_permanent"])
+                )
+            ),
             key=lambda record: (record.created_at_us, record.record_id),
         )
         candidates.extend(duplicates)
+        selected_ids.update(record.record_id for record in duplicates)
         if key[0] == "reevaluation":
             reevaluation_duplicates += len(duplicates)
-        else:
+        elif key[0] == "summary":
             summary_duplicates += len(duplicates)
+        else:
+            dreaming_duplicates += len(duplicates)
     return (
         candidates[:_MAX_SELECTION],
         len(candidates),
         reevaluation_duplicates,
         summary_duplicates,
+        dreaming_duplicates,
     )
 
 
@@ -2270,6 +2367,7 @@ def _dream_preview_sync(
                     eligible,
                     reevaluation_duplicates,
                     summary_duplicates,
+                    dreaming_duplicates,
                 ) = _dream_candidates(connection, workspace.workspace_id, scan_limit)
                 token, expires_at = _issue_selection_token(
                     dependencies,
@@ -2284,6 +2382,7 @@ def _dream_preview_sync(
                 return Preview(
                     selection_token=token,
                     counts={
+                        "dreaming_duplicates": dreaming_duplicates,
                         "eligible": eligible,
                         "reevaluation_duplicates": reevaluation_duplicates,
                         "remaining": max(0, eligible - len(records)),
@@ -2338,7 +2437,7 @@ def _dream_sync(
                     != claims.source_high_water
                 ):
                     raise MaintenanceOperationError("CONFLICT")
-                records, _eligible, _reevaluations, _summaries = _dream_candidates(
+                records, *_counts = _dream_candidates(
                     connection, workspace.workspace_id, scan_limit, cancelled
                 )
                 if (
