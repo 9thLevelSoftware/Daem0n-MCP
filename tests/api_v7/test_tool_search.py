@@ -50,6 +50,72 @@ class StableToolSearchTests(unittest.TestCase):
         self.assertEqual(index.search("new durable"), [])
         self.assertEqual(index.document_ids, {})
 
+    def _index(self) -> ToolSearchIndex:
+        index = ToolSearchIndex()
+        for name, title, description in (
+            (
+                "memory_prune",
+                "Prune Old Memories",
+                "Deletes the decisions that are old and unused.",
+            ),
+            (
+                "rule_list",
+                "List Rules",
+                "List the rules for the workspace in the order of priority.",
+            ),
+            (
+                "memory_archive_set",
+                "Archive a Memory",
+                "Hide the record from the recall of the workspace.",
+            ),
+        ):
+            index.add_tool(
+                ToolMetadata(name=name, title=title, description=description)
+            )
+        return index
+
+    def test_function_words_do_not_count_as_a_match(self) -> None:
+        index = self._index()
+        # "the", "of" and "for" are in every description; only "archive" counts.
+        self.assertEqual(
+            [tool.name for tool in index.search("the archive of the record for me")],
+            ["memory_archive_set"],
+        )
+        self.assertEqual(
+            [tool.name for tool in index.search("what is the priority for this")],
+            ["rule_list"],
+        )
+
+    def test_a_query_of_only_function_words_still_searches(self) -> None:
+        index = ToolSearchIndex()
+        index.add_tool(ToolMetadata("which_tool", "Report which tool is in use."))
+        self.assertEqual(index.search("which")[0].name, "which_tool")
+
+    def test_word_endings_are_folded(self) -> None:
+        index = self._index()
+        for query in ("delete", "deleting decision", "pruned memory", "archived"):
+            with self.subTest(query=query):
+                self.assertTrue(index.search(query), query)
+        self.assertEqual(index.search("deleted")[0].name, "memory_prune")
+        self.assertEqual(index.search("hiding records")[0].name, "memory_archive_set")
+
+    def test_a_rare_word_and_a_name_word_outrank_a_common_one(self) -> None:
+        index = ToolSearchIndex()
+        index.add_tool(ToolMetadata("alpha_tool", "Workspace memory workspace prune."))
+        index.add_tool(ToolMetadata("beta_tool", "Workspace memory listing."))
+        index.add_tool(ToolMetadata("prune_tool", "Workspace cleanup."))
+        # "workspace" is everywhere; "prune" is rare and names prune_tool.
+        self.assertEqual(
+            [tool.name for tool in index.search("workspace prune")],
+            ["prune_tool", "alpha_tool", "beta_tool"],
+        )
+
+    def test_the_title_is_searched(self) -> None:
+        index = ToolSearchIndex()
+        index.add_tool(ToolMetadata("t_one", "Does a thing.", title="Backup Export"))
+        index.add_tool(ToolMetadata("t_two", "Does another thing."))
+        self.assertEqual([t.name for t in index.search("backup")], ["t_one"])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1150,6 +1150,7 @@ def build_fastmcp_server(
     for spec in manifest.tools:
         registration: dict[str, Any] = {
             "name": spec.name,
+            "title": spec.title or None,
             "description": spec.description,
             "tags": set(spec.tags),
             "annotations": dict(spec.annotations),
