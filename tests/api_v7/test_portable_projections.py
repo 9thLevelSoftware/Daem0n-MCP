@@ -2425,3 +2425,77 @@ async def test_default_local_install_round_trips_vectors_through_embedded_qdrant
     finally:
         client.close()
     assert count.count == 1
+
+
+def test_transfer_shares_the_local_client_another_owner_holds(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A folder already open in this process is shared, not opened twice.
+
+    An embedded store admits one client per folder, so a transfer that opened
+    its own while the dense provider held the folder was refused.
+    """
+
+    from daem0nmcp.api.v7 import portable_projections
+    from daem0nmcp.retrieval import providers
+
+    opened: list[str] = []
+
+    class _OneClientPerFolder:
+        def __init__(self, path: str) -> None:
+            if path in opened:
+                raise RuntimeError(f"Storage folder {path} is already accessed")
+            opened.append(path)
+            self.path = path
+
+        def scroll(self, **_: object) -> tuple[list[object], None]:
+            return [], None
+
+        def collection_exists(self, _name: str) -> bool:
+            return False
+
+        def create_collection(self, **_: object) -> None:
+            return None
+
+        def upsert(self, **_: object) -> None:
+            return None
+
+        def count(self, **_: object) -> int:
+            return 0
+
+        def delete_collection(self, _name: str) -> None:
+            return None
+
+        def close(self) -> None:
+            opened.remove(self.path)
+
+    def factory(**kwargs: object) -> object:
+        return _OneClientPerFolder(str(kwargs["path"]))
+
+    monkeypatch.setattr(providers, "_default_qdrant_client_factory", factory)
+    database = tmp_path / "daem0nmcp.db"
+    database.touch()
+    config = SimpleNamespace(
+        qdrant_url=None,
+        qdrant_api_key=None,
+        qdrant_path=None,
+        qdrant_timeout_seconds=10.0,
+    )
+    folder = portable_projections._configured_qdrant_path(database, config)
+    held = providers.create_qdrant_client(
+        qdrant_url=None,
+        qdrant_api_key=None,
+        qdrant_path=folder,
+        timeout_seconds=10.0,
+    )
+    try:
+        transfer = portable_projections._qdrant_transfer_client(config, database)
+        try:
+            assert transfer.collection_exists("absent") is False
+            assert len(opened) == 1
+        finally:
+            transfer.close()
+        assert len(opened) == 1
+    finally:
+        held.close()
+    assert opened == []
