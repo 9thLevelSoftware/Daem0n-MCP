@@ -999,6 +999,7 @@ _RETRIEVAL_CONFIG_FIELDS = (
     "retrieval_utility_candidate_limit",
     "memory_validity_mode",
     "retrieval_retention_mode",
+    "lexical_content_tiering",
 )
 
 
