@@ -13,7 +13,7 @@ import sys
 from pathlib import Path
 
 from ..storage_activation import PointerValidationError, resolve_active_database
-from ..workspace import WorkspaceRegistry
+from ..workspace import WorkspaceRegistry, sqlite_file_uri
 from ._client import (
     REINSTALL_NOTICE,
     get_project_path,
@@ -47,7 +47,7 @@ def _fast_briefing(project_path: str) -> str:
         return ""
 
     try:
-        database_uri = f"file:{db_path.as_posix()}?mode=ro"
+        database_uri = sqlite_file_uri(db_path, mode="ro")
         conn = sqlite3.connect(database_uri, uri=True, timeout=2)
     except sqlite3.Error:
         return ""

@@ -26,6 +26,7 @@ from ...retrieval.types import (
 )
 from ...retrieval.types import FusedCandidate, RetrievalQuery
 from ...storage_activation import DatabaseFileLock
+from ...workspace import sqlite_file_uri
 from .models import (
     CitationManifestEntry,
     EvidenceItem,
@@ -194,7 +195,7 @@ def validate_directional_links(
 
     try:
         connection = sqlite3.connect(
-            f"file:{database_path.as_posix()}?mode=ro", uri=True, timeout=5.0
+            sqlite_file_uri(database_path, mode="ro"), uri=True, timeout=5.0
         )
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA query_only=ON")

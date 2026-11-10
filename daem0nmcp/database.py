@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Literal
 
 from sqlalchemy import event
+from sqlalchemy.engine import URL
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import NullPool
@@ -187,7 +188,9 @@ class DatabaseManager:
                         raise ActivePointerMissingError(
                             active_candidate_pointer_missing_detail(candidate)
                         )
-        self.db_url = f"sqlite+aiosqlite:///{self.db_path}"
+        # The path is handed over as a path: inside URL text a "?" in it would
+        # start the query and move the database out of the storage directory.
+        self.db_url = URL.create("sqlite+aiosqlite", database=str(self.db_path))
 
     @property
     def fresh_at_construction(self) -> bool:

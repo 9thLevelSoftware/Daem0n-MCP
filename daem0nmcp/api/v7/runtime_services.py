@@ -53,6 +53,7 @@ from ...workspace import (
     WorkspaceRegistry,
     normalize_resolved_path,
     resolve_derived_path,
+    sqlite_file_uri,
 )
 from .errors import is_database_busy
 from .federated_retrieval import (
@@ -212,10 +213,9 @@ class WorkspaceStorageResolver:
 
 
 def _open_database(path: Path, *, writable: bool) -> sqlite3.Connection:
-    mode = "rw" if writable else "ro"
     try:
         connection = sqlite3.connect(
-            f"file:{path.as_posix()}?mode={mode}",
+            sqlite_file_uri(path, mode="rw" if writable else "ro"),
             uri=True,
             timeout=5.0,
             isolation_level=None,
@@ -274,7 +274,7 @@ def _inspect_database_health(
     connection: sqlite3.Connection | None = None
     try:
         connection = sqlite3.connect(
-            f"file:{path.as_posix()}?mode=ro",
+            sqlite_file_uri(path, mode="ro"),
             uri=True,
             timeout=2.0,
             isolation_level=None,

@@ -9,7 +9,9 @@ import posixpath
 import re
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePath, PureWindowsPath
+from typing import Literal
+from urllib.parse import quote
 
 _WINDOWS_DRIVE = re.compile(r"^[A-Za-z]:")
 
@@ -73,6 +75,41 @@ def normalize_resolved_path(path: Path) -> Path:
     if value.startswith("\\\\?\\"):
         return Path(value[4:])
     return path
+
+
+def sqlite_file_uri(
+    path: str | os.PathLike[str],
+    *,
+    mode: Literal["ro", "rw", "rwc"] | None = None,
+) -> str:
+    """Return the SQLite URI filename that opens exactly ``path``.
+
+    SQLite reads ``?`` as the start of the query, ``#`` as a fragment and
+    ``%HH`` as an escaped byte, so a path pasted into ``file:...`` unescaped
+    can name a different file, or none.  Every byte outside the unreserved
+    set is percent-encoded here.  The path is made absolute first, and the
+    URI always carries an empty authority: ``file:///dir/x.db`` on POSIX,
+    ``file:///C:/dir/x.db`` for a drive path and ``file:////server/share/x.db``
+    for a UNC path, whose server SQLite would otherwise reject as an authority.
+    """
+
+    pure = path if isinstance(path, PurePath) else Path(path)
+    if not pure.is_absolute():
+        if not isinstance(pure, Path):
+            raise ValueError("a path of another platform must be absolute")
+        pure = Path(os.path.abspath(pure))
+    text = pure.as_posix()
+    if isinstance(pure, PureWindowsPath):
+        # SQLite's Windows VFS accepts forward slashes only outside the
+        # extended-length spelling, which names the same file without it.
+        if text[:8].upper() == "//?/UNC/":
+            text = "//" + text[8:]
+        elif text.startswith("//?/"):
+            text = text[4:]
+    if not text.startswith("/"):
+        text = "/" + text
+    uri = "file://" + quote(text, safe="/:", errors="surrogateescape")
+    return uri if mode is None else f"{uri}?mode={mode}"
 
 
 def _workspace_id(root: Path) -> str:

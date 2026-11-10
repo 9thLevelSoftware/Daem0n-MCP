@@ -23,6 +23,7 @@ from ..storage_activation import (
     resolve_active_database,
     write_active_pointer,
 )
+from ..workspace import sqlite_file_uri
 from .schema import MIGRATIONS, run_migrations
 from .v7 import (
     MigrationInterrupted,
@@ -1132,7 +1133,7 @@ class V7SchemaUpgradeService:
         self, candidate: Path, run_id: str, workspace_id: str
     ) -> tuple[str, dict[str, Any]]:
         _require_regular(candidate, candidate.parent)
-        connection = sqlite3.connect(f"file:{candidate.as_posix()}?mode=ro", uri=True)
+        connection = sqlite3.connect(sqlite_file_uri(candidate, mode="ro"), uri=True)
         try:
             try:
                 row = connection.execute(
@@ -1210,7 +1211,7 @@ class V7SchemaUpgradeService:
         return candidate, "resume" if status == "ready" else "reactivate"
 
     def _snapshot_hash(self, candidate: Path, run_id: str) -> str:
-        connection = sqlite3.connect(f"file:{candidate.as_posix()}?mode=ro", uri=True)
+        connection = sqlite3.connect(sqlite_file_uri(candidate, mode="ro"), uri=True)
         try:
             try:
                 row = connection.execute(
