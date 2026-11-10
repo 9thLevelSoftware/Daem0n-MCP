@@ -60,7 +60,7 @@ class UtilityFoldingTests(unittest.TestCase):
         )
 
         estimate = fold_utility(())
-        self.assertEqual(UtilityEstimate(0.5, 0.5, 0), estimate)
+        self.assertEqual(UtilityEstimate(0.5, 0.5, 0, 0), estimate)
         for credit in ("single_step", "trace"):
             self.assertEqual(0.0, utility_signal(estimate, credit))
 
@@ -105,18 +105,46 @@ class UtilityFoldingTests(unittest.TestCase):
         self.assertEqual(0.6185, estimate.q_trace)
         self.assertEqual(3, estimate.evidence_count)
 
+    def test_deep_evidence_does_not_inflate_single_step_support(self):
+        from daem0nmcp.retrieval.utility import (
+            UtilityContribution,
+            fold_utility,
+            utility_signal,
+        )
+
+        direct = (UtilityContribution(1, "evt_a", 0, 1.0, 1.0),)
+        deep_failures = (
+            UtilityContribution(2, "evt_b", 2, 0.0, 0.25),
+            UtilityContribution(3, "evt_c", 3, 0.0, 0.25),
+        )
+        alone = fold_utility(direct)
+        padded = fold_utility(direct + deep_failures)
+        self.assertEqual(alone.q_single, padded.q_single)
+        self.assertEqual((1, 1), (alone.evidence_count, alone.single_evidence_count))
+        self.assertEqual((3, 1), (padded.evidence_count, padded.single_evidence_count))
+        self.assertAlmostEqual(0.1, utility_signal(alone, "single_step"))
+        self.assertEqual(
+            utility_signal(alone, "single_step"),
+            utility_signal(padded, "single_step"),
+        )
+        # Trace credit folds the deep failures in, so they count there.
+        self.assertLess(padded.q_trace, alone.q_trace)
+        self.assertAlmostEqual(
+            (padded.q_trace - 0.5) * 2, utility_signal(padded, "trace")
+        )
+
     def test_signal_uses_selected_credit_and_evidence_support(self):
         from daem0nmcp.retrieval.utility import UtilityEstimate, utility_signal
 
         self.assertAlmostEqual(
-            0.1, utility_signal(UtilityEstimate(0.65, 0.5, 1), "single_step")
+            0.1, utility_signal(UtilityEstimate(0.65, 0.5, 1, 1), "single_step")
         )
-        self.assertEqual(0.0, utility_signal(UtilityEstimate(0.65, 0.5, 1), "trace"))
+        self.assertEqual(0.0, utility_signal(UtilityEstimate(0.65, 0.5, 1, 1), "trace"))
         self.assertEqual(
-            1.0, utility_signal(UtilityEstimate(1.0, 0.0, 3), "single_step")
+            1.0, utility_signal(UtilityEstimate(1.0, 0.0, 3, 3), "single_step")
         )
-        self.assertEqual(-1.0, utility_signal(UtilityEstimate(1.0, 0.0, 3), "trace"))
-        self.assertEqual(1.0, utility_signal(UtilityEstimate(1.0, 1.0, 10), "trace"))
+        self.assertEqual(-1.0, utility_signal(UtilityEstimate(1.0, 0.0, 3, 3), "trace"))
+        self.assertEqual(1.0, utility_signal(UtilityEstimate(1.0, 1.0, 10, 0), "trace"))
 
 
 class UtilityRepository(CanonicalRepository):

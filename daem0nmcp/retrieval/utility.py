@@ -27,6 +27,7 @@ class UtilityEstimate:
     q_single: float
     q_trace: float
     evidence_count: int
+    single_evidence_count: int
 
 
 def verification_weight(
@@ -47,12 +48,13 @@ def verification_weight(
 
 def fold_utility(contributions: Iterable[UtilityContribution]) -> UtilityEstimate:
     q_single = q_trace = 0.5
-    evidence_count = 0
+    evidence_count = single_evidence_count = 0
     for contribution in sorted(
         contributions, key=lambda item: (item.recorded_at_us, item.event_id)
     ):
         if contribution.depth <= 1:
             q_single += ALPHA * contribution.weight * (contribution.reward - q_single)
+            single_evidence_count += 1
         factor = (
             1.0
             if contribution.depth <= 1
@@ -62,11 +64,17 @@ def fold_utility(contributions: Iterable[UtilityContribution]) -> UtilityEstimat
             ALPHA * contribution.weight * factor * (contribution.reward - q_trace)
         )
         evidence_count += 1
-    return UtilityEstimate(round(q_single, 6), round(q_trace, 6), evidence_count)
+    return UtilityEstimate(
+        round(q_single, 6), round(q_trace, 6), evidence_count, single_evidence_count
+    )
 
 
 def utility_signal(
     estimate: UtilityEstimate, credit: Literal["single_step", "trace"]
 ) -> float:
-    q = estimate.q_single if credit == "single_step" else estimate.q_trace
-    return (q - 0.5) * 2 * min(1.0, estimate.evidence_count / 3)
+    # Support counts only the evidence that moved the selected estimate.
+    if credit == "single_step":
+        q, support = estimate.q_single, estimate.single_evidence_count
+    else:
+        q, support = estimate.q_trace, estimate.evidence_count
+    return (q - 0.5) * 2 * min(1.0, support / 3)
