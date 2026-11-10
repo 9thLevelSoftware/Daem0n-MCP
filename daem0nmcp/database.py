@@ -129,6 +129,7 @@ class DatabaseManager:
             raise
         self._migrated = False
         self._initialized = False
+        self._init_lock = asyncio.Lock()
         self._engine = None
         self._session_factory = None
         self._close_callbacks: list[Callable[[], None]] = []
@@ -381,7 +382,13 @@ class DatabaseManager:
         # Skip if already initialized
         if self._initialized:
             return
+        # One start at a time: a second caller waits for the first instead of
+        # swapping the storage lock the first is creating the store under.
+        async with self._init_lock:
+            if not self._initialized:
+                await self._init_db_locked()
 
+    async def _init_db_locked(self) -> None:
         if self._storage_lock_lost:
             # An earlier attempt gave the storage lock up and could not get it
             # back, so whatever it read about the storage may be stale, and an

@@ -371,6 +371,18 @@ async def test_refused_creation_lock_leaves_idle_holders_their_shared_lock(
         await idle.close()
 
 
+async def test_concurrent_starts_of_one_manager_create_the_store_once(tmp_path):
+    """A second ``init_db`` call waits for the first instead of racing it."""
+    storage = tmp_path / ".daem0nmcp" / "storage"
+    manager = DatabaseManager(str(storage))
+    try:
+        await asyncio.gather(manager.init_db(), manager.init_db())
+        assert (manager.format_version, manager.active_generation) == (7, 1)
+        assert not _storage_is_free_for_another_process(storage)
+    finally:
+        await manager.close()
+
+
 def test_concurrent_ledger_runs_apply_each_migration_exactly_once(tmp_path):
     """The migration runner decides what is pending under the write lock."""
     workspace_id = WorkspaceRegistry(
