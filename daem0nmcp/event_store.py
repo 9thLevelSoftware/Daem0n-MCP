@@ -1080,9 +1080,10 @@ class EventStore:
             raise ValueError("relationship endpoints are invalid")
         # Migrated and imported stores may hold self-edges; a runtime actor may
         # close one (unlink, or maintenance deleting the record) but not assert it.
+        # A removal that opens a stream closes nothing: it would insert the edge.
         if (
             source == target
-            and command.event_type != "relationship.removed"
+            and (command.event_type != "relationship.removed" or stream_version == 1)
             and command.actor_type not in {"migration", "import"}
         ):
             raise ValueError("runtime relationships may not be self-edges")

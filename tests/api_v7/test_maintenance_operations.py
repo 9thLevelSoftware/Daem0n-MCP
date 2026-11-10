@@ -1817,7 +1817,12 @@ class MaintenanceOperationTests(unittest.IsolatedAsyncioTestCase):
         self._assert_replay_reproduces_projections()
 
     def _append_migrated_self_edge(
-        self, suffix: str, record_id: str, *, actor_type: str = "migration"
+        self,
+        suffix: str,
+        record_id: str,
+        *,
+        actor_type: str = "migration",
+        event_type: str = "relationship.created",
     ) -> str:
         """A v6 store may hold a relationship from a record to itself."""
         from daem0nmcp.event_store import EventCommand, EventStore
@@ -1831,7 +1836,7 @@ class MaintenanceOperationTests(unittest.IsolatedAsyncioTestCase):
                     workspace_id=self.workspace.workspace_id,
                     stream_id=relationship_id,
                     stream_kind="relationship",
-                    event_type="relationship.created",
+                    event_type=event_type,
                     occurred_at_us=at_us,
                     recorded_at_us=at_us,
                     actor_type=actor_type,
@@ -1863,6 +1868,22 @@ class MaintenanceOperationTests(unittest.IsolatedAsyncioTestCase):
                     (self.workspace.workspace_id, relationship_id),
                 )
             ]
+
+    async def test_a_removal_that_opens_a_stream_cannot_assert_a_self_edge(
+        self,
+    ) -> None:
+        """Closing is exempt only where there is a version to close."""
+        record_id = self._append_record(
+            "a", "Self-linked decision.", created_at=NOW - timedelta(days=100)
+        )
+
+        with self.assertRaisesRegex(ValueError, "self-edges"):
+            self._append_migrated_self_edge(
+                "e", record_id, actor_type="client", event_type="relationship.removed"
+            )
+
+        self.assertEqual(set(), self._live_edges())
+        self.assertEqual([], self._relationship_event_types("rel_" + "e" * 64))
 
     async def test_prune_closes_a_migrated_self_edge_of_the_pruned_record(
         self,
