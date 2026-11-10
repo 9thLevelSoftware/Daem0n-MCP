@@ -508,3 +508,63 @@ def test_run_directories_no_pointer_could_have_named_do_not_block_a_v6_store(
     (malformed / "candidate.db").write_bytes(b"not a database" * 100)
 
     assert _start_manager(storage) == (6, 0)
+
+
+def test_the_pointer_guard_leaves_an_unfinished_wal_of_the_source_alone(
+    tmp_path: Path,
+):
+    """Inspecting a pointerless source must not checkpoint it."""
+
+    import shutil
+
+    from tests.test_migrate_v7_end_to_end import _registry, _v6_database
+
+    storage = _v6_database(tmp_path)
+    source = storage / "daem0nmcp.db"
+    wal = storage / "daem0nmcp.db-wal"
+    aside = tmp_path / "aside"
+    aside.mkdir()
+    with closing(sqlite3.connect(source)) as writer:
+        writer.execute("PRAGMA journal_mode=WAL")
+        writer.execute("PRAGMA wal_autocheckpoint=0")
+        writer.execute("CREATE TABLE left_in_the_wal(value TEXT)")
+        writer.commit()
+        assert wal.stat().st_size > 0
+        # What a writer that died here leaves behind.
+        for name in ("daem0nmcp.db", "daem0nmcp.db-wal", "daem0nmcp.db-shm"):
+            shutil.copyfile(storage / name, aside / name)
+    for name in ("daem0nmcp.db", "daem0nmcp.db-wal", "daem0nmcp.db-shm"):
+        shutil.copyfile(aside / name, storage / name)
+    source_bytes, wal_bytes = source.read_bytes(), wal.read_bytes()
+
+    result = MigrationV7Service(_registry(tmp_path)).dry_run(tmp_path)
+
+    assert (result.status, result.action) == ("dry_run", "migrate")
+    assert result.inventory["wal_bytes"] == len(wal_bytes)
+    assert source.read_bytes() == source_bytes
+    assert wal.read_bytes() == wal_bytes
+
+
+def test_a_source_the_pointer_guard_cannot_read_is_refused_not_passed(
+    tmp_path: Path,
+):
+    """A pointerless format-7 database that is locked is not taken for format 6."""
+
+    storage, database, registry = _workspace(tmp_path)
+    _append_event(database, registry.default.workspace_id, "1")
+    _lose_the_pointer(storage)
+    service = MigrationV7Service(registry)
+
+    with closing(sqlite3.connect(database)) as holder:
+        holder.execute("PRAGMA locking_mode=EXCLUSIVE")
+        holder.execute("BEGIN IMMEDIATE")
+        for operation in (service.dry_run, service.apply, service.rollback):
+            with pytest.raises(MigrationV7Error) as refused:
+                operation(tmp_path)
+            assert refused.value.code == "SOURCE_UNREADABLE"
+        holder.rollback()
+
+    assert not (storage / "migrations").exists()
+    with pytest.raises(MigrationV7Error) as readable:
+        service.dry_run(tmp_path)
+    assert readable.value.code == "ACTIVE_POINTER_MISSING"

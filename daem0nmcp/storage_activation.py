@@ -266,45 +266,56 @@ def resolve_active_database(
     )
 
 
+def canonical_v7_state_in(connection: sqlite3.Connection) -> bool:
+    """Whether an open database holds format-7 canonical state.
+
+    Only reads; a failure to read is raised, not answered as "no".
+    """
+
+    tables = {
+        str(row[0])
+        for row in connection.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        )
+    }
+    if "schema_version" not in tables:
+        return False
+    try:
+        version = int(
+            connection.execute(
+                "SELECT COALESCE(MAX(version),0) FROM schema_version"
+            ).fetchone()[0]
+        )
+    except (TypeError, ValueError):
+        return False
+    if version < _V7_FORMAT_MIN_SCHEMA_VERSION:
+        return False
+    required_tables = _V7_FORMAT_TABLES
+    if version < 33:
+        required_tables = required_tables - {
+            "memory_provenance_edges",
+            "memory_outcome_signals",
+        }
+    if not tables >= required_tables:
+        return False
+    return any(
+        connection.execute(f'SELECT 1 FROM "{table}" LIMIT 1').fetchone() is not None
+        for table in (
+            "memory_events",
+            "memory_records",
+            "projection_manifests",
+            "v7_migration_runs",
+        )
+    )
+
+
 def has_canonical_v7_state(database_path: str | os.PathLike[str]) -> bool:
     """Recognize copied v7 canonical state when its activation pointer is absent."""
 
     try:
         connection = sqlite3.connect(Path(database_path))
         try:
-            tables = {
-                str(row[0])
-                for row in connection.execute(
-                    "SELECT name FROM sqlite_master WHERE type='table'"
-                )
-            }
-            if "schema_version" not in tables:
-                return False
-            version = int(
-                connection.execute(
-                    "SELECT COALESCE(MAX(version),0) FROM schema_version"
-                ).fetchone()[0]
-            )
-            if version < _V7_FORMAT_MIN_SCHEMA_VERSION:
-                return False
-            required_tables = _V7_FORMAT_TABLES
-            if version < 33:
-                required_tables = required_tables - {
-                    "memory_provenance_edges",
-                    "memory_outcome_signals",
-                }
-            if not tables >= required_tables:
-                return False
-            return any(
-                connection.execute(f'SELECT 1 FROM "{table}" LIMIT 1').fetchone()
-                is not None
-                for table in (
-                    "memory_events",
-                    "memory_records",
-                    "projection_manifests",
-                    "v7_migration_runs",
-                )
-            )
+            return canonical_v7_state_in(connection)
         finally:
             connection.close()
     except (OSError, sqlite3.DatabaseError, TypeError, ValueError):

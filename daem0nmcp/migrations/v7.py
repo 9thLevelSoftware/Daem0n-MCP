@@ -48,6 +48,7 @@ from ..storage_activation import (
     PointerValidationError,
     active_candidate_pointer_missing_detail,
     active_candidate_without_pointer,
+    canonical_v7_state_in,
     has_canonical_v7_state,
     resolve_active_database,
     validate_pointer,
@@ -1667,7 +1668,23 @@ class MigrationV7Service:
 
         if resolved.pointer is not None:
             return
-        if has_canonical_v7_state(resolved.path):
+        # Read-only, as a dry run promises; and a database that cannot be
+        # read is refused, because "no format-7 state" was not established.
+        holds_v7_state = False
+        if resolved.path.is_file():
+            try:
+                connection = _readonly_connection(resolved.path)
+                try:
+                    holds_v7_state = canonical_v7_state_in(connection)
+                finally:
+                    connection.close()
+            except (OSError, sqlite3.Error) as exc:
+                raise MigrationV7Error(
+                    "SOURCE_UNREADABLE",
+                    f"{DEFAULT_DATABASE_NAME} cannot be read, so whether it "
+                    "holds format-7 state is unknown",
+                ) from exc
+        if holds_v7_state:
             raise MigrationV7Error(
                 ACTIVE_POINTER_MISSING_CODE, ACTIVE_POINTER_MISSING_DETAIL
             )
