@@ -120,13 +120,11 @@ class UtilityFoldingTests(unittest.TestCase):
         alone = fold_utility(direct)
         padded = fold_utility(direct + deep_failures)
         self.assertEqual(alone.q_single, padded.q_single)
+        # The behaviour first: deep failures must not triple the boost.
+        self.assertAlmostEqual(0.1, utility_signal(alone, "single_step"))
+        self.assertAlmostEqual(0.1, utility_signal(padded, "single_step"))
         self.assertEqual((1, 1), (alone.evidence_count, alone.single_evidence_count))
         self.assertEqual((3, 1), (padded.evidence_count, padded.single_evidence_count))
-        self.assertAlmostEqual(0.1, utility_signal(alone, "single_step"))
-        self.assertEqual(
-            utility_signal(alone, "single_step"),
-            utility_signal(padded, "single_step"),
-        )
         # Trace credit folds the deep failures in, so they count there.
         self.assertLess(padded.q_trace, alone.q_trace)
         self.assertAlmostEqual(
@@ -169,6 +167,40 @@ class UtilityOrderTests(unittest.TestCase):
         self.assertEqual((1, 0), utility_order((1.0, 0.95), (0.0, 1.0), 1.0))
         self.assertEqual((0, 1), utility_order((1.0, 0.94), (-1.0, 0.0), 1.0))
         self.assertEqual((), utility_order((), (), 1.0))
+
+    def test_a_candidate_is_compared_only_with_the_one_directly_above(self):
+        from daem0nmcp.retrieval.utility import utility_order
+
+        relevance = (0.5,) * 8
+        # Alone, the well-proven fifth match climbs three places.
+        self.assertEqual(
+            (0, 4, 1, 2, 3, 5, 6, 7),
+            utility_order(relevance, (0, 0, 0, 0, 1, 0, 0, 0), 0.1),
+        )
+        # A failed first match sinks three places and then sits directly
+        # above the fifth, which is out of its band and cannot pass it.
+        self.assertEqual(
+            (1, 2, 3, 0, 4, 5, 6, 7),
+            utility_order(relevance, (-1, 0, 0, 0, 1, 0, 0, 0), 0.1),
+        )
+        # The fifth stops below the first although it outscores the second,
+        # which has moved above the first and is in band with the fifth.
+        self.assertEqual(
+            (1, 0, 4, 2, 3, 5, 6, 7),
+            utility_order(relevance, (0, 0.2, 0.2, 0.2, 1, 0, 0, 0), 0.1),
+        )
+
+    def test_band_is_sized_for_the_default_fusion_constant(self):
+        from daem0nmcp.retrieval.utility import utility_order
+
+        def order(rrf_k):
+            relevance = tuple(1 / (rrf_k + rank) for rank in range(1, 6))
+            return utility_order(relevance, (0, 1, 1, 1, 1), 1.0)
+
+        self.assertEqual((1, 2, 3, 0, 4), order(60))
+        self.assertEqual((1, 0, 2, 3, 4), order(18))
+        # Below 18 adjacent single-channel ranks are already out of band.
+        self.assertEqual((0, 1, 2, 3, 4), order(17))
 
 
 class UtilityRepository(CanonicalRepository):

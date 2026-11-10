@@ -93,6 +93,14 @@ def utility_order(
     prior and its fused score are within ``RELEVANCE_BAND`` of that
     candidate's, so outcome history cannot lift a clearly weaker match over
     a clearly stronger one, nor sink a strong match below distant ones.
+
+    The comparison is always with the candidate currently directly above,
+    not with every candidate in band, so the result is not a sort by
+    combined score: a candidate stops below the first one it may not pass,
+    even when candidates that have moved further up score lower than it.
+    The band is sized for fused scores built with the default RRF constant
+    of 60; with a constant below 18 adjacent single-channel ranks are
+    already out of band and utility reorders nothing.
     """
 
     priors = tuple(
