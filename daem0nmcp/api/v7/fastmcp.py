@@ -16,6 +16,7 @@ from pydantic_core import InitErrorDetails
 
 from ... import __version__
 from ...covenant import invocation_scope_var
+from .ceremony import RECOVERABLE_TOKEN_CODES
 from .errors import ErrorCode
 from .gateway_operations import (
     GATEWAY_TOOL_NAMES,
@@ -478,6 +479,37 @@ def _mcp_task(view: TaskView) -> Any:
     )
 
 
+# Refusals of the covenant gate that the tool's own admission can answer
+# with a briefing, counsel or a remedy.
+_COVENANT_TASK_REFUSALS = frozenset(
+    {"COMMUNION_REQUIRED", "COUNSEL_REQUIRED", "TOKEN_MISSING"}
+    | RECOVERABLE_TOKEN_CODES
+)
+
+
+def _covenant_task_refusal(envelope: Mapping[str, Any]) -> Exception:
+    """Hand a refused task submission the answer a plain call would get."""
+
+    from mcp import McpError
+    from mcp.types import INVALID_PARAMS, ErrorData
+
+    error = envelope["error"]
+    return McpError(
+        ErrorData(
+            code=INVALID_PARAMS,
+            message=(
+                "The covenant refused this task. error.data.error is the tool's "
+                "own answer: follow its remedy, then send the task again."
+            ),
+            data={
+                "code": error["code"],
+                "error": error,
+                "covenant": envelope["meta"].get("covenant"),
+            },
+        )
+    )
+
+
 def _task_protocol_error(exc: Exception) -> Exception:
     from mcp import McpError
     from mcp.types import INVALID_PARAMS, ErrorData
@@ -500,6 +532,9 @@ def _install_task_protocol(
     server: Any,
     dispatcher: DurableTaskDispatcher,
     invocation_middleware: V7InvocationMiddleware,
+    *,
+    admission_specs: Mapping[str, ToolSpec],
+    sync_timeout_seconds: float,
 ) -> None:
     """Replace Docket handlers with the credential-free owned dispatcher."""
 
@@ -531,23 +566,84 @@ def _install_task_protocol(
         except Exception as exc:
             raise TaskDispatcherError("TASK_NOT_FOUND") from exc
 
+    async def covenant_admission(
+        name: str, arguments: Mapping[str, Any] | None
+    ) -> dict[str, Any] | None:
+        """Ask the tool's own admission, which never runs the operation.
+
+        The dispatcher consults the gate alone.  The handler behind a plain
+        call also briefs a guided session and issues counsel, and in
+        admission-only mode it stops before the operation, so its answer is
+        the ceremony this submission still owes.
+        """
+
+        spec = admission_specs.get(name)
+        if spec is None:
+            return None
+        try:
+            request = spec.input_model.model_validate(dict(arguments or {}))
+        except (TypeError, ValueError):
+            return None
+
+        async def admit() -> Any:
+            result = spec.handler(**request.model_dump())
+            if inspect.isawaitable(result):
+                result = await result
+            return result
+
+        admission = task_admission_only_var.set(True)
+        try:
+            result = await run_sync_fallback(
+                admit,
+                estimated_to_fit=True,
+                timeout_seconds=sync_timeout_seconds,
+            )
+        except TaskExecutionError:
+            return None
+        finally:
+            task_admission_only_var.reset(admission)
+        envelope = spec.output_model.model_validate(result).model_dump(mode="json")
+        if envelope.get("ok") is not False or not envelope.get("error"):
+            return None
+        return envelope
+
     async def handle_call(request: Any) -> Any:
         if request.params.task is None:
             return await original_call(request)
 
         async def submit(context: Any) -> Any:
-            try:
-                view = await dispatcher.submit(
+            async def accept() -> TaskView:
+                return await dispatcher.submit(
                     context.message.name,
                     context.message.arguments,
                     scope=invocation_scope_var.get(),
                     task_metadata=context.message.task,
                 )
+
+            notice = None
+            try:
+                view = await accept()
             except TaskDispatcherError as exc:
-                raise _task_protocol_error(exc) from None
-            return mcp.types.ServerResult(
-                mcp.types.CreateTaskResult(task=_mcp_task(view))
-            )
+                if exc.code not in _COVENANT_TASK_REFUSALS:
+                    raise _task_protocol_error(exc) from None
+                envelope = await covenant_admission(
+                    context.message.name, context.message.arguments
+                )
+                if envelope is None:
+                    raise _task_protocol_error(exc) from None
+                if envelope["error"]["code"] != ErrorCode.TASKS_UNAVAILABLE.value:
+                    raise _covenant_task_refusal(envelope) from None
+                # The tool's admission now passes: a guided session was
+                # briefed on the way.  The gate decides again, once.
+                notice = envelope["meta"].get("covenant")
+                try:
+                    view = await accept()
+                except TaskDispatcherError as retried:
+                    raise _task_protocol_error(retried) from None
+            created = mcp.types.CreateTaskResult(task=_mcp_task(view))
+            if notice is not None:
+                created.meta = {"daem0nmcp/covenant": notice}
+            return mcp.types.ServerResult(created)
 
         return await run_middleware(request, submit)
 
@@ -950,6 +1046,12 @@ def build_fastmcp_server(
             server,
             task_dispatcher,
             invocation_middleware,
+            admission_specs={
+                spec.name: spec
+                for spec in manifest.tools
+                if spec.task_mode == "optional"
+            },
+            sync_timeout_seconds=validated_sync_timeout,
         )
     elif hasattr(server, "_mcp_server"):
         _disable_upstream_task_protocol(server)
