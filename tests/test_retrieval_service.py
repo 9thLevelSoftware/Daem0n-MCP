@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import sqlite3
+import time
 import unittest
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
@@ -727,6 +729,7 @@ class DelayedProvider:
 
 _OPTIONAL_INTENT_TEXT = "history of workflow steps decision result"
 _CONCURRENT_OPTIONAL = ("dense", "temporal", "procedure", "outcome")
+_SERIAL_OPTIONAL = ("temporal", "procedure", "outcome")
 
 
 def _delayed_providers(log, delays, *, lexical_delay=0.0, overrides=None):
@@ -753,35 +756,65 @@ def _delayed_providers(log, delays, *, lexical_delay=0.0, overrides=None):
 
 
 class RetrievalServiceProviderConcurrencyTests(unittest.IsolatedAsyncioTestCase):
-    async def test_optional_providers_run_concurrently_after_lexical(self):
+    async def test_dense_runs_alongside_the_serial_projection_providers(self):
         log = []
-        delay = 0.5
         service = _service(
             providers=_delayed_providers(
-                log, dict.fromkeys(_CONCURRENT_OPTIONAL, delay), lexical_delay=0.05
+                log, dict.fromkeys(_CONCURRENT_OPTIONAL, 0.05), lexical_delay=0.05
             ),
             repository=CanonicalRepository(),
             provider_timeout_seconds=30.0,
         )
 
-        started = asyncio.get_running_loop().time()
         result = await service.retrieve(_query(text=_OPTIONAL_INTENT_TEXT))
-        elapsed = asyncio.get_running_loop().time() - started
 
         self.assertFalse(result.abstained)
-        # Four optional providers awaited one at a time need 4 * delay.
-        self.assertLess(elapsed, 3 * delay)
         self.assertEqual([("start", "lexical"), ("end", "lexical")], log[:2])
-        self.assertEqual([("start", name) for name in _CONCURRENT_OPTIONAL], log[2:6])
+        # Dense and the first projection provider both start before either
+        # ends; awaited one at a time, dense would end before temporal starts.
+        self.assertEqual([("start", "dense"), ("start", "temporal")], log[2:4])
+        # The projection providers share one bounded worker pool, so a single
+        # recall never has two of their searches in flight.
+        self.assertEqual(
+            [(event, name) for name in _SERIAL_OPTIONAL for event in ("start", "end")],
+            [entry for entry in log if entry[1] in _SERIAL_OPTIONAL],
+        )
         self.assertEqual(
             ("lexical", *_CONCURRENT_OPTIONAL),
             tuple(d.provider for d in result.providers),
         )
         self.assertTrue(all(d.status == "ready" for d in result.providers))
 
-    async def test_each_hung_optional_provider_times_out_within_one_timeout(self):
+    async def test_hung_dense_does_not_delay_the_projection_providers(self):
+        log = []
+        delays = {"dense": 60.0, "temporal": 0.01, "procedure": 0.01, "outcome": 0.01}
+        service = _service(
+            providers=_delayed_providers(log, delays),
+            repository=CanonicalRepository(),
+            provider_timeout_seconds=1.0,
+        )
+
+        result = await service.retrieve(_query(text=_OPTIONAL_INTENT_TEXT))
+
+        self.assertFalse(result.abstained)
+        self.assertEqual(
+            (
+                ("lexical", "ready", None),
+                ("dense", "failed", "DENSE_PROVIDER_TIMEOUT"),
+                ("temporal", "ready", None),
+                ("procedure", "ready", None),
+                ("outcome", "ready", None),
+            ),
+            tuple((d.provider, d.status, d.reason) for d in result.providers),
+        )
+        # Every projection provider finished inside the dense timeout rather
+        # than waiting for it to expire first.
+        self.assertLess(
+            log.index(("end", "outcome")), log.index(("cancelled", "dense"))
+        )
+
+    async def test_every_hung_optional_provider_reports_its_own_timeout(self):
         calls = []
-        timeout = 0.4
         providers = {
             "lexical": StaticProvider(
                 "lexical",
@@ -794,15 +827,12 @@ class RetrievalServiceProviderConcurrencyTests(unittest.IsolatedAsyncioTestCase)
         service = _service(
             providers=providers,
             repository=CanonicalRepository(),
-            provider_timeout_seconds=timeout,
+            provider_timeout_seconds=0.2,
         )
 
-        started = asyncio.get_running_loop().time()
         result = await service.retrieve(_query(text=_OPTIONAL_INTENT_TEXT))
-        elapsed = asyncio.get_running_loop().time() - started
 
         self.assertFalse(result.abstained)
-        self.assertLess(elapsed, 3 * timeout)
         self.assertEqual(
             ["lexical", *_CONCURRENT_OPTIONAL], [name for name, _ in calls]
         )
@@ -817,9 +847,15 @@ class RetrievalServiceProviderConcurrencyTests(unittest.IsolatedAsyncioTestCase)
 
     async def test_fusion_is_independent_of_provider_completion_order(self):
         outcomes = []
-        for delays in (
-            {"dense": 0.0, "temporal": 0.1, "procedure": 0.2, "outcome": 0.3},
-            {"dense": 0.3, "temporal": 0.2, "procedure": 0.1, "outcome": 0.0},
+        for delays, expected_finish in (
+            (
+                {"dense": 0.0, "temporal": 0.05, "procedure": 0.05, "outcome": 0.05},
+                ("dense", *_SERIAL_OPTIONAL),
+            ),
+            (
+                {"dense": 1.0, "temporal": 0.0, "procedure": 0.0, "outcome": 0.0},
+                (*_SERIAL_OPTIONAL, "dense"),
+            ),
         ):
             log = []
             result = await _service(
@@ -841,15 +877,13 @@ class RetrievalServiceProviderConcurrencyTests(unittest.IsolatedAsyncioTestCase)
                     result.context.text,
                 )
             )
-            finished = [name for event, name in log if event == "end"][1:]
-            self.assertEqual(
-                sorted(_CONCURRENT_OPTIONAL, key=delays.__getitem__), finished
-            )
+            finished = tuple(name for event, name in log if event == "end")[1:]
+            self.assertEqual(expected_finish, finished)
 
         self.assertEqual(outcomes[0], outcomes[1])
         self.assertEqual(("lexical", *_CONCURRENT_OPTIONAL), outcomes[0][0])
 
-    async def test_failing_provider_does_not_disturb_concurrent_providers(self):
+    async def test_failing_provider_does_not_disturb_the_other_providers(self):
         log = []
         delays = dict.fromkeys(_CONCURRENT_OPTIONAL, 0.05)
         result = await _service(
@@ -878,9 +912,12 @@ class RetrievalServiceProviderConcurrencyTests(unittest.IsolatedAsyncioTestCase)
         )
         self.assertNotIn("temporal secret", repr(result))
         self.assertEqual([], [entry for entry in log if entry[0] == "cancelled"])
-        # The failure happened while the other providers were still running.
+        # The failure happened while dense was still running, and the
+        # providers queued behind the failed one still ran.
         self.assertLess(log.index(("end", "temporal")), log.index(("end", "dense")))
-        self.assertLess(log.index(("start", "outcome")), log.index(("end", "temporal")))
+        self.assertLess(
+            log.index(("end", "temporal")), log.index(("start", "procedure"))
+        )
         self.assertEqual(
             {_record_id(digit) for digit in "1245"},
             {item.evidence_refs[0].record_id for item in result.items},
@@ -890,17 +927,17 @@ class RetrievalServiceProviderConcurrencyTests(unittest.IsolatedAsyncioTestCase)
         log = []
         service = _service(
             providers=_delayed_providers(
-                log, dict.fromkeys(_CONCURRENT_OPTIONAL, 30.0)
+                log, dict.fromkeys(_CONCURRENT_OPTIONAL, 60.0)
             ),
             repository=CanonicalRepository(),
-            provider_timeout_seconds=60.0,
+            provider_timeout_seconds=120.0,
         )
 
         task = asyncio.ensure_future(
             service.retrieve(_query(text=_OPTIONAL_INTENT_TEXT))
         )
-        for _ in range(500):
-            if len([entry for entry in log if entry[0] == "start"]) == 5:
+        for _ in range(3000):
+            if ("start", "dense") in log and ("start", "temporal") in log:
                 break
             await asyncio.sleep(0.01)
         task.cancel()
@@ -908,8 +945,69 @@ class RetrievalServiceProviderConcurrencyTests(unittest.IsolatedAsyncioTestCase)
             await task
 
         self.assertEqual(
-            {("cancelled", name) for name in _CONCURRENT_OPTIONAL},
+            {("cancelled", "dense"), ("cancelled", "temporal")},
             {entry for entry in log if entry[0] == "cancelled"},
+        )
+        # Nothing queued behind the cancelled provider was started.
+        self.assertEqual(
+            {"lexical", "dense", "temporal"},
+            {name for event, name in log if event == "start"},
+        )
+
+    async def test_overlapping_recalls_do_not_exhaust_the_projection_pool(self):
+        from daem0nmcp.retrieval import specialized
+
+        pool = specialized._SPECIALIZED_WORKERS
+        for _ in range(3000):
+            if pool.in_flight == 0:
+                break
+            await asyncio.sleep(0.01)
+        self.assertEqual(0, pool.in_flight)
+
+        def slow_connection():
+            time.sleep(0.2)
+            return sqlite3.connect(":memory:")
+
+        calls = []
+        service = _service(
+            providers={
+                "lexical": StaticProvider(
+                    "lexical",
+                    _provider_result("lexical", _candidate("1", "lexical", 1)),
+                    calls,
+                ),
+                "temporal": specialized.TemporalProvider(
+                    connection_factory=slow_connection, timeout_seconds=30.0
+                ),
+                "procedure": specialized.ProcedureProvider(
+                    connection_factory=slow_connection, timeout_seconds=30.0
+                ),
+                "outcome": specialized.OutcomeProvider(
+                    connection_factory=slow_connection, timeout_seconds=30.0
+                ),
+            },
+            repository=CanonicalRepository(),
+            provider_timeout_seconds=60.0,
+        )
+
+        # As many recalls as the shared pool has workers: each may hold one
+        # worker at a time, so none of their searches is turned away.
+        results = await asyncio.gather(
+            *(service.retrieve(_query(text=_OPTIONAL_INTENT_TEXT)) for _ in range(4))
+        )
+
+        self.assertEqual(
+            [("lexical", "temporal", "procedure", "outcome")] * 4,
+            [tuple(d.provider for d in result.providers) for result in results],
+        )
+        self.assertEqual(
+            [],
+            [
+                d.reason
+                for result in results
+                for d in result.providers
+                if d.reason is not None and d.reason.endswith("_PROVIDER_BUSY")
+            ],
         )
 
     async def test_graph_is_seeded_after_concurrent_dense_completes(self):

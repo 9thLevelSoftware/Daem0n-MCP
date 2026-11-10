@@ -60,6 +60,10 @@ _PROVIDER_ORDER = (
     "outcome",
 )
 _SUPPORTED_PROVIDERS = frozenset(_PROVIDER_ORDER)
+# These providers run their searches on one shared bounded worker pool that
+# turns work away when it is full.  A recall awaits them one after another so
+# that it holds at most one of those workers at a time.
+_SHARED_POOL_PROVIDERS = frozenset({"temporal", "procedure", "outcome"})
 
 # Category diversity may displace stronger hits only within these bounds: a
 # candidate that opens a new category must rank inside the first
@@ -472,23 +476,22 @@ class RetrievalService:
 
         provider_results = {"lexical": lexical}
         graph_request = None
-        concurrent_requests = []
+        shared_pool_requests = []
+        provider_lanes = []
         for request in plan.requests[1:]:
             if request.provider == "graph":
                 graph_request = request
-                continue
-            concurrent_requests.append(request)
-        # Optional providers are independent of each other, so one slow or
-        # hung provider costs a single timeout rather than one per provider.
-        # Results are keyed by name and merged in plan order below, never in
-        # completion order.
-        concurrent_results = await self._invoke_providers_concurrently(
-            concurrent_requests, provider_query
+            elif request.provider in _SHARED_POOL_PROVIDERS:
+                shared_pool_requests.append(request)
+            else:
+                provider_lanes.append((request,))
+        provider_lanes.append(tuple(shared_pool_requests))
+        # A slow or hung provider only holds up the providers that share its
+        # worker pool, not every optional provider.  Results are keyed by
+        # name and merged in plan order below, never in completion order.
+        provider_results.update(
+            await self._invoke_provider_lanes(provider_lanes, provider_query)
         )
-        for request, result in zip(
-            concurrent_requests, concurrent_results, strict=True
-        ):
-            provider_results[request.provider] = result
 
         if graph_request is not None:
             seed_results = tuple(
@@ -777,23 +780,28 @@ class RetrievalService:
             ),
         )
 
-    async def _invoke_providers_concurrently(
+    async def _invoke_provider_lanes(
         self,
-        requests: Iterable[ProviderRequest],
+        lanes: Iterable[tuple[ProviderRequest, ...]],
         query: RetrievalQuery,
-    ) -> tuple[ProviderResult, ...]:
-        """Run independent provider requests together, in request order."""
+    ) -> dict[str, ProviderResult]:
+        """Run the lanes together and the requests of each lane in turn."""
 
-        tasks = [
-            asyncio.ensure_future(
-                self._invoke_provider(request.provider, query, request.limit)
-            )
-            for request in requests
-        ]
-        if not tasks:
-            return ()
+        async def invoke_lane(
+            lane: tuple[ProviderRequest, ...],
+        ) -> list[ProviderResult]:
+            return [
+                await self._invoke_provider(request.provider, query, request.limit)
+                for request in lane
+            ]
+
+        tasks = [asyncio.ensure_future(invoke_lane(lane)) for lane in lanes if lane]
         try:
-            return tuple(await asyncio.gather(*tasks))
+            return {
+                result.provider: result
+                for lane_results in await asyncio.gather(*tasks)
+                for result in lane_results
+            }
         except BaseException:
             # Cancellation of the recall, or of one provider from inside,
             # must not leave sibling searches running unobserved.
