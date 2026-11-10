@@ -117,11 +117,15 @@ class MaintenanceOperationTests(unittest.IsolatedAsyncioTestCase):
         outcome: str | None = None,
         worked: bool | None = None,
         recall_count: int = 0,
+        informed_by: list[str] | None = None,
     ) -> str:
         from daem0nmcp.event_store import EventCommand, EventStore
 
         record_id = "mem_" + suffix * 64
         occurred_at_us = int(created_at.timestamp() * 1_000_000)
+        provenance = (
+            {} if informed_by is None else {"provenance": {"informed_by": informed_by}}
+        )
         with closing(sqlite3.connect(self.database)) as connection:
             connection.execute("PRAGMA foreign_keys=ON")
             EventStore(connection).append_and_project(
@@ -155,7 +159,8 @@ class MaintenanceOperationTests(unittest.IsolatedAsyncioTestCase):
                             "source_client": "maintenance-test",
                             "source_model": None,
                             "deleted_at_us": None,
-                        }
+                        },
+                        **provenance,
                     },
                 )
             )
@@ -908,6 +913,59 @@ class MaintenanceOperationTests(unittest.IsolatedAsyncioTestCase):
                 (record_id,),
             ).fetchone()
         self.assertEqual((2, int(NOW.timestamp() * 1_000_000)), row)
+
+    async def test_prune_keeps_records_that_informed_later_work(self) -> None:
+        """Prune must not delete a memory that later work demonstrably used."""
+        old = NOW - timedelta(days=100)
+        unused_id = self._append_record("a", "Old unused decision.", created_at=old)
+        cited_id = self._append_record(
+            "b", "Old decision still in use.", created_at=old
+        )
+        self._append_record(
+            "c", "Old decision with a legacy counter.", created_at=old, recall_count=5
+        )
+        self._append_record(
+            "d",
+            "Recent decision built on the old one.",
+            created_at=NOW - timedelta(days=1),
+            informed_by=[cited_id],
+        )
+        operations = self._operations()
+
+        preview = await operations["memory_prune_preview"](
+            workspace=self.workspace,
+            request=_request(
+                "memory_prune_preview", workspace_id=self.workspace.workspace_id
+            ),
+        )
+
+        self.assertEqual([unused_id], preview.sample_ids)
+        self.assertEqual(
+            {
+                "eligible": 1,
+                "kept_cited_as_informing": 1,
+                "kept_legacy_recall_count": 1,
+                "remaining": 0,
+                "selected": 1,
+            },
+            preview.counts,
+        )
+        receipt = await operations["memory_prune"](
+            workspace=self.workspace,
+            request=_request(
+                "memory_prune",
+                workspace_id=self.workspace.workspace_id,
+                selection_token=preview.selection_token,
+                preflight_token=PREFLIGHT_TOKEN,
+            ),
+        )
+        self.assertEqual([unused_id], receipt.affected_ids)
+        with closing(sqlite3.connect(self.database)) as connection:
+            surviving = connection.execute(
+                "SELECT deleted_at_us FROM memory_records WHERE record_id=?",
+                (cited_id,),
+            ).fetchone()
+        self.assertEqual((None,), surviving)
 
     def _relationship_operations(self):
         from daem0nmcp.api.v7.relationship_operations import (

@@ -496,12 +496,22 @@ def _prune_criteria(request: AdmittedRequest) -> dict[str, Any]:
     }
 
 
-def _prune_candidates(
-    connection: sqlite3.Connection,
+# v7 recall is read-only and does not count recalls, so ``recall_count`` only
+# carries what a migration or import brought along.  The usage evidence v7
+# does record canonically is a later store or outcome naming the record in
+# ``informed_by``; such a record is never pruned.
+_CITED_AS_INFORMING = (
+    "EXISTS (SELECT 1 FROM memory_provenance_edges AS edge "
+    "WHERE edge.workspace_id=record.workspace_id "
+    "AND edge.informed_by_record_id=record.record_id)"
+)
+
+
+def _prune_scope(
     workspace_id: str,
     criteria: Mapping[str, Any],
     evaluated_at_us: int,
-) -> tuple[list[_RecordSnapshot], int]:
+) -> tuple[str, list[Any]]:
     cutoff_us = evaluated_at_us - int(criteria["older_than_days"]) * 86_400_000_000
     categories = list(criteria["categories"])
     placeholders = ",".join("?" for _ in categories)
@@ -510,16 +520,22 @@ def _prune_candidates(
         + placeholders
         + ") AND record.created_at_us<? AND record.deleted_at_us IS NULL "
         "AND record.is_permanent=0 AND record.pinned=0 AND record.archived=0 "
-        "AND record.outcome IS NULL AND record.recall_count<?"
+        "AND record.outcome IS NULL"
     )
-    parameters: list[Any] = [
-        workspace_id,
-        *categories,
-        cutoff_us,
-        criteria["min_recall_count"],
-    ]
     if criteria["protect_successful"]:
         where += " AND (record.worked IS NULL OR record.worked=0)"
+    return where, [workspace_id, *categories, cutoff_us]
+
+
+def _prune_candidates(
+    connection: sqlite3.Connection,
+    workspace_id: str,
+    criteria: Mapping[str, Any],
+    evaluated_at_us: int,
+) -> tuple[list[_RecordSnapshot], int]:
+    scope, scope_parameters = _prune_scope(workspace_id, criteria, evaluated_at_us)
+    where = f"{scope} AND record.recall_count<? AND NOT {_CITED_AS_INFORMING}"
+    parameters = [*scope_parameters, criteria["min_recall_count"]]
     total_row = connection.execute(
         f"SELECT count(*) FROM memory_records AS record WHERE {where}",
         parameters,
@@ -533,6 +549,29 @@ def _prune_candidates(
         (*parameters, _MAX_SELECTION),
     ).fetchall()
     return [_verified_snapshot(row) for row in rows], int(total_row[0])
+
+
+def _prune_kept_counts(
+    connection: sqlite3.Connection,
+    workspace_id: str,
+    criteria: Mapping[str, Any],
+    evaluated_at_us: int,
+) -> dict[str, int]:
+    """Count the otherwise prunable records each usage safeguard kept."""
+
+    scope, parameters = _prune_scope(workspace_id, criteria, evaluated_at_us)
+    row = connection.execute(
+        f"SELECT COALESCE(sum({_CITED_AS_INFORMING}),0),"
+        f"COALESCE(sum(NOT {_CITED_AS_INFORMING} AND record.recall_count>=?),0) "
+        f"FROM memory_records AS record WHERE {scope}",
+        (criteria["min_recall_count"], *parameters),
+    ).fetchone()
+    if row is None:
+        raise MaintenanceOperationError("CAPABILITY_DEGRADED")
+    return {
+        "kept_cited_as_informing": int(row[0]),
+        "kept_legacy_recall_count": int(row[1]),
+    }
 
 
 def _duplicate_criteria(request: AdmittedRequest) -> dict[str, Any]:
@@ -1087,6 +1126,12 @@ def _prune_preview_sync(
                     criteria,
                     evaluated_at_us,
                 )
+                kept = _prune_kept_counts(
+                    connection,
+                    workspace.workspace_id,
+                    criteria,
+                    evaluated_at_us,
+                )
                 token, expires_at = _issue_selection_token(
                     dependencies,
                     workspace_id=workspace.workspace_id,
@@ -1101,6 +1146,7 @@ def _prune_preview_sync(
                     selection_token=token,
                     counts={
                         "eligible": eligible,
+                        **kept,
                         "remaining": max(0, eligible - len(records)),
                         "selected": len(records),
                     },
