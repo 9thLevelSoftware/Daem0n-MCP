@@ -377,15 +377,16 @@ def _related(
                     candidate,
                 )
                 ranked.append(entry)
-                if candidate.worked is None:
+                verdict = candidate.worked
+                if verdict is None:
                     continue
-                witness = witnesses.get(candidate.worked)
+                witness = witnesses.get(verdict)
                 if (
                     witness is None or entry[:3] < witness[:3]
                 ) and not _outcome_is_inferred(
                     connection, workspace_id, candidate.record_id
                 ):
-                    witnesses[candidate.worked] = entry
+                    witnesses[verdict] = entry
             ranked.sort(key=lambda item: item[:3])
             del ranked[_MAX_EVIDENCE:]
     finally:

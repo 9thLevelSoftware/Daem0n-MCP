@@ -79,6 +79,13 @@ class ActivePointerMissingError(RuntimeError):
         super().__init__(f"{self.code}: {detail}")
 
 
+def _is_concurrent_ddl_refusal(error: OperationalError) -> bool:
+    """Whether SQLite refused a statement because another start changed the schema."""
+
+    message = str(error.orig)
+    return "already exists" in message or "database schema has changed" in message
+
+
 class DatabaseManager:
     """
     Manages the SQLite database connection.
@@ -509,15 +516,18 @@ class DatabaseManager:
         start may be adding the same tables to it: each looks for a table and
         then creates it, and the one that comes second is refused.  The table
         it was refused over now exists, so it looks again; every refusal is
-        over a different table, which bounds the number of passes.
+        over a different table, which bounds the number of passes.  The look
+        itself can be refused the same way: SQLite reports "database schema
+        has changed" for a statement prepared before the other start's DDL
+        committed, and that too is answered by looking again.
         """
 
-        for _ in range(len(Base.metadata.tables)):
+        for _ in range(2 * len(Base.metadata.tables)):
             try:
                 async with self.engine.begin() as conn:
                     await conn.run_sync(Base.metadata.create_all)
             except OperationalError as exc:
-                if "already exists" not in str(exc.orig):
+                if not _is_concurrent_ddl_refusal(exc):
                     raise
             else:
                 return

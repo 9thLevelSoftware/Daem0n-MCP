@@ -472,3 +472,35 @@ def test_concurrent_ledger_runs_apply_each_migration_exactly_once(tmp_path):
     assert _schema(database) == _schema(reference)
     with closing(sqlite3.connect(database)) as connection:
         assert connection.execute("PRAGMA integrity_check").fetchall() == [("ok",)]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "refusal",
+    ["table memory_events already exists", "database schema has changed"],
+)
+async def test_table_creation_looks_again_after_another_start_changed_the_schema(
+    tmp_path, monkeypatch, refusal
+):
+    """Both ways SQLite refuses DDL raced by another start are retried."""
+
+    from sqlalchemy.exc import OperationalError
+
+    real_create_all = Base.metadata.create_all
+    calls = 0
+
+    def create_all(connection, **options):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise OperationalError("PRAGMA", {}, sqlite3.OperationalError(refusal))
+        return real_create_all(connection, **options)
+
+    monkeypatch.setattr(Base.metadata, "create_all", create_all)
+    manager = DatabaseManager(str(tmp_path / "storage"))
+    try:
+        await manager.init_db()
+        assert calls >= 2
+        assert manager.format_version == 7
+    finally:
+        await manager.close()
