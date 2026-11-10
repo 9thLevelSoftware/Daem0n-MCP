@@ -1078,7 +1078,13 @@ class EventStore:
         legacy_type = relation.get("legacy_type")
         if not isinstance(source, str) or not isinstance(target, str):
             raise ValueError("relationship endpoints are invalid")
-        if source == target and command.actor_type not in {"migration", "import"}:
+        # Migrated and imported stores may hold self-edges; a runtime actor may
+        # close one (unlink, or maintenance deleting the record) but not assert it.
+        if (
+            source == target
+            and command.event_type != "relationship.removed"
+            and command.actor_type not in {"migration", "import"}
+        ):
             raise ValueError("runtime relationships may not be self-edges")
         if relation_type not in {
             "led_to",

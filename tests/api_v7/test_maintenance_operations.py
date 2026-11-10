@@ -1200,6 +1200,15 @@ class MaintenanceOperationTests(unittest.IsolatedAsyncioTestCase):
             {(cause_id, keeper_id, "led_to"), (keeper_id, effect_id, "led_to")},
             self._live_edges(),
         )
+        with closing(sqlite3.connect(self.database)) as connection:
+            moved_valid_from = connection.execute(
+                "SELECT valid_from_us FROM memory_relationship_versions "
+                "WHERE source_record_id=? AND target_record_id=? "
+                "AND transaction_to_us IS NULL",
+                (cause_id, keeper_id),
+            ).fetchall()
+        # The moved edge keeps the validity start of the edge it replaces.
+        self.assertEqual([(int(NOW.timestamp() * 1_000_000),)], moved_valid_from)
         related = await self._related(relationships, keeper_id)
         self.assertEqual(
             {cause_id, effect_id}, {item.record_id for item in related.records}
@@ -1213,6 +1222,190 @@ class MaintenanceOperationTests(unittest.IsolatedAsyncioTestCase):
             [[cause_id, keeper_id, effect_id]],
             [path.record_ids for path in chain.paths],
         )
+        self._assert_replay_reproduces_projections()
+
+    def _append_migrated_self_edge(
+        self, suffix: str, record_id: str, *, actor_type: str = "migration"
+    ) -> str:
+        """A v6 store may hold a relationship from a record to itself."""
+        from daem0nmcp.event_store import EventCommand, EventStore
+
+        relationship_id = "rel_" + suffix * 64
+        at_us = int((NOW - timedelta(days=1)).timestamp() * 1_000_000)
+        with closing(sqlite3.connect(self.database)) as connection:
+            connection.execute("PRAGMA foreign_keys=ON")
+            EventStore(connection).append_and_project(
+                EventCommand(
+                    workspace_id=self.workspace.workspace_id,
+                    stream_id=relationship_id,
+                    stream_kind="relationship",
+                    event_type="relationship.created",
+                    occurred_at_us=at_us,
+                    recorded_at_us=at_us,
+                    actor_type=actor_type,
+                    payload={
+                        "relationship": {
+                            "source_record_id": record_id,
+                            "target_record_id": record_id,
+                            "relationship_type": "related_to",
+                            "legacy_type": None,
+                            "description": None,
+                            "confidence": 1.0,
+                            "metadata": {},
+                            "valid_from_us": at_us,
+                            "valid_to_us": None,
+                        }
+                    },
+                )
+            )
+            connection.commit()
+        return relationship_id
+
+    def _relationship_event_types(self, relationship_id: str) -> list[str]:
+        with closing(sqlite3.connect(self.database)) as connection:
+            return [
+                str(row[0])
+                for row in connection.execute(
+                    "SELECT event_type FROM memory_events WHERE workspace_id=? "
+                    "AND stream_id=? ORDER BY stream_version",
+                    (self.workspace.workspace_id, relationship_id),
+                )
+            ]
+
+    async def test_prune_closes_a_migrated_self_edge_of_the_pruned_record(
+        self,
+    ) -> None:
+        """A migrated self-edge must not make its record impossible to prune."""
+        pruned_id = self._append_record(
+            "a", "Old self-linked decision.", created_at=NOW - timedelta(days=100)
+        )
+        self_edge = self._append_migrated_self_edge("e", pruned_id)
+        # Only closing is allowed at runtime; asserting one is still refused.
+        with self.assertRaisesRegex(ValueError, "self-edges"):
+            self._append_migrated_self_edge("f", pruned_id, actor_type="client")
+        operations = self._operations()
+        preview = await operations["memory_prune_preview"](
+            workspace=self.workspace,
+            request=_request(
+                "memory_prune_preview", workspace_id=self.workspace.workspace_id
+            ),
+        )
+        self.assertEqual([pruned_id], preview.sample_ids)
+
+        receipt = await operations["memory_prune"](
+            workspace=self.workspace,
+            request=_request(
+                "memory_prune",
+                workspace_id=self.workspace.workspace_id,
+                selection_token=preview.selection_token,
+                preflight_token=PREFLIGHT_TOKEN,
+            ),
+        )
+
+        self.assertEqual([pruned_id], receipt.affected_ids)
+        self.assertEqual(set(), self._live_edges())
+        self.assertEqual(
+            ["relationship.created", "relationship.removed"],
+            self._relationship_event_types(self_edge),
+        )
+        self._assert_replay_reproduces_projections()
+
+    async def test_duplicate_cleanup_closes_a_migrated_self_edge_of_the_duplicate(
+        self,
+    ) -> None:
+        """A self-edge on a merged duplicate is closed, never moved to the keeper."""
+        duplicate_id = self._append_record(
+            "a", "Use the durable queue", created_at=NOW - timedelta(days=3)
+        )
+        keeper_id = self._append_record(
+            "b", "use the durable queue", created_at=NOW - timedelta(days=2)
+        )
+        self_edge = self._append_migrated_self_edge("e", duplicate_id)
+        operations = self._operations()
+        preview = await operations["memory_duplicates_preview"](
+            workspace=self.workspace,
+            request=_request(
+                "memory_duplicates_preview",
+                workspace_id=self.workspace.workspace_id,
+            ),
+        )
+        self.assertEqual([duplicate_id], preview.sample_ids)
+
+        receipt = await operations["memory_duplicates_cleanup"](
+            workspace=self.workspace,
+            request=_request(
+                "memory_duplicates_cleanup",
+                workspace_id=self.workspace.workspace_id,
+                selection_token=preview.selection_token,
+                preflight_token=PREFLIGHT_TOKEN,
+            ),
+        )
+
+        self.assertEqual([keeper_id, duplicate_id], receipt.affected_ids)
+        self.assertEqual(set(), self._live_edges())
+        self.assertEqual(
+            ["relationship.created", "relationship.removed"],
+            self._relationship_event_types(self_edge),
+        )
+        self._assert_replay_reproduces_projections()
+
+    async def test_duplicate_cleanup_leaves_an_unlinked_relationship_removed(
+        self,
+    ) -> None:
+        """An edge the caller already removed must not come back on the keeper."""
+        duplicate_id = self._append_record(
+            "a", "Use the durable queue", created_at=NOW - timedelta(days=3)
+        )
+        self._append_record(
+            "b", "use the durable queue", created_at=NOW - timedelta(days=2)
+        )
+        effect_id = self._append_record(
+            "c", "Worker rollout.", created_at=NOW - timedelta(days=1)
+        )
+        relationships = self._relationship_operations()
+        unlinked = await self._link(
+            relationships, duplicate_id, effect_id, "led_to", "merge-unlinked-0001"
+        )
+        await relationships["memory_unlink"](
+            workspace=self.workspace,
+            request=_request(
+                "memory_unlink",
+                workspace_id=self.workspace.workspace_id,
+                relationship_id=unlinked,
+                preflight_token=PREFLIGHT_TOKEN,
+            ),
+        )
+        operations = self._operations()
+        preview = await operations["memory_duplicates_preview"](
+            workspace=self.workspace,
+            request=_request(
+                "memory_duplicates_preview",
+                workspace_id=self.workspace.workspace_id,
+            ),
+        )
+        self.assertEqual([duplicate_id], preview.sample_ids)
+
+        await operations["memory_duplicates_cleanup"](
+            workspace=self.workspace,
+            request=_request(
+                "memory_duplicates_cleanup",
+                workspace_id=self.workspace.workspace_id,
+                selection_token=preview.selection_token,
+                preflight_token=PREFLIGHT_TOKEN,
+            ),
+        )
+
+        self.assertEqual(set(), self._live_edges())
+        self.assertEqual(
+            ["relationship.created", "relationship.removed"],
+            self._relationship_event_types(unlinked),
+        )
+        with closing(sqlite3.connect(self.database)) as connection:
+            streams = connection.execute(
+                "SELECT count(DISTINCT stream_id) FROM memory_events "
+                "WHERE stream_kind='relationship'"
+            ).fetchone()
+        self.assertEqual((1,), streams)
         self._assert_replay_reproduces_projections()
 
     async def test_dream_purge_closes_relationships_of_purged_records(self) -> None:

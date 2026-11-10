@@ -867,12 +867,14 @@ def _retire_relationships(
     maintenance: Mapping[str, Any],
     successor_record_id: str | None = None,
 ) -> None:
-    """Close every live relationship of a record that was just deleted.
+    """Close every open relationship of a record that was just deleted.
 
     A relationship left open on a deleted record is unreachable (it cannot be
     listed) and breaks graph reads.  With ``successor_record_id`` the edge is
     re-created on the surviving record, unless that would be a self-edge or
-    repeat an edge the survivor already has.
+    repeat an edge the survivor already has.  As in ``memory_unlink``, a
+    relationship that already has an end is treated as removed: it is neither
+    closed again nor moved.
     """
 
     rows = connection.execute(
@@ -881,11 +883,10 @@ def _retire_relationships(
         "valid_from_us,transaction_from_us "
         "FROM memory_relationship_versions "
         "WHERE workspace_id=? AND relationship_type<>'legacy' "
-        "AND transaction_to_us IS NULL "
-        "AND (valid_to_us IS NULL OR valid_to_us>?) "
+        "AND transaction_to_us IS NULL AND valid_to_us IS NULL "
         "AND (source_record_id=? OR target_record_id=?) "
         "ORDER BY relationship_id",
-        (workspace_id, recorded_at_us, record_id, record_id),
+        (workspace_id, record_id, record_id),
     ).fetchall()
     for row in rows:
         relationship_id = str(row["relationship_id"])
@@ -984,7 +985,7 @@ def _retire_relationships(
                         **relation,
                         "source_record_id": source,
                         "target_record_id": target,
-                        "valid_from_us": event_at_us,
+                        "valid_from_us": valid_from_us,
                         "valid_to_us": None,
                     },
                     "maintenance": {
