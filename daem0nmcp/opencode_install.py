@@ -9,6 +9,7 @@ import argparse
 import copy
 import importlib.resources
 import json
+import re
 import shutil
 import subprocess
 import sys
@@ -72,29 +73,63 @@ def render_plugin(python: str) -> str:
     )
 
 
+# The statement every current launch runs first; see ``module_launch_args``.
+_PATH_FILTER = module_launch_args("daem0nmcp")[1].split("; ")[1]
+_SERVER_MODULES = ("daem0nmcp", "daem0nmcp.server")
+_MODULE_SWITCH_SERVER = re.compile(r"""["']-m["']\s*,\s*["']daem0nmcp(\.server)?["']""")
+
+
 def _plugin_is_outdated(path: Path) -> bool:
-    """Whether an installed plugin still starts its hooks with ``python -m``."""
+    """Whether an installed plugin starts its hooks without the current launcher.
+
+    Earlier plugins spelled their ``python -m`` launch in several ways, so
+    this looks for what a safe plugin has rather than for any one of them.
+    """
     try:
         text = path.read_text(encoding="utf-8")
     except (OSError, ValueError):
         return False
-    return "daem0nmcp.claude_hooks" in text and '"-m"' in text
+    return "daem0nmcp.claude_hooks" in text and _PATH_FILTER not in text
 
 
-def _upgrade_server_command(path: Path, dry_run: bool) -> bool:
-    """Rewrite the ``-m`` server command older installers wrote; True if it was."""
+def _upgrade_server_command(path: Path, dry_run: bool) -> str | None:
+    """Rewrite a ``-m`` server command from an older install.
+
+    Returns ``"updated"`` when it was (or, in a dry run, would be) rewritten,
+    ``"outdated"`` when the file still holds one but cannot be rewritten
+    here, and ``None`` when there is nothing to do.
+    """
     try:
-        value = json.loads(path.read_text(encoding="utf-8"))
+        text = path.read_text(encoding="utf-8")
+    except (OSError, ValueError):
+        return None
+    try:
+        value = json.loads(text)
         server = value["mcp"]["daem0nmcp"]
-        interpreter, flag, module = server["command"]
-        if flag != "-m" or module not in {"daem0nmcp", "daem0nmcp.server"}:
-            return False
-        if not dry_run:
-            server["command"] = [interpreter, *module_launch_args(module)]
+        command = server["command"]
+        if not isinstance(command, list):
+            return None
+    except ValueError:
+        # OpenCode also accepts comments; this installer does not edit those.
+        return "outdated" if _MODULE_SWITCH_SERVER.search(text) else None
+    except (KeyError, TypeError):
+        return None
+    for at in range(len(command) - 1):
+        if command[at] == "-m" and command[at + 1] in _SERVER_MODULES:
+            break
+    else:
+        return None
+    if not dry_run:
+        server["command"] = [
+            *command[:at],
+            *module_launch_args(command[at + 1]),
+            *command[at + 2 :],
+        ]
+        try:
             path.write_text(json.dumps(value, indent=2) + "\n", encoding="utf-8")
-        return True
-    except (OSError, ValueError, KeyError, TypeError):
-        return False
+        except OSError:
+            return "outdated"
+    return "updated"
 
 
 def detect_clients(project_path: Path) -> dict[str, Any]:
@@ -326,9 +361,21 @@ def install_opencode(
         json_path = root / "opencode.json"
         status = _ensure_file(json_path, json_content, dry_run, force, root)
         lines.append(f"  {status} opencode.json")
-        if status == "[exists]" and _upgrade_server_command(json_path, dry_run):
+        upgrade = (
+            _upgrade_server_command(json_path, dry_run)
+            if status == "[exists]"
+            else None
+        )
+        if upgrade == "updated":
             lines.append(
                 '  [update] opencode.json Daem0n server command (was "python -m")'
+            )
+        elif upgrade == "outdated":
+            lines.append(
+                '  [outdated] opencode.json starts the Daem0n server with "python'
+                ' -m", which also imports from this project; replace "-m",'
+                ' "<module>" in its command with: '
+                + json.dumps(module_launch_args("daem0nmcp"))[1:-1]
             )
         if (
             installation is not None
@@ -361,8 +408,9 @@ def install_opencode(
         lines.append(f"  {status} .opencode/plugins/daem0n.ts")
         if status == "[exists]" and _plugin_is_outdated(plugin_path):
             lines.append(
-                '  [outdated] .opencode/plugins/daem0n.ts starts hooks with "python'
-                ' -m"; delete it and re-run, or re-run with --force'
+                "  [outdated] .opencode/plugins/daem0n.ts is from an older version"
+                " whose hooks also import from this project; delete it and re-run"
+                " to install the current one"
             )
 
         # -- Ensure slash-command files ----------------------------------

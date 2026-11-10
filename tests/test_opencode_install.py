@@ -138,6 +138,88 @@ def test_install_plugin_idempotent(tmp_path):
     assert "server command" not in msg2
 
 
+# The hook launch lines of the plugins earlier releases installed.
+_SHELL_PLUGIN = (
+    "const mod = `daem0nmcp.claude_hooks.${module}`;\n"
+    "const result = await shell`python -m ${mod}`.quiet();\n"
+)
+_PROJECT_INTERPRETER_PLUGIN = (
+    "const python = configured ?? 'python';\n"
+    "const mod = `daem0nmcp.claude_hooks.${module}`;\n"
+    "child = Bun.spawn([python, '-m', mod], { cwd: directory });\n"
+)
+
+
+@pytest.mark.parametrize("older_plugin", [_SHELL_PLUGIN, _PROJECT_INTERPRETER_PLUGIN])
+def test_reinstall_flags_every_plugin_without_the_current_launcher(
+    tmp_path, older_plugin
+):
+    """Any earlier plugin is reported, however it spelled its ``-m`` launch."""
+    plugin = tmp_path / ".opencode" / "plugins" / "daem0n.ts"
+    plugin.parent.mkdir(parents=True)
+    plugin.write_text(older_plugin, encoding="utf-8")
+
+    ok, msg = install_opencode(
+        str(tmp_path), bridge_config_root=tmp_path / "host-config"
+    )
+
+    assert ok, msg
+    assert "[outdated] .opencode/plugins/daem0n.ts" in msg
+    assert plugin.read_text(encoding="utf-8") == older_plugin
+
+
+@pytest.mark.parametrize(
+    "older",
+    [
+        ["python", "-u", "-m", "daem0nmcp"],
+        ["py", "-3", "-m", "daem0nmcp.server"],
+        ["uv", "run", "python", "-m", "daem0nmcp"],
+        ["python", "-m", "daem0nmcp.server", "--transport", "stdio"],
+    ],
+)
+def test_reinstall_upgrades_a_server_command_with_other_arguments(tmp_path, older):
+    config_path = tmp_path / "opencode.json"
+    config_path.write_text(
+        json.dumps({"mcp": {"daem0nmcp": {"type": "local", "command": older}}}),
+        encoding="utf-8",
+    )
+
+    ok, msg = install_opencode(
+        str(tmp_path), bridge_config_root=tmp_path / "host-config"
+    )
+
+    assert ok, msg
+    at = older.index("-m")
+    command = json.loads(config_path.read_text(encoding="utf-8"))["mcp"]["daem0nmcp"][
+        "command"
+    ]
+    assert command == [
+        *older[:at],
+        *module_launch_args(older[at + 1]),
+        *older[at + 2 :],
+    ]
+    assert "[update] opencode.json Daem0n server command" in msg
+
+
+def test_reinstall_reports_a_server_command_it_cannot_rewrite(tmp_path):
+    """A config with comments is not rewritten, so the user is told to."""
+    older = (
+        "{\n  // my servers\n"
+        '  "mcp": {"daem0nmcp": {"type": "local",'
+        ' "command": ["python", "-m", "daem0nmcp"]}}\n}\n'
+    )
+    config_path = tmp_path / "opencode.json"
+    config_path.write_text(older, encoding="utf-8")
+
+    ok, msg = install_opencode(
+        str(tmp_path), bridge_config_root=tmp_path / "host-config"
+    )
+
+    assert ok, msg
+    assert config_path.read_text(encoding="utf-8") == older
+    assert "[outdated] opencode.json" in msg
+
+
 def test_reinstall_upgrades_an_older_server_command_and_flags_an_older_plugin(
     tmp_path,
 ):
@@ -191,7 +273,9 @@ def test_reinstall_upgrades_an_older_server_command_and_flags_an_older_plugin(
     assert "[update] opencode.json Daem0n server command" in msg
     assert plugin.read_text(encoding="utf-8") == older_plugin
     assert "[outdated] .opencode/plugins/daem0n.ts" in msg
-    assert "--force" in msg
+    # --force would also replace opencode.json and the user's other servers.
+    assert "--force" not in msg
+    assert "delete it and re-run" in msg
 
     ok, again = install_opencode(
         str(tmp_path), bridge_config_root=tmp_path / "host-config"
