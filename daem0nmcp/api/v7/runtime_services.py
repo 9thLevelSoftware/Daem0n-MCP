@@ -665,14 +665,6 @@ class SQLiteMemoryEventWriter:
             else _datetime_us(command.happened_at)
         )
         context = dict(command.context)
-        if command.code_refs:
-            try:
-                bindings = capture_bindings(workspace, command.code_refs)
-            except CodeBindingUnavailableError as exc:
-                raise RuntimeServiceError("CAPABILITY_DEGRADED") from exc
-            except CodeBindingError as exc:
-                raise RuntimeServiceError("INVALID_ARGUMENT") from exc
-            context["code_bindings"] = [binding.to_json() for binding in bindings]
         if command.record_type == "procedure":
             steps = list(command.procedure_steps)
             if "steps" in context and context["steps"] != steps:
@@ -735,6 +727,30 @@ class SQLiteMemoryEventWriter:
         with self._storage_resolver.locked_active(workspace) as active:
             connection = _open_database(active.path, writable=True)
             try:
+                # A retry of a committed store must replay it, so the bound
+                # files are read only for a request the log does not hold
+                # yet, and before the write lock is taken.  The lookup is
+                # repeated under that lock to settle a concurrent first write.
+                if command.code_refs and (
+                    _existing_idempotent_event(
+                        connection,
+                        workspace_id=workspace.workspace_id,
+                        event_type="memory.created",
+                        correlation_id=correlation,
+                        stream_id=record_id,
+                        request_hash=request_hash,
+                    )
+                    is None
+                ):
+                    try:
+                        bindings = capture_bindings(workspace, command.code_refs)
+                    except CodeBindingUnavailableError as exc:
+                        raise RuntimeServiceError("CAPABILITY_DEGRADED") from exc
+                    except CodeBindingError as exc:
+                        raise RuntimeServiceError("INVALID_ARGUMENT") from exc
+                    context["code_bindings"] = [
+                        binding.to_json() for binding in bindings
+                    ]
                 connection.execute("BEGIN IMMEDIATE")
                 if cancelled.is_set():
                     raise _WorkerCancelledError()
@@ -747,6 +763,10 @@ class SQLiteMemoryEventWriter:
                     request_hash=request_hash,
                 )
                 if existing is None:
+                    if command.code_refs and "code_bindings" not in context:
+                        # The request was in the log a moment ago and is not
+                        # now: never append it without its bindings.
+                        raise RuntimeServiceError("MEMORY_EVENT_INTEGRITY_FAILED")
                     if record_id in command.informed_by:
                         raise RuntimeServiceError("INVALID_ARGUMENT")
                     _validate_informed_by(

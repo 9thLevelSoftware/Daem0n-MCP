@@ -269,6 +269,63 @@ class MemoryLearningWriteTests(unittest.IsolatedAsyncioTestCase):
                 )
         self.assertEqual(1, len(self._payloads()))
 
+    async def test_committed_bound_store_replays_after_its_file_changes(self) -> None:
+        """Re-reading the bound file before the lookup failed a finished write."""
+        bound = self.fixture.root / "bound.txt"
+        bound.write_bytes(b"first version")
+        command = _store_command(code_refs=(("bound.txt", None),))
+        stored = await self.writer.store(self.fixture.workspace, command)
+        committed = self._payloads()
+
+        bound.write_bytes(b"second version")
+        changed = await self.writer.store(self.fixture.workspace, command)
+        bound.unlink()
+        missing = await self.writer.store(self.fixture.workspace, command)
+
+        for replay in (changed, missing):
+            self.assertTrue(replay.idempotent_replay)
+            self.assertEqual(stored.event, replay.event)
+            self.assertEqual(stored.record, replay.record)
+        self.assertFalse(stored.idempotent_replay)
+        self.assertEqual(committed, self._payloads())
+        # The key still names one request: other arguments stay a conflict,
+        # and a new write to the missing file is still refused.
+        with self.assertRaises(IdempotencyConflict):
+            await self.writer.store(
+                self.fixture.workspace,
+                replace(command, content="A different request under the same key."),
+            )
+        with self.assertRaises(IdempotencyConflict):
+            await self.writer.store(
+                self.fixture.workspace, replace(command, code_refs=())
+            )
+        with self.assertRaisesRegex(RuntimeServiceError, "INVALID_ARGUMENT"):
+            await self.writer.store(
+                self.fixture.workspace,
+                replace(command, idempotency_key="store-after-file-removed-0001"),
+            )
+        self.assertEqual(committed, self._payloads())
+
+    async def test_committed_rebinding_outcome_replays_after_its_file_changes(
+        self,
+    ) -> None:
+        """The outcome retry must not re-read the file it already rebound."""
+        bound = self.fixture.root / "bound.txt"
+        bound.write_bytes(b"first version")
+        stored = await self.writer.store(
+            self.fixture.workspace, _store_command(code_refs=(("bound.txt", None),))
+        )
+        outcome = _outcome_command(stored.record.record_id, rebind_code=True)
+        recorded = await self.writer.record_outcome(self.fixture.workspace, outcome)
+        committed = self._payloads()
+
+        bound.unlink()
+        replay = await self.writer.record_outcome(self.fixture.workspace, outcome)
+
+        self.assertTrue(replay.idempotent_replay)
+        self.assertEqual(recorded.event, replay.event)
+        self.assertEqual(committed, self._payloads())
+
     async def test_environmental_code_ref_failure_is_atomic_and_restorable(
         self,
     ) -> None:
