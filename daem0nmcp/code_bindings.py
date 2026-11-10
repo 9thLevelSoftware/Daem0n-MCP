@@ -276,6 +276,10 @@ def _fingerprint(
                 and entity.qualified_name.endswith(suffix)
             ):
                 suffixes.append(entity)
+        if exact and suffixes:
+            # ``Server.start`` in ``Server.py`` is the identity of a top-level
+            # ``start`` and also names the method ``Server.Server.start``.
+            raise CodeBindingReferenceError("bound symbol reference is ambiguous")
         aliases = aliases or suffixes
         selected = exact or aliases
         if not exact and aliases:

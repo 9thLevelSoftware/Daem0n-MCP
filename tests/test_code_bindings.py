@@ -426,11 +426,65 @@ def test_qualified_suffix_matches_whole_components_only(workspace, name):
     )
 
 
-def test_short_name_keeps_precedence_over_qualified_suffix(workspace, monkeypatch):
+@pytest.mark.parametrize(
+    ("filename", "source"),
+    [
+        (
+            "Server.py",
+            "class Server:\n    def start(self):\n        return 1\n\n"
+            "def start():\n    return 2\n",
+        ),
+        (
+            "Server.ts",
+            "class Server {\n  start() { return 1; }\n}\n"
+            "function start() { return 2; }\n",
+        ),
+    ],
+    ids=["python", "typescript"],
+)
+def test_qualified_name_matching_exact_and_suffix_identities_is_ambiguous(
+    workspace, filename, source
+):
+    require_parser()
+    if not filename.endswith(".py"):
+        producer = discovery_operations.default_code_indexer_factory()
+        if ".ts" not in producer.get_supported_extensions():
+            pytest.skip("typescript parser unavailable")
+    path = workspace.root / filename
+    path.write_text(source, encoding="utf-8")
+    # ``Server.start`` is the identity of the top-level function and also
+    # names the method ``Server.Server.start`` without its module prefix.
+    with pytest.raises(CodeBindingReferenceError, match="ambiguous"):
+        capture_bindings(workspace, [(filename, "Server.start")])
+    context = context_for(workspace, [(filename, "Server.Server.start")])
+    evaluator = BindingEvaluator()
+    edit(path, source.replace("return 2", "return 8"))
+    assert evaluator.evaluate(workspace.root, context).applicability == "current"
+    edit(path, source.replace("return 1", "return 9"))
+    result = evaluator.evaluate(workspace.root, context)
+    assert result.applicability == "needs_revalidation"
+    assert result.changed == (f"{filename}::Server.Server.start",)
+
+
+def test_exact_identity_gaining_a_suffix_namesake_is_unverifiable(workspace):
+    require_parser()
+    path = workspace.root / "Server.py"
+    original = "def start():\n    return 2\n"
+    path.write_text(original, encoding="utf-8")
+    context = context_for(workspace, [("Server.py", "Server.start")])
+    evaluator = BindingEvaluator()
+    assert evaluator.evaluate(workspace.root, context).applicability == "current"
+    edit(path, original + "\nclass Server:\n    def start(self):\n        return 1\n")
+    result = evaluator.evaluate(workspace.root, context)
+    assert result.applicability == "unverifiable"
+    assert result.changed == ()
+
+
+def test_entity_name_keeps_precedence_over_qualified_suffix(workspace, monkeypatch):
     path = workspace.root / "sample.py"
     path.write_text("first\nsecond\n", encoding="utf-8")
     entities = [
-        {"name": "b", "qualified_name": "sample.b", "line_start": 1, "line_end": 1},
+        {"name": "a.b", "qualified_name": "sample.x", "line_start": 1, "line_end": 1},
         {"name": "c", "qualified_name": "sample.a.b", "line_start": 2, "line_end": 2},
     ]
     monkeypatch.setattr(
@@ -442,10 +496,12 @@ def test_short_name_keeps_precedence_over_qualified_suffix(workspace, monkeypatc
             index_source_strict=lambda *_: entities,
         ),
     )
-    short, suffix = capture_bindings(
-        workspace, [("sample.py", "b"), ("sample.py", "a.b")]
-    )
-    assert short.fingerprint == hashlib.sha256(b"first").hexdigest()
+    # An entity literally named ``a.b`` and another whose identity ends in
+    # ``.a.b`` compete for the same reference; the name tier is consulted first.
+    (named,) = capture_bindings(workspace, [("sample.py", "a.b")])
+    assert named.fingerprint == hashlib.sha256(b"first").hexdigest()
+    del entities[0]
+    (suffix,) = capture_bindings(workspace, [("sample.py", "a.b")])
     assert suffix.fingerprint == hashlib.sha256(b"second").hexdigest()
 
 
