@@ -568,3 +568,32 @@ def test_a_source_the_pointer_guard_cannot_read_is_refused_not_passed(
     with pytest.raises(MigrationV7Error) as readable:
         service.dry_run(tmp_path)
     assert readable.value.code == "ACTIVE_POINTER_MISSING"
+
+
+def test_a_migration_root_that_cannot_be_listed_is_a_migration_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Listing the published candidates fails with a code, not a traceback."""
+
+    storage, database, registry = _workspace(tmp_path)
+    workspace_id = registry.default.workspace_id
+    _append_event(database, workspace_id, "1")
+    _activate_a_projection_repair(storage, database, workspace_id)
+    service = MigrationV7Service(registry)
+    assert service.rollback(tmp_path).status == "rolled_back"
+    _lose_the_pointer(storage)
+    root = storage / "migrations" / "v7"
+    listing = Path.iterdir
+
+    def unlistable(path: Path):
+        if path == root:
+            raise PermissionError("migration root cannot be listed")
+        return listing(path)
+
+    monkeypatch.setattr(Path, "iterdir", unlistable)
+
+    with pytest.raises(MigrationV7Error) as refused:
+        service.recover_pointer(tmp_path)
+
+    assert refused.value.code == "UNSAFE_MIGRATION_PATH"
+    assert not (storage / "active-db.json").exists()

@@ -663,7 +663,13 @@ def _published_candidates(storage: Path) -> list[Path]:
     if root is None:
         return []
     candidates: list[Path] = []
-    for run_dir in sorted(root.iterdir(), key=lambda path: path.name):
+    try:
+        children = sorted(root.iterdir(), key=lambda path: path.name)
+    except OSError as exc:
+        raise MigrationV7Error(
+            "UNSAFE_MIGRATION_PATH", "migration root cannot be enumerated"
+        ) from exc
+    for run_dir in children:
         candidate = run_dir / "candidate.db"
         if (
             re.fullmatch(r"mig_[0-9a-f]{64}", run_dir.name)
@@ -2113,7 +2119,13 @@ class MigrationV7Service:
             snapshot_only: list[Path] = []
             published_matches: list[tuple[str, Path, Path, Path, str]] = []
             canonical_inventory = canonical_json_bytes(inventory).decode("utf-8")
-            for run_dir in sorted(root.iterdir(), key=lambda path: path.name):
+            try:
+                run_dirs = sorted(root.iterdir(), key=lambda path: path.name)
+            except OSError as exc:
+                raise MigrationV7Error(
+                    "UNSAFE_MIGRATION_PATH", "migration root cannot be enumerated"
+                ) from exc
+            for run_dir in run_dirs:
                 if not re.fullmatch(r"mig_[0-9a-f]{64}", run_dir.name):
                     continue
                 snapshot = run_dir / "source.snapshot.db"
