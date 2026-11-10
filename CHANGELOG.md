@@ -89,6 +89,10 @@
 - The remote edit-bridge client no longer follows redirects or uses environment proxies, and `FASTMCP_SERVER_AUTH_JWT_JWKS_URI` must be `https://` (plain `http://` only for loopback). Documentation no longer describes workspace IDs as unguessable: they are a truncated hash of the root path, and grants decide access.
 - One client can no longer exhaust covenant capabilities or scopes for everyone: consumed capability handles are released immediately, live handles and scopes are bounded per session and per principal, and exhausted capacity is reported as a retryable `CAPABILITY_DEGRADED` instead of `COUNSEL_REQUIRED` without a challenge. A retried remedy stays `TOKEN_REPLAYED` for its full lifetime.
 - Scanned or ingested records can no longer force, or hide, covenant counsel: `RELATED_WARNING` and `RELATED_FAILURE` come only from records the workspace's callers stored.
+- Guidance returned by `memory_preflight` and in `COUNSEL_REQUIRED` counsel withholds scanned TODO comments and URL-ingested pages as the brief does, reporting them in `guidance.withheld_untrusted` beside `guidance.content_notice`; they remain available through `memory_recall`.
+- Resource reads return the same JSON-RPC error (`-32002`, `Resource unavailable`) whether the workspace is unknown, unauthorised or not yet briefed, and the admission limits no longer distinguish a registered workspace from an unknown one for a caller without access.
+- Rejected tool arguments are described by field path and rule without echoing caller input, including unknown tool and prompt names.
+
 ### Fixed
 - Opening a format 7 database no longer upgrades its schema in place. The server, the legacy commands and the generic `migrate` command answer `MIGRATION_REQUIRED` and name `migrate-v7 --apply`; `migrate` on a retained format 6 store stops at the last format 6 schema version.
 - Rolling back a v7 schema upgrade or projection repair restores the predecessor's own `active-db.json`, so the workspace starts again and `migrate-v7 --apply` can be re-run. Rollback can unwind the run beneath a rolled-back schema upgrade, and an interrupted reactivation is completed by re-running `migrate-v7`.
@@ -133,6 +137,12 @@
 - Dreaming treats a record as evidence for a decision only when they share several distinctive terms, checks every live record instead of the newest 64, judges unanimity on all related records, never builds an automatic outcome on another inferred outcome, and labels an automatically recorded outcome as inferred and unverified. It no longer re-proposes the same record connection after every graph rebuild, and community refresh backs off after exceeding its build deadline.
 - Importing the v7 dreaming runtime no longer loads the legacy dreaming managers, SQLAlchemy and the v6 models.
 - The event store refuses a self-edge asserted through a `relationship.removed` event that opens a relationship stream.
+- Tool results set `isError: true` exactly when the envelope has `ok: false`; the full envelope, including `error.counsel` and `error.remedy`, is still returned as structured content and text.
+- `daem0n_tool_call` advertises the destructive, non-idempotent and open-world hints of the tools it can dispatch, and `daem0n_tools_search` results carry each tool's `destructive`, `idempotent` and `open_world` hints beside `read_only`.
+- Resource reads return `application/json` as declared. The server no longer advertises `listChanged` notifications it never sends, and the initialize result carries `instructions` for the active covenant mode and tool surface.
+- MCP tasks: a task-augmented call is processed normally when tasks are not configured; `tools/list` advertises `execution.taskSupport: "optional"` only on tools that can really run as a task; a task refused by the covenant returns the tool's counsel and remedy in the JSON-RPC error data; task refusals are distinguishable by `error.data.code`, with `-32601` for a tool that cannot run as a task. The gateway still does not relay tasks.
+- Every v7 tool has a hand-written description and a `title` in `tools/list`, and `daem0n_tools_search` ignores function words, folds word endings and weights rare and name words, so natural queries such as "delete old memories" find the right tool.
+- Client-visible `expires_at` and `briefed_at` are placed on the current wall clock rather than the process's steady scale, so they stay correct after a wall-clock step.
 
 ## [6.0.0] - 2026-01-29
 
