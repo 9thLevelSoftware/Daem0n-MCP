@@ -101,9 +101,11 @@ RESOURCE_NOT_FOUND = -32002
 class ResourceUnavailableError(_McpError):
     """The one refusal a resource read puts on the wire.
 
-    An unknown workspace, one the caller may not read, one that has not been
-    briefed and a failed read all produce this exact code and message, so a
-    resource read cannot be used to learn which workspaces exist.
+    An unknown workspace, one the caller may not read and one that has not
+    been briefed all produce this exact code and message, so a resource read
+    cannot be used to learn which workspaces exist.  (A read that fails for
+    an unexpected internal reason is answered separately, as an internal
+    error.)
     """
 
     def __init__(self) -> None:
@@ -454,6 +456,17 @@ class V7InvocationMiddleware(_MiddlewareBase):
             principal, session_id = await self._remote_identity(context)
         return principal, session_id
 
+    async def _principal_or_none(self, context: Any) -> str | None:
+        identity = await _capture_async(lambda: self.identity(context))
+        if identity is _ADMISSION_FAILURE:
+            return None
+        return cast("tuple[str, str]", identity)[0]
+
+    def _workspace_quota(self, scope: InvocationScope | None) -> bool:
+        # Only a caller allowed to use the workspace may learn that its
+        # bucket is full; to anyone else that would confirm it exists.
+        return scope is None or self._gate.workspace_authorized(scope)
+
     async def _admit_tool(self, context: Any) -> InvocationScope | None:
         message = context.message
         name = message.name
@@ -491,11 +504,14 @@ class V7InvocationMiddleware(_MiddlewareBase):
         scope: InvocationScope | None,
         *,
         principal_id: str | None = None,
+        workspace_quota: bool = True,
     ) -> Any:
         # All admission accounting runs on the server event loop before the
         # first await. No waiting queue or permanent per-principal entries grow.
         principal = principal_id if scope is None else scope.principal_id
-        workspace = None if scope is None else scope.canonical_workspace
+        workspace = (
+            scope.canonical_workspace if scope is not None and workspace_quota else None
+        )
         principal_count = (
             self._principal_inflight.get(principal, 0) if principal is not None else 0
         )
@@ -547,7 +563,14 @@ class V7InvocationMiddleware(_MiddlewareBase):
             # Tool handlers own the typed v7 error envelope.  Dispatch with no
             # scope so Covenant admission returns IDENTITY_UNAVAILABLE instead
             # of turning an authentication failure into a framework exception.
-            return await self._dispatch(context, call_next, None)
+            # The caller is still charged, as for a workspace that resolved,
+            # so a full limit answers every workspace ID alike.
+            return await self._dispatch(
+                context,
+                call_next,
+                None,
+                principal_id=await self._principal_or_none(context),
+            )
         scope = cast(InvocationScope | None, captured)
         workspace = (
             None
@@ -560,7 +583,12 @@ class V7InvocationMiddleware(_MiddlewareBase):
             except Exception:
                 workspace = None
         try:
-            return await self._dispatch(context, call_next, scope)
+            return await self._dispatch(
+                context,
+                call_next,
+                scope,
+                workspace_quota=self._workspace_quota(scope),
+            )
         finally:
             if workspace is not None and self._activity_callback is not None:
                 with suppress(Exception):
@@ -575,12 +603,25 @@ class V7InvocationMiddleware(_MiddlewareBase):
 
         captured = await _capture_async(lambda: self._admit_resource(context))
         if captured is _ADMISSION_FAILURE:
-            raise ResourceInvocationContextError()
+            # A full limit must answer the same whether or not the workspace
+            # resolved, so the refusal passes through the same accounting.
+            return await self._dispatch(
+                context,
+                _refuse_resource,
+                None,
+                principal_id=await self._principal_or_none(context),
+            )
+        scope = cast(InvocationScope | None, captured)
         return await self._dispatch(
             context,
             call_next,
-            cast(InvocationScope | None, captured),
+            scope,
+            workspace_quota=self._workspace_quota(scope),
         )
+
+
+def _refuse_resource(_context: Any) -> Any:
+    raise ResourceInvocationContextError()
 
 
 class ResourceCommunionAuthorizer:
