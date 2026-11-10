@@ -147,9 +147,11 @@ def _legacy_metadata(
 class RetrievalQuery:
     """One policy-scoped retrieval request.
 
-    Empty or whitespace-only query text is deliberately permitted.  The
-    lexical provider reports it as an explicit no-results result instead of
-    changing ranking semantics through a hidden fallback.
+    Empty or whitespace-only query text is deliberately permitted.  Without a
+    category, tag or record-ID filter the lexical provider reports it as an
+    explicit no-results result instead of changing ranking semantics through
+    a hidden fallback.  With such a filter it lists the filtered records,
+    most recently changed first.
     """
 
     workspace_id: str

@@ -148,6 +148,34 @@ def _safe_fts_queries(text: str) -> tuple[str, ...] | None:
     return (conjunctive, " OR ".join(pairs), " OR ".join(quoted))
 
 
+def _document_filter_sql(query: RetrievalQuery) -> tuple[str, tuple[object, ...]]:
+    """Return the query's category, tag and record-ID scope as SQL conditions.
+
+    The conditions select ``retrieval_documents`` rows before the candidate
+    limit applies.  They only narrow: the retrieval policy still checks every
+    candidate against the canonical record state afterwards.
+    """
+
+    clauses: list[str] = []
+    parameters: list[object] = []
+    if query.categories is not None:
+        values = sorted(query.categories)
+        clauses.append(f"category IN ({','.join('?' for _ in values)})")
+        parameters.extend(values)
+    if query.tags is not None:
+        # tags_text is the record's tags joined by newlines.
+        for tag in sorted(query.tags):
+            clauses.append(
+                "instr(char(10)||tags_text||char(10),char(10)||?||char(10))>0"
+            )
+            parameters.append(tag)
+    if query.record_ids is not None:
+        values = sorted(query.record_ids)
+        clauses.append(f"record_id IN ({','.join('?' for _ in values)})")
+        parameters.extend(values)
+    return "".join(f" AND {clause}" for clause in clauses), tuple(parameters)
+
+
 def _transaction_datetime(value: object) -> datetime | None:
     try:
         return datetime.fromtimestamp(int(value) / 1_000_000, timezone.utc)
@@ -267,7 +295,8 @@ class LexicalProvider:
                     manifest_generation=generation,
                     elapsed_ms=(perf_counter_ns() - started) / 1_000_000,
                 )
-            if not fts_queries:
+            filter_sql, filter_parameters = _document_filter_sql(query)
+            if not fts_queries and not filter_sql:
                 return ProviderResult(
                     provider=self.name,
                     status=result_status,
@@ -278,6 +307,22 @@ class LexicalProvider:
             content_weight, rationale_weight, tags_weight = LEXICAL_BM25_WEIGHTS
             rows = []
             rank_offset = 0
+            if not fts_queries:
+                # No searchable term, but an explicit scope: list the scoped
+                # documents, most recently changed first, as listings do.
+                rows = connection.execute(
+                    "SELECT record_id,content_hash,source_event_id,"
+                    "transaction_from_us,0.0,NULL FROM retrieval_documents "
+                    "WHERE workspace_id=? AND projection_generation=?"
+                    f"{filter_sql} "
+                    "ORDER BY transaction_from_us DESC,record_id ASC LIMIT ?",
+                    (
+                        query.workspace_id,
+                        generation,
+                        *filter_parameters,
+                        bounded_limit,
+                    ),
+                ).fetchall()
             for rung, fts_query in enumerate(fts_queries):
                 rung_limit = bounded_limit
                 if rung >= _SINGLE_TERM_RUNG:
@@ -303,6 +348,7 @@ class LexicalProvider:
                                transaction_from_us AS updated_at_us
                         FROM retrieval_documents
                         WHERE workspace_id=? AND projection_generation=?
+                              {filter_sql}
                     ) AS document
                       ON document.document_rowid="{expected_table}".rowid
                     WHERE "{expected_table}" MATCH ?
@@ -318,6 +364,7 @@ class LexicalProvider:
                         "{content rationale}: (" + fts_query + ")",
                         query.workspace_id,
                         generation,
+                        *filter_parameters,
                         fts_query,
                         rung_limit,
                     ),

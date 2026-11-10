@@ -326,11 +326,7 @@ class LexicalProjectionTests(unittest.IsolatedAsyncioTestCase):
         self.connection.commit()
 
         result = await LexicalProvider(self.connection).search(
-            RetrievalQuery(
-                workspace_id=WORKSPACE_ID,
-                text="ssrf controls",
-                tags=frozenset({"ssrf"}),
-            ),
+            RetrievalQuery(workspace_id=WORKSPACE_ID, text="ssrf controls"),
             10,
         )
 
@@ -338,6 +334,21 @@ class LexicalProjectionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             {tag_match, content_match},
             {candidate.evidence.record_id for candidate in result.candidates},
+        )
+
+        # A tag filter scopes the candidates themselves; the record without
+        # the tag would only be rejected by the policy afterwards.
+        scoped = await LexicalProvider(self.connection).search(
+            RetrievalQuery(
+                workspace_id=WORKSPACE_ID,
+                text="ssrf controls",
+                tags=frozenset({"ssrf"}),
+            ),
+            10,
+        )
+        self.assertEqual(
+            [tag_match],
+            [candidate.evidence.record_id for candidate in scoped.candidates],
         )
 
     async def test_multi_term_queries_prefer_complete_matches_before_or_fallback(self):
