@@ -866,11 +866,11 @@ async def _import_call(invoke, workspace_id: str, arguments: dict) -> dict[str, 
             + "\nSQLITE OBJECTS\n"
             + _live_sqlite_objects()
         )
-        assert time.monotonic() < deadline, (result["error"], "\n".join(contended))
+        # pytest shortens a long assertion message; captured stderr is whole.
+        print(contended[-1], file=sys.stderr)
+        assert time.monotonic() < deadline, result["error"]
         await asyncio.sleep(0.5)
-    raise AssertionError(
-        "the import stayed contended for 8 attempts\n" + "\n".join(contended)
-    )
+    raise AssertionError("the import stayed contended for 8 attempts")
 
 
 def _live_sqlite_objects() -> str:
