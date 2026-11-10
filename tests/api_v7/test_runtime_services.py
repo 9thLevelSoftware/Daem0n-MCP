@@ -364,6 +364,89 @@ class WriterServiceTests(
                 connection.execute("SELECT count(*) FROM memory_events").fetchone()[0],
             )
 
+    def _tombstone(self, record_id: str) -> None:
+        """Delete a record the way destructive maintenance does."""
+        import json
+
+        from daem0nmcp.event_store import EventCommand, EventStore
+
+        with closing(sqlite3.connect(self.database)) as connection:
+            connection.execute("PRAGMA foreign_keys=ON")
+            version, payload_json = connection.execute(
+                "SELECT record.stream_version,event.payload_json "
+                "FROM memory_records record JOIN memory_events event "
+                "ON event.event_id=record.source_event_id WHERE record.record_id=?",
+                (record_id,),
+            ).fetchone()
+            state = dict(json.loads(payload_json)["record"])
+            deleted_at_us = int(WORKED_AT.timestamp() * 1_000_000)
+            state["deleted_at_us"] = deleted_at_us
+            EventStore(connection).append_and_project(
+                EventCommand(
+                    workspace_id=self.workspace.workspace_id,
+                    stream_id=record_id,
+                    stream_kind="memory",
+                    event_type="memory.deleted",
+                    occurred_at_us=deleted_at_us,
+                    recorded_at_us=deleted_at_us,
+                    actor_type="client",
+                    payload={"record": state},
+                    expected_stream_version=int(version) + 1,
+                )
+            )
+            connection.commit()
+
+    def _stream_event_types(self, record_id: str) -> list[str]:
+        with closing(sqlite3.connect(self.database)) as connection:
+            return [
+                row[0]
+                for row in connection.execute(
+                    "SELECT event_type FROM memory_events WHERE stream_id=? "
+                    "ORDER BY stream_version",
+                    (record_id,),
+                )
+            ]
+
+    async def test_outcome_refuses_a_deleted_record_but_replays_an_earlier_one(
+        self,
+    ) -> None:
+        """An outcome on a tombstoned record must not append or report success."""
+        from daem0nmcp.api.v7.pinned import MemoryOutcomeCommand
+        from daem0nmcp.api.v7.runtime_services import RuntimeServiceError
+
+        writer = self._writer()
+        stored = await writer.store(self.workspace, self._store_command())
+        record_id = stored.record.record_id
+        committed = MemoryOutcomeCommand(
+            record_id=record_id,
+            outcome_text="The release stayed healthy.",
+            worked=True,
+            happened_at=WORKED_AT,
+            idempotency_key="runtime-outcome-0001",
+        )
+        first = await writer.record_outcome(self.workspace, committed)
+        self._tombstone(record_id)
+
+        with self.assertRaisesRegex(RuntimeServiceError, "NOT_FOUND"):
+            await writer.record_outcome(
+                self.workspace,
+                MemoryOutcomeCommand(
+                    record_id=record_id,
+                    outcome_text="A late verdict on a pruned record.",
+                    worked=False,
+                    happened_at=WORKED_AT,
+                    idempotency_key="runtime-outcome-0002",
+                ),
+            )
+        replay = await writer.record_outcome(self.workspace, committed)
+
+        self.assertTrue(replay.idempotent_replay)
+        self.assertEqual(first.event, replay.event)
+        self.assertEqual(
+            ["memory.created", "memory.outcome_recorded", "memory.deleted"],
+            self._stream_event_types(record_id),
+        )
+
 
 class RecallAdapterTests(
     _RuntimeServiceFixtures,

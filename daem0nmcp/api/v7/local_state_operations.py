@@ -693,6 +693,9 @@ def _add_sync(
                 if len(record_rows) != 1:
                     raise LocalStateOperationError("CAPABILITY_DEGRADED")
                 _record_summary(record_rows[0])
+                # A tombstoned record takes no new or changed entry; only the
+                # retry of an add committed before the deletion replays.
+                record_deleted = record_rows[0]["deleted_at_us"] is not None
                 entry_rows = connection.execute(
                     "SELECT active_context_id,priority,reason,added_at_us,"
                     "expires_at_us,removed_at_us FROM active_context_entries "
@@ -703,6 +706,8 @@ def _add_sync(
                     raise LocalStateOperationError("CAPABILITY_DEGRADED")
                 event_type: str | None = None
                 if not entry_rows:
+                    if record_deleted:
+                        raise LocalStateOperationError("NOT_FOUND")
                     _require_active_capacity(
                         connection,
                         workspace.workspace_id,
@@ -745,6 +750,8 @@ def _add_sync(
                         entry["removed_at_us"],
                     )
                     if actual != expected:
+                        if record_deleted:
+                            raise LocalStateOperationError("NOT_FOUND")
                         if not was_current:
                             _require_active_capacity(
                                 connection,

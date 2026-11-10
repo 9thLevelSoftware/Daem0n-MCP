@@ -872,6 +872,10 @@ class SQLiteMemoryEventWriter:
                     request_hash=request_hash,
                 )
                 if existing is None:
+                    # A tombstoned record takes no new outcome; only the retry
+                    # of an outcome committed before the deletion replays.
+                    if row["deleted_at_us"] is not None:
+                        raise RuntimeServiceError("NOT_FOUND")
                     _validate_informed_by(
                         connection, workspace.workspace_id, command.informed_by
                     )

@@ -583,6 +583,111 @@ class RecordOperationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("NOT_FOUND", caught.exception.code)
         self.assertNotIn(str(self.root), str(caught.exception))
 
+    def _tombstone(self, record_id: str) -> None:
+        """Delete a record the way destructive maintenance does."""
+        import json
+
+        from daem0nmcp.event_store import EventCommand, EventStore
+
+        with closing(sqlite3.connect(self.database)) as connection:
+            connection.execute("PRAGMA foreign_keys=ON")
+            version, payload_json = connection.execute(
+                "SELECT record.stream_version,event.payload_json "
+                "FROM memory_records record JOIN memory_events event "
+                "ON event.event_id=record.source_event_id WHERE record.record_id=?",
+                (record_id,),
+            ).fetchone()
+            state = dict(json.loads(payload_json)["record"])
+            deleted_at_us = int(NOW.timestamp() * 1_000_000)
+            state["deleted_at_us"] = deleted_at_us
+            EventStore(connection).append_and_project(
+                EventCommand(
+                    workspace_id=self.workspace.workspace_id,
+                    stream_id=record_id,
+                    stream_kind="memory",
+                    event_type="memory.deleted",
+                    occurred_at_us=deleted_at_us,
+                    recorded_at_us=deleted_at_us,
+                    actor_type="client",
+                    payload={"record": state},
+                    expected_stream_version=int(version) + 1,
+                )
+            )
+            connection.commit()
+
+    def _stream_event_types(self, record_id: str) -> list[str]:
+        with closing(sqlite3.connect(self.database)) as connection:
+            return [
+                row[0]
+                for row in connection.execute(
+                    "SELECT event_type FROM memory_events WHERE stream_id=? "
+                    "ORDER BY stream_version",
+                    (record_id,),
+                )
+            ]
+
+    async def test_pin_and_archive_refuse_a_deleted_record(self) -> None:
+        """A write to a tombstoned record must not append an event or succeed."""
+        from daem0nmcp.api.v7.record_operations import RecordOperationError
+
+        stored = await self._store_default_batch()
+        record_id = stored.records[0].record_id
+        self._tombstone(record_id)
+        operations = self._operations()
+
+        for tool, field in (
+            ("memory_pin_set", "pinned"),
+            ("memory_archive_set", "archived"),
+        ):
+            for desired in (True, False):
+                with self.subTest(tool=tool, desired=desired):
+                    with self.assertRaises(RecordOperationError) as caught:
+                        await operations[tool](
+                            workspace=self.workspace,
+                            request=_request(
+                                tool,
+                                workspace_id=self.workspace.workspace_id,
+                                record_id=record_id,
+                                preflight_token=PREFLIGHT_TOKEN,
+                                **{field: desired},
+                            ),
+                        )
+                    self.assertEqual("NOT_FOUND", caught.exception.code)
+        self.assertEqual(
+            ["memory.created", "memory.deleted"],
+            self._stream_event_types(record_id),
+        )
+
+    async def test_pin_replay_after_deletion_returns_the_original_receipt(
+        self,
+    ) -> None:
+        """Deleting a record must not turn a committed write's retry into an error."""
+        stored = await self._store_default_batch()
+        record_id = stored.records[0].record_id
+        operations = self._operations()
+        request = _request(
+            "memory_pin_set",
+            workspace_id=self.workspace.workspace_id,
+            record_id=record_id,
+            pinned=True,
+            preflight_token=PREFLIGHT_TOKEN,
+        )
+        first = await operations["memory_pin_set"](
+            workspace=self.workspace, request=request
+        )
+        self._tombstone(record_id)
+
+        replay = await operations["memory_pin_set"](
+            workspace=self.workspace, request=request
+        )
+
+        self.assertTrue(replay.idempotent_replay)
+        self.assertEqual(first.event_ids, replay.event_ids)
+        self.assertEqual(
+            ["memory.created", "memory.pin_set", "memory.deleted"],
+            self._stream_event_types(record_id),
+        )
+
     async def test_file_recall_uses_versioned_authenticated_pagination(self) -> None:
         """File cursors must be keyed, tamper evident, and selector bound."""
         await self._operations()["memory_store_batch"](

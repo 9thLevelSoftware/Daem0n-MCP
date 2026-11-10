@@ -782,6 +782,10 @@ def _state_set_sync(
                         request_hash=request_hash,
                     )
                 if existing is None:
+                    # A tombstoned record takes no new state; only the retry of
+                    # a change committed before the deletion replays.
+                    if row["deleted_at_us"] is not None:
+                        raise RecordOperationError("NOT_FOUND")
                     if cancelled.is_set():
                         raise _WorkerCancelledError()
                     state = _record_state(row)
