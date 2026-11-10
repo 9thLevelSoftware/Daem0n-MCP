@@ -175,13 +175,15 @@ idempotency key. For authorized federation, `memory_recall` accepts
 `linked_workspace_ids`; returned evidence remains attributed to its source
 workspace.
 
-Lexical recall first ranks records whose content or rationale satisfy the
-selected full-text expression, then tag-assisted matches. Content-tier ordering
-uses the existing content/rationale BM25 weights without a tag contribution;
-tag-assisted matches use ordinary weighted BM25. Record IDs break ties. Original
-weighted scores remain diagnostics, not a guarantee of rank order. Tags remain
-searchable, and the precision-first query ladder remains unchanged; no projection
-rebuild is required for this query-side ordering change.
+Lexical recall ranks by weighted BM25 over content, rationale and tags by
+default; record IDs break ties and the reported score does not increase with
+rank. Set `DAEM0NMCP_LEXICAL_CONTENT_TIERING=true` to opt in to content-tier
+ordering: records whose content or rationale satisfy the selected full-text
+expression rank first, ordered by the content/rationale BM25 weights without a
+tag contribution, then tag-assisted matches by ordinary weighted BM25. With the
+tier on, the weighted scores remain diagnostics, not a guarantee of rank order.
+Tags are searchable either way, and no projection rebuild is required for this
+query-side ordering setting.
 Direct and linked-workspace recall expose provider channels in canonical sorted
 order, including retained contexts, so equivalent evidence does not acquire
 different channel-array order after a server restart.
