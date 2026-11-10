@@ -479,7 +479,7 @@ class ProductionCompositionTests(unittest.TestCase):
         from daem0nmcp.workspace import Workspace
 
         requests: dict[str, object] = {}
-        withheld = {"warnings": 2, "failures": 0, "rules": 0}
+        withheld = {"warnings": 2, "failures": 3, "rules": 0}
 
         async def read(_workspace, request):
             requests[request.kind] = request
@@ -502,7 +502,10 @@ class ProductionCompositionTests(unittest.TestCase):
 
         self.assertIs(requests["warnings"].include_untrusted_origin, False)
         self.assertIs(requests["failures"].include_untrusted_origin, False)
-        self.assertEqual({"warnings": 2}, result["withheld_untrusted"])
+        # The same keys the session brief uses for the same records.
+        self.assertEqual(
+            {"warnings": 2, "failed_outcomes": 3}, result["withheld_untrusted"]
+        )
         self.assertEqual(RECORD_CONTENT_NOTICE, result["content_notice"])
 
     def test_loopback_http_is_explicit_but_remote_http_fails_closed(self) -> None:

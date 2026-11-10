@@ -821,8 +821,9 @@ def _guidance_reader(readers: ResourceRepositoryReaders):
                 ],
                 limit=50,
             ),
+            # Keyed like the session brief's count of the same records.
             "withheld_untrusted": _withheld_untrusted(
-                warnings=warnings, failures=failures
+                warnings=warnings, failed_outcomes=failures
             ),
             "content_notice": RECORD_CONTENT_NOTICE,
         }
