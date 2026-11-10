@@ -617,6 +617,10 @@ async def run_evaluation(
                 "mode": mode,
                 "topics": topics,
                 "seed": seed,
+                # The seed shuffles the order of the canonical writes and
+                # nothing else; metrics are the same for every seed, so runs
+                # with different seeds are not independent samples.
+                "seed_scope": "write_order_only",
                 "schema_version": CURRENT_SCHEMA_VERSION,
                 "capability_statuses": statuses,
                 "symbol_bindings_available": symbols_available,
@@ -676,7 +680,12 @@ def main(argv: list[str] | None = None) -> int:
         "--mode", choices=("lexical_only", "fully_enabled"), default="lexical_only"
     )
     parser.add_argument("--topics", type=_positive_topics, default=24)
-    parser.add_argument("--seed", type=int, default=20261004)
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=20261004,
+        help="write order only; every seed reports the same metrics",
+    )
     parser.add_argument("--output", type=Path, required=True)
     arguments = parser.parse_args(argv)
     report = asyncio.run(

@@ -27,9 +27,10 @@ class CodingMemoryEvaluationTests(unittest.TestCase):
         async def evaluate_twice():
             first = await run_evaluation(mode="lexical_only", topics=6, seed=20261004)
             second = await run_evaluation(mode="lexical_only", topics=6, seed=20261004)
-            return first, second
+            reordered = await run_evaluation(mode="lexical_only", topics=6, seed=7)
+            return first, second, reordered
 
-        cls.first, cls.second = asyncio.run(evaluate_twice())
+        cls.first, cls.second, cls.reordered = asyncio.run(evaluate_twice())
 
     def test_non_latency_report_is_identical_across_real_runs(self):
         first, second = copy.deepcopy(self.first), copy.deepcopy(self.second)
@@ -37,6 +38,16 @@ class CodingMemoryEvaluationTests(unittest.TestCase):
             for arm in report["arms"].values():
                 del arm["latency_ms"]
         self.assertEqual(first, second)
+
+    def test_seed_only_reorders_writes_and_is_reported_as_such(self):
+        """Another seed is not another sample: every metric stays the same."""
+
+        first, reordered = copy.deepcopy(self.first), copy.deepcopy(self.reordered)
+        for report in (first, reordered):
+            for arm in report["arms"].values():
+                del arm["latency_ms"]
+        self.assertEqual(first["arms"], reordered["arms"])
+        self.assertEqual("write_order_only", self.first["metadata"]["seed_scope"])
 
     def test_baseline_has_graded_outcome_headroom(self):
         self.assertLess(
