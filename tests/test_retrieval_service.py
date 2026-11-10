@@ -1026,6 +1026,71 @@ class RetrievalServicePolicyTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("denied secret", result.context.text)
         self.assertNotIn("unselected architecture result", result.context.text)
 
+    async def _ranked_categories(self, categories, *, limit):
+        """Return the 1-based ranks recalled for per-rank record categories."""
+
+        digits = "123456789abcdef"[: len(categories)]
+        candidates = tuple(
+            _candidate(digit, "lexical", rank)
+            for rank, digit in enumerate(digits, start=1)
+        )
+        repository = CanonicalRepository(
+            changes={
+                _record_id(digit): {"category": category}
+                for digit, category in zip(digits, categories, strict=True)
+            }
+        )
+        result = await _service(
+            providers={
+                "lexical": StaticProvider(
+                    "lexical", _provider_result("lexical", *candidates), []
+                )
+            },
+            repository=repository,
+        ).retrieve(_query(limit=limit, candidate_limit=max(limit, len(digits))))
+
+        self.assertFalse(result.abstained)
+        return [
+            digits.index(item.evidence_refs[0].record_id[-1]) + 1
+            for item in result.items
+        ]
+
+    async def test_category_diversity_keeps_strong_hits_and_rank_order(self):
+        # Eight same-category hits followed by four hits that each open a new
+        # category: weak novelty must not push out strong hits 2-4.
+        ranks = await self._ranked_categories(
+            ("decision",) * 8 + ("warning", "pattern", "learning", "procedure"),
+            limit=6,
+        )
+
+        self.assertEqual([1, 2, 3, 4, 9, 10], ranks)
+
+    async def test_category_diversity_is_bounded_and_returned_in_rank_order(self):
+        cases = (
+            # A new category just below the cut still claims the single slot,
+            # and the result is emitted by rank, not by pick order.
+            (("decision", "decision", "decision", "warning"), 3, [1, 2, 4]),
+            # Category firsts inside the top `limit` need no diversity slot.
+            (("decision", "decision", "warning", "decision"), 3, [1, 2, 3]),
+            # A new category beyond twice the limit is below the rank floor.
+            (("decision",) * 4 + ("warning",), 2, [1, 2]),
+            # At most a third of the slots (minimum one) go to diversity.
+            (
+                ("decision",) * 6 + ("warning", "pattern", "learning"),
+                6,
+                [1, 2, 3, 4, 7, 8],
+            ),
+            # Diversity displaces the lowest-ranked duplicate category.
+            (("decision", "decision", "warning", "pattern"), 3, [1, 3, 4]),
+            # Nothing is displaced when every candidate fits.
+            (("decision", "decision", "warning"), 5, [1, 2, 3]),
+        )
+        for categories, limit, expected in cases:
+            with self.subTest(categories=categories, limit=limit):
+                self.assertEqual(
+                    expected, await self._ranked_categories(categories, limit=limit)
+                )
+
     async def test_all_filtered_returns_exact_counts_without_loading_content(self):
         candidates = (
             _candidate("1", "lexical", 1),

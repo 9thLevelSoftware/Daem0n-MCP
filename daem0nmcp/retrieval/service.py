@@ -61,6 +61,14 @@ _PROVIDER_ORDER = (
 )
 _SUPPORTED_PROVIDERS = frozenset(_PROVIDER_ORDER)
 
+# Category diversity may displace stronger hits only within these bounds: a
+# candidate that opens a new category must rank inside the first
+# ``limit * _DIVERSITY_RANK_FLOOR_FACTOR`` policy-valid candidates, and such
+# picks may claim at most ``limit // _DIVERSITY_SLOT_DIVISOR`` result slots
+# (never fewer than one).
+_DIVERSITY_RANK_FLOOR_FACTOR = 2
+_DIVERSITY_SLOT_DIVISOR = 3
+
 
 @runtime_checkable
 class UtilityContributionRepository(Protocol):
@@ -969,27 +977,39 @@ class RetrievalService:
         records: tuple[PolicyRecord, ...],
         limit: int,
     ) -> tuple[FusedCandidate, ...]:
+        """Pick ``limit`` candidates by rank, with bounded category diversity.
+
+        The first candidate of a category not yet represented may displace a
+        higher-ranked duplicate category, but only from within the rank floor
+        and only for a bounded share of the slots; everything else is filled
+        strictly by rank.  The selection is returned in rank order.
+        """
+
         record_by_identity = {record.identity: record for record in records}
-        chosen: list[FusedCandidate] = []
-        chosen_ids: set[tuple[str, str | None]] = set()
+        diversity_slots = max(1, limit // _DIVERSITY_SLOT_DIVISOR)
+        chosen: set[int] = set()
         seen_categories: set[str] = set()
-        for candidate in candidates:
+        for index, candidate in enumerate(
+            candidates[: limit * _DIVERSITY_RANK_FLOOR_FACTOR]
+        ):
+            if len(chosen) == limit:
+                break
             category = record_by_identity[_identity(candidate)].category.casefold()
             if category in seen_categories:
                 continue
-            chosen.append(candidate)
-            chosen_ids.add(_identity(candidate))
+            if index >= limit:
+                # Outside the top ``limit`` by rank: this pick displaces a
+                # stronger hit, so it spends one of the diversity slots.
+                if diversity_slots == 0:
+                    break
+                diversity_slots -= 1
+            chosen.add(index)
             seen_categories.add(category)
-            if len(chosen) == limit:
-                return tuple(chosen)
-        for candidate in candidates:
-            identity = _identity(candidate)
-            if identity in chosen_ids:
-                continue
-            chosen.append(candidate)
+        for index in range(len(candidates)):
             if len(chosen) == limit:
                 break
-        return tuple(chosen)
+            chosen.add(index)
+        return tuple(candidates[index] for index in sorted(chosen))
 
     @staticmethod
     def _validated_composed_items(
