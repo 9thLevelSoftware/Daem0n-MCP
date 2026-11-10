@@ -11,7 +11,7 @@ import re
 from collections.abc import Iterable
 from dataclasses import dataclass
 
-from .types import RetrievalQuery
+from .types import RetrievalQuery, without_terminal_escapes
 
 _MAX_INTENT_CHARS = 4096
 _TOKEN = re.compile(r"[a-z0-9]+")
@@ -140,7 +140,9 @@ class RetrievalPlanner:
             for provider in ready_providers
             if isinstance(provider, str) and provider in _OPTIONAL_ORDER
         }
-        intent_text = query.text[:_MAX_INTENT_CHARS].casefold()
+        intent_text = without_terminal_escapes(query.text)[
+            :_MAX_INTENT_CHARS
+        ].casefold()
         words = frozenset(_TOKEN.findall(intent_text))
         intent = {
             "graph": not words.isdisjoint(_GRAPH_TERMS),

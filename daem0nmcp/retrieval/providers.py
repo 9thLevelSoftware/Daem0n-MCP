@@ -33,6 +33,7 @@ from .types import (
     ProviderResult,
     ProviderStatus,
     RetrievalQuery,
+    without_terminal_escapes,
 )
 from .vector_validation import VECTOR_ATTESTATION_FORMAT
 
@@ -59,15 +60,6 @@ _FTS_QUESTION_STOP_WORDS = frozenset(
         "why",
         "you",
     }
-)
-# Terminal escape sequences of a pasted log: CSI (7-bit and 8-bit introducer),
-# terminated OSC, and two-character escapes.  The parameter bytes of a CSI
-# sequence are word characters, so the sequence is removed whole; every other
-# control character is already a term separator for the word pattern below.
-_TERMINAL_ESCAPE = re.compile(
-    r"(?:\x1b\[|\x9b)[0-?]*[ -/]*[@-~]"
-    r"|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)"
-    r"|\x1b[@-Z\\-_]"
 )
 # Position of the any-single-term rung in a ladder of three or more terms.  One
 # shared word out of several is weak evidence, so its candidates are ranked
@@ -115,7 +107,7 @@ def _safe_fts_queries(text: str) -> tuple[str, ...] | None:
         dict.fromkeys(
             term
             for term in re.findall(
-                r"\w+", _TERMINAL_ESCAPE.sub(" ", text), flags=re.UNICODE
+                r"\w+", without_terminal_escapes(text), flags=re.UNICODE
             )
             if term.casefold() not in _FTS_QUESTION_STOP_WORDS
         )

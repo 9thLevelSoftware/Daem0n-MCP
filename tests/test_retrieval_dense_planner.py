@@ -149,6 +149,39 @@ class RetrievalPlannerTests(unittest.TestCase):
         self.assertEqual((50,), tuple(item.limit for item in disabled.requests))
         self.assertEqual((50, 7), tuple(item.limit for item in enabled.requests))
 
+    def test_terminal_escapes_do_not_hide_intent_terms(self):
+        planner_type, query_type = self._planner_types()
+        planner = planner_type()
+        ready = frozenset({"dense", "graph", "temporal", "procedure", "outcome"})
+        plain = planner.plan(
+            query_type(workspace_id=WORKSPACE_ID, text="deploy choice"),
+            ready_providers=ready,
+        )
+        self.assertEqual(("lexical", "dense", "outcome"), plain.provider_names)
+
+        for text in (
+            "deploy \x1b[31mchoice\x1b[0m",
+            "deploy \x9b1;31mchoice\x9b0m",
+            "deploy \x1b(Bchoice\x1b(B\x1b[m",
+            "\x1b]0;title\x07deploy\x00choice",
+        ):
+            with self.subTest(text=repr(text)):
+                plan = planner.plan(
+                    query_type(workspace_id=WORKSPACE_ID, text=text),
+                    ready_providers=ready,
+                )
+                self.assertEqual(plain.provider_names, plan.provider_names)
+
+        # Escape sequences are not counted against the bounded intent window.
+        padded = "\x1b[0m" * 2_000 + "deploy choice"
+        self.assertEqual(
+            plain.provider_names,
+            planner.plan(
+                query_type(workspace_id=WORKSPACE_ID, text=padded),
+                ready_providers=ready,
+            ).provider_names,
+        )
+
     def test_overlapping_intents_add_each_ready_provider_once_in_fixed_order(self):
         planner_type, query_type = self._planner_types()
         planner = planner_type(optional_candidate_limit=6)
