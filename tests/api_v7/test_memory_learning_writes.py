@@ -471,6 +471,38 @@ class MemoryLearningWriteTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(2, len(self._payloads()))
 
+    async def test_class_qualified_symbol_binds_and_ambiguous_one_is_rejected(
+        self,
+    ) -> None:
+        if not default_code_indexer_factory().available:
+            self.skipTest("code parser is unavailable")
+        source = self.fixture.root / "runtime.py"
+        single = "class Runtime:\n    def start(self):\n        return 1\n"
+        source.write_text(single, encoding="utf-8")
+        command = _store_command(code_refs=(("runtime.py", "Runtime.start"),))
+        stored = await self.writer.store(self.fixture.workspace, command)
+        (binding,) = self._payloads()[0]["record"]["context"]["code_bindings"]
+        self.assertEqual("Runtime.start", binding["qualified_name"])
+        nested = (
+            "class A:\n    class Runtime:\n        def start(self):\n"
+            "            return 1\n\n"
+            "class B:\n    class Runtime:\n        def start(self):\n"
+            "            return 2\n"
+        )
+        source.write_text(nested, encoding="utf-8")
+        before = self._payloads()
+        with self.assertRaisesRegex(RuntimeServiceError, "INVALID_ARGUMENT"):
+            await self.writer.store(
+                self.fixture.workspace,
+                replace(command, idempotency_key="learning-store-0002"),
+            )
+        with self.assertRaisesRegex(RuntimeServiceError, "INVALID_ARGUMENT"):
+            await self.writer.record_outcome(
+                self.fixture.workspace,
+                _outcome_command(stored.record.record_id, rebind_code=True),
+            )
+        self.assertEqual(before, self._payloads())
+
     async def test_unsupported_symbol_rebind_is_a_client_error(self) -> None:
         if not default_code_indexer_factory().available:
             self.skipTest("code parser is unavailable")

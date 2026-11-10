@@ -322,6 +322,130 @@ def test_exact_identity_takes_precedence_over_short_name_match(workspace):
     )
 
 
+_QUALIFIED = (
+    "class AuthService:\n"
+    "    def refresh(self):\n"
+    "        return 1\n"
+    "\n"
+    "    class Token:\n"
+    "        def rotate(self):\n"
+    "            return 2\n"
+    "\n"
+    "class Session:\n"
+    "    def refresh(self):\n"
+    "        return 3\n"
+)
+
+
+@pytest.mark.parametrize(
+    ("name", "exact", "bound_edit"),
+    [
+        ("AuthService.refresh", "login.AuthService.refresh", "return 1"),
+        ("Session.refresh", "login.Session.refresh", "return 3"),
+        ("Token.rotate", "login.AuthService.Token.rotate", "return 2"),
+        ("AuthService.Token.rotate", "login.AuthService.Token.rotate", "return 2"),
+        ("AuthService.Token", "login.AuthService.Token", "return 2"),
+    ],
+)
+def test_qualified_name_without_module_prefix_resolves(
+    workspace, name, exact, bound_edit
+):
+    require_parser()
+    path = workspace.root / "login.py"
+    path.write_text(_QUALIFIED, encoding="utf-8")
+    (binding,) = capture_bindings(workspace, [("login.py", name)])
+    (expected,) = capture_bindings(workspace, [("login.py", exact)])
+    assert binding.qualified_name == name
+    assert binding.fingerprint == expected.fingerprint
+    context = {"code_bindings": [binding.to_json()]}
+    evaluator = BindingEvaluator()
+    assert evaluator.evaluate(workspace.root, context).applicability == "current"
+    for other in ("return 1", "return 2", "return 3"):
+        edit(path, _QUALIFIED.replace(other, "return 9"))
+        result = evaluator.evaluate(workspace.root, context)
+        if other == bound_edit:
+            assert result.applicability == "needs_revalidation"
+            assert result.changed == (f"login.py::{name}",)
+        else:
+            assert result.applicability == "current"
+
+
+def test_ambiguous_qualified_suffix_is_rejected(workspace):
+    require_parser()
+    path = workspace.root / "dup.py"
+    original = (
+        "class A:\n    class Inner:\n        def run(self):\n            return 1\n\n"
+        "class B:\n    class Inner:\n        def run(self):\n            return 2\n"
+    )
+    path.write_text(original, encoding="utf-8")
+    for name in ("Inner.run", "Inner"):
+        with pytest.raises(CodeBindingReferenceError, match="ambiguous"):
+            capture_bindings(workspace, [("dup.py", name)])
+    context = context_for(workspace, [("dup.py", "A.Inner.run")])
+    evaluator = BindingEvaluator()
+    edit(path, original.replace("return 2", "return 3"))
+    assert evaluator.evaluate(workspace.root, context).applicability == "current"
+    edit(path, original.replace("return 1", "return 4"))
+    result = evaluator.evaluate(workspace.root, context)
+    assert result.applicability == "needs_revalidation"
+    assert result.changed == ("dup.py::A.Inner.run",)
+
+
+def test_unique_qualified_suffix_becoming_ambiguous_is_unverifiable(workspace):
+    require_parser()
+    path = workspace.root / "dup.py"
+    original = (
+        "class A:\n    class Inner:\n        def run(self):\n            return 1\n"
+    )
+    path.write_text(original, encoding="utf-8")
+    context = context_for(workspace, [("dup.py", "Inner.run")])
+    edit(
+        path,
+        original
+        + "\nclass B:\n    class Inner:\n        def run(self):\n            return 2\n",
+    )
+    result = BindingEvaluator().evaluate(workspace.root, context)
+    assert result.applicability == "unverifiable"
+    assert result.changed == ()
+
+
+@pytest.mark.parametrize(
+    "name",
+    ["Service.refresh", "Missing.refresh", "AuthService.missing", "login.refresh"],
+)
+def test_qualified_suffix_matches_whole_components_only(workspace, name):
+    require_parser()
+    (workspace.root / "login.py").write_text(_QUALIFIED, encoding="utf-8")
+    with pytest.raises(CodeBindingError, match="bound symbol is missing") as caught:
+        capture_bindings(workspace, [("login.py", name)])
+    assert not isinstance(
+        caught.value, (CodeBindingReferenceError, CodeBindingUnavailableError)
+    )
+
+
+def test_short_name_keeps_precedence_over_qualified_suffix(workspace, monkeypatch):
+    path = workspace.root / "sample.py"
+    path.write_text("first\nsecond\n", encoding="utf-8")
+    entities = [
+        {"name": "b", "qualified_name": "sample.b", "line_start": 1, "line_end": 1},
+        {"name": "c", "qualified_name": "sample.a.b", "line_start": 2, "line_end": 2},
+    ]
+    monkeypatch.setattr(
+        discovery_operations,
+        "default_code_indexer_factory",
+        lambda: SimpleNamespace(
+            available=True,
+            get_supported_extensions=lambda: {".py"},
+            index_source_strict=lambda *_: entities,
+        ),
+    )
+    short, suffix = capture_bindings(
+        workspace, [("sample.py", "b"), ("sample.py", "a.b")]
+    )
+    assert short.fingerprint == hashlib.sha256(b"first").hexdigest()
+    assert suffix.fingerprint == hashlib.sha256(b"second").hexdigest()
+
+
 @pytest.mark.parametrize("nested_first", [False, True])
 def test_symbol_snapshots_isolate_nested_workspace_identities(workspace, nested_first):
     require_parser()

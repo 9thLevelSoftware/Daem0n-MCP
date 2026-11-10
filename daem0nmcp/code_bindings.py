@@ -254,11 +254,22 @@ def _fingerprint(
             offsets = _line_offsets(source)
         exact = []
         aliases = []
+        suffixes = []
+        # ``Class.method`` names the trailing scope components of an identity
+        # whose leading module component the caller left out.
+        suffix = "." + name if "." in name else None
         for entity in entities:
             if entity.qualified_name == name:
                 exact.append(entity)
             elif entity.name == name:
                 aliases.append(entity)
+            elif (
+                suffix is not None
+                and isinstance(entity.qualified_name, str)
+                and entity.qualified_name.endswith(suffix)
+            ):
+                suffixes.append(entity)
+        aliases = aliases or suffixes
         selected = exact or aliases
         if not exact and aliases:
             identities = set()
