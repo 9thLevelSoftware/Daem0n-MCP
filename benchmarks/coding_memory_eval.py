@@ -38,6 +38,37 @@ Mode = Literal["lexical_only", "fully_enabled"]
 _START = datetime(2026, 1, 1, tzinfo=timezone.utc)
 _RETENTION_NOTE_TAG_COUNT = 16
 _UTILITY_WEIGHT = 0.2
+# One component per retention topic: a shared component gave several topics the
+# same query text with different goldens, which no single ranking can satisfy.
+_RETENTION_COMPONENTS = (
+    "release",
+    "canary",
+    "schemas",
+    "toggles",
+    "bundles",
+    "workers",
+    "replicas",
+    "queues",
+    "certificates",
+    "firewalls",
+    "dashboards",
+    "secrets",
+    "images",
+    "shards",
+    "mirrors",
+    "tenants",
+    "plugins",
+    "runners",
+    "proxies",
+    "archives",
+    "volumes",
+    "regions",
+    "pipelines",
+    "balancers",
+)
+# The chain family has 6 x 4 component/problem pairs and the retention family
+# one component per topic; more topics would repeat a query text.
+_MAX_TOPICS = len(_RETENTION_COMPONENTS)
 
 
 @dataclass(frozen=True)
@@ -234,9 +265,7 @@ def _corpus(root: Path, topics: int, symbols_available: bool) -> _Corpus:
             _Query(key, "validity", f"topic {t} runbook pointer", ((key, 3),))
         )
 
-        component = ("release", "canary", "schemas", "toggles", "bundles", "workers")[
-            t % 6
-        ]
+        component = _RETENTION_COMPONENTS[t]
         procedure = f"retention-{t}-procedure"
         steps = (
             f"freeze {component} writes",
@@ -272,6 +301,12 @@ def _corpus(root: Path, topics: int, symbols_available: bool) -> _Corpus:
                 steps[0],
             )
         )
+    goldens: dict[str, tuple[tuple[str, int], ...]] = {}
+    for query in corpus.queries:
+        if goldens.setdefault(query.text, query.relevant) != query.relevant:
+            raise RuntimeError(
+                "coding evaluation corpus repeats a query text with another golden"
+            )
     return corpus
 
 
@@ -501,6 +536,8 @@ async def run_evaluation(
         raise ValueError("unknown coding evaluation mode")
     if isinstance(topics, bool) or not isinstance(topics, int) or topics < 1:
         raise ValueError("topics must be a positive integer")
+    if topics > _MAX_TOPICS:
+        raise ValueError(f"topics must not exceed {_MAX_TOPICS}")
     if isinstance(seed, bool) or not isinstance(seed, int):
         raise ValueError("seed must be an integer")
     statuses = (
@@ -599,8 +636,8 @@ async def run_evaluation(
 
 def _positive_topics(value: str) -> int:
     topics = int(value)
-    if topics < 1:
-        raise argparse.ArgumentTypeError("topics must be positive")
+    if not 1 <= topics <= _MAX_TOPICS:
+        raise argparse.ArgumentTypeError(f"topics must be between 1 and {_MAX_TOPICS}")
     return topics
 
 

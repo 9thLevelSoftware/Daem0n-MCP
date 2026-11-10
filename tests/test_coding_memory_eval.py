@@ -9,7 +9,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from benchmarks.coding_memory_eval import run_evaluation
+from benchmarks.coding_memory_eval import _corpus, run_evaluation
 from daem0nmcp.api.v7.discovery_operations import default_code_indexer_factory
 from daem0nmcp.schema_version import CURRENT_SCHEMA_VERSION
 
@@ -143,12 +143,31 @@ class CodingMemoryEvaluationTests(unittest.TestCase):
         self.assertFalse(scratch.exists())
 
 
+class CodingMemoryFixtureTests(unittest.TestCase):
+    def _corpus(self, topics: int):
+        with tempfile.TemporaryDirectory() as root:
+            return _corpus(Path(root), topics, True)
+
+    def test_no_query_text_is_shared_by_two_goldens(self):
+        corpus = self._corpus(24)
+        goldens: dict[str, set[tuple[tuple[str, int], ...]]] = {}
+        for query in corpus.queries:
+            goldens.setdefault(query.text, set()).add(query.relevant)
+        self.assertEqual(
+            {}, {text: keys for text, keys in goldens.items() if len(keys) > 1}
+        )
+        self.assertEqual(
+            24, len({q.text for q in corpus.queries if q.family == "retention"})
+        )
+
+
 class CodingMemoryEvaluationInputTests(unittest.IsolatedAsyncioTestCase):
     async def test_invalid_parameters_fail_before_creating_workspace(self):
         for arguments in (
             {"mode": "scripted"},
             {"topics": 0},
             {"topics": True},
+            {"topics": 25},
             {"seed": True},
         ):
             with self.subTest(arguments=arguments), self.assertRaises(ValueError):
