@@ -435,6 +435,10 @@ def _discard_crashed_pointer_temp(storage: Path, temporary: Path) -> None:
     nobody.  Under a shared lock, or none, it may be a live writer's and stays.
     A link or any other non-regular entry is never touched and is refused by
     the exclusive create that follows.
+
+    The lock is looked up for the process, not for the caller: pointer writes
+    are made by the one holder of the exclusive lock, never by a second thread
+    of the same process beside it.
     """
 
     key = os.path.normcase(str((storage / LOCK_NAME).resolve(strict=False)))
