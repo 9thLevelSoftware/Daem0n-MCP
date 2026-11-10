@@ -799,6 +799,233 @@ class MaintenanceOperationTests(unittest.IsolatedAsyncioTestCase):
             rows,
         )
 
+    def _append_filler(self, count: int) -> None:
+        """Append distinct live learnings in one transaction."""
+        from daem0nmcp.event_store import EventCommand, EventStore
+
+        occurred_at_us = int((NOW - timedelta(days=30)).timestamp() * 1_000_000)
+        with closing(sqlite3.connect(self.database)) as connection:
+            connection.execute("PRAGMA foreign_keys=ON")
+            store = EventStore(connection)
+            for index in range(count):
+                store.append_and_project(
+                    EventCommand(
+                        workspace_id=self.workspace.workspace_id,
+                        stream_id=f"mem_{index:064x}",
+                        stream_kind="memory",
+                        event_type="memory.created",
+                        occurred_at_us=occurred_at_us + index,
+                        recorded_at_us=occurred_at_us + index,
+                        actor_type="system",
+                        payload={
+                            "record": {
+                                "record_type": "learning",
+                                "legacy_type": None,
+                                "content": f"Distinct filler learning {index}.",
+                                "rationale": None,
+                                "context": {},
+                                "tags": [],
+                                "file_path": None,
+                                "file_path_relative": None,
+                                "keywords": None,
+                                "is_permanent": False,
+                                "pinned": False,
+                                "archived": False,
+                                "outcome": None,
+                                "worked": None,
+                                "recall_count": 0,
+                                "surprise_score": None,
+                                "importance_score": None,
+                                "source_client": "maintenance-test",
+                                "source_model": None,
+                                "deleted_at_us": None,
+                            }
+                        },
+                    )
+                )
+            connection.commit()
+
+    @contextmanager
+    def _as_durable_task(self, tool_name: str):
+        """Run the block the way the owned task worker invokes a tool."""
+        from daem0nmcp.api.v7.tasks import (
+            DurableTaskExecution,
+            durable_task_execution_var,
+        )
+
+        token = durable_task_execution_var.set(
+            DurableTaskExecution(
+                task_id="task-maintenance-test",
+                tool_name=tool_name,
+                workspace_id=self.workspace.workspace_id,
+                arguments_sha256="0" * 64,
+                principal_id="principal-maintenance-test",
+                transport_session_id=None,
+            )
+        )
+        try:
+            yield
+        finally:
+            durable_task_execution_var.reset(token)
+
+    async def _foreground_and_task(self, operations, tool_name: str, **arguments):
+        """Return the task result after proving the foreground asks for a task."""
+        from daem0nmcp.api.v7.maintenance_operations import (
+            MaintenanceOperationError,
+        )
+
+        request = _request(
+            tool_name, workspace_id=self.workspace.workspace_id, **arguments
+        )
+        with self.assertRaises(MaintenanceOperationError) as raised:
+            await operations[tool_name](workspace=self.workspace, request=request)
+        self.assertEqual("TASK_REQUIRED", raised.exception.code)
+        with self._as_durable_task(tool_name):
+            return await operations[tool_name](
+                workspace=self.workspace, request=request
+            )
+
+    async def test_a_task_completes_the_scans_the_foreground_defers(self) -> None:
+        """TASK_REQUIRED must be an answer a task can actually satisfy."""
+        from daem0nmcp.api.v7.maintenance_operations import _MAX_GROUP_SCAN
+
+        self._append_filler(_MAX_GROUP_SCAN + 1)
+        source_id = "mem_" + "9" * 64
+        old_dream = self._append_record(
+            "a",
+            "Older dream re-evaluation.",
+            created_at=NOW - timedelta(days=3),
+            record_type="learning",
+            tags=["dream", "re-evaluation", f"source-decision:{source_id}"],
+        )
+        self._append_record(
+            "b",
+            "Newer dream re-evaluation.",
+            created_at=NOW - timedelta(days=2),
+            record_type="learning",
+            tags=["dream", "re-evaluation", f"source-decision:{source_id}"],
+        )
+        old_duplicate = self._append_record(
+            "c", "Use the durable queue", created_at=NOW - timedelta(days=5)
+        )
+        keeper = self._append_record(
+            "d", "use the  durable queue", created_at=NOW - timedelta(days=4)
+        )
+        needle = self._append_record(
+            "e",
+            "Needle retry learning.",
+            created_at=NOW - timedelta(days=1),
+            record_type="learning",
+        )
+        operations = self._operations()
+
+        dream_preview = await self._foreground_and_task(
+            operations, "dream_duplicates_preview"
+        )
+        self.assertEqual([old_dream], dream_preview.sample_ids)
+        dream_receipt = await self._foreground_and_task(
+            operations,
+            "dream_duplicates_purge",
+            selection_token=dream_preview.selection_token,
+            preflight_token=PREFLIGHT_TOKEN,
+        )
+        self.assertEqual([old_dream], dream_receipt.affected_ids)
+
+        duplicate_preview = await self._foreground_and_task(
+            operations, "memory_duplicates_preview"
+        )
+        self.assertEqual(
+            {"duplicate_groups": 1, "eligible": 1, "remaining": 0, "selected": 1},
+            duplicate_preview.counts,
+        )
+        self.assertEqual([old_duplicate], duplicate_preview.sample_ids)
+        duplicate_receipt = await self._foreground_and_task(
+            operations,
+            "memory_duplicates_cleanup",
+            selection_token=duplicate_preview.selection_token,
+            preflight_token=PREFLIGHT_TOKEN,
+        )
+        self.assertEqual([keeper, old_duplicate], duplicate_receipt.affected_ids)
+
+        summary = "Needle retries need a bounded budget."
+        compaction_preview = await self._foreground_and_task(
+            operations,
+            "memory_compaction_preview",
+            summary=summary,
+            query="needle",
+            limit=10,
+        )
+        self.assertEqual([needle], compaction_preview.sample_ids)
+        self.assertEqual(1, compaction_preview.counts["selected"])
+        compacted = await self._foreground_and_task(
+            operations,
+            "memory_compact",
+            summary=summary,
+            query="needle",
+            limit=10,
+            selection_token=compaction_preview.selection_token,
+            idempotency_key="compact-needle-history-0001",
+            preflight_token=PREFLIGHT_TOKEN,
+        )
+        self.assertEqual(1, compacted.receipt.changed_count)
+        self._assert_replay_reproduces_projections()
+
+    async def test_task_and_foreground_scans_select_identically(self) -> None:
+        """A preview issued one way must stay valid when applied the other way."""
+        self._append_record("a", "Same content.", created_at=NOW - timedelta(days=3))
+        self._append_record("b", "same  content.", created_at=NOW - timedelta(days=2))
+        self._append_record("c", "Same Content.", created_at=NOW - timedelta(days=1))
+        self._append_record("d", "Other content.", created_at=NOW - timedelta(days=1))
+        self._append_record("e", "other content.", created_at=NOW - timedelta(days=2))
+        operations = self._operations()
+        request = _request(
+            "memory_duplicates_preview", workspace_id=self.workspace.workspace_id
+        )
+
+        foreground = await operations["memory_duplicates_preview"](
+            workspace=self.workspace, request=request
+        )
+        with self._as_durable_task("memory_duplicates_preview"):
+            task = await operations["memory_duplicates_preview"](
+                workspace=self.workspace, request=request
+            )
+
+        self.assertEqual(3, foreground.counts["selected"])
+        self.assertEqual(foreground, task)
+        with self._as_durable_task("memory_duplicates_cleanup"):
+            receipt = await operations["memory_duplicates_cleanup"](
+                workspace=self.workspace,
+                request=_request(
+                    "memory_duplicates_cleanup",
+                    workspace_id=self.workspace.workspace_id,
+                    selection_token=foreground.selection_token,
+                    preflight_token=PREFLIGHT_TOKEN,
+                ),
+            )
+        self.assertEqual(3, receipt.changed_count)
+
+    async def test_a_task_for_another_tool_does_not_lift_the_scan_bound(self) -> None:
+        """Only the admitted task's own tool and workspace run unbounded."""
+        from daem0nmcp.api.v7.maintenance_operations import (
+            _MAX_GROUP_SCAN,
+            MaintenanceOperationError,
+        )
+
+        self._append_filler(_MAX_GROUP_SCAN + 1)
+        operations = self._operations()
+        request = _request(
+            "memory_duplicates_preview", workspace_id=self.workspace.workspace_id
+        )
+
+        with (
+            self._as_durable_task("memory_prune_preview"),
+            self.assertRaises(MaintenanceOperationError) as raised,
+        ):
+            await operations["memory_duplicates_preview"](
+                workspace=self.workspace, request=request
+            )
+        self.assertEqual("TASK_REQUIRED", raised.exception.code)
+
     async def test_cancelled_prune_rolls_back_before_commit(self) -> None:
         """Cancellation observed before commit must leave authority unchanged."""
         from daem0nmcp.api.v7.runtime_services import WorkspaceStorageResolver

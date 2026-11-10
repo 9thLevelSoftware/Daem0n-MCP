@@ -7,7 +7,7 @@ import os
 import re
 import sqlite3
 import threading
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -41,6 +41,7 @@ from .models import (
 from .public_ids import PublicObjectIdNotFound, PublicObjectIdRepository
 from .runtime_protocols import ActiveStorageResolver, WorkerPool
 from .runtime_services import WorkspaceStorageResolver
+from .tasks import durable_task_execution_var
 from .tools import (
     CommunitySummary,
     Contradiction,
@@ -56,6 +57,10 @@ from .tools import (
 )
 
 _EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
+# The foreground refuses an evidence scan above these bounds with
+# TASK_REQUIRED so a synchronous call keeps a bounded deadline and memory.  The
+# same call admitted as a durable task reads the whole event log lazily and is
+# limited by the task's own deadline instead.
 _MAX_SCAN_EVENTS = 20_000
 _MAX_EVIDENCE_RECORDS = 10_000
 _MAX_GOVERNANCE_EVENTS = 5_000
@@ -374,10 +379,26 @@ def _safe_text(value: object) -> str:
     return value
 
 
+def _scan_is_bounded(workspace: Workspace, tool_name: str) -> bool:
+    """Return whether an evidence scan keeps the foreground bounds.
+
+    Only the durable task admitted for this exact tool and workspace scans
+    unbounded; every other caller keeps the bounds.
+    """
+
+    execution = durable_task_execution_var.get()
+    return not (
+        execution is not None
+        and execution.tool_name == tool_name
+        and execution.workspace_id == workspace.workspace_id
+    )
+
+
 def _record_evidence_from_events(
     connection: sqlite3.Connection,
     workspace_id: str,
     *,
+    bounded: bool,
     categories: frozenset[str] | None = None,
     valid_at_us: int | None = None,
     transaction_at_us: int | None = None,
@@ -387,15 +408,21 @@ def _record_evidence_from_events(
     if transaction_at_us is not None:
         transaction_filter = " AND recorded_at_us<=?"
         parameters.append(transaction_at_us)
-    rows = connection.execute(
+    query = (
         f"SELECT {_EVENT_COLUMNS} FROM memory_events WHERE workspace_id=? "
         "AND stream_kind='memory'"
         + transaction_filter
-        + " ORDER BY stream_id,stream_version LIMIT ?",
-        (*parameters, _MAX_SCAN_EVENTS + 1),
-    ).fetchall()
-    if len(rows) > _MAX_SCAN_EVENTS:
-        raise IntelligenceOperationError("TASK_REQUIRED")
+        + " ORDER BY stream_id,stream_version"
+    )
+    rows: Iterable[sqlite3.Row]
+    if bounded:
+        rows = connection.execute(
+            query + " LIMIT ?", (*parameters, _MAX_SCAN_EVENTS + 1)
+        ).fetchall()
+        if len(rows) > _MAX_SCAN_EVENTS:
+            raise IntelligenceOperationError("TASK_REQUIRED")
+    else:
+        rows = connection.execute(query, parameters)
 
     selected: dict[str, tuple[sqlite3.Row, dict[str, Any], int]] = {}
     first_recorded: dict[str, int] = {}
@@ -472,7 +499,7 @@ def _record_evidence_from_events(
                 recorded_at_us=recorded_at_us,
             )
         )
-        if len(records) > _MAX_EVIDENCE_RECORDS:
+        if bounded and len(records) > _MAX_EVIDENCE_RECORDS:
             raise IntelligenceOperationError("TASK_REQUIRED")
     return records
 
@@ -531,6 +558,7 @@ def _memory_verify_sync(
     dependencies: IntelligenceOperationDependencies,
     workspace: Workspace,
     request: AdmittedRequest,
+    bounded: bool,
 ) -> MemoryVerifyData:
     valid_at = (
         None
@@ -551,6 +579,7 @@ def _memory_verify_sync(
                 evidence = _record_evidence_from_events(
                     connection,
                     workspace.workspace_id,
+                    bounded=bounded,
                     categories=categories,
                     valid_at_us=valid_at,
                     transaction_at_us=transaction_at,
@@ -660,6 +689,7 @@ def _decision_simulate_sync(
     dependencies: IntelligenceOperationDependencies,
     workspace: Workspace,
     request: AdmittedRequest,
+    bounded: bool,
 ) -> DecisionSimulationData:
     try:
         with dependencies.storage_resolver.locked_active(workspace) as active:
@@ -669,6 +699,7 @@ def _decision_simulate_sync(
                 current = _record_evidence_from_events(
                     connection,
                     workspace.workspace_id,
+                    bounded=bounded,
                 )
                 current_by_id = {item.record.record_id: item for item in current}
                 decision = current_by_id.get(request.record_id)
@@ -684,6 +715,7 @@ def _decision_simulate_sync(
                 then = _record_evidence_from_events(
                     connection,
                     workspace.workspace_id,
+                    bounded=bounded,
                     transaction_at_us=comparison_at,
                 )
                 then_by_id = {item.record.record_id: item for item in then}
@@ -866,6 +898,7 @@ def _rule_evolution_sync(
     dependencies: IntelligenceOperationDependencies,
     workspace: Workspace,
     request: AdmittedRequest,
+    bounded: bool,
 ) -> RuleEvolutionData:
     now = _now(dependencies)
     try:
@@ -879,7 +912,7 @@ def _rule_evolution_sync(
                     request.rule_id,
                 )
                 memory_evidence = _record_evidence_from_events(
-                    connection, workspace.workspace_id
+                    connection, workspace.workspace_id, bounded=bounded
                 )
                 reports: list[RuleEvolutionReport] = []
                 all_references: dict[tuple[str, str], EvidenceRef] = {}
@@ -1084,6 +1117,7 @@ def _hierarchical_recall_sync(
     dependencies: IntelligenceOperationDependencies,
     workspace: Workspace,
     request: AdmittedRequest,
+    bounded: bool,
 ) -> HierarchicalRecallData:
     try:
         with dependencies.storage_resolver.locked_active(workspace) as active:
@@ -1097,7 +1131,7 @@ def _hierarchical_recall_sync(
                     connection, workspace.workspace_id, generation
                 )
                 records = _record_evidence_from_events(
-                    connection, workspace.workspace_id
+                    connection, workspace.workspace_id, bounded=bounded
                 )
                 by_id = {item.record.record_id: item for item in records}
                 members_by_community: dict[str, list[_RecordEvidence]] = {
@@ -1250,6 +1284,7 @@ def _decision_debate_sync(
     workspace: Workspace,
     request: AdmittedRequest,
     cancelled: threading.Event,
+    bounded: bool,
 ) -> DecisionDebateData:
     now = _now(dependencies)
     now_us = _datetime_us(now)
@@ -1342,7 +1377,7 @@ def _decision_debate_sync(
                     )
 
                 records = _record_evidence_from_events(
-                    connection, workspace.workspace_id
+                    connection, workspace.workspace_id, bounded=bounded
                 )
                 advocate_evidence = _position_evidence(
                     request.advocate_position, records
@@ -1496,10 +1531,11 @@ def build_intelligence_operations(
         *, workspace: Workspace, request: AdmittedRequest
     ) -> DecisionDebateData:
         _authorize(workspace, request, "decision_debate")
+        bounded = _scan_is_bounded(workspace, "decision_debate")
         return await _run_mutation(
             dependencies,
             lambda cancelled: _decision_debate_sync(
-                dependencies, workspace, request, cancelled
+                dependencies, workspace, request, cancelled, bounded
             ),
         )
 
@@ -1507,36 +1543,42 @@ def build_intelligence_operations(
         *, workspace: Workspace, request: AdmittedRequest
     ) -> DecisionSimulationData:
         _authorize(workspace, request, "decision_simulate")
+        bounded = _scan_is_bounded(workspace, "decision_simulate")
         return await _run_read(
             dependencies,
-            lambda: _decision_simulate_sync(dependencies, workspace, request),
+            lambda: _decision_simulate_sync(dependencies, workspace, request, bounded),
         )
 
     async def memory_recall_hierarchical(
         *, workspace: Workspace, request: AdmittedRequest
     ) -> HierarchicalRecallData:
         _authorize(workspace, request, "memory_recall_hierarchical")
+        bounded = _scan_is_bounded(workspace, "memory_recall_hierarchical")
         return await _run_read(
             dependencies,
-            lambda: _hierarchical_recall_sync(dependencies, workspace, request),
+            lambda: _hierarchical_recall_sync(
+                dependencies, workspace, request, bounded
+            ),
         )
 
     async def memory_verify(
         *, workspace: Workspace, request: AdmittedRequest
     ) -> MemoryVerifyData:
         _authorize(workspace, request, "memory_verify")
+        bounded = _scan_is_bounded(workspace, "memory_verify")
         return await _run_read(
             dependencies,
-            lambda: _memory_verify_sync(dependencies, workspace, request),
+            lambda: _memory_verify_sync(dependencies, workspace, request, bounded),
         )
 
     async def rule_evolution_analyze(
         *, workspace: Workspace, request: AdmittedRequest
     ) -> RuleEvolutionData:
         _authorize(workspace, request, "rule_evolution_analyze")
+        bounded = _scan_is_bounded(workspace, "rule_evolution_analyze")
         return await _run_read(
             dependencies,
-            lambda: _rule_evolution_sync(dependencies, workspace, request),
+            lambda: _rule_evolution_sync(dependencies, workspace, request, bounded),
         )
 
     return MappingProxyType(

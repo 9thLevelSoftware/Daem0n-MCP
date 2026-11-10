@@ -336,6 +336,70 @@ class IntelligenceOperationTests(unittest.IsolatedAsyncioTestCase):
             {ref.record_id for ref in result.contradictions[0].evidence_refs},
         )
 
+    async def test_a_task_completes_the_scan_the_foreground_defers(self) -> None:
+        """TASK_REQUIRED must be an answer a task can actually satisfy."""
+        from unittest.mock import patch
+
+        from daem0nmcp.api.v7 import intelligence_operations
+        from daem0nmcp.api.v7.tasks import (
+            DurableTaskExecution,
+            durable_task_execution_var,
+        )
+
+        supported_id, supported_event = self._append_record(
+            "a", "The migration completed successfully."
+        )
+        for suffix in "bcd":
+            self._append_record(suffix, f"Unrelated note {suffix}.")
+        operation = self._operations()["memory_verify"]
+        request = _request(
+            "memory_verify",
+            workspace_id=self.workspace.workspace_id,
+            text="The migration completed successfully.",
+        )
+
+        def execution(tool_name: str) -> DurableTaskExecution:
+            return DurableTaskExecution(
+                task_id="task-intelligence-test",
+                tool_name=tool_name,
+                workspace_id=self.workspace.workspace_id,
+                arguments_sha256="0" * 64,
+                principal_id="principal-intelligence-test",
+                transport_session_id=None,
+            )
+
+        for bound in ("_MAX_SCAN_EVENTS", "_MAX_EVIDENCE_RECORDS"):
+            with (
+                self.subTest(bound=bound),
+                patch.object(intelligence_operations, bound, 3),
+            ):
+                with self.assertRaises(
+                    intelligence_operations.IntelligenceOperationError
+                ) as raised:
+                    await operation(workspace=self.workspace, request=request)
+                self.assertEqual("TASK_REQUIRED", raised.exception.code)
+
+                token = durable_task_execution_var.set(execution("decision_debate"))
+                try:
+                    with self.assertRaises(
+                        intelligence_operations.IntelligenceOperationError
+                    ) as other_tool:
+                        await operation(workspace=self.workspace, request=request)
+                finally:
+                    durable_task_execution_var.reset(token)
+                self.assertEqual("TASK_REQUIRED", other_tool.exception.code)
+
+                token = durable_task_execution_var.set(execution("memory_verify"))
+                try:
+                    result = await operation(workspace=self.workspace, request=request)
+                finally:
+                    durable_task_execution_var.reset(token)
+                self.assertEqual("supported", result.overall_status)
+                self.assertEqual(
+                    {(supported_id, supported_event)},
+                    {(ref.record_id, ref.event_id) for ref in result.evidence_refs},
+                )
+
     async def test_memory_verify_honors_category_and_transaction_time(self) -> None:
         """Ignoring filters or future events would corrupt point-in-time truth."""
         self._append_record(

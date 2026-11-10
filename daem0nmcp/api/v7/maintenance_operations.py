@@ -11,7 +11,7 @@ import os
 import secrets
 import sqlite3
 import threading
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -43,12 +43,19 @@ from .models import (
 )
 from .runtime_protocols import ActiveStorageResolver, WorkerPool
 from .runtime_services import WorkspaceStorageResolver
-from .tasks import await_task_terminal
+from .tasks import await_task_terminal, durable_task_execution_var
 from .tools import MemoryCompactData
 
 _EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
 _MAX_SELECTION = 500
+# Whole-workspace selection scans (duplicates, compaction, dream purge) verify
+# every scanned record.  The foreground refuses a scan above this many records
+# with TASK_REQUIRED so a synchronous call keeps a bounded deadline, memory and
+# write-lock hold.  The same call admitted as a durable task has no record
+# bound: it reads the rows in batches of ``_SCAN_BATCH``, retains only what the
+# selection needs, and is limited by the task's own deadline and cancellation.
 _MAX_GROUP_SCAN = 2_000
+_SCAN_BATCH = 500
 _REQUIRED_TABLES = frozenset({"memory_events", "memory_records", "schema_version"})
 _RECORD_COLUMNS = (
     "record.record_id,record.workspace_id,record.record_type,"
@@ -574,6 +581,57 @@ def _prune_kept_counts(
     }
 
 
+def _foreground_scan_limit(workspace: Workspace, tool_name: str) -> int | None:
+    """Return the record bound of a selection scan; ``None`` inside its task.
+
+    Only the durable task admitted for this exact tool and workspace scans
+    unbounded; every other caller keeps the foreground bound.
+    """
+
+    execution = durable_task_execution_var.get()
+    if (
+        execution is not None
+        and execution.tool_name == tool_name
+        and execution.workspace_id == workspace.workspace_id
+    ):
+        return None
+    return _MAX_GROUP_SCAN
+
+
+def _scan_snapshots(
+    connection: sqlite3.Connection,
+    where: str,
+    order: str,
+    parameters: Sequence[Any],
+    scan_limit: int | None,
+    cancelled: threading.Event | None,
+) -> Iterator[_RecordSnapshot]:
+    """Yield every verified record of a selection scan in bounded batches."""
+
+    if scan_limit is not None:
+        counted = connection.execute(
+            "SELECT count(*) FROM (SELECT 1 FROM memory_records AS record "
+            f"WHERE {where} LIMIT ?)",
+            (*parameters, scan_limit + 1),
+        ).fetchone()
+        if counted is None or int(counted[0]) > scan_limit:
+            raise MaintenanceOperationError("TASK_REQUIRED")
+    cursor = connection.execute(
+        f"SELECT {_RECORD_COLUMNS} FROM memory_records AS record "
+        "JOIN memory_events AS event ON event.event_id=record.source_event_id "
+        f"WHERE {where} ORDER BY {order}",
+        tuple(parameters),
+    )
+    while True:
+        if cancelled is not None and cancelled.is_set():
+            raise _WorkerCancelledError()
+        rows = cursor.fetchmany(_SCAN_BATCH)
+        if not rows:
+            return
+        for row in rows:
+            yield _verified_snapshot(row)
+
+
 def _duplicate_criteria(request: AdmittedRequest) -> dict[str, Any]:
     return {"merge_duplicates": request.merge_duplicates}
 
@@ -584,35 +642,55 @@ def _normalized_duplicate_content(value: object) -> str:
     return " ".join(value.casefold().split())
 
 
+def _duplicate_key(snapshot: _RecordSnapshot) -> tuple[str, str, str]:
+    return (
+        str(snapshot.state["record_type"]),
+        _normalized_duplicate_content(snapshot.state["content"]),
+        ""
+        if snapshot.state["file_path_relative"] is None
+        else str(snapshot.state["file_path_relative"]),
+    )
+
+
 def _duplicate_groups(
     connection: sqlite3.Connection,
     workspace_id: str,
     criteria: Mapping[str, Any],
+    scan_limit: int | None,
+    cancelled: threading.Event | None = None,
 ) -> tuple[list[_DuplicateGroup], int, int]:
-    rows = connection.execute(
-        f"SELECT {_RECORD_COLUMNS} FROM memory_records AS record "
-        "JOIN memory_events AS event ON event.event_id=record.source_event_id "
-        "WHERE record.workspace_id=? AND record.deleted_at_us IS NULL "
-        "ORDER BY record.record_id LIMIT ?",
-        (workspace_id, _MAX_GROUP_SCAN + 1),
-    ).fetchall()
-    if len(rows) > _MAX_GROUP_SCAN:
-        raise MaintenanceOperationError("TASK_REQUIRED")
+    # Only records that share a key are retained.  A key seen once is held as
+    # a digest and its record's ID; that first member is loaded again once a
+    # second one turns up.
+    first_seen: dict[bytes, str] = {}
+    first_ids: dict[tuple[str, str, str], str] = {}
     grouped: dict[tuple[str, str, str], list[_RecordSnapshot]] = {}
-    for row in rows:
-        snapshot = _verified_snapshot(row)
-        key = (
-            str(snapshot.state["record_type"]),
-            _normalized_duplicate_content(snapshot.state["content"]),
-            ""
-            if snapshot.state["file_path_relative"] is None
-            else str(snapshot.state["file_path_relative"]),
-        )
-        grouped.setdefault(key, []).append(snapshot)
-    duplicate_items = [
-        (key, members) for key, members in grouped.items() if len(members) > 1
-    ]
-    duplicate_items.sort(key=lambda item: item[0])
+    for snapshot in _scan_snapshots(
+        connection,
+        "record.workspace_id=? AND record.deleted_at_us IS NULL",
+        "record.record_id",
+        (workspace_id,),
+        scan_limit,
+        cancelled,
+    ):
+        key = _duplicate_key(snapshot)
+        members = grouped.get(key)
+        if members is not None:
+            members.append(snapshot)
+            continue
+        digest = hashlib.sha256(canonical_json_bytes(list(key))).digest()
+        first_id = first_seen.get(digest)
+        if first_id is None:
+            first_seen[digest] = snapshot.record_id
+            continue
+        first_ids[key] = first_id
+        grouped[key] = [snapshot]
+    for key, first_id in first_ids.items():
+        first = _load_snapshot(connection, workspace_id, first_id)
+        if _duplicate_key(first) != key:
+            raise MaintenanceOperationError("CAPABILITY_DEGRADED")
+        grouped[key].insert(0, first)
+    duplicate_items = sorted(grouped.items(), key=lambda item: item[0])
     eligible = sum(len(members) - 1 for _key, members in duplicate_items)
     if not criteria["merge_duplicates"]:
         return [], eligible, len(duplicate_items)
@@ -654,23 +732,24 @@ def _compaction_candidates(
     connection: sqlite3.Connection,
     workspace_id: str,
     criteria: Mapping[str, Any],
+    scan_limit: int | None,
+    cancelled: threading.Event | None = None,
 ) -> tuple[list[_RecordSnapshot], int]:
-    rows = connection.execute(
-        f"SELECT {_RECORD_COLUMNS} FROM memory_records AS record "
-        "JOIN memory_events AS event ON event.event_id=record.source_event_id "
-        "WHERE record.workspace_id=? AND record.deleted_at_us IS NULL "
-        "AND record.archived=0 AND record.pinned=0 AND record.is_permanent=0 "
-        "AND record.record_type IN ('decision','learning') "
-        "ORDER BY record.created_at_us,record.record_id LIMIT ?",
-        (workspace_id, _MAX_GROUP_SCAN + 1),
-    ).fetchall()
-    if len(rows) > _MAX_GROUP_SCAN:
-        raise MaintenanceOperationError("TASK_REQUIRED")
     query = criteria["query"]
     query_text = None if query is None else str(query).casefold()
-    eligible: list[_RecordSnapshot] = []
-    for row in rows:
-        record = _verified_snapshot(row)
+    limit = int(criteria["limit"])
+    selected: list[_RecordSnapshot] = []
+    eligible = 0
+    for record in _scan_snapshots(
+        connection,
+        "record.workspace_id=? AND record.deleted_at_us IS NULL "
+        "AND record.archived=0 AND record.pinned=0 AND record.is_permanent=0 "
+        "AND record.record_type IN ('decision','learning')",
+        "record.created_at_us,record.record_id",
+        (workspace_id,),
+        scan_limit,
+        cancelled,
+    ):
         if (
             record.state["record_type"] == "decision"
             and record.state["outcome"] is None
@@ -692,8 +771,10 @@ def _compaction_candidates(
             ]
             if not any(query_text in value.casefold() for value in searchable):
                 continue
-        eligible.append(record)
-    return eligible[: int(criteria["limit"])], len(eligible)
+        eligible += 1
+        if len(selected) < limit:
+            selected.append(record)
+    return selected, eligible
 
 
 def _record_summary(record: _RecordSnapshot) -> RecordSummary:
@@ -755,19 +836,19 @@ def _dream_criteria(_request: AdmittedRequest) -> dict[str, Any]:
 def _dream_candidates(
     connection: sqlite3.Connection,
     workspace_id: str,
+    scan_limit: int | None,
+    cancelled: threading.Event | None = None,
 ) -> tuple[list[_RecordSnapshot], int, int, int]:
-    rows = connection.execute(
-        f"SELECT {_RECORD_COLUMNS} FROM memory_records AS record "
-        "JOIN memory_events AS event ON event.event_id=record.source_event_id "
-        "WHERE record.workspace_id=? AND record.record_type='learning' "
-        "AND record.deleted_at_us IS NULL ORDER BY record.record_id LIMIT ?",
-        (workspace_id, _MAX_GROUP_SCAN + 1),
-    ).fetchall()
-    if len(rows) > _MAX_GROUP_SCAN:
-        raise MaintenanceOperationError("TASK_REQUIRED")
     grouped: dict[tuple[str, str], list[_RecordSnapshot]] = {}
-    for row in rows:
-        record = _verified_snapshot(row)
+    for record in _scan_snapshots(
+        connection,
+        "record.workspace_id=? AND record.record_type='learning' "
+        "AND record.deleted_at_us IS NULL",
+        "record.record_id",
+        (workspace_id,),
+        scan_limit,
+        cancelled,
+    ):
         tags = record.state["tags"]
         if not isinstance(tags, list) or not all(isinstance(tag, str) for tag in tags):
             raise MaintenanceOperationError("CAPABILITY_DEGRADED")
@@ -1300,6 +1381,7 @@ def _duplicates_preview_sync(
     dependencies: MaintenanceOperationDependencies,
     workspace: Workspace,
     request: AdmittedRequest,
+    scan_limit: int | None,
 ) -> Preview:
     evaluated_at_us = _now_us(dependencies)
     criteria = _duplicate_criteria(request)
@@ -1314,6 +1396,7 @@ def _duplicates_preview_sync(
                     connection,
                     workspace.workspace_id,
                     criteria,
+                    scan_limit,
                 )
                 records = _duplicate_candidates(groups)
                 token, expires_at = _issue_selection_token(
@@ -1452,6 +1535,7 @@ def _duplicates_sync(
     request: AdmittedRequest,
     claims: _SelectionClaims,
     cancelled: threading.Event,
+    scan_limit: int | None,
 ) -> DestructiveMutationReceipt:
     if cancelled.is_set():
         raise _WorkerCancelledError()
@@ -1484,6 +1568,8 @@ def _duplicates_sync(
                     connection,
                     workspace.workspace_id,
                     criteria,
+                    scan_limit,
+                    cancelled,
                 )
                 records = _duplicate_candidates(groups)
                 if (
@@ -1616,6 +1702,7 @@ def _compaction_preview_sync(
     dependencies: MaintenanceOperationDependencies,
     workspace: Workspace,
     request: AdmittedRequest,
+    scan_limit: int | None,
 ) -> Preview:
     evaluated_at_us = _now_us(dependencies)
     criteria = _compaction_criteria(request)
@@ -1630,6 +1717,7 @@ def _compaction_preview_sync(
                     connection,
                     workspace.workspace_id,
                     criteria,
+                    scan_limit,
                 )
                 token, expires_at = _issue_selection_token(
                     dependencies,
@@ -1826,6 +1914,7 @@ def _compaction_sync(
     request: AdmittedRequest,
     claims: _SelectionClaims,
     cancelled: threading.Event,
+    scan_limit: int | None,
 ) -> MemoryCompactData:
     if cancelled.is_set():
         raise _WorkerCancelledError()
@@ -1863,6 +1952,8 @@ def _compaction_sync(
                     connection,
                     workspace.workspace_id,
                     criteria,
+                    scan_limit,
+                    cancelled,
                 )
                 if (
                     len(records) != claims.selected_count
@@ -2028,6 +2119,7 @@ def _dream_preview_sync(
     dependencies: MaintenanceOperationDependencies,
     workspace: Workspace,
     request: AdmittedRequest,
+    scan_limit: int | None,
 ) -> Preview:
     evaluated_at_us = _now_us(dependencies)
     criteria = _dream_criteria(request)
@@ -2043,7 +2135,7 @@ def _dream_preview_sync(
                     eligible,
                     reevaluation_duplicates,
                     summary_duplicates,
-                ) = _dream_candidates(connection, workspace.workspace_id)
+                ) = _dream_candidates(connection, workspace.workspace_id, scan_limit)
                 token, expires_at = _issue_selection_token(
                     dependencies,
                     workspace_id=workspace.workspace_id,
@@ -2082,6 +2174,7 @@ def _dream_sync(
     request: AdmittedRequest,
     claims: _SelectionClaims,
     cancelled: threading.Event,
+    scan_limit: int | None,
 ) -> DestructiveMutationReceipt:
     if cancelled.is_set():
         raise _WorkerCancelledError()
@@ -2111,7 +2204,7 @@ def _dream_sync(
                 ):
                     raise MaintenanceOperationError("CONFLICT")
                 records, _eligible, _reevaluations, _summaries = _dream_candidates(
-                    connection, workspace.workspace_id
+                    connection, workspace.workspace_id, scan_limit, cancelled
                 )
                 if (
                     len(records) != claims.selected_count
@@ -2249,9 +2342,12 @@ def build_maintenance_operations(
         *, workspace: Workspace, request: AdmittedRequest
     ) -> Preview:
         _authorize(workspace, request, "memory_duplicates_preview")
+        scan_limit = _foreground_scan_limit(workspace, "memory_duplicates_preview")
         return await _run_read(
             dependencies,
-            lambda: _duplicates_preview_sync(dependencies, workspace, request),
+            lambda: _duplicates_preview_sync(
+                dependencies, workspace, request, scan_limit
+            ),
         )
 
     async def memory_duplicates_cleanup(
@@ -2266,6 +2362,7 @@ def build_maintenance_operations(
             target_tool="memory_duplicates_cleanup",
             criteria=criteria,
         )
+        scan_limit = _foreground_scan_limit(workspace, "memory_duplicates_cleanup")
         return await _run_mutation(
             dependencies,
             lambda cancelled: _duplicates_sync(
@@ -2274,6 +2371,7 @@ def build_maintenance_operations(
                 request,
                 claims,
                 cancelled,
+                scan_limit,
             ),
         )
 
@@ -2281,9 +2379,12 @@ def build_maintenance_operations(
         *, workspace: Workspace, request: AdmittedRequest
     ) -> Preview:
         _authorize(workspace, request, "memory_compaction_preview")
+        scan_limit = _foreground_scan_limit(workspace, "memory_compaction_preview")
         return await _run_read(
             dependencies,
-            lambda: _compaction_preview_sync(dependencies, workspace, request),
+            lambda: _compaction_preview_sync(
+                dependencies, workspace, request, scan_limit
+            ),
         )
 
     async def memory_compact(
@@ -2298,6 +2399,7 @@ def build_maintenance_operations(
             target_tool="memory_compact",
             criteria=criteria,
         )
+        scan_limit = _foreground_scan_limit(workspace, "memory_compact")
         return await _run_mutation(
             dependencies,
             lambda cancelled: _compaction_sync(
@@ -2306,6 +2408,7 @@ def build_maintenance_operations(
                 request,
                 claims,
                 cancelled,
+                scan_limit,
             ),
         )
 
@@ -2313,9 +2416,10 @@ def build_maintenance_operations(
         *, workspace: Workspace, request: AdmittedRequest
     ) -> Preview:
         _authorize(workspace, request, "dream_duplicates_preview")
+        scan_limit = _foreground_scan_limit(workspace, "dream_duplicates_preview")
         return await _run_read(
             dependencies,
-            lambda: _dream_preview_sync(dependencies, workspace, request),
+            lambda: _dream_preview_sync(dependencies, workspace, request, scan_limit),
         )
 
     async def dream_duplicates_purge(
@@ -2330,6 +2434,7 @@ def build_maintenance_operations(
             target_tool="dream_duplicates_purge",
             criteria=criteria,
         )
+        scan_limit = _foreground_scan_limit(workspace, "dream_duplicates_purge")
         return await _run_mutation(
             dependencies,
             lambda cancelled: _dream_sync(
@@ -2338,6 +2443,7 @@ def build_maintenance_operations(
                 request,
                 claims,
                 cancelled,
+                scan_limit,
             ),
         )
 
