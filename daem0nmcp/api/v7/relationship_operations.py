@@ -48,6 +48,7 @@ from .tools import (
 )
 
 logger = logging.getLogger(__name__)
+_MAX_LOGGED_DANGLING = 20
 
 _EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
 _REQUIRED_TABLES = frozenset(
@@ -457,10 +458,20 @@ def _live_relationships(
         (workspace_id, now_us, now_us),
     ).fetchone()
     if dangling is not None and int(dangling[0]):
+        listed = connection.execute(
+            "SELECT relation.relationship_id "
+            "FROM memory_relationship_versions AS relation "
+            f"{endpoints}WHERE {live}"
+            "AND (source.record_id IS NULL OR target.record_id IS NULL) "
+            "ORDER BY relation.relationship_id LIMIT ?",
+            (workspace_id, now_us, now_us, _MAX_LOGGED_DANGLING),
+        ).fetchall()
         logger.warning(
             "Skipped %d live relationship(s) whose endpoint record is deleted "
-            "or missing; remove them with memory_unlink.",
+            "or missing; remove them with memory_unlink (first %d: %s).",
             int(dangling[0]),
+            len(listed),
+            ", ".join(str(row[0]) for row in listed),
         )
     rows = connection.execute(
         f"SELECT {_RELATIONSHIP_COLUMNS} "

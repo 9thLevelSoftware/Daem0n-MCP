@@ -801,6 +801,8 @@ class RelationshipOperationTests(unittest.IsolatedAsyncioTestCase):
             unrelated = await related(d)
         self.assertEqual([], unrelated.records)
         self.assertTrue(any("2 live relationship" in line for line in logs.output))
+        # The ids are what memory_unlink needs and no tool lists them.
+        self.assertTrue(any(dangling in line for line in logs.output))
         neighbour = await related(a)
         self.assertEqual([c], [item.record_id for item in neighbour.records])
         self.assertEqual(
