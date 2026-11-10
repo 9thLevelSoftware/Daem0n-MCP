@@ -2756,7 +2756,11 @@ def prepare_import(
             "FROM portable_transfer_pages "
             "WHERE session_id=? ORDER BY page_index",
             (session_id,),
-        )
+        ).fetchall()
+        # Read up front: a query left half-read by a failure below keeps its
+        # read lock after the connection is closed, for as long as the
+        # error's traceback refers to this frame, and that lock refuses
+        # every writer of a rollback-journal database.
         actual_page_count = 0
         for expected_page_index, (page_index, kind, page_hash, relative) in enumerate(
             pages

@@ -258,7 +258,9 @@ def _portable_failure_code(error: BaseException, operation: str) -> str:
     while cause is not None and id(cause) not in seen:
         seen.add(id(cause))
         if is_database_busy(cause):
-            _LOGGER.warning("%s deferred: %s", operation, cause)
+            # The text, not the exception: a log record that keeps the error
+            # keeps its traceback, and with it every frame's open cursors.
+            _LOGGER.warning("%s deferred: %s", operation, str(cause))
             return "DATABASE_IN_USE"
         cause = cause.__cause__
     _LOGGER.warning(
@@ -273,6 +275,9 @@ def _verify_schema(connection: sqlite3.Connection) -> None:
             "SELECT COALESCE(MAX(version),0) FROM schema_version"
         ).fetchone()
     except sqlite3.Error as exc:
+        if is_database_busy(exc):
+            # A writer holding the database is transient; say so.
+            raise CoreOperationError("DATABASE_IN_USE") from exc
         raise CoreOperationError("CAPABILITY_DEGRADED") from exc
     if row is None or type(row[0]) is not int or row[0] != _SCHEMA_VERSION:
         raise CoreOperationError("CAPABILITY_DEGRADED")
@@ -309,6 +314,8 @@ def _active_connection(
     except PointerValidationError as exc:
         raise CoreOperationError("CAPABILITY_DEGRADED") from exc
     except sqlite3.Error as exc:
+        if is_database_busy(exc):
+            raise CoreOperationError("DATABASE_IN_USE") from exc
         raise CoreOperationError("CAPABILITY_DEGRADED") from exc
 
 

@@ -10,6 +10,7 @@ import os
 import shutil
 import sqlite3
 import threading
+from contextlib import closing
 from datetime import timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -2499,3 +2500,101 @@ def test_transfer_shares_the_local_client_another_owner_holds(
     finally:
         held.close()
     assert opened == []
+
+
+async def test_failed_finalization_leaves_no_read_lock_on_the_database(
+    tmp_path: Path,
+):
+    """A finalization that fails partway must not keep the database locked.
+
+    A half-read query outlives ``close()`` for as long as anything refers to
+    its cursor, and an error's traceback refers to it through the frame that
+    was reading.  In rollback-journal mode, which a freshly created store
+    uses, that read lock refuses every writer, including the caller's retry.
+    """
+
+    source = _fixture(tmp_path / "source")
+    target = _fixture(tmp_path / "target")
+    for index in range(6):
+        source.append(
+            f"portable-{index}-" + "x" * 18_000,
+            occurred_at_us=100 + index,
+            recorded_at_us=200 + index,
+        )
+    pages = await _all_pages(
+        build_core_operations(_dependencies(source))["workspace_export"],
+        source,
+        include_legacy_projection=False,
+    )
+    assert len(pages) >= 2
+    with closing(sqlite3.connect(target.database)) as connection:
+        connection.execute("PRAGMA journal_mode=DELETE")
+    importer = build_core_operations(_dependencies(target))["workspace_import"]
+    session_id = None
+    for index, page in enumerate(pages):
+        staged = await importer(
+            workspace=target.workspace,
+            request=_request(
+                "workspace_import",
+                workspace_id=WORKSPACE_ID,
+                bundle=page.model_dump(mode="python"),
+                import_session_id=session_id,
+                finalize=False,
+                idempotency_key=f"stage-locked-page-{index:04d}",
+                preflight_token="token_value_for_test",
+            ),
+        )
+        session_id = staged.import_session_id
+    with closing(sqlite3.connect(target.database)) as connection:
+        relative = connection.execute(
+            "SELECT relative_path FROM portable_transfer_pages "
+            "WHERE session_id=? AND page_index=0",
+            (session_id,),
+        ).fetchone()[0]
+    staged_page = next(target.storage.rglob(Path(str(relative)).name))
+    staged_page.write_bytes(staged_page.read_bytes() + b" ")
+
+    failure: BaseException | None = None
+    try:
+        await importer(
+            workspace=target.workspace,
+            request=_request(
+                "workspace_import",
+                workspace_id=WORKSPACE_ID,
+                bundle=None,
+                import_session_id=session_id,
+                finalize=True,
+                idempotency_key="finalize-locked-import-0001",
+                preflight_token="token_value_for_test",
+            ),
+        )
+    except Exception as exc:
+        # Kept on purpose: the traceback is what kept the cursor alive.
+        failure = exc
+    assert failure is not None
+
+    with closing(sqlite3.connect(target.database, timeout=0)) as writer:
+        writer.execute("BEGIN IMMEDIATE")
+        writer.execute(
+            "UPDATE portable_transfer_sessions SET updated_at_us=updated_at_us"
+        )
+        writer.commit()
+
+
+def test_schema_check_reports_a_held_database_as_busy(tmp_path: Path):
+    """A writer holding the database is retryable, not a degraded store."""
+
+    from daem0nmcp.api.v7 import operations
+
+    database = tmp_path / "held.db"
+    with closing(sqlite3.connect(database)) as holder:
+        holder.execute("CREATE TABLE schema_version (version INTEGER)")
+        holder.commit()
+        holder.execute("BEGIN EXCLUSIVE")
+        with (
+            closing(sqlite3.connect(database, timeout=0)) as reader,
+            pytest.raises(operations.CoreOperationError) as refused,
+        ):
+            operations._verify_schema(reader)
+        holder.rollback()
+    assert refused.value.code == "DATABASE_IN_USE"

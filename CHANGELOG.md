@@ -144,6 +144,7 @@
 - MCP tasks: a task-augmented call is processed normally when tasks are not configured; `tools/list` advertises `execution.taskSupport: "optional"` only on tools that can really run as a task; a task refused by the covenant returns the tool's counsel and remedy in the JSON-RPC error data; task refusals are distinguishable by `error.data.code`, with `-32601` for a tool that cannot run as a task. The gateway still does not relay tasks.
 - Every v7 tool has a hand-written description and a `title` in `tools/list`, and `daem0n_tools_search` ignores function words, folds word endings and weights rare and name words, so natural queries such as "delete old memories" find the right tool.
 - Client-visible `expires_at` and `briefed_at` are placed on the current wall clock rather than the process's steady scale, so they stay correct after a wall-clock step.
+- A `workspace_import` finalization that failed partway no longer leaves the database read-locked until the error is garbage-collected, which had refused every writer, including the caller's retry, on a freshly created store. A database held by another writer is reported as the retryable `DATABASE_IN_USE` by the transfer tools' schema check instead of `CAPABILITY_DEGRADED`.
 
 ## [6.0.0] - 2026-01-29
 
