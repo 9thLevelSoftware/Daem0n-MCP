@@ -54,9 +54,105 @@ _GRAPH_CURSOR = re.compile(
 )
 _MAX_CONTENT_CHARS = 1_024
 _MAX_SOURCE_BYTES = 512 * 1_024
-_MAX_EVIDENCE_ROWS = 64
-_MAX_EVIDENCE_BYTES = 256 * 1_024
+_EVIDENCE_PAGE_ROWS = 64
+_MAX_EVIDENCE_SCAN_ROWS = 65_536
+_EVIDENCE_SCAN_SECONDS = 1.0
 _MAX_EVIDENCE = 10
+# A record is evidence about a decision only when the two share at least this
+# many distinctive terms and those terms are a meaningful part of both texts
+# (Dice coefficient over the distinctive term sets).
+_MIN_SHARED_TERMS = 2
+_MIN_TERM_SIMILARITY = 0.5
+# Function words and the outcome vocabulary every record uses say nothing about
+# what a record is about.
+_STOP_WORDS = frozenset(
+    {
+        "about",
+        "after",
+        "all",
+        "also",
+        "and",
+        "any",
+        "are",
+        "because",
+        "been",
+        "before",
+        "but",
+        "can",
+        "could",
+        "decided",
+        "decision",
+        "decisions",
+        "did",
+        "does",
+        "done",
+        "each",
+        "failed",
+        "failing",
+        "fails",
+        "failure",
+        "for",
+        "from",
+        "had",
+        "has",
+        "have",
+        "how",
+        "into",
+        "its",
+        "may",
+        "more",
+        "must",
+        "new",
+        "not",
+        "now",
+        "old",
+        "our",
+        "out",
+        "outcome",
+        "over",
+        "passed",
+        "passes",
+        "passing",
+        "pending",
+        "should",
+        "some",
+        "success",
+        "successful",
+        "test",
+        "tested",
+        "tests",
+        "than",
+        "that",
+        "the",
+        "their",
+        "them",
+        "then",
+        "there",
+        "these",
+        "they",
+        "this",
+        "use",
+        "used",
+        "uses",
+        "using",
+        "was",
+        "were",
+        "what",
+        "when",
+        "which",
+        "will",
+        "with",
+        "worked",
+        "working",
+        "works",
+        "would",
+        "you",
+    }
+)
+_INFERRED_OUTCOME_TEXT = (
+    "Inferred by background dreaming from unanimous related outcomes; "
+    "not verified by a test, command or review."
+)
 _MAX_GRAPH_MEMBERSHIPS = 4_096
 _MAX_GRAPH_PAIR_CHECKS = 20_000
 _ANALYSIS_SECONDS = 2.0
@@ -155,8 +251,21 @@ def _open(path: Path, *, writable: bool) -> sqlite3.Connection:
     return connection
 
 
-def _tokens(value: str) -> frozenset[str]:
-    return frozenset(word.casefold() for word in _WORD.findall(value))
+def _terms(value: str) -> frozenset[str]:
+    """Return the distinctive terms of a text: its words minus stop words."""
+
+    return frozenset(word.casefold() for word in _WORD.findall(value)) - _STOP_WORDS
+
+
+def _shared_terms(left: frozenset[str], right: frozenset[str]) -> int:
+    """Count shared distinctive terms, or 0 when the texts are not related."""
+
+    shared = len(left & right)
+    if shared < _MIN_SHARED_TERMS or 2 * shared < _MIN_TERM_SIMILARITY * (
+        len(left) + len(right)
+    ):
+        return 0
+    return shared
 
 
 def _row_record(row: sqlite3.Row) -> _Record:
@@ -185,36 +294,80 @@ def _related(
     workspace_id: str,
     source: _Record,
     cancelled: threading.Event,
+    deadline: float,
 ) -> tuple[tuple[_Record, ...], bool]:
-    source_tokens = _tokens(source.content)
+    """Rank the live records related to ``source`` and say whether all were seen.
+
+    Every live record of the workspace is read, one bounded page at a time, so
+    the result is complete for a workspace of any size that fits the row and
+    time budgets.  Only the best ``_MAX_EVIDENCE`` records are retained.
+    """
+
+    source_terms = _terms(source.content)
+    complete = not source.content_truncated
+    if not source_terms:
+        return (), complete
     ranked: list[tuple[int, int, str, _Record]] = []
+    scanned = 0
     rows = connection.execute(
         "SELECT record_id,record_type,substr(content,1,?) AS content,"
         "length(CAST(content AS BLOB)) AS content_bytes,content_hash,state_hash,"
         "source_event_id,stream_version,created_at_us,updated_at_us,outcome,worked "
         "FROM memory_records WHERE workspace_id=? AND record_id<>? AND archived=0 "
-        "AND deleted_at_us IS NULL ORDER BY updated_at_us DESC,record_id "
-        "LIMIT ?",
-        (_MAX_CONTENT_CHARS, workspace_id, source.record_id, _MAX_EVIDENCE_ROWS + 1),
-    ).fetchall()
-    complete = len(rows) <= _MAX_EVIDENCE_ROWS and not source.content_truncated
-    admitted_bytes = 0
-    for row in rows[:_MAX_EVIDENCE_ROWS]:
-        if cancelled.is_set():
-            return (), False
-        candidate = _row_record(row)
-        admitted_bytes += len(candidate.content.encode("utf-8"))
-        if admitted_bytes > _MAX_EVIDENCE_BYTES:
-            complete = False
-            break
-        complete = complete and not candidate.content_truncated
-        overlap = len(source_tokens & _tokens(candidate.content))
-        if overlap:
-            ranked.append(
-                (-overlap, -candidate.updated_at_us, candidate.record_id, candidate)
-            )
-    ranked.sort(key=lambda item: item[:3])
-    return tuple(item[3] for item in ranked[:_MAX_EVIDENCE]), complete
+        "AND deleted_at_us IS NULL",
+        (_MAX_CONTENT_CHARS, workspace_id, source.record_id),
+    )
+    try:
+        while True:
+            if cancelled.is_set():
+                return (), False
+            if scanned >= _MAX_EVIDENCE_SCAN_ROWS or time.monotonic() >= deadline:
+                complete = complete and rows.fetchone() is None
+                break
+            page = rows.fetchmany(_EVIDENCE_PAGE_ROWS)
+            if not page:
+                break
+            scanned += len(page)
+            for row in page:
+                candidate = _row_record(row)
+                complete = complete and not candidate.content_truncated
+                shared = _shared_terms(source_terms, _terms(candidate.content))
+                if shared:
+                    ranked.append(
+                        (
+                            -shared,
+                            -candidate.updated_at_us,
+                            candidate.record_id,
+                            candidate,
+                        )
+                    )
+            ranked.sort(key=lambda item: item[:3])
+            del ranked[_MAX_EVIDENCE:]
+    finally:
+        rows.close()
+    return tuple(item[3] for item in ranked), complete
+
+
+def _scan_deadline(budget_end: float, remaining_sources: int) -> float:
+    """Give each remaining source an equal share of the evidence scan budget."""
+
+    now = time.monotonic()
+    return now + max(0.0, budget_end - now) / max(1, remaining_sources)
+
+
+def _outcome_is_inferred(
+    connection: sqlite3.Connection, workspace_id: str, record_id: str
+) -> bool:
+    """Whether the record's current outcome was written by dreaming itself."""
+
+    row = connection.execute(
+        "SELECT json_type(payload_json,'$.dreaming') FROM memory_events "
+        "WHERE workspace_id=? AND stream_id=? "
+        "AND event_type='memory.outcome_recorded' "
+        "ORDER BY stream_version DESC LIMIT 1",
+        (workspace_id, record_id),
+    ).fetchone()
+    return row is not None and row[0] is not None
 
 
 def _cursor_value(updated_at_us: int, record_id: str) -> str:
@@ -760,7 +913,8 @@ class V7DreamingCoordinator:
             cancelled=cancelled,
         )
         proposals: list[_Proposal] = []
-        for source in selected:
+        scan_budget = time.monotonic() + _EVIDENCE_SCAN_SECONDS
+        for index, source in enumerate(selected):
             if cancelled.is_set():
                 break
             evidence, complete = _related(
@@ -768,6 +922,7 @@ class V7DreamingCoordinator:
                 workspace.workspace_id,
                 source,
                 cancelled,
+                _scan_deadline(scan_budget, len(selected) - index),
             )
             successful = tuple(item for item in evidence if item.worked is True)
             if successful:
@@ -793,6 +948,7 @@ class V7DreamingCoordinator:
                         "evidence_count": len(evidence),
                     },
                     sources=sources,
+                    extra={"classification": result},
                 )
             )
         return _Analysis(
@@ -818,7 +974,8 @@ class V7DreamingCoordinator:
         threshold = self._settings.dream_pending_evidence_threshold
         proposals: list[_Proposal] = []
         outcomes: list[_OutcomeAction] = []
-        for source in selected:
+        scan_budget = time.monotonic() + _EVIDENCE_SCAN_SECONDS
+        for index, source in enumerate(selected):
             if cancelled.is_set():
                 break
             evidence, complete = _related(
@@ -826,9 +983,19 @@ class V7DreamingCoordinator:
                 workspace.workspace_id,
                 source,
                 cancelled,
+                _scan_deadline(scan_budget, len(selected) - index),
             )
-            positive = tuple(item for item in evidence if item.worked is True)
-            negative = tuple(item for item in evidence if item.worked is False)
+            # An outcome dreaming inferred is not evidence for another inference.
+            verified = tuple(
+                item
+                for item in evidence
+                if item.worked is not None
+                and not _outcome_is_inferred(
+                    connection, workspace.workspace_id, item.record_id
+                )
+            )
+            positive = tuple(item for item in verified if item.worked is True)
+            negative = tuple(item for item in verified if item.worked is False)
             if positive and negative:
                 classification = "mixed"
             elif complete and len(positive) >= threshold:
@@ -861,7 +1028,7 @@ class V7DreamingCoordinator:
                         source,
                         tuple(directional),
                         worked,
-                        "Automatically resolved from unanimous verified related evidence.",
+                        _INFERRED_OUTCOME_TEXT,
                         identity_hash,
                     )
                 )
@@ -889,6 +1056,7 @@ class V7DreamingCoordinator:
                         "evidence_count": len(evidence),
                     },
                     sources=(source, *directional),
+                    extra={"classification": classification},
                 )
             )
         return _Analysis(

@@ -145,16 +145,17 @@ def _append_many_decisions(
 
 
 def _settings(root: Path, **changes: object) -> Settings:
-    return Settings(
-        project_root=str(root),
-        dream_idle_timeout=60,
-        dream_min_decision_age_hours=0,
-        dream_review_cooldown_hours=72,
-        dream_pending_min_age_hours=0,
-        dream_pending_cooldown_hours=72,
-        dream_pending_evidence_threshold=2,
-        **changes,
-    )
+    values: dict[str, object] = {
+        "project_root": str(root),
+        "dream_idle_timeout": 60,
+        "dream_min_decision_age_hours": 0,
+        "dream_review_cooldown_hours": 72,
+        "dream_pending_min_age_hours": 0,
+        "dream_pending_cooldown_hours": 72,
+        "dream_pending_evidence_threshold": 2,
+    }
+    values.update(changes)
+    return Settings(**values)
 
 
 @pytest.mark.asyncio
@@ -439,10 +440,7 @@ async def test_explicit_pending_action_is_audited_and_replay_safe(
         row = connection.execute(
             "SELECT worked,outcome FROM memory_records WHERE record_id=?", (pending,)
         ).fetchone()
-        assert row == (
-            1,
-            "Automatically resolved from unanimous verified related evidence.",
-        )
+        assert row == (1, dreaming_runtime._INFERRED_OUTCOME_TEXT)
         assert (
             connection.execute(
                 "SELECT COUNT(*) FROM memory_events WHERE stream_id=? "
@@ -965,3 +963,277 @@ async def test_connection_discovery_and_community_refresh_use_active_graph(
             (workspace.workspace_id,),
         ).fetchone()[0]
         assert generation > first.generation
+
+
+_MST = dreaming_runtime._MIN_SHARED_TERMS
+_EPR = dreaming_runtime._EVIDENCE_PAGE_ROWS
+
+
+def _pending_candidate_context(database: Path, record_id: str) -> dict[str, object]:
+    with sqlite3.connect(database) as connection:
+        row = connection.execute(
+            "SELECT proposed_record_json FROM memory_capture_candidates WHERE "
+            "json_extract(provenance_json,'$.strategy')='pending_outcome' AND "
+            "json_extract(provenance_json,'$.sources[0].record_id')=?",
+            (record_id,),
+        ).fetchone()
+    assert row is not None
+    return json.loads(row[0])["context"]
+
+
+async def _run_pending_pass(workspace, **changes: object) -> None:
+    coordinator = V7DreamingCoordinator(
+        workspaces=(workspace,),
+        settings=_settings(workspace.root, **changes),
+        candidate_store=CaptureCandidateStore(),
+        capability_statuses={"graph": "disabled"},
+    )
+    await coordinator.start()
+    try:
+        await coordinator.run_once(workspace)
+    finally:
+        await coordinator.aclose()
+
+
+def _append_unrelated_outcomes(database: Path, workspace_id: str) -> str:
+    pending = _append(
+        database,
+        workspace_id,
+        "d",
+        "Adopt the new postgres connection pooler",
+        worked=None,
+    )
+    _append(
+        database,
+        workspace_id,
+        "e",
+        "Ship the new onboarding carousel",
+        worked=True,
+    )
+    _append(
+        database,
+        workspace_id,
+        "f",
+        "Rename the new billing webhook",
+        worked=True,
+    )
+    return pending
+
+
+def _append_migration_evidence(database: Path, workspace_id: str) -> list[str]:
+    return [
+        _append(
+            database,
+            workspace_id,
+            suffix,
+            f"postgres migration passed {stage}",
+            worked=True,
+        )
+        for suffix, stage in (("e", "tests"), ("f", "staging"))
+    ]
+
+
+@pytest.mark.asyncio
+async def test_records_sharing_only_ordinary_words_are_not_evidence(
+    dream_workspace,
+) -> None:
+    workspace, database = dream_workspace
+    pending = _append_unrelated_outcomes(database, workspace.workspace_id)
+
+    await _run_pending_pass(workspace)
+
+    context = _pending_candidate_context(database, pending)
+    assert context["evidence_count"] == 0
+    assert context["classification"] == "insufficient"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("shared_terms", "padding", "expected"),
+    [
+        (_MST - 1, 0, 0),
+        (_MST, 0, 1),
+        # Enough shared terms, but diluted below the similarity floor.
+        (_MST, 12, 0),
+    ],
+)
+async def test_evidence_threshold_is_enforced_on_both_sides(
+    dream_workspace, shared_terms: int, padding: int, expected: int
+) -> None:
+    workspace, database = dream_workspace
+    subject = ["postgres", "pooler", "failover", "replica"]
+    assert len(subject) >= _MST
+    pending = _append(
+        database,
+        workspace.workspace_id,
+        "d",
+        " ".join(subject),
+        worked=None,
+    )
+    other = ["carousel", "webhook", "invoice", "tooltip"]
+    filler = [f"unrelated{index}" for index in range(padding)]
+    _append(
+        database,
+        workspace.workspace_id,
+        "e",
+        " ".join(subject[:shared_terms] + other[shared_terms:] + filler),
+        worked=True,
+    )
+
+    await _run_pending_pass(workspace)
+
+    assert _pending_candidate_context(database, pending)["evidence_count"] == expected
+
+
+@pytest.mark.asyncio
+async def test_unrelated_outcomes_never_commit_an_automatic_outcome(
+    dream_workspace,
+) -> None:
+    workspace, database = dream_workspace
+    pending = _append_unrelated_outcomes(database, workspace.workspace_id)
+
+    await _run_pending_pass(workspace, dream_pending_dry_run=False)
+
+    with sqlite3.connect(database) as connection:
+        assert connection.execute(
+            "SELECT worked,outcome FROM memory_records WHERE record_id=?", (pending,)
+        ).fetchone() == (None, None)
+        assert (
+            connection.execute(
+                "SELECT COUNT(*) FROM memory_events WHERE stream_id=? "
+                "AND event_type='memory.outcome_recorded'",
+                (pending,),
+            ).fetchone()[0]
+            == 0
+        )
+
+
+@pytest.mark.asyncio
+async def test_automatic_outcome_is_attributed_to_dreaming_and_unverified(
+    dream_workspace,
+) -> None:
+    from daem0nmcp.retrieval.utility import verification_weight
+
+    workspace, database = dream_workspace
+    pending = _append(
+        database, workspace.workspace_id, "d", "postgres migration pending", worked=None
+    )
+    evidence = _append_migration_evidence(database, workspace.workspace_id)
+
+    await _run_pending_pass(workspace, dream_pending_dry_run=False)
+
+    with sqlite3.connect(database) as connection:
+        actor, payload_json, event_id = connection.execute(
+            "SELECT actor_type,payload_json,event_id FROM memory_events WHERE "
+            "stream_id=? AND event_type='memory.outcome_recorded'",
+            (pending,),
+        ).fetchone()
+        payload = json.loads(payload_json)
+        weight = connection.execute(
+            "SELECT weight FROM memory_outcome_signals WHERE event_id=?", (event_id,)
+        ).fetchone()[0]
+        evidence_events = {
+            row[0]
+            for row in connection.execute(
+                "SELECT source_event_id FROM memory_records WHERE record_id IN (?,?)",
+                evidence,
+            )
+        }
+    assert actor == "system"
+    assert payload["dreaming"]["strategy"] == "pending_outcome"
+    assert set(payload["dreaming"]["evidence_event_ids"]) == evidence_events
+    # No verification object: the outcome model's unverified form and weight.
+    assert "verification" not in payload
+    assert weight == verification_weight(True, None) == 0.5
+    outcome_text = payload["record"]["outcome"].casefold()
+    assert "dreaming" in outcome_text
+    assert "not verified" in outcome_text
+
+
+@pytest.mark.asyncio
+async def test_outcome_inferred_by_dreaming_is_not_evidence_for_another_decision(
+    dream_workspace,
+) -> None:
+    workspace, database = dream_workspace
+    inferred = _append(
+        database, workspace.workspace_id, "a", "postgres migration pending", worked=None
+    )
+    _append_migration_evidence(database, workspace.workspace_id)
+    await _run_pending_pass(workspace, dream_pending_dry_run=False)
+    with sqlite3.connect(database) as connection:
+        assert (
+            connection.execute(
+                "SELECT worked FROM memory_records WHERE record_id=?", (inferred,)
+            ).fetchone()[0]
+            == 1
+        )
+
+    # Two verified outcomes plus the inferred one must not reach a threshold of 3.
+    second = _append(
+        database, workspace.workspace_id, "b", "postgres migration rollout", worked=None
+    )
+    await _run_pending_pass(
+        workspace, dream_pending_dry_run=False, dream_pending_evidence_threshold=3
+    )
+
+    with sqlite3.connect(database) as connection:
+        assert (
+            connection.execute(
+                "SELECT worked FROM memory_records WHERE record_id=?", (second,)
+            ).fetchone()[0]
+            is None
+        )
+    assert _pending_candidate_context(database, second)["classification"] == (
+        "insufficient"
+    )
+
+
+@pytest.mark.asyncio
+async def test_evidence_completeness_scales_past_one_page_of_records(
+    dream_workspace,
+) -> None:
+    workspace, database = dream_workspace
+    pending = _append(
+        database, workspace.workspace_id, "d", "postgres migration pending", worked=None
+    )
+    _append_migration_evidence(database, workspace.workspace_id)
+    for index in range(_EPR + 6):
+        _append(
+            database,
+            workspace.workspace_id,
+            f"{index + 1:064x}",
+            f"unrelated observation number{index}",
+            worked=None,
+            record_type="observation",
+        )
+
+    await _run_pending_pass(workspace)
+
+    context = _pending_candidate_context(database, pending)
+    assert context["evidence_count"] == 2
+    assert context["classification"] == "unanimous_positive"
+
+
+@pytest.mark.asyncio
+async def test_exhausted_evidence_scan_budget_is_reported_as_incomplete(
+    dream_workspace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace, database = dream_workspace
+    pending = _append(
+        database, workspace.workspace_id, "d", "postgres migration pending", worked=None
+    )
+    _append_migration_evidence(database, workspace.workspace_id)
+    monkeypatch.setattr(dreaming_runtime, "_EVIDENCE_SCAN_SECONDS", 0.0)
+
+    await _run_pending_pass(workspace, dream_pending_dry_run=False)
+
+    assert _pending_candidate_context(database, pending)["classification"] == (
+        "insufficient"
+    )
+    with sqlite3.connect(database) as connection:
+        assert (
+            connection.execute(
+                "SELECT worked FROM memory_records WHERE record_id=?", (pending,)
+            ).fetchone()[0]
+            is None
+        )
