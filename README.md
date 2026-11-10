@@ -1328,7 +1328,8 @@ python -m benchmarks.coding_memory_eval --mode fully_enabled --topics 24 --seed 
 This isolated synthetic workload exercises outcome reuse, multi-hop provenance,
 symbol/file validity and budgeted procedure retention through the production
 writer and recall service. The lexical mode requires no model downloads.
-Event times are fixed and the seed only shuffles the order of the writes: every
+Event times are assigned in write order, not read from the wall clock, and the
+seed only shuffles the order of the writes: every
 seed reports the same metrics, so repeating a run with other seeds adds no
 evidence. Latency measurements are wall-clock and excluded from deterministic
 comparisons. Each run creates its own temporary directory and removes it when

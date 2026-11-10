@@ -1652,7 +1652,7 @@ class LexicalProjectionTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual((), result.candidates)
 
     async def test_two_character_escapes_with_any_final_byte_are_removed(self):
-        """ESC plus any final byte 0x30-0x7E is one sequence, lowercase included."""
+        """ESC plus a final byte 0x30-0x7E (except ``[``) is one sequence."""
 
         from daem0nmcp.retrieval.projections import LexicalProjectionBuilder
         from daem0nmcp.retrieval.providers import LexicalProvider

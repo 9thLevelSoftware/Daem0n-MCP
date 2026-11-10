@@ -136,6 +136,8 @@ def _workspace(temporary: Path) -> tuple[Workspace, Path]:
 
 
 def _corpus(root: Path, topics: int, symbols_available: bool) -> _Corpus:
+    if topics > _MAX_TOPICS:
+        raise ValueError(f"topics must not exceed {_MAX_TOPICS}")
     corpus = _Corpus()
     (root / "src").mkdir()
     (root / "docs").mkdir()
