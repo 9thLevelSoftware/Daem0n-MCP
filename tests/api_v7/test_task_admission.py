@@ -17,8 +17,11 @@ from fastmcp import Client
 from mcp.shared.exceptions import McpError
 from pydantic import RootModel
 
-from daem0nmcp.api.v7 import production
+from daem0nmcp.api.v7 import production, rule_trigger_operations
+from daem0nmcp.api.v7.fastmcp import _task_protocol_error
 from daem0nmcp.api.v7.models import CapabilityState
+from daem0nmcp.api.v7.task_dispatcher import TaskDispatcherError
+from daem0nmcp.bounded_workers import BoundedWorkerBusyError
 from daem0nmcp.config import Settings
 from tests.api_v7.process_client import initialize_workspaces
 
@@ -188,8 +191,21 @@ async def test_tools_list_marks_task_support_only_when_tasks_are_offered(
         for tool in tools
         if tool.execution is not None and tool.execution.taskSupport is not None
     }
-    assert "memory_recall" in declared and "memory_store" not in declared
-    assert advertised == (dict.fromkeys(declared, "optional") if tasks else {})
+    # A task is admitted only when it is replay-safe: the tool is read-only
+    # or its input carries an idempotency key.  The rest are not advertised.
+    admissible = {
+        tool.name
+        for tool in tools
+        if tool.name in declared
+        and (
+            (tool.annotations is not None and tool.annotations.readOnlyHint)
+            or "idempotency_key" in tool.inputSchema["properties"]
+        )
+    }
+    assert "memory_recall" in admissible and "memory_store" not in declared
+    assert "memory_store_batch" in admissible
+    assert "code_index" in declared - admissible
+    assert advertised == (dict.fromkeys(admissible, "optional") if tasks else {})
 
 
 async def test_gateway_names_the_task_path_for_an_oversized_hidden_tool(tmp_path):
@@ -296,3 +312,97 @@ async def test_task_refusals_are_told_apart_by_code_and_data(tmp_path):
         assert error.data == {"code": code}
     messages = [forbidden.message, *(error.message for error in others.values())]
     assert len(set(messages)) == len(messages)
+
+
+async def test_tool_that_can_never_be_a_task_is_not_sent_to_the_task_path(tmp_path):
+    # code_index writes and takes no idempotency key, so no task of it is
+    # ever replay-safe.
+    async with _client(tmp_path, tasks=True, tool_surface="full") as (
+        client,
+        workspace_id,
+    ):
+        oversized = {
+            "workspace_id": workspace_id,
+            "patterns": [f"pkg{index}/**/*.py" for index in range(9)],
+        }
+        plain = await client.call_tool("code_index", oversized, raise_on_error=False)
+        refused = await _refusal(client, "code_index", oversized)
+
+    error = plain.structured_content["error"]
+    assert error["code"] == "TASK_REQUIRED"
+    assert "tools/call" not in error["message"]
+    # Not a missing key the caller could supply: the schema has no such field.
+    assert refused.code == mcp_types.METHOD_NOT_FOUND
+    assert refused.data == {"code": "TASK_NOT_SUPPORTED"}
+    assert "idempotency_key" not in refused.message
+
+
+async def test_busy_task_forbidden_tool_is_not_sent_to_the_task_path(tmp_path):
+    async def busy(*_args: Any, **_kwargs: Any) -> Any:
+        raise BoundedWorkerBusyError("busy")
+
+    async with _client(tmp_path, tasks=True, tool_surface="full") as (
+        client,
+        workspace_id,
+    ):
+        scope = {"workspace_id": workspace_id}
+        with patch.object(rule_trigger_operations._RULE_TRIGGER_WORKERS, "run", busy):
+            direct = await client.call_tool("rule_list", scope, raise_on_error=False)
+            relayed = await client.call_tool(
+                "daem0n_tool_call",
+                scope | {"tool": "rule_list", "arguments": {}},
+                raise_on_error=False,
+            )
+        as_task = await _refusal(client, "rule_list", scope)
+
+    # rule_list cannot run as a task, so neither answer may name that path.
+    assert as_task.data == {"code": "TASK_NOT_SUPPORTED"}
+    for answer in (direct, relayed):
+        error = answer.structured_content["error"]
+        assert error["code"] == "TASK_REQUIRED"
+        assert "tools/call" not in error["message"]
+
+
+def test_server_conditions_and_idempotency_refusals_are_reported_apart():
+    def reported(code: str) -> Any:
+        return _task_protocol_error(TaskDispatcherError(code)).error
+
+    full = reported("TASK_QUEUE_FULL")
+    unavailable = reported("TASKS_UNAVAILABLE")
+    degraded = reported("CAPABILITY_DEGRADED")
+    assert full.code == unavailable.code == degraded.code == mcp_types.INTERNAL_ERROR
+    assert full.data == {"code": "TASK_QUEUE_FULL", "retryable": True}
+    assert unavailable.data == {"code": "TASKS_UNAVAILABLE", "retryable": False}
+    assert degraded.data == {"code": "CAPABILITY_DEGRADED", "retryable": True}
+
+    # A covenant refusal whose counsel could not be fetched still names itself.
+    request_faults = [
+        "IDEMPOTENCY_REQUIRED",
+        "IDEMPOTENCY_CONFLICT",
+        "TASK_RESULT_UNAVAILABLE",
+        "IDENTITY_UNAVAILABLE",
+        "COUNSEL_REQUIRED",
+        "TOKEN_TAMPERED",
+        "TOKEN_ARGUMENT_MISMATCH",
+    ]
+    messages = set()
+    for code in request_faults:
+        error = reported(code)
+        assert error.code == mcp_types.INVALID_PARAMS, code
+        assert error.data == {"code": code}
+        messages.add(error.message)
+    assert len(messages) == len(request_faults) - 1  # the two TOKEN_* share one
+
+    unknown = reported("SOMETHING_ELSE")
+    assert unknown.code == mcp_types.INVALID_PARAMS and unknown.data is None
+
+
+async def test_token_refusal_without_a_remedy_does_not_point_at_one(tmp_path):
+    async with _client(tmp_path, tasks=True) as (client, workspace_id):
+        forged = _batch(workspace_id) | {"preflight_token": "cap_" + "A" * 43}
+        error = await _refusal(client, "memory_store_batch", forged)
+
+    assert error.data["code"].startswith("TOKEN_")
+    assert error.data["error"]["remedy"] is None
+    assert "follow its remedy" not in error.message
+    assert error.data["error"]["message"] in error.message

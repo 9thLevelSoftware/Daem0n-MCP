@@ -183,6 +183,22 @@ _TASK_REQUIRED_WITH_TASKS = (
     "or send it as a task-augmented tools/call to this tool by its own name "
     "(daem0n_tool_call does not relay tasks)."
 )
+_TASK_REQUIRED_MESSAGES = frozenset(
+    {_TASK_FAILURE_MESSAGES["TASK_REQUIRED"], _TASK_REQUIRED_WITH_TASKS}
+)
+
+
+def _task_admissible(spec: ToolSpec) -> bool:
+    """Whether the dispatcher can ever accept this tool as a task.
+
+    It admits only replay-safe work: a read-only tool, or a request that
+    carries an idempotency key, which the input model must then have.
+    """
+
+    return spec.task_mode == "optional" and (
+        bool(spec.annotations.get("readOnlyHint"))
+        or "idempotency_key" in spec.input_model.model_fields
+    )
 
 
 def _tool_adapter(
@@ -193,7 +209,7 @@ def _tool_adapter(
     foreground_policy: ForegroundExecutionPolicy | None = None,
 ):
     failure_messages = dict(_TASK_FAILURE_MESSAGES)
-    if tasks_enabled:
+    if tasks_enabled and _task_admissible(spec):
         failure_messages["TASK_REQUIRED"] = _TASK_REQUIRED_WITH_TASKS
 
     async def invoke(**arguments: Any) -> dict[str, Any]:
@@ -263,7 +279,8 @@ def _tool_adapter(
         if (
             error is not None
             and getattr(error, "code", None) == ErrorCode.TASK_REQUIRED
-            and getattr(error, "message", None) != failure_messages["TASK_REQUIRED"]
+            # The gateway relays a target's answer, already worded for it.
+            and getattr(error, "message", None) not in _TASK_REQUIRED_MESSAGES
         ):
             response = response.model_copy(
                 update={
@@ -696,6 +713,14 @@ def _install_task_protocol(
             try:
                 view = await accept()
             except TaskDispatcherError as exc:
+                if (
+                    exc.code == "IDEMPOTENCY_REQUIRED"
+                    and context.message.name not in admission_specs
+                ):
+                    # Its input has no idempotency key to supply.
+                    raise _task_protocol_error(
+                        TaskDispatcherError("TASK_NOT_SUPPORTED")
+                    ) from None
                 if not _is_covenant_task_refusal(exc.code):
                     raise _task_protocol_error(exc) from None
                 envelope = await covenant_admission(
@@ -1139,9 +1164,7 @@ def build_fastmcp_server(
             task_dispatcher,
             invocation_middleware,
             admission_specs={
-                spec.name: spec
-                for spec in manifest.tools
-                if spec.task_mode == "optional"
+                spec.name: spec for spec in manifest.tools if _task_admissible(spec)
             },
             sync_timeout_seconds=validated_sync_timeout,
         )
