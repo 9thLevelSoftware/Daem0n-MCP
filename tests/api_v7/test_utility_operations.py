@@ -132,6 +132,82 @@ class UtilityOperationTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(second.next_cursor)
         self.assertEqual(failure.exception.code, "INVALID_ARGUMENT")
 
+    async def _scan_all(self, handler, **arguments: object) -> list:
+        request = {
+            "workspace_id": self.workspace.workspace_id,
+            "relative_root": ".",
+            "types": None,
+            "cursor": None,
+            "limit": 100,
+            **arguments,
+        }
+        findings: list = []
+        for _page in range(50):
+            page = await handler(
+                workspace=self.workspace,
+                request=AdmittedRequest("code_todos_scan", request),
+            )
+            findings.extend(page.items)
+            self.assertEqual(page.truncated, page.next_cursor is not None)
+            if page.next_cursor is None:
+                return findings
+            request = {**request, "cursor": page.next_cursor}
+        self.fail("the scan never reached its last page")
+
+    async def test_todo_scan_pages_past_the_source_file_bound(self) -> None:
+        """A cursor the scan issued must be accepted, however many findings."""
+        from unittest.mock import patch
+
+        from daem0nmcp.api.v7 import utility_operations
+
+        (self.root / "debt.py").write_text(
+            "".join(f"# TODO: item {index}\n" for index in range(9)),
+            encoding="utf-8",
+        )
+        dependencies = self._dependencies()
+        try:
+            handler = utility_operations.build_utility_operations(dependencies)[
+                "code_todos_scan"
+            ]
+            # Findings are counted per line, not per file: one file can hold
+            # more findings than the scan admits files.
+            with patch.object(utility_operations, "_MAX_SOURCE_FILES", 3):
+                findings = await self._scan_all(handler, limit=2)
+        finally:
+            dependencies.close()
+
+        self.assertEqual(list(range(1, 10)), [item.line for item in findings])
+
+    async def test_todo_scan_reads_note_as_a_marker_not_as_prose(self) -> None:
+        """Ordinary sentences containing "note" are not debt markers."""
+        from daem0nmcp.api.v7.utility_operations import build_utility_operations
+
+        (self.root / "notes.py").write_text(
+            "# note that the order matters\n"
+            "# Please note the retry below.\n"
+            "value = 1  # a quick note\n"
+            "# Note the cache is warm here\n"
+            "# NOTE: a real marker\n"
+            "# Note(owner): another marker\n"
+            "# note: lower-case marker\n"
+            "# NOTE bare upper-case marker\n"
+            "# note that TODO: prose before a marker\n",
+            encoding="utf-8",
+        )
+        dependencies = self._dependencies()
+        try:
+            handler = build_utility_operations(dependencies)["code_todos_scan"]
+            default = await self._scan_all(handler)
+            explicit = await self._scan_all(handler, types={"note"})
+        finally:
+            dependencies.close()
+
+        self.assertEqual(
+            [(5, "note"), (6, "note"), (7, "note"), (8, "note"), (9, "todo")],
+            [(item.line, item.todo_type) for item in default],
+        )
+        self.assertEqual([5, 6, 7, 8], [item.line for item in explicit])
+
     async def test_refactor_proposal_reads_only_the_bounded_relative_file(
         self,
     ) -> None:
