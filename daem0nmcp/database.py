@@ -27,6 +27,7 @@ from .storage_activation import (
     LOCK_NAME,
     ActiveDatabasePointer,
     DatabaseFileLock,
+    DatabaseInUseError,
     active_candidate_pointer_missing_detail,
     active_candidate_without_pointer,
     has_canonical_v7_state,
@@ -36,6 +37,11 @@ from .storage_activation import (
 from .workspace import WorkspaceRegistry
 
 logger = logging.getLogger(__name__)
+
+# How long a start waits for the storage lock under which a store is created,
+# and how often it looks again: the patience of production workspace bootstrap.
+_CREATION_LOCK_TIMEOUT_SECONDS = 30.0
+_CREATION_LOCK_RETRY_SECONDS = 0.05
 
 
 class FreshDatabaseRequiredError(RuntimeError):
@@ -112,60 +118,73 @@ class DatabaseManager:
         if defer_fresh_activation and not require_fresh:
             raise ValueError("deferred activation requires fresh storage")
         self._defer_fresh_activation = defer_fresh_activation
+        self._lock_mode: Literal["shared", "exclusive"] = lock_mode
+        self._require_fresh = require_fresh
         self._database_lock = DatabaseFileLock(self.storage_path, lock_mode).acquire()
         try:
-            entries = iter(self.storage_path.iterdir())
-            first = next(entries, None)
-            self._fresh_at_construction = (
-                first is not None
-                and first.name == LOCK_NAME
-                and not first.is_symlink()
-                and first.is_file()
-                and next(entries, None) is None
-                and not (self.storage_path / db_name).exists()
-                and not (self.storage_path / "active-db.json").exists()
-            )
-            if require_fresh and not self._fresh_at_construction:
-                raise FreshDatabaseRequiredError()
-            if self._fresh_at_construction:
-                self._active_database = None
-                self.db_path = self.storage_path / db_name
-                self.format_version = 7
-                self.active_generation = 0
-                self.migration_run_id = None
-            else:
-                self._active_database = resolve_active_database(self.storage_path)
-                self.db_path = self._active_database.path
-                self.format_version = self._active_database.format_version
-                self.active_generation = self._active_database.generation
-                self.migration_run_id = self._active_database.migration_run_id
-                # A store without a pointer reads as format 6, where every
-                # write bypasses the event log.  Format-7 state in it means
-                # the pointer was lost, unless the database is a brand-new one
-                # whose creation stopped before publishing it.
-                if self._active_database.pointer is None:
-                    if has_canonical_v7_state(self.db_path):
-                        if not self._is_unpublished_fresh_database():
-                            raise ActivePointerMissingError()
-                    else:
-                        # A store migrated from format 6 runs on a candidate
-                        # only the pointer names; this file is its retained
-                        # source and must not take the writes instead.
-                        candidate = active_candidate_without_pointer(self.storage_path)
-                        if candidate is not None:
-                            raise ActivePointerMissingError(
-                                active_candidate_pointer_missing_detail(candidate)
-                            )
+            self._resolve_storage()
         except Exception:
             self._database_lock.release()
             raise
-        self.db_url = f"sqlite+aiosqlite:///{self.db_path}"
         self._migrated = False
         self._initialized = False
         self._engine = None
         self._session_factory = None
         self._close_callbacks: list[Callable[[], None]] = []
         self._foreground_projection_tasks: set[asyncio.Task] = set()
+
+    def _resolve_storage(self) -> None:
+        """Read which database the locked storage selects, without writing.
+
+        Runs at construction, and again once ``init_db`` holds the lock under
+        which a store is created, because another process may have created it
+        in between.
+        """
+
+        db_name = "daem0nmcp.db"
+        entries = iter(self.storage_path.iterdir())
+        first = next(entries, None)
+        self._fresh_at_construction = (
+            first is not None
+            and first.name == LOCK_NAME
+            and not first.is_symlink()
+            and first.is_file()
+            and next(entries, None) is None
+            and not (self.storage_path / db_name).exists()
+            and not (self.storage_path / "active-db.json").exists()
+        )
+        if self._require_fresh and not self._fresh_at_construction:
+            raise FreshDatabaseRequiredError()
+        if self._fresh_at_construction:
+            self._active_database = None
+            self.db_path = self.storage_path / db_name
+            self.format_version = 7
+            self.active_generation = 0
+            self.migration_run_id = None
+        else:
+            self._active_database = resolve_active_database(self.storage_path)
+            self.db_path = self._active_database.path
+            self.format_version = self._active_database.format_version
+            self.active_generation = self._active_database.generation
+            self.migration_run_id = self._active_database.migration_run_id
+            # A store without a pointer reads as format 6, where every
+            # write bypasses the event log.  Format-7 state in it means
+            # the pointer was lost, unless the database is a brand-new one
+            # whose creation stopped before publishing it.
+            if self._active_database.pointer is None:
+                if has_canonical_v7_state(self.db_path):
+                    if not self._is_unpublished_fresh_database():
+                        raise ActivePointerMissingError()
+                else:
+                    # A store migrated from format 6 runs on a candidate
+                    # only the pointer names; this file is its retained
+                    # source and must not take the writes instead.
+                    candidate = active_candidate_without_pointer(self.storage_path)
+                    if candidate is not None:
+                        raise ActivePointerMissingError(
+                            active_candidate_pointer_missing_detail(candidate)
+                        )
+        self.db_url = f"sqlite+aiosqlite:///{self.db_path}"
 
     @property
     def fresh_at_construction(self) -> bool:
@@ -271,11 +290,118 @@ class DatabaseManager:
             return None
         return _LAST_V6_SCHEMA_VERSION
 
+    def _start_creates_store(self) -> bool:
+        """Whether this start creates the database or publishes its pointer.
+
+        True for empty storage and for the pointerless, rowless database an
+        interrupted first start leaves behind.  Any other pointerless database
+        is a format-6 store, which a start only ever opens.
+        """
+
+        if self._fresh_at_construction:
+            return True
+        return (
+            self._active_database is not None
+            and self._active_database.pointer is None
+            and self._schema_version() >= 16
+            and not self._has_user_rows()
+        )
+
+    async def _acquire_creation_lock(self) -> bool:
+        """Swap the shared storage lock for the exclusive one a creation needs.
+
+        Shared holders do not exclude one another, so two first starts would
+        create the same tables and publish the same pointer at once.  The
+        shared lock is given up and the exclusive one polled for.  Whenever
+        only the shared lock can be had the storage is read again, because the
+        process holding it exclusively may have finished the store meanwhile.
+
+        Returns ``True`` holding the exclusive lock, with the storage re-read
+        under it and still to be created; ``False`` holding the shared lock
+        over a store another process created.  Raises ``DatabaseInUseError``,
+        holding no lock, when neither happens in time.
+        """
+
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + _CREATION_LOCK_TIMEOUT_SECONDS
+        self._database_lock.release()
+        while True:
+            try:
+                self._database_lock = DatabaseFileLock(
+                    self.storage_path, "exclusive"
+                ).acquire()
+            except DatabaseInUseError:
+                pass
+            else:
+                try:
+                    self._resolve_storage()
+                    if self._start_creates_store():
+                        return True
+                except BaseException:
+                    self._restore_shared_lock()
+                    raise
+                self._restore_shared_lock()
+                return False
+            try:
+                self._database_lock = DatabaseFileLock(
+                    self.storage_path, "shared"
+                ).acquire()
+            except DatabaseInUseError:
+                pass
+            else:
+                self._resolve_storage()
+                if not self._start_creates_store():
+                    return False
+                self._database_lock.release()
+            if loop.time() >= deadline:
+                raise DatabaseInUseError()
+            await asyncio.sleep(_CREATION_LOCK_RETRY_SECONDS)
+
+    def _restore_shared_lock(self) -> None:
+        """Give the exclusive creation lock back for the lifetime shared one.
+
+        A migration may take the storage in the instant between the two; the
+        start then fails as in use, holding no lock, and can be retried.
+        """
+
+        self._database_lock.release()
+        self._database_lock = DatabaseFileLock(self.storage_path, "shared").acquire()
+
     async def init_db(self):
         """Initialize the database tables and run migrations."""
         # Skip if already initialized
         if self._initialized:
             return
+
+        if not self._database_lock.acquired:
+            # An earlier attempt gave the storage lock up and could not get it
+            # back, so whatever it read about the storage may be stale.
+            self._database_lock = DatabaseFileLock(
+                self.storage_path, self._lock_mode
+            ).acquire()
+            self._resolve_storage()
+        # A store is created, and its pointer published, only under the
+        # exclusive storage lock, held for no longer than the creation takes.
+        creating = (
+            self._lock_mode == "shared"
+            and self._start_creates_store()
+            and await self._acquire_creation_lock()
+        )
+        try:
+            await self._initialize_storage()
+        finally:
+            if creating:
+                self._restore_shared_lock()
+
+        self._initialized = True
+        if self.format_version == 7 and not self._defer_fresh_activation:
+            from .retrieval.runtime import schedule_projection_job_drain
+
+            schedule_projection_job_drain(self.db_path, max_jobs=5)
+        logger.info("Database initialized")
+
+    async def _initialize_storage(self) -> None:
+        """Create or open the selected database under the lock now held."""
 
         # Check if this is a fresh database.  This fact is captured before any
         # engine construction so a failed pointer publication cannot be mistaken
@@ -346,13 +472,6 @@ class DatabaseManager:
             self.active_generation = 1
         else:
             self._validate_database(format_version=6)
-
-        self._initialized = True
-        if self.format_version == 7 and not self._defer_fresh_activation:
-            from .retrieval.runtime import schedule_projection_job_drain
-
-            schedule_projection_job_drain(self.db_path, max_jobs=5)
-        logger.info("Database initialized")
 
     async def init_legacy_v6(self) -> None:
         """Initialize a retained format-6 database without publishing v7 schema.

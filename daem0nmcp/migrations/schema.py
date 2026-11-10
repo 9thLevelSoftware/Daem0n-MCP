@@ -2671,9 +2671,10 @@ def get_current_version(conn: sqlite3.Connection) -> int:
     """)
 
     if not cursor.fetchone():
-        # Create version table
+        # Create version table.  Two runners can both find it missing, so the
+        # loser's statement must be a no-op rather than an error.
         cursor.execute("""
-            CREATE TABLE schema_version (
+            CREATE TABLE IF NOT EXISTS schema_version (
                 version INTEGER PRIMARY KEY,
                 applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
@@ -3340,10 +3341,19 @@ def run_migrations(
             ):
                 raise RuntimeError("WORKSPACE_SCOPE_REQUIRED")
 
-            logger.info(f"Applying migration {version}: {description}")
-
             try:
-                conn.execute("BEGIN")
+                # Take the write lock before reading anything: a deferred
+                # transaction that reads first cannot wait for another writer
+                # and fails at once instead of honouring the busy timeout.
+                conn.execute("BEGIN IMMEDIATE")
+                # Another runner may have applied this migration while this
+                # one waited for the lock; what is pending is decided here.
+                current_version = get_current_version(conn)
+                if version <= current_version:
+                    conn.rollback()
+                    continue
+
+                logger.info(f"Applying migration {version}: {description}")
                 for sql in statements:
                     sql = sql.strip()
                     if not sql:
@@ -3409,7 +3419,9 @@ def run_migrations(
             and get_current_version(conn) >= 19
         ):
             try:
-                conn.execute("BEGIN")
+                # The backfills read before they write, so the write lock is
+                # taken first for the same reason as above.
+                conn.execute("BEGIN IMMEDIATE")
                 backfill_retained_public_object_ids(conn, workspace_id)
                 if get_current_version(conn) >= 21:
                     backfill_retained_governance(conn, workspace_id)
