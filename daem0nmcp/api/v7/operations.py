@@ -750,36 +750,36 @@ def _earliest_later_occurrence(
     connection: sqlite3.Connection,
     workspace_id: str,
     record_id: str,
-    selected: Sequence[Mapping[str, Any]],
+    events: Sequence[Mapping[str, Any]],
 ) -> dict[int, int | None]:
-    """Map each listed version to the earliest occurrence recorded after it.
+    """Map each loaded version to the earliest occurrence recorded after it.
 
     Every event carries the whole record, so a version stops being valid at
     the earliest occurrence time among the events appended after it, however
-    many versions later that event is.
+    many versions later that event is.  The events after the loaded ones are
+    reduced to their minimum by one aggregate, so no further row is fetched.
     """
 
-    if not selected:
+    if not events:
         return {}
-    first_version = int(selected[0]["stream_version"])
-    rows = connection.execute(
-        "SELECT stream_version,occurred_at_us FROM memory_events "
-        "WHERE workspace_id=? AND stream_id=? AND stream_kind='memory' "
-        "AND stream_version>? ORDER BY stream_version DESC",
-        (workspace_id, record_id, first_version),
-    ).fetchall()
-    earliest: dict[int, int | None] = {}
+    last_version = int(events[-1]["stream_version"])
+    minimum, count, highest, untyped = connection.execute(
+        "SELECT MIN(occurred_at_us),COUNT(*),MAX(stream_version),"
+        "COALESCE(SUM(typeof(occurred_at_us)<>'integer'),0) "
+        "FROM memory_events WHERE workspace_id=? AND stream_id=? "
+        "AND stream_kind='memory' AND stream_version>?",
+        (workspace_id, record_id, last_version),
+    ).fetchone()
     running: int | None = None
-    expected_version = first_version + len(rows)
-    for version, occurred_at_us in rows:
-        if type(version) is not int or type(occurred_at_us) is not int:
+    if count:
+        if untyped or type(minimum) is not int or highest != last_version + count:
             raise CoreOperationError("IMPORT_INVALID")
-        if version != expected_version:
-            raise CoreOperationError("IMPORT_INVALID")
-        earliest[version] = running
+        running = minimum
+    earliest: dict[int, int | None] = {}
+    for event in reversed(events):
+        earliest[int(event["stream_version"])] = running
+        occurred_at_us = int(event["occurred_at_us"])
         running = occurred_at_us if running is None else min(running, occurred_at_us)
-        expected_version -= 1
-    earliest[first_version] = running
     return earliest
 
 
@@ -830,7 +830,7 @@ def _versions_sync(
         truncated = len(events) > request.limit
         selected = events[: request.limit]
         later_occurred = _earliest_later_occurrence(
-            connection, workspace.workspace_id, request.record_id, selected
+            connection, workspace.workspace_id, request.record_id, events
         )
         items: list[MemoryVersionView] = []
         for index, event in enumerate(selected):
