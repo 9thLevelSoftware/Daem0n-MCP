@@ -38,12 +38,6 @@ CAPACITY_MESSAGE = (
 )
 CAPACITY_RETRY_AFTER_MS = 5_000
 CounselMode = Literal["inline", "challenge", "off"]
-_RECORD_REASONS: frozenset[CounselReason] = frozenset(
-    {"RELATED_WARNING", "RELATED_FAILURE"}
-)
-# The bounds ``PreflightGuidance`` puts on what a challenge may show.
-_GUIDANCE_RECORD_LIMIT = 20
-_GUIDANCE_WARNING_LIMIT = 50
 _CONTENT_TOKEN = re.compile(r"[a-z0-9][a-z0-9_-]{3,79}")
 _TOKEN_COMPONENT = re.compile(r"[_-]")
 _COUNSEL_STOPWORDS = frozenset(
@@ -208,77 +202,11 @@ class CovenantCeremony:
         argument_normalizer: ArgumentNormalizer,
         preflight_service: PreflightService,
         brief_reader: Callable[[Workspace], Awaitable[Mapping[str, object]]],
-        authored_preflight_service: PreflightService | None = None,
     ) -> None:
         self._gate = covenant_gate
         self._normalizer = argument_normalizer
         self._preflight = preflight_service
-        self._authored_preflight = authored_preflight_service
         self._brief_reader = brief_reader
-
-    async def _authored_counsel(
-        self,
-        reasons: list[CounselReason],
-        guidance: PreflightGuidance,
-        level: CovenantLevel,
-        workspace: Workspace,
-        tool_name: str,
-        normalized: Mapping[str, Any],
-    ) -> tuple[list[CounselReason], PreflightGuidance]:
-        """Take the related-record reasons from authored records alone.
-
-        ``preflight_service`` reads every stored record, including scanned
-        TODOs and ingested pages whose text anyone who controls a file or a
-        site can write.  Those stay visible as guidance, but they must neither
-        force counsel by themselves nor crowd out the authored record that
-        warrants it, so the related-record reasons are computed from guidance
-        read without them, and the authored records that raised a reason are
-        shown first.  Failing to read it keeps the reasons already found.
-        """
-
-        if self._authored_preflight is None:
-            return reasons, guidance
-        try:
-            raw = self._authored_preflight.guidance(
-                workspace, tool_name, normalized, None
-            )
-            if inspect.isawaitable(raw):
-                raw = await raw
-            authored = PreflightGuidance.model_validate(raw)
-            related = _related_records(authored, normalized)
-            record_reasons = [
-                reason
-                for reason in counsel_reasons(level, authored, normalized)
-                if reason in _RECORD_REASONS
-            ]
-            shown = {record.record_id for record in guidance.records}
-            missing = [record for record in related if record.record_id not in shown]
-            if missing:
-                records = [*missing, *guidance.records]
-                warnings = [
-                    *[
-                        record.excerpt
-                        for record in missing
-                        if record.record_type == "warning"
-                        and record.excerpt not in guidance.warnings
-                    ],
-                    *guidance.warnings,
-                ]
-                guidance = guidance.model_copy(
-                    update={
-                        "records": records[:_GUIDANCE_RECORD_LIMIT],
-                        "warnings": warnings[:_GUIDANCE_WARNING_LIMIT],
-                    }
-                )
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            return reasons, guidance
-        return (
-            [reason for reason in reasons if reason not in _RECORD_REASONS]
-            + record_reasons,
-            guidance,
-        )
 
     async def admit(
         self,
@@ -360,14 +288,7 @@ class CovenantCeremony:
                 return CeremonyOutcome(_capacity_violation(tool_name), notice, None)
             except Exception:
                 return CeremonyOutcome(violation, notice, None)
-            reasons, guidance = await self._authored_counsel(
-                counsel_reasons(level, guidance, normalized),
-                guidance,
-                level,
-                workspace,
-                tool_name,
-                normalized,
-            )
+            reasons = counsel_reasons(level, guidance, normalized)
             if counsel_mode == "challenge" and not reasons:
                 reasons = ["TASK_ADMISSION"]
             if not reasons and counsel_mode == "inline":

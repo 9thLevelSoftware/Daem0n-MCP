@@ -467,6 +467,43 @@ class ProductionCompositionTests(unittest.TestCase):
         )
         self.assertNotIn(unrelated_warning, result["records"])
         self.assertNotIn(unrelated_rule, result["rules"])
+        # The snapshot is read without scanned or ingested records.
+        self.assertIs(calls[0]["include_untrusted_origin"], False)
+        self.assertEqual({}, result["withheld_untrusted"])
+
+    def test_preflight_counts_untrusted_records_each_reader_withheld(self) -> None:
+        from daem0nmcp.api.v7.models import RECORD_CONTENT_NOTICE
+        from daem0nmcp.api.v7.production import _guidance_reader
+        from daem0nmcp.api.v7.resource_repository import ResourceRepositoryReaders
+        from daem0nmcp.api.v7.resources import ResourceRows
+        from daem0nmcp.workspace import Workspace
+
+        requests: dict[str, object] = {}
+        withheld = {"warnings": 2, "failures": 0, "rules": 0}
+
+        async def read(_workspace, request):
+            requests[request.kind] = request
+            return ResourceRows(withheld_untrusted=withheld[request.kind])
+
+        async def forbidden(*_args, **_kwargs):
+            raise AssertionError("preflight never reads active context")
+
+        reader = _guidance_reader(
+            ResourceRepositoryReaders(
+                warning_reader=read,
+                failure_reader=read,
+                rule_reader=read,
+                active_context_reader=forbidden,
+            )
+        )
+        result = asyncio.run(
+            reader(Workspace("ws_" + "a" * 24, self.root), "memory_store", {}, None)
+        )
+
+        self.assertIs(requests["warnings"].include_untrusted_origin, False)
+        self.assertIs(requests["failures"].include_untrusted_origin, False)
+        self.assertEqual({"warnings": 2}, result["withheld_untrusted"])
+        self.assertEqual(RECORD_CONTENT_NOTICE, result["content_notice"])
 
     def test_loopback_http_is_explicit_but_remote_http_fails_closed(self) -> None:
         from daem0nmcp.api.v7.production import build_production_surface

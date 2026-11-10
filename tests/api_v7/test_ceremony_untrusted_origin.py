@@ -1,18 +1,23 @@
 """Machine-ingested text must not, by itself, force covenant counsel.
 
 A scanned TODO or a fetched page is written by whoever controls the file or
-the site.  Counsel still shows such records as guidance, but only records
-the workspace's own callers stored may turn a routine write into a
-``COUNSEL_REQUIRED`` challenge through ``RELATED_WARNING`` or
-``RELATED_FAILURE``.
+the site.  Only records the workspace's own callers stored may turn a routine
+write into a ``COUNSEL_REQUIRED`` challenge through ``RELATED_WARNING`` or
+``RELATED_FAILURE``, and the guidance shown in counsel and by
+``memory_preflight`` withholds machine-ingested records the way the brief
+does: they are counted beside the content notice, never quoted.
 """
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 from fastmcp import Client
 
+from daem0nmcp.api.v7.models import RECORD_CONTENT_NOTICE
+from daem0nmcp.api.v7.production import create_v7_server
+from daem0nmcp.config import Settings
 from tests.api_v7.process_client import initialize_workspaces
 from tests.api_v7.test_untrusted_origin_brief import _call, _server, _write
 
@@ -27,6 +32,12 @@ def _decision(scope: dict[str, str], key: str) -> dict[str, Any]:
         "content": "Publish the billing ledger as CSV",
         "idempotency_key": f"untrusted-counsel-{key}",
     }
+
+
+def _assert_planted_withheld(guidance: dict[str, Any]) -> None:
+    assert PLANTED_TODO not in json.dumps(guidance)
+    assert guidance["withheld_untrusted"] == {"warnings": 1}
+    assert guidance["content_notice"] == RECORD_CONTENT_NOTICE
 
 
 async def test_scanned_todo_alone_does_not_force_counsel(tmp_path):
@@ -47,7 +58,7 @@ async def test_scanned_todo_alone_does_not_force_counsel(tmp_path):
         stored = await _call(client, "memory_store", _decision(scope, "first-0001"))
         assert stored["ok"], stored["error"]
 
-        # The planted record is still offered as guidance for planning.
+        # Planning guidance counts the planted record instead of quoting it.
         planned = await _call(
             client,
             "memory_preflight",
@@ -62,8 +73,8 @@ async def test_scanned_todo_alone_does_not_force_counsel(tmp_path):
             },
         )
         assert planned["ok"], planned
-        [planted] = planned["data"]["guidance"]["records"]
-        assert PLANTED_TODO in planted["excerpt"]
+        _assert_planted_withheld(planned["data"]["guidance"])
+        assert planned["data"]["guidance"]["records"] == []
 
         # A warning the workspace's own caller stored still forces counsel.
         await _write(
@@ -87,6 +98,7 @@ async def test_scanned_todo_alone_does_not_force_counsel(tmp_path):
             for record in challenged["error"]["counsel"]["guidance"]["records"]
         ]
         assert AUTHORED_WARNING in excerpts
+        _assert_planted_withheld(challenged["error"]["counsel"]["guidance"])
         retried = await _call(
             client,
             challenged["error"]["remedy"]["tool"],
@@ -187,4 +199,68 @@ async def test_planted_records_cannot_mask_an_authored_failure(tmp_path):
         # The record that forced counsel is among those shown.
         assert failed in [
             record["excerpt"] for record in counsel["guidance"]["records"]
+        ]
+
+
+async def test_strict_preflight_and_gateway_counsel_withhold_planted_text(tmp_path):
+    [workspace] = await initialize_workspaces((tmp_path,))
+    (tmp_path / "planted.py").write_text(
+        f"# TODO: {PLANTED_TODO}\nvalue = 1\n", encoding="utf-8"
+    )
+    scope = {"workspace_id": workspace.workspace_id}
+    target = {
+        key: value
+        for key, value in _decision(scope, "surface-0001").items()
+        if key != "workspace_id"
+    }
+
+    async with Client(_server(tmp_path)) as client:
+        await _write(
+            client,
+            "code_todos_scan_and_store",
+            {**scope, "idempotency_key": "untrusted-counsel-scan-0004"},
+        )
+        await _write(
+            client,
+            "memory_store",
+            {
+                **scope,
+                "record_type": "warning",
+                "content": AUTHORED_WARNING,
+                "idempotency_key": "untrusted-counsel-authored-0004",
+            },
+        )
+        # The gateway reaches the same counsel as the direct tool.
+        gated = await _call(
+            client,
+            "daem0n_tool_call",
+            {**scope, "tool": "memory_store", "arguments": target},
+        )
+        assert gated["error"]["code"] == "COUNSEL_REQUIRED"
+        assert gated["error"]["counsel"]["reasons"] == ["RELATED_WARNING"]
+        _assert_planted_withheld(gated["error"]["counsel"]["guidance"])
+
+    strict = create_v7_server(
+        "stdio",
+        settings=Settings(
+            project_root=str(tmp_path),
+            workspace_roots=[str(tmp_path)],
+            covenant_mode="strict",
+            dream_enabled=False,
+        ),
+        environ={},
+    )
+    async with Client(strict) as client:
+        briefed = await _call(client, "session_brief", scope)
+        assert briefed["ok"], briefed
+        planned = await _call(
+            client,
+            "memory_preflight",
+            {**scope, "target_tool": "memory_store", "target_arguments": target},
+        )
+        assert planned["ok"], planned
+        guidance = planned["data"]["guidance"]
+        _assert_planted_withheld(guidance)
+        assert [record["excerpt"] for record in guidance["records"]] == [
+            AUTHORED_WARNING
         ]

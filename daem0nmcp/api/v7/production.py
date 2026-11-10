@@ -726,9 +726,7 @@ def _briefing_reader(readers: ResourceRepositoryReaders):
     return read
 
 
-def _guidance_reader(
-    readers: ResourceRepositoryReaders, *, include_untrusted_origin: bool = True
-):
+def _guidance_reader(readers: ResourceRepositoryReaders):
     async def read(
         workspace: Workspace,
         target_tool: str,
@@ -749,16 +747,14 @@ def _guidance_reader(
                 rule_limit=50,
                 active_context_limit=1,
                 include_git_changes=False,
-                # Counsel still shows every stored warning and failure,
-                # whatever its origin; only the briefs withhold them.  The
-                # ceremony reads again without them before a related record
-                # is allowed to force counsel.
-                include_untrusted_origin=include_untrusted_origin,
+                # Scanned TODOs and ingested pages are written by whoever
+                # controls a file or a site.  Guidance is shown to the agent
+                # as counsel to review, so, like the briefs, it counts them
+                # instead of quoting them and they never raise a reason.
+                include_untrusted_origin=False,
             )
-            candidate_records = [
-                *_public_items(snapshot.failures, RecordSummary),
-                *_public_items(snapshot.warnings, RecordSummary),
-            ]
+            failures = _public_items(snapshot.failures, RecordSummary)
+            warnings = _public_items(snapshot.warnings, RecordSummary)
             candidate_rules = _public_items(snapshot.rules, RuleView)
         else:
             warnings = await _read_items(
@@ -768,7 +764,7 @@ def _guidance_reader(
                     "warnings",
                     20,
                     "updated_at_desc",
-                    include_untrusted_origin=include_untrusted_origin,
+                    include_untrusted_origin=False,
                 ),
                 RecordSummary,
             )
@@ -779,11 +775,10 @@ def _guidance_reader(
                     "failures",
                     20,
                     "updated_at_desc",
-                    include_untrusted_origin=include_untrusted_origin,
+                    include_untrusted_origin=False,
                 ),
                 RecordSummary,
             )
-            candidate_records = [*failures, *warnings]
             candidate_rules = await _read_items(
                 readers.rule_reader,
                 workspace,
@@ -791,7 +786,7 @@ def _guidance_reader(
                 RuleView,
             )
         records = _rank_relevant(
-            candidate_records,
+            [*failures, *warnings],
             query_tokens,
             limit=20,
         )
@@ -826,6 +821,10 @@ def _guidance_reader(
                 ],
                 limit=50,
             ),
+            "withheld_untrusted": _withheld_untrusted(
+                warnings=warnings, failures=failures
+            ),
+            "content_notice": RECORD_CONTENT_NOTICE,
         }
 
     return read
@@ -1012,11 +1011,6 @@ def _assemble(
             argument_normalizer=normalizer,
             preflight_service=preflight_service,
             brief_reader=_compact_brief_reader(resource_readers),
-            authored_preflight_service=BasicPreflightService(
-                reader=_guidance_reader(
-                    resource_readers, include_untrusted_origin=False
-                )
-            ),
         )
         if loaded_settings.covenant_mode == "guided"
         else None

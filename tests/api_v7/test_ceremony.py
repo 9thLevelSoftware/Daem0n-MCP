@@ -18,7 +18,12 @@ from daem0nmcp.api.v7.ceremony import (
     _content_tokens,
     counsel_reasons,
 )
-from daem0nmcp.api.v7.models import PreflightGuidance, RecordSummary, RuleView
+from daem0nmcp.api.v7.models import (
+    RECORD_CONTENT_NOTICE,
+    PreflightGuidance,
+    RecordSummary,
+    RuleView,
+)
 from daem0nmcp.api.v7.opaque_capabilities import OpaqueCapabilityAuthority
 from daem0nmcp.api.v7.policy import V7_COVENANT_POLICY
 from daem0nmcp.covenant import (
@@ -277,91 +282,16 @@ class CeremonyTests(unittest.IsolatedAsyncioTestCase):
                     self.assertIsNone(outcome.violation)
                 self.args.pop("relative_file_path", None)
 
-    async def test_related_reasons_need_a_record_the_authored_read_returns(
-        self,
-    ) -> None:
-        planted = record("authentication session TODO", warning=True)
-        authored = GuidanceService()
-        self.ceremony = CovenantCeremony(
-            covenant_gate=self.gate,
-            argument_normalizer=normalize,
-            preflight_service=self.service,
-            brief_reader=self.ceremony._brief_reader,
-            authored_preflight_service=authored,
-        )
-        self.service.value = PreflightGuidance(records=[planted])
-
-        admitted = await self.admit()
-        self.assertIsNone(admitted.violation)
-        self.assertIsNone(admitted.challenge)
-        self.assertEqual("memory_store", authored.calls[0][0])
-
-        # A rule or a destructive level never depends on record origin.
+    async def test_challenge_carries_the_guidance_notice_from_one_read(self) -> None:
         self.service.value = PreflightGuidance(
-            records=[planted], rules=[rule(ask_first=["Ask the owner."])]
+            records=[record("authentication session", warning=True)],
+            withheld_untrusted={"warnings": 3},
         )
-        self.assertEqual(["RULE_ASK_FIRST"], (await self.admit()).challenge.reasons)
-        self.service.value = PreflightGuidance(records=[planted])
-        self.assertEqual(
-            ["DESTRUCTIVE_OPERATION"],
-            (await self.admit("memory_prune")).challenge.reasons,
-        )
-
-        # The reasons are the ones authored records raise, whatever the
-        # planted records would have raised, and the authored record that
-        # raised one is shown ahead of them.
-        failed = record("authentication session").model_copy(
-            update={"record_id": "mem_" + "c" * 64}
-        )
-        authored.value = PreflightGuidance(records=[failed])
-        masked = (await self.admit()).challenge
-        self.assertEqual(["RELATED_FAILURE"], masked.reasons)
-        self.assertEqual([failed, planted], masked.guidance.records)
-        warned = record("authentication session", warning=True).model_copy(
-            update={"record_id": "mem_" + "d" * 64}
-        )
-        authored.value = PreflightGuidance(records=[warned])
-        shown = (await self.admit()).challenge
-        self.assertEqual(["RELATED_WARNING"], shown.reasons)
-        self.assertEqual(warned.excerpt, shown.guidance.warnings[0])
-
-        # Planted records that crowd every authored record out of the first
-        # read cannot hide it, and the shown guidance stays bounded.
-        crowd = [
-            record(f"authentication session TODO {index}", warning=True).model_copy(
-                update={"record_id": "mem_" + f"{index:064x}"}
-            )
-            for index in range(20)
-        ]
-        self.service.value = PreflightGuidance(records=crowd)
-        authored.value = PreflightGuidance(records=[failed])
-        crowded = (await self.admit()).challenge
-        self.assertEqual(["RELATED_FAILURE"], crowded.reasons)
-        self.assertEqual([failed, *crowd[:19]], crowded.guidance.records)
-        self.service.value = PreflightGuidance()
-        hidden = (await self.admit()).challenge
-        self.assertEqual(["RELATED_FAILURE"], hidden.reasons)
-        self.assertEqual([failed], hidden.guidance.records)
-        authored.value = PreflightGuidance()
-        self.assertIsNone((await self.admit()).challenge)
-
-        # An unreadable second opinion keeps the challenge.
-        self.service.value = PreflightGuidance(records=[planted])
-        for failure in (RuntimeError("unavailable"), None):
-            with self.subTest(failure=failure):
-                options = (
-                    {"return_value": {"unexpected": True}}
-                    if failure is None
-                    else {"side_effect": failure}
-                )
-                with patch.object(authored, "guidance", **options):
-                    outcome = await self.admit()
-                self.assertEqual(["RELATED_WARNING"], outcome.challenge.reasons)
-        with (
-            patch.object(authored, "guidance", side_effect=asyncio.CancelledError),
-            self.assertRaises(asyncio.CancelledError),
-        ):
-            await self.admit()
+        challenge = (await self.admit()).challenge
+        self.assertEqual(["RELATED_WARNING"], challenge.reasons)
+        self.assertEqual({"warnings": 3}, challenge.guidance.withheld_untrusted)
+        self.assertEqual(RECORD_CONTENT_NOTICE, challenge.guidance.content_notice)
+        self.assertEqual(1, len(self.service.calls))
 
     async def test_unrecoverable_tokens_return_original_without_counsel(self) -> None:
         self.gate.record_briefing(self.scope)
