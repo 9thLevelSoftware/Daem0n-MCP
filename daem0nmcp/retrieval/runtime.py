@@ -44,6 +44,10 @@ _UNSEGMENTED_SCRIPT_CHARS = (
     "\u1000-\u109f"  # Myanmar
     "\u1100-\u11ff"  # Hangul Jamo
     "\u1780-\u17ff"  # Khmer
+    "\u1950-\u19df"  # Tai Le, New Tai Lue
+    "\u1a20-\u1aaf"  # Tai Tham
+    "\u1b00-\u1b7f"  # Balinese
+    "\u3005-\u3007"  # CJK iteration mark, closing mark, zero
     "\u3040-\u30ff"  # Hiragana, Katakana
     "\u3100-\u312f"  # Bopomofo
     "\u3130-\u318f"  # Hangul compatibility Jamo
@@ -51,11 +55,16 @@ _UNSEGMENTED_SCRIPT_CHARS = (
     "\u31f0-\u31ff"  # Katakana phonetic extensions
     "\u3400-\u4dbf"  # CJK unified ideographs extension A
     "\u4e00-\u9fff"  # CJK unified ideographs
+    "\ua000-\ua4cf"  # Yi
     "\ua960-\ua97f"  # Hangul Jamo extended A
+    "\ua980-\ua9df"  # Javanese
+    "\uaa80-\uaadf"  # Tai Viet
     "\uac00-\ud7ff"  # Hangul syllables, Jamo extended B
     "\uf900-\ufaff"  # CJK compatibility ideographs
     "\uff66-\uff9f"  # Halfwidth Katakana
     "\uffa0-\uffdc"  # Halfwidth Hangul
+    "\U00016fe0-\U00018dff"  # Tangut, Khitan small script
+    "\U0001aff0-\U0001b2ff"  # Kana extensions, Nushu
     "\U00020000-\U0003ffff"  # CJK unified ideographs extensions B and later
 )
 # Text in every other script tokenizes exactly as ``\w+|[^\w\s]`` does.
