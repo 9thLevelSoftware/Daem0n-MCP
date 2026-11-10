@@ -584,8 +584,64 @@ def _windows_file_unlock(handle: BinaryIO) -> None:
         raise DatabaseInUseError()
 
 
+def _lock_file_handle(handle: BinaryIO, *, exclusive: bool, nonblocking: bool) -> None:
+    if os.name == "nt":
+        _windows_file_lock(handle, exclusive=exclusive, nonblocking=nonblocking)
+        return
+    try:
+        import fcntl
+    except ImportError as exc:
+        raise RuntimeError("UNSUPPORTED_FILE_LOCK") from exc
+    operation = fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH
+    if nonblocking:
+        operation |= fcntl.LOCK_NB
+    try:
+        fcntl.flock(handle.fileno(), operation)
+    except (BlockingIOError, OSError) as exc:
+        raise DatabaseInUseError() from exc
+
+
+def _convert_file_lock(handle: BinaryIO, *, exclusive: bool) -> None:
+    """Change the mode of the lock this process holds through ``handle``.
+
+    No platform converts a held lock both atomically and without giving it up
+    when the conversion is refused, so a refused or interrupted conversion is
+    followed by taking the shared lock again, waiting for it if a locker in
+    another process got in between: the holders registered on the handle never
+    go on believing in a lock the process no longer has.  Raises
+    ``DatabaseInUseError``, holding the shared lock, when the exclusive lock
+    is refused.
+    """
+
+    if os.name == "nt":
+        # LockFileEx stacks a second lock on the handle rather than converting.
+        _windows_file_unlock(handle)
+    refused: DatabaseInUseError | None = None
+    if exclusive:
+        try:
+            _lock_file_handle(handle, exclusive=True, nonblocking=True)
+            return
+        except DatabaseInUseError as exc:
+            refused = exc
+    try:
+        _lock_file_handle(handle, exclusive=False, nonblocking=True)
+    except DatabaseInUseError:
+        _lock_file_handle(handle, exclusive=False, nonblocking=False)
+    if refused is not None:
+        raise refused
+
+
 class DatabaseFileLock:
-    """Lifetime shared or exclusive advisory lock for a storage generation."""
+    """Lifetime shared or exclusive advisory lock for a storage generation.
+
+    The operating-system lock is held once per process and counted here, so
+    locks taken in one process exclude each other by this registry alone.
+    ``over_process_holders`` is for the short exclusive lock under which a
+    store is created: it is granted over shared holders in this same process,
+    which keep their registration and get the shared lock back when it is
+    released or demoted.  It still excludes every other process, and every
+    further lock in this one, for as long as it is held.
+    """
 
     def __init__(
         self,
@@ -593,12 +649,16 @@ class DatabaseFileLock:
         mode: Literal["shared", "exclusive"],
         *,
         nonblocking: bool = True,
+        over_process_holders: bool = False,
     ) -> None:
         if mode not in {"shared", "exclusive"}:
             raise ValueError("lock mode must be shared or exclusive")
+        if over_process_holders and mode != "exclusive":
+            raise ValueError("only an exclusive lock is taken over process holders")
         self.path = Path(storage_path) / LOCK_NAME
         self.mode = mode
         self.nonblocking = nonblocking
+        self.over_process_holders = over_process_holders
         self._key: str | None = None
         self._registered = False
 
@@ -624,8 +684,13 @@ class DatabaseFileLock:
         with _PROCESS_LOCK_GUARD:
             state = _PROCESS_LOCKS.get(key)
             if state is not None:
-                if self.mode != "shared" or state.mode != "shared":
+                if state.mode != "shared":
                     raise DatabaseInUseError()
+                if self.mode != "shared":
+                    if not self.over_process_holders:
+                        raise DatabaseInUseError()
+                    _convert_file_lock(state.handle, exclusive=True)
+                    state.mode = "exclusive"
                 state.count += 1
                 self._key = key
                 self._registered = True
@@ -648,24 +713,28 @@ class DatabaseFileLock:
             return self
 
     def _lock_handle(self, handle: BinaryIO) -> None:
-        if os.name == "nt":
-            _windows_file_lock(
-                handle,
-                exclusive=self.mode == "exclusive",
-                nonblocking=self.nonblocking,
-            )
+        _lock_file_handle(
+            handle,
+            exclusive=self.mode == "exclusive",
+            nonblocking=self.nonblocking,
+        )
+
+    def demote(self) -> None:
+        """Turn the exclusive lock held through this object into a shared one.
+
+        The process never stops holding the storage, so nothing registered on
+        it is left without a lock; where the platform cannot convert in place
+        this waits out a locker that got in between.
+        """
+
+        if not self._registered or self._key is None or self.mode != "exclusive":
             return
-        try:
-            import fcntl
-        except ImportError as exc:
-            raise RuntimeError("UNSUPPORTED_FILE_LOCK") from exc
-        operation = fcntl.LOCK_SH if self.mode == "shared" else fcntl.LOCK_EX
-        if self.nonblocking:
-            operation |= fcntl.LOCK_NB
-        try:
-            fcntl.flock(handle.fileno(), operation)
-        except (BlockingIOError, OSError) as exc:
-            raise DatabaseInUseError() from exc
+        with _PROCESS_LOCK_GUARD:
+            state = _PROCESS_LOCKS.get(self._key)
+            if state is not None and state.mode == "exclusive":
+                _convert_file_lock(state.handle, exclusive=False)
+                state.mode = "shared"
+            self.mode = "shared"
 
     def release(self) -> None:
         if not self._registered or self._key is None:
@@ -676,6 +745,10 @@ class DatabaseFileLock:
                 self._registered = False
                 self._key = None
                 return
+            if state.count > 1 and self.mode == "exclusive":
+                # Taken over shared holders in this process: they stay.
+                self.demote()
+                self.mode = "exclusive"
             state.count -= 1
             if state.count == 0:
                 handle = state.handle

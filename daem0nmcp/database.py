@@ -316,6 +316,10 @@ class DatabaseManager:
         shared lock is given up and the exclusive one polled for.  Whenever
         only the shared lock can be had the storage is read again, because the
         process holding it exclusively may have finished the store meanwhile.
+        Other shared holders in this process, such as a manager that was
+        constructed and never started, do not stand in the way: the exclusive
+        lock is taken over them, and they read the storage again when they
+        start.  A holder in another process does, until it lets go.
 
         Returns ``True`` holding the exclusive lock, with the storage re-read
         under it and still to be created; ``False`` holding the shared lock
@@ -330,7 +334,7 @@ class DatabaseManager:
         while True:
             try:
                 self._database_lock = DatabaseFileLock(
-                    self.storage_path, "exclusive"
+                    self.storage_path, "exclusive", over_process_holders=True
                 ).acquire()
             except DatabaseInUseError:
                 pass
@@ -344,6 +348,7 @@ class DatabaseManager:
                     self._restore_shared_lock()
                     raise
                 self._restore_shared_lock()
+                self._storage_lock_lost = False
                 return False
             try:
                 self._database_lock = DatabaseFileLock(
@@ -362,17 +367,14 @@ class DatabaseManager:
             await asyncio.sleep(_CREATION_LOCK_RETRY_SECONDS)
 
     def _restore_shared_lock(self) -> None:
-        """Give the exclusive creation lock back for the lifetime shared one.
+        """Turn the exclusive creation lock into the lifetime shared one.
 
-        A migration, or another start polling for the creation lock, may take
-        the storage in the instant between the two; this start then fails as
-        in use, holding no lock, and can be retried.
+        The lock is converted rather than released and taken again, so the
+        start always ends up holding the storage, and an error raised by the
+        creation is not replaced by a failure to get the lock back.
         """
 
-        self._storage_lock_lost = True
-        self._database_lock.release()
-        self._database_lock = DatabaseFileLock(self.storage_path, "shared").acquire()
-        self._storage_lock_lost = False
+        self._database_lock.demote()
 
     async def init_db(self):
         """Initialize the database tables and run migrations."""
