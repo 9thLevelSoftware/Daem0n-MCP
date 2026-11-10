@@ -88,7 +88,9 @@ stdio or configure authentication on a shared machine. A loopback bind with
 `DAEM0NMCP_TRUSTED_PROXY_IPS`, or with a non-loopback name in
 `DAEM0NMCP_ALLOWED_HOSTS`, is treated as remotely reachable: without a
 production token verifier the server exits with
-`PROXIED_LISTENER_REQUIRES_AUTH`.
+`PROXIED_LISTENER_REQUIRES_AUTH`. Those two settings are the only signal: a
+proxy that forwards the loopback authority as `Host` needs neither and is not
+detected, so configure authentication for every proxied deployment.
 
 For a remote HTTPS deployment, terminate TLS at a reverse proxy and make the
 backend listener and proxy addresses explicit. This is an environment example,

@@ -713,8 +713,11 @@ def _reached_through_proxy(environ: Mapping[str, str]) -> bool:
     for value in raw.split(",") if raw else ():
         try:
             hostname = urlsplit("http://" + _normalized_authority(value)).hostname
-        except (UnicodeError, ValueError):
-            return True
+        except (UnicodeError, ValueError) as exc:
+            raise TransportSecurityError(
+                "INVALID_HOST_CONFIGURATION",
+                "configure exact DAEM0NMCP_ALLOWED_HOSTS authorities for this listener",
+            ) from exc
         if hostname is None or not _is_loopback_host(hostname):
             return True
     return False

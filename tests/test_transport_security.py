@@ -88,7 +88,6 @@ class TransportSecurityTests(unittest.TestCase):
             {"DAEM0NMCP_ALLOWED_HOSTS": "mcp.example"},
             {"DAEM0NMCP_ALLOWED_HOSTS": "localhost:8765,mcp.example:443"},
             {"DAEM0NMCP_ALLOWED_HOSTS": "203.0.113.10:8765"},
-            {"DAEM0NMCP_ALLOWED_HOSTS": "not a host"},
             {"DAEM0NMCP_TRUSTED_PROXY_IPS": "127.0.0.1"},
             {"DAEM0NMCP_TRUSTED_PROXY_IPS": "10.0.0.5"},
         )
@@ -101,6 +100,18 @@ class TransportSecurityTests(unittest.TestCase):
                     ),
                 ):
                     validate_transport_security(host, environ=environ)
+
+    def test_malformed_allowed_host_on_loopback_is_a_host_configuration_error(self):
+        for value in ("not a host", "localhost,", " localhost", "localhost.:80"):
+            with (
+                self.subTest(value=value),
+                self.assertRaisesRegex(
+                    TransportSecurityError, "INVALID_HOST_CONFIGURATION"
+                ),
+            ):
+                validate_transport_security(
+                    "127.0.0.1", environ={"DAEM0NMCP_ALLOWED_HOSTS": value}
+                )
 
     def test_proxied_loopback_listener_rejects_development_verifiers(self):
         class DevelopmentVerifier:
