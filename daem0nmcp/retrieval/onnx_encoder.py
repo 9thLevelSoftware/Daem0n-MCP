@@ -11,6 +11,7 @@ from __future__ import annotations
 import hashlib
 import math
 import os
+from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
@@ -75,20 +76,69 @@ class OnnxSentenceEmbeddingModel:
         self._tokenizer = None
 
 
+# Root-level files that decide how text becomes model input.  Those present
+# in a snapshot take part in the pooled encoder's identity.
+_TOKENIZER_IDENTITY_FILES = (
+    "added_tokens.json",
+    "config.json",
+    "merges.txt",
+    "sentencepiece.bpe.model",
+    "special_tokens_map.json",
+    "spiece.model",
+    "tokenizer.json",
+    "tokenizer.model",
+    "tokenizer_config.json",
+    "vocab.json",
+    "vocab.txt",
+)
+
+
 def fingerprint_model_directory(root: Path) -> str:
     """Fingerprint stable bytes under a resolved model snapshot directory."""
 
     root = root.resolve(strict=True)
     if not root.is_dir():
         raise RuntimeError("DENSE_ENCODER_UNAVAILABLE")
-    digest = hashlib.sha256(b"daem0nmcp-embedding-artifacts-v1\0")
     entries = tuple(root.rglob("*"))
     if any(path.is_symlink() and path.is_dir() for path in entries):
         raise RuntimeError("DENSE_ENCODER_UNAVAILABLE")
-    files = sorted(
-        (path for path in entries if path.is_file()),
-        key=lambda path: path.relative_to(root).as_posix(),
-    )
+    return _fingerprint_files(root, (path for path in entries if path.is_file()))
+
+
+def fingerprint_encoder_artifacts(
+    root: Path, artifact: Path, external_data: Iterable[str] = ()
+) -> str:
+    """Fingerprint only the files that determine a pooled encoder's vectors.
+
+    These are the loaded graph, the external tensor files it names, and the
+    tokenizer files present directly under *root*.  Anything else in the
+    snapshot (other exports, weights for other backends, documentation) is
+    ignored, so an unrelated download into the same snapshot leaves the
+    identity alone.  A snapshot holding nothing but these files keeps the
+    fingerprint :func:`fingerprint_model_directory` gives it.
+    """
+
+    # Only lexical locations are compared: hub snapshots link every file to
+    # a blob stored outside the snapshot directory.
+    root = Path(os.path.abspath(root))
+    if not root.is_dir():
+        raise RuntimeError("DENSE_ENCODER_UNAVAILABLE")
+    files = {
+        path
+        for path in (root / name for name in _TOKENIZER_IDENTITY_FILES)
+        if path.is_file()
+    }
+    for path in (artifact, *(artifact.parent / name for name in external_data)):
+        located = Path(os.path.abspath(path))
+        if root not in located.parents or not located.is_file():
+            raise RuntimeError("DENSE_ENCODER_UNAVAILABLE")
+        files.add(located)
+    return _fingerprint_files(root, files)
+
+
+def _fingerprint_files(root: Path, paths: Iterable[Path]) -> str:
+    digest = hashlib.sha256(b"daem0nmcp-embedding-artifacts-v1\0")
+    files = sorted(paths, key=lambda path: path.relative_to(root).as_posix())
     if not files:
         raise RuntimeError("DENSE_ENCODER_UNAVAILABLE")
     for path in files:
@@ -141,14 +191,27 @@ def load_pooled_onnx_model(
         # Freeze the tokenizer to the same downloaded snapshot as the graph.
         revision = artifact.parent.parent.name
     model_root = artifact.parent.parent
-    fingerprint_before = fingerprint_model_directory(model_root)
     graph = onnx.load(artifact, load_external_data=False)
     pooled = any(output.name == "sentence_embedding" for output in graph.graph.output)
+    external_data = sorted(
+        {
+            entry.value
+            for initializer in graph.graph.initializer
+            if initializer.data_location == onnx.TensorProto.EXTERNAL
+            for entry in initializer.external_data
+            if entry.key == "location"
+        }
+    )
     del graph
     if not pooled:
         return None
+    # A first load from the hub downloads the tokenizer into the snapshot
+    # here, so the identity is taken once every file it covers is in place.
     tokenizer = AutoTokenizer.from_pretrained(
         model_id, revision=revision, trust_remote_code=False
+    )
+    fingerprint_before = fingerprint_encoder_artifacts(
+        model_root, artifact, external_data
     )
     options = ort.SessionOptions()
     options.intra_op_num_threads = 4
@@ -156,7 +219,9 @@ def load_pooled_onnx_model(
     session = ort.InferenceSession(
         str(artifact), sess_options=options, providers=["CPUExecutionProvider"]
     )
-    fingerprint_after = fingerprint_model_directory(model_root)
+    fingerprint_after = fingerprint_encoder_artifacts(
+        model_root, artifact, external_data
+    )
     if fingerprint_after != fingerprint_before:
         raise RuntimeError("DENSE_ENCODER_UNAVAILABLE")
     return OnnxSentenceEmbeddingModel(
@@ -169,6 +234,7 @@ def load_pooled_onnx_model(
 
 __all__ = [
     "OnnxSentenceEmbeddingModel",
+    "fingerprint_encoder_artifacts",
     "fingerprint_model_directory",
     "load_pooled_onnx_model",
 ]
