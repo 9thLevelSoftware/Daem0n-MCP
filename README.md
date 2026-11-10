@@ -91,7 +91,11 @@ loopback listener behind a reverse proxy is not local: when
 `DAEM0NMCP_TRUSTED_PROXY_IPS` is set or `DAEM0NMCP_ALLOWED_HOSTS` names a host
 other than `localhost` or a loopback address, the server refuses to start with
 `PROXIED_LISTENER_REQUIRES_AUTH` unless a production token verifier is
-configured.
+configured. That check sees a proxy only through those two settings. A proxy
+that forwards the loopback authority as `Host` (for example nginx without
+`proxy_set_header Host $host`) needs neither, is not detected, and exposes the
+unauthenticated listener to its clients, so configure authentication for every
+proxied deployment.
 
 `python -m` resolves `daem0nmcp` from the current directory first, so type these
 commands (and the `python -m daem0nmcp.cli` ones) from a directory you trust.
@@ -824,6 +828,21 @@ launched inside a project, so that file belongs to the repository, not to the
 operator. To keep settings in a file, set `DAEM0NMCP_ENV_FILE` to its absolute
 path in the server's environment. A relative path or a missing file is refused
 at startup, and real environment variables override values from the file.
+
+That file may hold only the settings listed in the tables below. Any other
+line stops startup, including variables the server reads straight from its
+environment: the transport and proxy settings (`DAEM0NMCP_ALLOWED_HOSTS`,
+`DAEM0NMCP_ALLOWED_ORIGINS`, `DAEM0NMCP_TRUSTED_PROXY_IPS`),
+`DAEM0NMCP_WORKSPACE_ACCESS_FILE`, `DAEM0NMCP_TOKEN_SECRET`, the
+`DAEM0NMCP_EDIT_BRIDGE_*` and task variables, and every `FASTMCP_*` variable.
+Keep those in the process environment.
+
+The FastMCP library has its own `.env` loading for `FASTMCP_*` settings. The
+server turns it off by setting `FASTMCP_ENV_FILE` to the null device when it is
+unset, so a project's `.env` cannot change them either. To load `FASTMCP_*`
+settings from a file, set `FASTMCP_ENV_FILE` yourself to an absolute path; a
+relative value is resolved against the working directory. Authentication
+variables (`FASTMCP_SERVER_AUTH*`) are read only from the process environment.
 
 ### Core Settings
 

@@ -7,8 +7,9 @@ from pathlib import Path
 
 import pytest
 
-from daem0nmcp.config import ENV_FILE_VARIABLE, Settings
+from daem0nmcp.config import Settings
 
+ENV_FILE_VARIABLE = "DAEM0NMCP_ENV_FILE"
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 _HOSTILE_QDRANT = "http://attacker.invalid:6333"
 
@@ -135,3 +136,63 @@ def test_explicit_env_file_argument_still_wins(
     loaded = Settings(_env_file=str(explicit))
     assert loaded.log_level == "DEBUG"
     assert loaded.qdrant_url is None
+
+
+def _run_python(code: str, cwd: Path, **extra: str) -> subprocess.CompletedProcess:
+    environment = {
+        name: value
+        for name, value in os.environ.items()
+        if not name.startswith(("DAEM0NMCP_", "FASTMCP_"))
+    }
+    environment["PYTHONPATH"] = str(_REPO_ROOT)
+    environment.update(extra)
+    return subprocess.run(
+        [sys.executable, "-c", code],
+        cwd=cwd,
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+    )
+
+
+def test_transport_library_ignores_working_directory_env_file(tmp_path):
+    (tmp_path / ".env").write_text(
+        "FASTMCP_DEBUG=true\n"
+        "FASTMCP_STREAMABLE_HTTP_PATH=/moved\n"
+        "FASTMCP_SSRF_TRUST_PROXY=true\n",
+        encoding="utf-8",
+    )
+
+    completed = _run_python(
+        "import daem0nmcp.api.v7.launcher, fastmcp;"
+        "loaded = fastmcp.settings;"
+        "print(repr((loaded.debug, loaded.streamable_http_path,"
+        " loaded.ssrf_trust_proxy)))",
+        tmp_path,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout.strip() == "(False, '/mcp', False)"
+
+
+def test_operator_env_file_for_the_transport_library_is_kept(tmp_path):
+    operator_file = tmp_path / "operator.env"
+    operator_file.write_text(
+        "FASTMCP_STREAMABLE_HTTP_PATH=/operator\n", encoding="utf-8"
+    )
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / ".env").write_text(
+        "FASTMCP_STREAMABLE_HTTP_PATH=/moved\n", encoding="utf-8"
+    )
+
+    completed = _run_python(
+        "import daem0nmcp, fastmcp; print(fastmcp.settings.streamable_http_path)",
+        project,
+        FASTMCP_ENV_FILE=str(operator_file),
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout.strip() == "/operator"
