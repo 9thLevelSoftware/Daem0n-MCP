@@ -156,6 +156,10 @@ _INFERRED_OUTCOME_TEXT = (
 _MAX_GRAPH_MEMBERSHIPS = 4_096
 _MAX_GRAPH_PAIR_CHECKS = 20_000
 _ANALYSIS_SECONDS = 2.0
+# A community refresh that ran out of time is not repeated on the next idle
+# pass: it waits, doubling per consecutive deadline, until its inputs change.
+_COMMUNITY_BACKOFF_SECONDS = 300.0
+_COMMUNITY_BACKOFF_MAX_SECONDS = 21_600.0
 
 
 class V7DreamingError(RuntimeError):
@@ -224,6 +228,9 @@ class _WorkspaceRuntime:
     available: bool = True
     activity_epoch: int = 0
     publication_lock: LockType = field(default_factory=threading.Lock)
+    community_failures: int = 0
+    community_failed_events: int = -1
+    community_retry_at: float = 0.0
 
 
 def _now_us() -> int:
@@ -368,6 +375,15 @@ def _outcome_is_inferred(
         (workspace_id, record_id),
     ).fetchone()
     return row is not None and row[0] is not None
+
+
+def _community_backoff_seconds(failures: int) -> float:
+    """Wait after the ``failures``-th consecutive community refresh deadline."""
+
+    return min(
+        _COMMUNITY_BACKOFF_MAX_SECONDS,
+        _COMMUNITY_BACKOFF_SECONDS * 2 ** min(max(failures, 1) - 1, 32),
+    )
 
 
 def _cursor_value(updated_at_us: int, record_id: str) -> str:
@@ -718,9 +734,13 @@ class V7DreamingCoordinator:
             analysis_cursor: str | None = None
             if strategy == "community_refresh":
                 pending = await self._run_worker(
-                    lambda: self._refresh_communities(workspace, state.cancelled)
+                    lambda: self._refresh_communities(state)
                 )
-                if pending and self._projection_scheduler is not None:
+                if (
+                    pending
+                    and not state.cancelled.is_set()
+                    and self._projection_scheduler is not None
+                ):
                     with self._storage.locked_active(workspace) as active:
                         self._projection_scheduler(active.path)
             else:
@@ -1340,9 +1360,9 @@ class V7DreamingCoordinator:
             cursor=next_cursor,
         )
 
-    def _refresh_communities(
-        self, workspace: Workspace, cancelled: threading.Event
-    ) -> int:
+    def _refresh_communities(self, state: _WorkspaceRuntime) -> int:
+        workspace = state.workspace
+        cancelled = state.cancelled
         with self._storage.locked_active(workspace) as active:
             connection = _open(active.path, writable=True)
             try:
@@ -1361,13 +1381,36 @@ class V7DreamingCoordinator:
                 pending = max(0, event_count - baseline)
                 if pending < self._settings.dream_community_staleness_threshold:
                     return pending
-                from ..graph_projection import GraphProjectionBuilder
-
-                GraphProjectionBuilder(connection).rebuild(
-                    workspace.workspace_id,
-                    force=False,
-                    cancelled=cancelled,
+                if state.community_failures:
+                    if event_count != state.community_failed_events:
+                        state.community_failures = 0
+                    elif time.monotonic() < state.community_retry_at:
+                        # Same inputs as the pass that ran out of time.
+                        raise V7DreamingError("DEADLINE_EXCEEDED")
+                from ..graph_projection import (
+                    GraphProjectionBuilder,
+                    GraphProjectionBuildError,
                 )
+
+                try:
+                    GraphProjectionBuilder(connection).rebuild(
+                        workspace.workspace_id,
+                        force=False,
+                        cancelled=cancelled,
+                    )
+                except GraphProjectionBuildError as error:
+                    if error.code == "CANCELLED" and cancelled.is_set():
+                        # Yielded to foreground activity; nothing failed.
+                        return pending
+                    if error.code == "DEADLINE_EXCEEDED":
+                        state.community_failures += 1
+                        state.community_failed_events = event_count
+                        state.community_retry_at = (
+                            time.monotonic()
+                            + _community_backoff_seconds(state.community_failures)
+                        )
+                    raise
+                state.community_failures = 0
                 return 0
             finally:
                 connection.close()

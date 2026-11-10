@@ -1367,3 +1367,145 @@ async def test_connection_stored_before_the_fingerprint_change_is_recognised(
         await coordinator.aclose()
 
     assert len(_connection_candidates(database)) == expected
+
+
+def _community_state(health) -> tuple[object, object, object]:
+    assert health is not None
+    item = next(
+        item for item in health["strategies"] if item["strategy"] == "community_refresh"
+    )
+    return item["status"], item["stable_error_code"], item["yielded"]
+
+
+def _community_coordinator(workspace) -> V7DreamingCoordinator:
+    return V7DreamingCoordinator(
+        workspaces=(workspace,),
+        settings=_settings(workspace.root, dream_community_staleness_threshold=1),
+        candidate_store=CaptureCandidateStore(),
+        capability_statuses={"graph": "ready"},
+    )
+
+
+@pytest.mark.asyncio
+async def test_community_refresh_backs_off_after_a_deadline_until_inputs_change(
+    dream_workspace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from daem0nmcp.graph_projection import (
+        GraphProjectionBuilder,
+        GraphProjectionBuildError,
+    )
+
+    workspace, database = dream_workspace
+    _append(
+        database,
+        workspace.workspace_id,
+        "7",
+        "CacheManager observation",
+        worked=None,
+        record_type="observation",
+    )
+    passes: list[float] = []
+
+    def over_deadline(self, workspace_id, **_kwargs):
+        passes.append(time.monotonic())
+        raise GraphProjectionBuildError("DEADLINE_EXCEEDED")
+
+    monkeypatch.setattr(GraphProjectionBuilder, "rebuild", over_deadline)
+    coordinator = _community_coordinator(workspace)
+    await coordinator.start()
+    try:
+        state = coordinator._states[workspace.workspace_id]
+        for _ in range(3):
+            await coordinator.run_once(workspace)
+        # One full pass, then idle passes wait instead of repeating it.
+        assert len(passes) == 1
+        assert _community_state(await coordinator.health(workspace)) == (
+            "degraded",
+            "DEADLINE_EXCEEDED",
+            False,
+        )
+        first_wait = state.community_retry_at - passes[-1]
+        assert first_wait >= dreaming_runtime._COMMUNITY_BACKOFF_SECONDS
+
+        # The same inputs are retried once the wait has elapsed, and a second
+        # consecutive deadline waits longer.
+        state.community_retry_at = 0.0
+        await coordinator.run_once(workspace)
+        await coordinator.run_once(workspace)
+        assert len(passes) == 2
+        assert state.community_retry_at - passes[-1] >= 2 * first_wait - 1.0
+
+        # New events are new inputs: retry at once, from the first wait again.
+        _append(
+            database,
+            workspace.workspace_id,
+            "8",
+            "CacheManager follow-up observation",
+            worked=None,
+            record_type="observation",
+        )
+        await coordinator.run_once(workspace)
+        await coordinator.run_once(workspace)
+        assert len(passes) == 3
+        assert (
+            state.community_retry_at - passes[-1]
+            < 2 * dreaming_runtime._COMMUNITY_BACKOFF_SECONDS
+        )
+    finally:
+        await coordinator.aclose()
+
+
+def test_community_refresh_backoff_is_exponential_and_capped() -> None:
+    base = dreaming_runtime._COMMUNITY_BACKOFF_SECONDS
+    cap = dreaming_runtime._COMMUNITY_BACKOFF_MAX_SECONDS
+    waits = [dreaming_runtime._community_backoff_seconds(n) for n in range(1, 40)]
+    assert waits[:3] == [base, 2 * base, 4 * base]
+    assert waits == sorted(waits)
+    assert waits[-1] == cap > base
+
+
+@pytest.mark.asyncio
+async def test_community_refresh_that_yields_to_foreground_is_not_degraded(
+    dream_workspace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from daem0nmcp.graph_projection import (
+        GraphProjectionBuilder,
+        GraphProjectionBuildError,
+    )
+
+    workspace, database = dream_workspace
+    _append(
+        database,
+        workspace.workspace_id,
+        "7",
+        "CacheManager observation",
+        worked=None,
+        record_type="observation",
+    )
+    scheduled: list[Path] = []
+
+    def interrupted(self, workspace_id, *, cancelled, **_kwargs):
+        # Foreground activity arrives while the pass is running.
+        cancelled.set()
+        raise GraphProjectionBuildError("CANCELLED")
+
+    monkeypatch.setattr(GraphProjectionBuilder, "rebuild", interrupted)
+    coordinator = V7DreamingCoordinator(
+        workspaces=(workspace,),
+        settings=_settings(workspace.root, dream_community_staleness_threshold=1),
+        candidate_store=CaptureCandidateStore(),
+        capability_statuses={"graph": "ready"},
+        projection_scheduler=scheduled.append,
+    )
+    await coordinator.start()
+    try:
+        await coordinator.run_once(workspace)
+        health = await coordinator.health(workspace)
+        state = coordinator._states[workspace.workspace_id]
+    finally:
+        await coordinator.aclose()
+
+    assert _community_state(health) == ("idle", None, True)
+    assert health["yielded"] is True
+    assert scheduled == []
+    assert state.community_failures == 0
