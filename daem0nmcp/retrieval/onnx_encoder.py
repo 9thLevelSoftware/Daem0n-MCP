@@ -123,19 +123,21 @@ def tokenizer_vocabulary_files(tokenizer: object) -> tuple[str, ...]:
 def fingerprint_encoder_artifacts(
     root: Path,
     artifact: Path,
-    external_data: Iterable[str] = (),
     *,
+    external_data: Iterable[str],
     tokenizer_files: Iterable[str],
 ) -> str:
     """Fingerprint only the files that determine a pooled encoder's vectors.
 
-    These are the loaded graph, the external tensor files it names, and the
-    tokenizer files present directly under *root*: the well-known ones and
-    those in *tokenizer_files*.  Anything else in the
-    snapshot (other exports, weights for other backends, documentation) is
-    ignored, so an unrelated download into the same snapshot leaves the
-    identity alone.  A snapshot holding nothing but these files keeps the
-    fingerprint :func:`fingerprint_model_directory` gives it.
+    These are the loaded graph, the external tensor files it names
+    (*external_data*, relative to the graph), and the tokenizer files present
+    directly under *root*: the well-known ones and those in *tokenizer_files*.
+    Both lists come from what was loaded, so neither has a default: an
+    identity taken without them would cover less than the encoder reads.
+    Anything else in the snapshot (other exports, weights for other backends,
+    documentation) is ignored, so an unrelated download into the same
+    snapshot leaves the identity alone.  A snapshot holding nothing but these
+    files keeps the fingerprint :func:`fingerprint_model_directory` gives it.
     """
 
     # Only lexical locations are compared: hub snapshots link every file to
@@ -235,7 +237,10 @@ def load_pooled_onnx_model(
     )
     tokenizer_files = tokenizer_vocabulary_files(tokenizer)
     fingerprint_before = fingerprint_encoder_artifacts(
-        model_root, artifact, external_data, tokenizer_files=tokenizer_files
+        model_root,
+        artifact,
+        external_data=external_data,
+        tokenizer_files=tokenizer_files,
     )
     options = ort.SessionOptions()
     options.intra_op_num_threads = 4
@@ -244,7 +249,10 @@ def load_pooled_onnx_model(
         str(artifact), sess_options=options, providers=["CPUExecutionProvider"]
     )
     fingerprint_after = fingerprint_encoder_artifacts(
-        model_root, artifact, external_data, tokenizer_files=tokenizer_files
+        model_root,
+        artifact,
+        external_data=external_data,
+        tokenizer_files=tokenizer_files,
     )
     if fingerprint_after != fingerprint_before:
         raise RuntimeError("DENSE_ENCODER_UNAVAILABLE")

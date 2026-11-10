@@ -400,6 +400,30 @@ class OnnxEncoderFingerprintTests(unittest.TestCase):
 
         self.assertEqual(3, len({inline, external, changed}))
 
+    def test_identity_cannot_be_taken_without_naming_the_external_tensors(self):
+        from daem0nmcp.retrieval.onnx_encoder import fingerprint_encoder_artifacts
+
+        with tempfile.TemporaryDirectory() as temporary:
+            snapshot = self._snapshot(temporary)
+            artifact = snapshot / "onnx" / "model_quantized.onnx"
+            (snapshot / "onnx" / "model_quantized.onnx_data").write_bytes(b"tensors")
+            complete = fingerprint_encoder_artifacts(
+                snapshot,
+                artifact,
+                external_data=("model_quantized.onnx_data",),
+                tokenizer_files=(),
+            )
+            graph_only = fingerprint_encoder_artifacts(
+                snapshot, artifact, external_data=(), tokenizer_files=()
+            )
+            # Leaving the argument out must not quietly give the identity of
+            # the graph alone.
+            for arguments in ({"tokenizer_files": ()}, {"external_data": ()}):
+                with self.subTest(arguments=arguments), self.assertRaises(TypeError):
+                    fingerprint_encoder_artifacts(snapshot, artifact, **arguments)
+
+        self.assertNotEqual(complete, graph_only)
+
     def test_snapshot_of_only_encoder_files_keeps_its_directory_fingerprint(self):
         from daem0nmcp.retrieval.onnx_encoder import fingerprint_model_directory
 
