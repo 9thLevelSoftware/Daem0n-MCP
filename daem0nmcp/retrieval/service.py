@@ -474,14 +474,13 @@ class RetrievalService:
         # hung provider costs a single timeout rather than one per provider.
         # Results are keyed by name and merged in plan order below, never in
         # completion order.
-        provider_results.update(
-            zip(
-                (request.provider for request in concurrent_requests),
-                await self._invoke_providers_concurrently(
-                    concurrent_requests, provider_query
-                ),
-            )
+        concurrent_results = await self._invoke_providers_concurrently(
+            concurrent_requests, provider_query
         )
+        for request, result in zip(
+            concurrent_requests, concurrent_results, strict=True
+        ):
+            provider_results[request.provider] = result
 
         if graph_request is not None:
             seed_results = tuple(
