@@ -167,6 +167,22 @@ class CodingMemoryFixtureTests(unittest.TestCase):
             24, len({q.text for q in corpus.queries if q.family == "retention"})
         )
 
+    def test_no_query_repeats_a_golden_record_verbatim(self):
+        corpus = self._corpus(24)
+        contents = {
+            item.key: item.content for item in corpus.writes if hasattr(item, "content")
+        }
+        verbatim = [
+            query.key
+            for query in corpus.queries
+            if query.family == "validity"
+            and any(contents[key] == query.text for key, _ in query.relevant)
+        ]
+        self.assertEqual([], verbatim)
+        self.assertEqual(
+            48, len([query for query in corpus.queries if query.family == "validity"])
+        )
+
     def _retention(self, items: list[tuple[str, str]], context: str) -> float:
         """Score one retention query against a stubbed recall result."""
 

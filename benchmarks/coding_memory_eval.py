@@ -254,7 +254,11 @@ def _corpus(root: Path, topics: int, symbols_available: bool) -> _Corpus:
             )
             corpus.bindings[key] = (t % 2 == 0, True)
             corpus.queries.append(
-                _Query(key, "validity", f"handle_topic_{t} handler update", ((key, 3),))
+                # Asked as a question, never as the record's own text: a
+                # verbatim query scores 1.0 whatever the ranking does.
+                _Query(
+                    key, "validity", f"what changed in handle_topic_{t}", ((key, 3),)
+                )
             )
         key = f"validity-{t}-file"
         corpus.writes.append(
@@ -262,7 +266,7 @@ def _corpus(root: Path, topics: int, symbols_available: bool) -> _Corpus:
         )
         corpus.bindings[key] = (t % 3 == 0, False)
         corpus.queries.append(
-            _Query(key, "validity", f"topic {t} runbook pointer", ((key, 3),))
+            _Query(key, "validity", f"where is the runbook for topic {t}", ((key, 3),))
         )
 
         component = _RETENTION_COMPONENTS[t]
