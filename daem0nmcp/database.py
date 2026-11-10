@@ -120,6 +120,7 @@ class DatabaseManager:
         self._defer_fresh_activation = defer_fresh_activation
         self._lock_mode: Literal["shared", "exclusive"] = lock_mode
         self._require_fresh = require_fresh
+        self._storage_lock_lost = False
         self._database_lock = DatabaseFileLock(self.storage_path, lock_mode).acquire()
         try:
             self._resolve_storage()
@@ -324,6 +325,7 @@ class DatabaseManager:
 
         loop = asyncio.get_running_loop()
         deadline = loop.time() + _CREATION_LOCK_TIMEOUT_SECONDS
+        self._storage_lock_lost = True
         self._database_lock.release()
         while True:
             try:
@@ -336,6 +338,7 @@ class DatabaseManager:
                 try:
                     self._resolve_storage()
                     if self._start_creates_store():
+                        self._storage_lock_lost = False
                         return True
                 except BaseException:
                     self._restore_shared_lock()
@@ -351,6 +354,7 @@ class DatabaseManager:
             else:
                 self._resolve_storage()
                 if not self._start_creates_store():
+                    self._storage_lock_lost = False
                     return False
                 self._database_lock.release()
             if loop.time() >= deadline:
@@ -360,12 +364,15 @@ class DatabaseManager:
     def _restore_shared_lock(self) -> None:
         """Give the exclusive creation lock back for the lifetime shared one.
 
-        A migration may take the storage in the instant between the two; the
-        start then fails as in use, holding no lock, and can be retried.
+        A migration, or another start polling for the creation lock, may take
+        the storage in the instant between the two; this start then fails as
+        in use, holding no lock, and can be retried.
         """
 
+        self._storage_lock_lost = True
         self._database_lock.release()
         self._database_lock = DatabaseFileLock(self.storage_path, "shared").acquire()
+        self._storage_lock_lost = False
 
     async def init_db(self):
         """Initialize the database tables and run migrations."""
@@ -373,13 +380,19 @@ class DatabaseManager:
         if self._initialized:
             return
 
-        if not self._database_lock.acquired:
+        if self._storage_lock_lost:
             # An earlier attempt gave the storage lock up and could not get it
-            # back, so whatever it read about the storage may be stale.
-            self._database_lock = DatabaseFileLock(
-                self.storage_path, self._lock_mode
-            ).acquire()
+            # back, so whatever it read about the storage may be stale, and an
+            # engine it built may point at a database no longer selected.
+            if not self._database_lock.acquired:
+                self._database_lock = DatabaseFileLock(
+                    self.storage_path, "shared"
+                ).acquire()
             self._resolve_storage()
+            self._engine = None
+            self._session_factory = None
+            self._migrated = False
+            self._storage_lock_lost = False
         # A store is created, and its pointer published, only under the
         # exclusive storage lock, held for no longer than the creation takes.
         creating = (
