@@ -43,6 +43,7 @@ from ..storage_activation import (
     ACTIVE_POINTER_MISSING_DETAIL,
     DEFAULT_DATABASE_NAME,
     ActiveDatabasePointer,
+    CandidateUnreadableError,
     DatabaseFileLock,
     PointerValidationError,
     active_candidate_pointer_missing_detail,
@@ -1670,7 +1671,10 @@ class MigrationV7Service:
             raise MigrationV7Error(
                 ACTIVE_POINTER_MISSING_CODE, ACTIVE_POINTER_MISSING_DETAIL
             )
-        candidate = active_candidate_without_pointer(storage)
+        try:
+            candidate = active_candidate_without_pointer(storage)
+        except CandidateUnreadableError as exc:
+            raise MigrationV7Error(ACTIVE_POINTER_MISSING_CODE, str(exc)) from exc
         if candidate is not None:
             raise MigrationV7Error(
                 ACTIVE_POINTER_MISSING_CODE,
@@ -1698,7 +1702,15 @@ class MigrationV7Service:
                     "active-db.json is present; there is nothing to recover",
                 )
             if not has_canonical_v7_state(resolved.path):
-                active_candidate = active_candidate_without_pointer(storage)
+                try:
+                    active_candidate = active_candidate_without_pointer(storage)
+                except CandidateUnreadableError as exc:
+                    raise MigrationV7Error(
+                        "POINTER_RECOVERY_AMBIGUOUS",
+                        f"the lost pointer may have named {exc.candidate}, "
+                        "which cannot be read; restore active-db.json from a "
+                        "backup",
+                    ) from exc
                 if active_candidate is not None:
                     raise MigrationV7Error(
                         "POINTER_RECOVERY_AMBIGUOUS",

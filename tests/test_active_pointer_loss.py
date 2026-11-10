@@ -400,3 +400,111 @@ def test_actual_cli_names_and_performs_the_pointer_recovery(tmp_path: Path):
     )
     assert (storage / "active-db.json").read_bytes() == published
     assert _cli(tmp_path, "status").returncode == 0
+
+
+def _migrated_v6_store_without_pointer(root: Path) -> tuple[Path, Path, str]:
+    """A v6 store migrated to a candidate, with ``active-db.json`` then lost."""
+
+    from tests.test_migrate_v7_end_to_end import _registry, _v6_database
+
+    storage = _v6_database(root)
+    MigrationV7Service(_registry(root)).apply(root)
+    active = resolve_active_database(storage)
+    assert active.relative_path.endswith("/candidate.db")
+    _lose_the_pointer(storage)
+    return storage, active.path, active.relative_path
+
+
+def _assert_every_opener_refuses_the_unreadable_candidate(
+    root: Path, storage: Path, relative: str
+) -> None:
+    from tests.test_migrate_v7_end_to_end import _registry
+
+    source = storage / "daem0nmcp.db"
+    source_bytes = source.read_bytes()
+    service = MigrationV7Service(_registry(root))
+
+    with pytest.raises(RuntimeError) as start:
+        _remember(storage, "would land in the retained v6 source")
+    assert getattr(start.value, "code", None) == "ACTIVE_POINTER_MISSING"
+    assert relative in str(start.value)
+    assert "cannot be read" in str(start.value)
+    assert "from a backup" in str(start.value)
+    assert str(root) not in str(start.value)
+    for attempt in (service.dry_run, service.apply, service.rollback):
+        with pytest.raises(MigrationV7Error) as refused:
+            attempt(root)
+        assert refused.value.code == "ACTIVE_POINTER_MISSING"
+        assert relative in str(refused.value)
+    with pytest.raises(MigrationV7Error) as recovery:
+        service.recover_pointer(root)
+    assert recovery.value.code == "POINTER_RECOVERY_AMBIGUOUS"
+    assert relative in str(recovery.value)
+
+    assert source.read_bytes() == source_bytes
+    assert not (storage / "active-db.json").exists()
+
+
+def test_a_damaged_candidate_of_a_pointerless_store_is_not_taken_for_inactive(
+    tmp_path: Path,
+):
+    """A candidate that cannot be read may be the one the lost pointer named."""
+
+    storage, candidate, relative = _migrated_v6_store_without_pointer(tmp_path)
+    damaged = bytearray(candidate.read_bytes())
+    damaged[:100] = b"\xff" * 100
+    candidate.write_bytes(bytes(damaged))
+
+    _assert_every_opener_refuses_the_unreadable_candidate(tmp_path, storage, relative)
+
+    # The refusal names its way out: without the unreadable run the retained
+    # format-6 file is the whole store again.
+    candidate.parent.rename(tmp_path / "set-aside")
+    assert _start_manager(storage) == (6, 0)
+
+
+def test_a_locked_candidate_of_a_pointerless_store_is_not_taken_for_inactive(
+    tmp_path: Path,
+):
+    storage, candidate, relative = _migrated_v6_store_without_pointer(tmp_path)
+    with closing(sqlite3.connect(candidate)) as holder:
+        holder.execute("PRAGMA locking_mode=EXCLUSIVE")
+        holder.execute("BEGIN IMMEDIATE")
+        with pytest.raises(RuntimeError) as start:
+            _start_manager(storage)
+        holder.rollback()
+    assert getattr(start.value, "code", None) == "ACTIVE_POINTER_MISSING"
+    assert relative in str(start.value)
+    assert "cannot be read" in str(start.value)
+
+    # Released, it is readable again and still recorded as active.
+    with pytest.raises(RuntimeError) as later:
+        _start_manager(storage)
+    assert "is still recorded as the active" in str(later.value)
+
+
+def test_run_directories_no_pointer_could_have_named_do_not_block_a_v6_store(
+    tmp_path: Path,
+):
+    """Only a published candidate that cannot be inspected stands in the way."""
+
+    from tests.test_migrate_v7_end_to_end import _v6_database
+
+    storage = _v6_database(tmp_path)
+    runs = storage / "migrations" / "v7"
+    partial = runs / ("mig_" + "1" * 64)
+    partial.mkdir(parents=True)
+    (partial / "candidate.db.partial").write_bytes(b"not a database" * 100)
+    empty = runs / ("mig_" + "2" * 64)
+    empty.mkdir()
+    (empty / "candidate.db").write_bytes(b"")
+    unrelated = runs / ("mig_" + "3" * 64)
+    unrelated.mkdir()
+    with closing(sqlite3.connect(unrelated / "candidate.db")) as connection:
+        connection.execute("CREATE TABLE notes(body TEXT)")
+        connection.commit()
+    malformed = runs / "mig_not-a-run"
+    malformed.mkdir()
+    (malformed / "candidate.db").write_bytes(b"not a database" * 100)
+
+    assert _start_manager(storage) == (6, 0)

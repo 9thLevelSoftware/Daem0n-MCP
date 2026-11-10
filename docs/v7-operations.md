@@ -396,7 +396,12 @@ runs on the candidate. Without the pointer that file is not opened or migrated
 again while the candidate's run is still recorded as active: every command
 answers `ACTIVE_POINTER_MISSING`, naming the candidate, `--recover-pointer`
 answers `POINTER_RECOVERY_AMBIGUOUS`, and the pointer has to come from a
-backup. A brand-new,
+backup. A published `candidate.db` that cannot be read at all (in use by
+another process, or damaged) is treated the same way, because it may be that
+active database: stop the process holding it and retry, restore the pointer
+from a backup, or, when that run was never activated, move its
+`migrations/v7/<migration-id>/` directory out of the storage directory. A
+brand-new,
 still empty database whose first start stopped before its pointer was written
 is the one case finished automatically on the next start.
 

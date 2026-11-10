@@ -20,7 +20,7 @@ from typing import BinaryIO, Literal
 
 from .event_store import canonical_json_bytes
 from .protected_files import reject_linked_ancestry
-from .workspace import normalize_resolved_path
+from .workspace import normalize_resolved_path, sqlite_file_uri
 
 POINTER_NAME = "active-db.json"
 POINTER_TEMP_NAME = "active-db.json.tmp"
@@ -324,6 +324,24 @@ ACTIVE_POINTER_MISSING_DETAIL = (
 )
 
 
+class CandidateUnreadableError(RuntimeError):
+    """A published candidate of a pointerless store could not be inspected.
+
+    The message is the operator text; ``candidate`` is storage-relative.
+    """
+
+    def __init__(self, candidate: str) -> None:
+        self.candidate = candidate
+        super().__init__(
+            f"{POINTER_NAME} is missing and {candidate} cannot be read, so it "
+            f"may be the active format-7 database and {DEFAULT_DATABASE_NAME} "
+            "is not opened in its place. If another process is using that "
+            f"file, stop it and retry. Otherwise restore {POINTER_NAME} from a "
+            "backup, or, if that migration run was never activated, move its "
+            "directory out of the storage directory"
+        )
+
+
 def active_candidate_without_pointer(storage: Path) -> str | None:
     """The migration candidate a pointerless store still records as active.
 
@@ -332,6 +350,12 @@ def active_candidate_without_pointer(storage: Path) -> str | None:
     format-6 file would be opened and written instead, so a candidate whose own
     run is still ``active`` is reported by its storage-relative name.  Links
     are skipped: no pointer can have named one.
+
+    A published candidate that cannot be read (locked, damaged, I/O error) may
+    be that active database, so when no readable one is active it raises
+    ``CandidateUnreadableError`` instead of answering "none".  Only a published
+    ``candidate.db`` counts: a run directory without one, a partial candidate,
+    and a readable file that holds no run table were never named by a pointer.
     """
 
     root = storage / "migrations" / "v7"
@@ -341,6 +365,7 @@ def active_candidate_without_pointer(storage: Path) -> str | None:
         run_dirs = sorted(root.iterdir(), key=lambda path: path.name)
     except OSError:
         return None
+    unreadable: str | None = None
     for run_dir in run_dirs:
         name = run_dir.name
         candidate = run_dir / "candidate.db"
@@ -351,19 +376,33 @@ def active_candidate_without_pointer(storage: Path) -> str | None:
             or not candidate.is_file()
         ):
             continue
+        relative = f"migrations/v7/{name}/candidate.db"
         try:
-            connection = sqlite3.connect(candidate)
+            # Read-only: inspecting a candidate must not checkpoint or
+            # otherwise change a database this process does not own.
+            connection = sqlite3.connect(
+                sqlite_file_uri(candidate, mode="ro"), uri=True
+            )
             try:
-                row = connection.execute(
-                    "SELECT status FROM v7_migration_runs WHERE migration_run_id=?",
-                    (name,),
-                ).fetchone()
+                row = None
+                if connection.execute(
+                    "SELECT 1 FROM sqlite_master "
+                    "WHERE type='table' AND name='v7_migration_runs'"
+                ).fetchone():
+                    row = connection.execute(
+                        "SELECT status FROM v7_migration_runs WHERE migration_run_id=?",
+                        (name,),
+                    ).fetchone()
             finally:
                 connection.close()
         except (OSError, sqlite3.Error):
+            if unreadable is None:
+                unreadable = relative
             continue
         if row is not None and row[0] == "active":
-            return f"migrations/v7/{name}/candidate.db"
+            return relative
+    if unreadable is not None:
+        raise CandidateUnreadableError(unreadable)
     return None
 
 

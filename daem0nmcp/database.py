@@ -28,6 +28,7 @@ from .storage_activation import (
     ACTIVE_POINTER_MISSING_DETAIL,
     LOCK_NAME,
     ActiveDatabasePointer,
+    CandidateUnreadableError,
     DatabaseFileLock,
     DatabaseInUseError,
     active_candidate_pointer_missing_detail,
@@ -183,7 +184,10 @@ class DatabaseManager:
                     # A store migrated from format 6 runs on a candidate
                     # only the pointer names; this file is its retained
                     # source and must not take the writes instead.
-                    candidate = active_candidate_without_pointer(self.storage_path)
+                    try:
+                        candidate = active_candidate_without_pointer(self.storage_path)
+                    except CandidateUnreadableError as exc:
+                        raise ActivePointerMissingError(str(exc)) from exc
                     if candidate is not None:
                         raise ActivePointerMissingError(
                             active_candidate_pointer_missing_detail(candidate)
