@@ -575,6 +575,7 @@ class DatabaseManager:
             if lexical is None:
                 raise RuntimeError("LEXICAL_BOOTSTRAP_FAILED")
             now = time.time_ns() // 1_000
+            dense_encoder_changed = self._dense_encoder_changed(connection)
             for projection_name in (
                 "dense",
                 "graph",
@@ -619,7 +620,12 @@ class DatabaseManager:
                         str(lexical[3]) if lexical[3] is not None else None
                     ),
                     recorded_at_us=now,
-                    requeue_existing=False,
+                    # A finished rebuild job is left alone, except that vectors
+                    # built by another encoder cannot answer queries and no
+                    # write is coming to queue their replacement.
+                    requeue_existing=(
+                        projection_name == "dense" and dense_encoder_changed
+                    ),
                 )
             connection.commit()
         except Exception as exc:
@@ -627,6 +633,35 @@ class DatabaseManager:
             raise RuntimeError("LEXICAL_BOOTSTRAP_FAILED") from exc
         finally:
             connection.close()
+
+    def _dense_encoder_changed(self, connection: sqlite3.Connection) -> bool:
+        """Whether the active dense projection was built for other settings."""
+
+        import json
+
+        from .config import settings
+
+        row = connection.execute(
+            "SELECT details_json FROM projection_manifests WHERE workspace_id=? "
+            "AND projection_name='dense' AND status='active'",
+            (self.workspace_id,),
+        ).fetchone()
+        if row is None:
+            return False
+        try:
+            details = json.loads(str(row[0]))
+        except ValueError:
+            return False
+        if (
+            not isinstance(details, dict)
+            or "model_id" not in details
+            or "dimension" not in details
+        ):
+            return False
+        return (
+            details["model_id"] != settings.embedding_model
+            or details["dimension"] != settings.embedding_dimension
+        )
 
     def _schema_version(self) -> int:
         try:

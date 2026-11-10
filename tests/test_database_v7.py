@@ -434,6 +434,95 @@ class DatabaseManagerDependencyIntegrationTests(unittest.IsolatedAsyncioTestCase
             )
             await manager.close()
 
+    async def test_changed_embedding_settings_requeue_the_dense_rebuild_on_start(
+        self,
+    ):
+        """Vectors of another encoder must not wait for the next write."""
+        import json
+        from unittest.mock import patch
+
+        from daem0nmcp.config import settings
+        from daem0nmcp.database import DatabaseManager
+
+        def job_states(path: Path) -> dict[str, str]:
+            connection = sqlite3.connect(path)
+            try:
+                return {
+                    json.loads(row[0])["projection_names"][0]: str(row[1])
+                    for row in connection.execute(
+                        "SELECT payload_json,status FROM background_jobs "
+                        "WHERE job_type='retrieval.projection_rebuild'"
+                    )
+                }
+            finally:
+                connection.close()
+
+        async def restart(raw: str) -> None:
+            manager = DatabaseManager(raw)
+            try:
+                await manager.init_db()
+            finally:
+                await manager.close()
+
+        with tempfile.TemporaryDirectory() as raw:
+            database = Path(raw) / "daem0nmcp.db"
+            await restart(raw)
+            # A finished build: the dense and graph manifests are active for
+            # the configured encoder and their rebuild jobs have succeeded.
+            connection = sqlite3.connect(database)
+            try:
+                connection.execute(
+                    "UPDATE projection_manifests SET status='active',details_json=? "
+                    "WHERE projection_name='dense'",
+                    (
+                        json.dumps(
+                            {
+                                "model_id": settings.embedding_model,
+                                "dimension": settings.embedding_dimension,
+                            }
+                        ),
+                    ),
+                )
+                connection.execute(
+                    "UPDATE projection_manifests SET status='active' "
+                    "WHERE projection_name='graph'"
+                )
+                connection.execute(
+                    "UPDATE background_jobs SET status='succeeded' "
+                    "WHERE job_type='retrieval.projection_rebuild' "
+                    "AND idempotency_key IN "
+                    "('active-projection:dense','active-projection:graph')"
+                )
+                connection.commit()
+            finally:
+                connection.close()
+
+            await restart(raw)
+            unchanged = job_states(database)
+            self.assertEqual("succeeded", unchanged["dense"])
+            self.assertEqual("succeeded", unchanged["graph"])
+
+            changes = (
+                ("embedding_model", "example/another-embedding-model"),
+                ("embedding_dimension", settings.embedding_dimension * 2),
+            )
+            for name, value in changes:
+                with self.subTest(setting=name):
+                    connection = sqlite3.connect(database)
+                    try:
+                        connection.execute(
+                            "UPDATE background_jobs SET status='succeeded' "
+                            "WHERE idempotency_key='active-projection:dense'"
+                        )
+                        connection.commit()
+                    finally:
+                        connection.close()
+                    with patch.object(settings, name, value):
+                        await restart(raw)
+                    changed = job_states(database)
+                    self.assertEqual("queued", changed["dense"])
+                    self.assertEqual("succeeded", changed["graph"])
+
     async def test_reopening_a_current_v7_store_changes_neither_schema_nor_pointer(
         self,
     ):
