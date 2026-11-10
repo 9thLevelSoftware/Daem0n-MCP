@@ -43,7 +43,7 @@ _TERMINAL_ESCAPE = re.compile(
     r"|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)"
     r"|\x1b[PX^_][^\x1b]*\x1b\\"
     r"|\x1b[ -/]+[0-~]"
-    r"|\x1b[0-Z\\-_]"
+    r"|\x1b[0-~]"
 )
 
 

@@ -1651,6 +1651,55 @@ class LexicalProjectionTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIsNone(result.reason)
                 self.assertEqual((), result.candidates)
 
+    async def test_two_character_escapes_with_any_final_byte_are_removed(self):
+        """ESC plus any final byte 0x30-0x7E is one sequence, lowercase included."""
+
+        from daem0nmcp.retrieval.projections import LexicalProjectionBuilder
+        from daem0nmcp.retrieval.providers import LexicalProvider
+        from daem0nmcp.retrieval.types import RetrievalQuery, without_terminal_escapes
+
+        for final in range(0x30, 0x7F):
+            if final == 0x5B:
+                continue  # ``ESC [`` introduces a control sequence, below
+            with self.subTest(final=hex(final)):
+                # ``ESC ]`` and the string introducers open longer sequences
+                # only when a terminator follows; none does here.
+                self.assertEqual(
+                    "a  b", without_terminal_escapes(f"a\x1b{chr(final)} b")
+                )
+        # The longer forms still win over the two-character one.
+        self.assertEqual(" x", without_terminal_escapes("\x1b[31mx"))
+        self.assertEqual("a ", without_terminal_escapes("a\x1b[ b"))
+        self.assertEqual("a \n", without_terminal_escapes("a\x1b[\n"))
+        self.assertEqual(" x", without_terminal_escapes("\x1b]0;title\x07x"))
+        self.assertEqual(" x", without_terminal_escapes("\x1bPq#0\x1b\\x"))
+        self.assertEqual(" x", without_terminal_escapes("\x1b(Bx"))
+
+        target = self._append_record(
+            "a", "Postgres pooling notes", "Connection reuse", ["database"]
+        )
+        self._append_record("b", "Graph traversal", "Bounded walks", ["graph"])
+        LexicalProjectionBuilder(self.connection).rebuild(WORKSPACE_ID)
+        self.connection.commit()
+        provider = LexicalProvider(self.connection)
+
+        for text in (
+            "\x1bcpostgres",
+            "\x1bnpostgres\x1bo",
+            "\x1b|postgres\x1b}\x1b~",
+            "\x1b`postgres",
+        ):
+            with self.subTest(text=repr(text)):
+                result = await provider.search(
+                    RetrievalQuery(workspace_id=WORKSPACE_ID, text=text), 10
+                )
+                self.assertEqual("ready", result.status)
+                self.assertIsNone(result.reason)
+                self.assertEqual(
+                    [target],
+                    [candidate.evidence.record_id for candidate in result.candidates],
+                )
+
     async def test_three_term_query_falls_back_to_single_term_matches(self):
         """One relevant term must not be erased by two absent ones."""
 
