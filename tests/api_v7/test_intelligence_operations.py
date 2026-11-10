@@ -346,6 +346,7 @@ class IntelligenceOperationTests(unittest.IsolatedAsyncioTestCase):
             ("We don\u2019t use Postgres.", "We do not use Postgres.", "supported"),
             ("We can\u2019t use Postgres.", "We can use Postgres.", "contradicted"),
             ("We dont use Postgres.", "We use Postgres.", "contradicted"),
+            ("We wont use Postgres.", "We use Postgres.", "contradicted"),
             ("We no longer use Postgres.", "We use Postgres.", "contradicted"),
             ("We never use Postgres.", "We use Postgres.", "contradicted"),
             ("We use Postgres.", "We never use Postgres.", "contradicted"),
@@ -374,6 +375,60 @@ class IntelligenceOperationTests(unittest.IsolatedAsyncioTestCase):
                 "unknown",
             ),
             ("We use Postgres.", "We never don't use Postgres.", "unknown"),
+            # A negation about something else in the same sentence.
+            (
+                "We use Postgres and we don't use MySQL.",
+                "We use Postgres.",
+                "supported",
+            ),
+            (
+                "We use Postgres and we do not use MySQL.",
+                "We don't use MySQL.",
+                "supported",
+            ),
+            (
+                "We do not trust MySQL so we use Postgres.",
+                "We use Postgres.",
+                "supported",
+            ),
+            ("We don't use Postgres or MySQL.", "We use MySQL.", "contradicted"),
+            ("We don't use MySQL and we use Postgres.", "We use Postgres.", "unknown"),
+            # Restating a record supports it, whatever its clauses negate.
+            (
+                "We use Postgres, not MySQL.",
+                "We use Postgres, not MySQL.",
+                "supported",
+            ),
+            (
+                "Use signed session cookies, not server-side sessions.",
+                "Use signed session cookies, not server-side sessions.",
+                "supported",
+            ),
+            (
+                "We use Postgres 15, no exceptions.",
+                "We use Postgres 15, no exceptions.",
+                "supported",
+            ),
+            (
+                "It isn't true that we don't use Postgres.",
+                "It is not true that we do not use Postgres.",
+                "supported",
+            ),
+            # A negation cut off from what it negates is never read as support.
+            ("Never, ever deploy on Friday.", "Deploy on Friday.", "unknown"),
+            (
+                "We do not, under any load, use Postgres.",
+                "We use Postgres.",
+                "unknown",
+            ),
+            ("We do not (ever) use Postgres.", "We use Postgres.", "unknown"),
+            (
+                "The deploy must not, under any circumstances, skip tests.",
+                "The deploy must skip tests.",
+                "unknown",
+            ),
+            ("We use Postgres in no service.", "We use Postgres.", "unknown"),
+            ("Secrets are committed never.", "Secrets are committed.", "unknown"),
             # No English negation word: plain term agreement.
             ("Nous utilisons Postgres.", "Nous utilisons Postgres.", "supported"),
             ("The cache is enabled.", "The cache is enabled.", "supported"),

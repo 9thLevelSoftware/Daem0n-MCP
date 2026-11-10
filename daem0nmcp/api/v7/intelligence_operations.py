@@ -72,10 +72,16 @@ _WORD_RE = re.compile(r"[A-Za-z0-9]+(?:[-_][A-Za-z0-9]+)*")
 # otherwise split "don't" into "don" and "t" and lose the negation.
 _CONTRACTED_NEGATION_RE = re.compile(
     r"\b[A-Za-z]+n['\u2019]t\b|\bcannot\b"
-    r"|\b(?:are|could|did|does|do|had|has|have|is|should|was|were|would)nt\b",
+    r"|\b(?:are|ca|could|did|does|do|had|has|have|is|must|should|was|were|wo|would)nt\b",
     re.IGNORECASE,
 )
-_CLAUSE_SPLIT_RE = re.compile(r"[,;:()\u2013\u2014]|\s-\s|\bbut\b", re.IGNORECASE)
+_CLAUSE_SPLIT_RE = re.compile(r"[,;:()\u2013\u2014]|\s-\s")
+# Words that start a clause with a polarity of its own, and the coordinations
+# across which a negation may or may not carry.
+_CLAUSE_WORDS = frozenset(
+    {"although", "because", "but", "so", "though", "whereas", "while"}
+)
+_COORDINATIONS = frozenset({"and", "or"})
 _NEGATIONS = frozenset({"neither", "never", "no", "none", "nor", "not", "without"})
 _STOP_WORDS = frozenset(
     {
@@ -557,40 +563,140 @@ def _semantic_terms(text: str) -> frozenset[str]:
     )
 
 
-def _polarity(terms: frozenset[str], text: str) -> bool | None:
-    """Whether ``text`` negates what ``terms`` name; ``None`` when unclear.
+def _sentence_units(sentence: str) -> list[tuple[list[str], str, int]]:
+    """Split a sentence into units that each carry one polarity.
 
-    Only the sentences that share the most terms are read, and inside them a
-    negation counts only when one of the terms follows it within its clause.
-    A negation elsewhere in the text is about something else.  Two negations
-    in one clause, or clauses that disagree, are not resolved by guessing.
+    Each unit is ``(tokens, polarity, negation index)`` with polarity ``"+"``,
+    ``"-"`` or ``"?"`` (not readable without guessing) and the index of the
+    unit's own negation, or ``-1``.  A unit ends at punctuation, at a word
+    that opens a new clause, and at "and"/"or".
+    """
+    units: list[tuple[list[str], str, int]] = []
+    # A negation with nothing after it in its unit ("We do not, under any
+    # load, ...") negates something later in the sentence; which part is not
+    # decided here, so the rest of the sentence is unreadable.
+    dangling = False
+    for clause in _CLAUSE_SPLIT_RE.split(sentence):
+        groups: list[tuple[str, list[str]]] = [("", [])]
+        for token in _tokens(clause):
+            if token in _CLAUSE_WORDS or token in _COORDINATIONS:
+                groups.append((token, []))
+            else:
+                groups[-1][1].append(token)
+        previous = "+"
+        for connective, tokens in groups:
+            if connective in _CLAUSE_WORDS:
+                previous = "+"
+            if not tokens or (tokens == ["no"] and not units):
+                # Nothing to read, or a leading "No," that answers a question
+                # rather than negating the statement after it.
+                continue
+            negations = [
+                index for index, token in enumerate(tokens) if token in _NEGATIONS
+            ]
+            if dangling or len(negations) > 1:
+                polarity = "?"
+            elif negations:
+                polarity = "-"
+                if all(token in _STOP_WORDS for token in tokens[negations[0] + 1 :]):
+                    polarity = "?"
+                    dangling = True
+            elif previous == "-" and connective == "or":
+                # "We don't use X or Y" negates Y as well.
+                polarity = "-"
+            elif previous == "+":
+                polarity = "+"
+            else:
+                # After "and" a negation may or may not carry: "don't use X
+                # and Y" against "don't use X and we use Y".
+                polarity = "?"
+            units.append((tokens, polarity, negations[0] if negations else -1))
+            previous = polarity
+    return units
+
+
+def _polar_units(terms: frozenset[str], text: str) -> list[tuple[frozenset[str], str]]:
+    """The parts of ``text`` that mention ``terms``, each with its polarity.
+
+    Only the sentences that share the most terms are read: a negation in
+    another sentence is about something else.
     """
     best_overlap = 0
-    best_sentences: list[list[list[str]]] = []
+    best_sentences: list[list[tuple[list[str], str, int]]] = []
     for sentence in _CLAIM_SPLIT_RE.split(text):
-        clauses = [_tokens(clause) for clause in _CLAUSE_SPLIT_RE.split(sentence)]
-        overlap = len(terms & {token for clause in clauses for token in clause})
+        units = _sentence_units(sentence)
+        overlap = len(terms & {token for unit in units for token in unit[0]})
         if overlap > best_overlap:
             best_overlap = overlap
-            best_sentences = [clauses]
+            best_sentences = [units]
         elif overlap and overlap == best_overlap:
-            best_sentences.append(clauses)
-    polarities: set[bool] = set()
-    for clauses in best_sentences:
-        for tokens in clauses:
-            if terms.isdisjoint(tokens):
+            best_sentences.append(units)
+    result: list[tuple[frozenset[str], str]] = []
+    for units in best_sentences:
+        for tokens, polarity, negation in units:
+            mentioned = terms.intersection(tokens)
+            if not mentioned:
                 continue
-            negations = sum(
-                1
-                for index, token in enumerate(tokens)
-                if token in _NEGATIONS and not terms.isdisjoint(tokens[index + 1 :])
-            )
-            if negations > 1:
-                return None
-            polarities.add(negations == 1)
-    if len(polarities) != 1:
+            if (
+                polarity == "-"
+                and negation >= 0
+                and terms.isdisjoint(tokens[negation + 1 :])
+            ):
+                # The terms come before the negation ("use Postgres in no
+                # service", "use Postgres not MySQL"): it may or may not
+                # reach back to them.
+                polarity = "?"
+            result.append((mentioned, polarity))
+    return result
+
+
+def _statement(text: str) -> tuple[str, ...]:
+    return tuple(token for token in _tokens(text) if token not in _STOP_WORDS)
+
+
+def _restates(claim: str, evidence: str) -> bool:
+    """Whether a sentence of ``evidence`` says ``claim`` word for word."""
+    statement = _statement(claim)
+    return bool(statement) and any(
+        _statement(sentence) == statement
+        for sentence in _CLAIM_SPLIT_RE.split(evidence)
+    )
+
+
+def _agreement(
+    claim_units: list[tuple[frozenset[str], str]],
+    claim_terms: frozenset[str],
+    evidence: str,
+) -> bool | None:
+    """Whether ``evidence`` agrees with the claim; ``None`` when unclear.
+
+    Each part of the claim is compared with the evidence unit(s) sharing the
+    most of its terms.  Units that disagree with each other, an unreadable
+    unit, or parts of the claim that fare differently are not resolved by
+    guessing.
+    """
+    if not claim_units or any(polarity == "?" for _terms, polarity in claim_units):
         return None
-    return polarities.pop()
+    evidence_units = _polar_units(claim_terms, evidence)
+    verdicts: set[bool] = set()
+    for terms, claim_polarity in claim_units:
+        best_overlap = 0
+        polarities: set[str] = set()
+        for evidence_terms, polarity in evidence_units:
+            overlap = len(terms & evidence_terms)
+            if overlap > best_overlap:
+                best_overlap = overlap
+                polarities = {polarity}
+            elif overlap and overlap == best_overlap:
+                polarities.add(polarity)
+        if not polarities:
+            continue
+        if len(polarities) != 1 or "?" in polarities:
+            return None
+        verdicts.add(polarities.pop() == claim_polarity)
+    if len(verdicts) != 1:
+        return None
+    return verdicts.pop()
 
 
 def _match_score(claim_terms: frozenset[str], evidence: str) -> float:
@@ -638,17 +744,19 @@ def _memory_verify_sync(
                 all_refs: dict[tuple[str, str], EvidenceRef] = {}
                 for claim in _claims(request.text):
                     claim_terms = _semantic_terms(claim)
-                    claim_negated = _polarity(claim_terms, claim)
+                    claim_units = _polar_units(claim_terms, claim)
                     matches: list[tuple[float, bool, _RecordEvidence]] = []
-                    for item in evidence if claim_negated is not None else ():
+                    for item in evidence:
                         score = _match_score(claim_terms, item.content)
                         if score < 0.75:
                             continue
-                        evidence_negated = _polarity(claim_terms, item.content)
+                        agrees = _restates(claim, item.content) or _agreement(
+                            claim_units, claim_terms, item.content
+                        )
                         # Evidence whose stance on the claim is unclear proves
                         # nothing either way.
-                        if evidence_negated is not None:
-                            matches.append((score, evidence_negated, item))
+                        if agrees is not None:
+                            matches.append((score, agrees, item))
                     matches.sort(
                         key=lambda entry: (
                             -entry[0],
@@ -656,12 +764,8 @@ def _memory_verify_sync(
                         )
                     )
                     selected = matches[:32]
-                    contradictory = [
-                        entry for entry in selected if entry[1] != claim_negated
-                    ]
-                    supporting = [
-                        entry for entry in selected if entry[1] == claim_negated
-                    ]
+                    contradictory = [entry for entry in selected if not entry[1]]
+                    supporting = [entry for entry in selected if entry[1]]
                     if contradictory:
                         status = "contradicted"
                         used = contradictory
