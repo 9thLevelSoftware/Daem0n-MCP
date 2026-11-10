@@ -1335,10 +1335,30 @@ class MigrationV7Service:
         storage = resolve_derived_path(workspace.root, ".daem0nmcp", "storage")
         return workspace, storage
 
-    def _validate_active_v7(self, resolved, workspace_id: str) -> None:
-        """Fail closed before treating a pointer target as already active."""
+    def _validate_active_v7(
+        self, resolved, workspace_id: str, *, allow_older_schema: bool = False
+    ) -> None:
+        """Fail closed before treating a pointer target as already active.
+
+        Rollback passes ``allow_older_schema``: returning to a predecessor
+        needs the active database to be an intact format-7 store, not one this
+        build could serve, so a supported older schema is checked against its
+        own ledger and physical contract instead of the current one.
+        """
 
         required = _V7_TABLE_NAMES
+        older_schema = False
+        if allow_older_schema:
+            from .v7_schema_upgrade import _schema_versions
+
+            try:
+                older_schema = (
+                    _schema_versions(resolved.path)[0] < CURRENT_SCHEMA_VERSION
+                )
+            except MigrationV7Error as exc:
+                raise MigrationV7Error(
+                    "ACTIVE_V7_INVALID", "active target schema or integrity is invalid"
+                ) from exc
         connection = sqlite3.connect(resolved.path)
         try:
             connection.execute("PRAGMA foreign_keys=ON")
@@ -1357,12 +1377,13 @@ class MigrationV7Service:
             ]
             foreign = list(connection.execute("PRAGMA foreign_key_check"))
             if (
-                version < CURRENT_SCHEMA_VERSION
-                or not versions >= REQUIRED_V7_SCHEMA_VERSIONS
-                or not required <= tables
-                or quick != ["ok"]
-                or foreign
-            ):
+                not older_schema
+                and (
+                    version < CURRENT_SCHEMA_VERSION
+                    or not versions >= REQUIRED_V7_SCHEMA_VERSIONS
+                    or not required <= tables
+                )
+            ) or (quick != ["ok"] or foreign):
                 raise MigrationV7Error(
                     "ACTIVE_V7_INVALID", "active target schema or integrity is invalid"
                 )
@@ -3672,7 +3693,11 @@ class MigrationV7Service:
                 raise MigrationV7Error(
                     "ROLLBACK_NOT_ACTIVE", "migration run is not active"
                 )
-            self._validate_active_v7(resolved, workspace.workspace_id)
+            # The database a rollback of a schema upgrade returned to is on
+            # its older schema, and the run underneath it can still be undone.
+            self._validate_active_v7(
+                resolved, workspace.workspace_id, allow_older_schema=True
+            )
             run_id = resolved.migration_run_id
             if run_id is None or (requested is not None and requested != run_id):
                 raise MigrationV7Error(

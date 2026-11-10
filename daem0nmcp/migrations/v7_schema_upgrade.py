@@ -1351,7 +1351,18 @@ class V7SchemaUpgradeService:
             status, identity = self._read_run(active.path, run_id, workspace_id)
         except MigrationV7Error:
             return None
-        if status != "ready":
+        if status == "rolled_back":
+            # Activation writes the pointer first.  A rolled-back run named by
+            # exactly the pointer its activation publishes is a reactivation
+            # that stopped before its metadata; any other pointer is not ours.
+            recorded = identity.get("active_pointer")
+            if (
+                not isinstance(recorded, dict)
+                or recorded.get("active_db") != active.previous_db
+                or recorded.get("generation") != active.generation - 1
+            ):
+                return None
+        elif status != "ready":
             return None
         _verify_published_candidate(active.path, workspace_id)
         connection = sqlite3.connect(active.path)
@@ -1359,7 +1370,8 @@ class V7SchemaUpgradeService:
             now = self._clock_us()
             connection.execute(
                 "UPDATE v7_migration_runs SET status='active',updated_at_us=?,"
-                "activated_at_us=? WHERE migration_run_id=? AND status='ready'",
+                "activated_at_us=?,rolled_back_at_us=NULL,last_error_json=NULL "
+                "WHERE migration_run_id=? AND status IN ('ready','rolled_back')",
                 (now, now, run_id),
             )
             connection.commit()

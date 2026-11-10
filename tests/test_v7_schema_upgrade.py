@@ -1244,6 +1244,166 @@ def test_apply_after_an_interrupted_rollback_reactivates_the_candidate(tmp_path:
     _assert_pointer_names_its_own_database(storage)
 
 
+def test_an_interrupted_reactivation_is_completed_by_apply_or_rollback(
+    tmp_path: Path,
+):
+    """Reactivation writes the pointer first, like a first activation."""
+
+    def interrupt(stage: str, _details: dict[str, object]) -> None:
+        if stage == "schema_upgrade_after_pointer":
+            raise MigrationInterrupted(stage)
+
+    for name, finish in (("apply", "apply"), ("rollback", "rollback")):
+        root = tmp_path / name
+        root.mkdir()
+        storage, source, registry = _fixture(
+            root, maximum_version=CURRENT_SCHEMA_VERSION - 1
+        )
+        source_pointer = (storage / "active-db.json").read_bytes()
+        service = MigrationV7Service(registry)
+        upgraded = service.apply(root)
+        candidate = resolve_active_database(storage).path
+        candidate_pointer = (storage / "active-db.json").read_bytes()
+        service.rollback(root)
+
+        with pytest.raises(MigrationInterrupted):
+            MigrationV7Service(registry, fault_injector=interrupt).apply(root)
+        assert (storage / "active-db.json").read_bytes() == candidate_pointer
+        assert _run_status(candidate) == "rolled_back"
+
+        if finish == "apply":
+            resumed = service.apply(root)
+            assert (resumed.status, resumed.migration_run_id) == (
+                "activated",
+                upgraded.migration_run_id,
+            )
+            assert (storage / "active-db.json").read_bytes() == candidate_pointer
+            _assert_pointer_names_its_own_database(storage)
+            assert _start_manager(storage) == (7, 2)
+            assert service.rollback(root).status == "rolled_back"
+        else:
+            rolled = service.rollback(root)
+            assert (rolled.status, rolled.migration_run_id) == (
+                "rolled_back",
+                upgraded.migration_run_id,
+            )
+            assert (storage / "active-db.json").read_bytes() == source_pointer
+            assert _run_status(candidate) == "rolled_back"
+            assert service.apply(root).action == "reactivate"
+            assert _start_manager(storage) == (7, 2)
+
+
+def test_a_rolled_back_run_under_a_foreign_pointer_is_not_completed(tmp_path: Path):
+    """Only the pointer activation itself publishes proves an interruption."""
+
+    storage, _source, registry = _fixture(
+        tmp_path, maximum_version=CURRENT_SCHEMA_VERSION - 1
+    )
+    service = MigrationV7Service(registry)
+    upgraded = service.apply(tmp_path)
+    candidate = resolve_active_database(storage)
+    service.rollback(tmp_path)
+    write_active_pointer(
+        storage,
+        ActiveDatabasePointer(
+            7,
+            candidate.generation + 5,
+            candidate.relative_path,
+            candidate.previous_db,
+            upgraded.migration_run_id,
+        ),
+    )
+
+    with pytest.raises(MigrationV7Error) as refused:
+        service.apply(tmp_path)
+
+    assert refused.value.code == "ACTIVE_V7_INVALID"
+    assert _run_status(candidate.path) == "rolled_back"
+
+
+def test_the_run_under_a_rolled_back_schema_upgrade_can_be_rolled_back_too(
+    tmp_path: Path,
+):
+    """An older schema is no reason to keep a store from its predecessor."""
+
+    storage, source, registry = _fixture(
+        tmp_path, maximum_version=CURRENT_SCHEMA_VERSION - 1
+    )
+    source_bytes = source.read_bytes()
+    source_pointer = (storage / "active-db.json").read_bytes()
+    first = MigrationV7Service(registry).apply(tmp_path)
+    first_pointer = (storage / "active-db.json").read_bytes()
+    first_candidate = resolve_active_database(storage).path
+
+    with _as_the_next_build():
+        service = MigrationV7Service(registry)
+        second = service.apply(tmp_path)
+        assert second.checkpoints["schema_from"] == CURRENT_SCHEMA_VERSION
+        second_candidate = resolve_active_database(storage).path
+        assert service.rollback(tmp_path).migration_run_id == second.migration_run_id
+        assert (storage / "active-db.json").read_bytes() == first_pointer
+        assert service.rollback(tmp_path).action == "already_rolled_back"
+
+        under = service.rollback(tmp_path, first.migration_run_id)
+
+        assert (under.status, under.migration_run_id, under.active_generation) == (
+            "rolled_back",
+            first.migration_run_id,
+            1,
+        )
+        assert (storage / "active-db.json").read_bytes() == source_pointer
+        assert source.read_bytes() == source_bytes
+        assert _run_status(first_candidate) == "rolled_back"
+        assert _run_status(second_candidate) == "rolled_back"
+        assert service.rollback(tmp_path).action == "already_rolled_back"
+        # A damaged predecessor is still refused, whatever its schema.
+        again = service.apply(tmp_path)
+        assert again.status == "activated"
+        with closing(sqlite3.connect(resolve_active_database(storage).path)) as raw:
+            raw.execute("DROP TABLE later_build_marker")
+            raw.commit()
+        with pytest.raises(MigrationV7Error) as damaged:
+            service.rollback(tmp_path)
+        assert damaged.value.code == "ACTIVE_V7_INVALID"
+
+
+def test_a_v6_migration_under_a_rolled_back_schema_upgrade_returns_to_v6(
+    tmp_path: Path,
+):
+    from tests.test_migrate_v7_end_to_end import _registry, _v6_database
+
+    storage = _v6_database(tmp_path)
+    source = storage / "daem0nmcp.db"
+    source_bytes = source.read_bytes()
+    registry = _registry(tmp_path)
+    migrated = MigrationV7Service(registry).apply(tmp_path)
+    migrated_candidate = resolve_active_database(storage).path
+
+    with _as_the_next_build():
+        service = MigrationV7Service(registry)
+        upgraded = service.apply(tmp_path)
+        assert (upgraded.action, upgraded.active_generation) == ("upgrade", 2)
+        assert service.rollback(tmp_path).migration_run_id == (
+            upgraded.migration_run_id
+        )
+        assert resolve_active_database(storage).path == migrated_candidate
+
+        under = service.rollback(tmp_path, migrated.migration_run_id)
+
+    assert (under.status, under.migration_run_id) == (
+        "rolled_back",
+        migrated.migration_run_id,
+    )
+    active = resolve_active_database(storage)
+    assert (active.format_version, active.path) == (6, source)
+    assert source.read_bytes() == source_bytes
+    assert _run_status(migrated_candidate) == "rolled_back"
+    # The build that migrated it takes the store forward again.
+    assert MigrationV7Service(registry).apply(tmp_path).action == "reactivate"
+    assert resolve_active_database(storage).path == migrated_candidate
+    assert _start_manager(storage) == (7, 3)
+
+
 def test_schema_upgrade_rollback_leaves_a_store_that_starts_and_upgrades_again(
     tmp_path: Path,
 ):
