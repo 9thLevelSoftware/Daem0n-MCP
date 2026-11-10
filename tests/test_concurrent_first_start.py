@@ -504,3 +504,32 @@ async def test_table_creation_looks_again_after_another_start_changed_the_schema
         assert manager.format_version == 7
     finally:
         await manager.close()
+
+
+def test_wal_switch_waits_out_another_connection_switching(monkeypatch):
+    """A refused journal-mode switch is tried again, and a lasting one surfaces."""
+
+    monkeypatch.setattr(database, "_WAL_SWITCH_PAUSE_SECONDS", 0)
+
+    class _Cursor:
+        def __init__(self, refusals: int, message: str = "database is locked"):
+            self.refusals = refusals
+            self.message = message
+            self.statements: list[str] = []
+
+        def execute(self, statement: str) -> None:
+            self.statements.append(statement)
+            if self.refusals:
+                self.refusals -= 1
+                raise sqlite3.OperationalError(self.message)
+
+    raced = _Cursor(refusals=3)
+    database._enter_wal_mode(raced)
+    assert raced.statements == ["PRAGMA journal_mode=WAL"] * 4
+
+    with pytest.raises(sqlite3.OperationalError):
+        database._enter_wal_mode(_Cursor(refusals=database._WAL_SWITCH_ATTEMPTS))
+    other = _Cursor(refusals=1, message="disk I/O error")
+    with pytest.raises(sqlite3.OperationalError):
+        database._enter_wal_mode(other)
+    assert len(other.statements) == 1

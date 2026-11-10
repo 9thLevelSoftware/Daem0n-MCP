@@ -10,7 +10,7 @@ from collections.abc import Callable
 from contextlib import asynccontextmanager, closing
 from datetime import datetime
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 from sqlalchemy import event
 from sqlalchemy.engine import URL
@@ -84,6 +84,30 @@ def _is_concurrent_ddl_refusal(error: OperationalError) -> bool:
 
     message = str(error.orig)
     return "already exists" in message or "database schema has changed" in message
+
+
+_WAL_SWITCH_ATTEMPTS = 100
+_WAL_SWITCH_PAUSE_SECONDS = 0.05
+
+
+def _enter_wal_mode(cursor: Any) -> None:
+    """Switch the database to WAL, waiting out another connection doing the same.
+
+    Changing the journal mode of a database that is not yet in WAL needs every
+    other connection out of the file, and SQLite refuses at once, without
+    consulting the busy timeout, when two connections each wait on the other.
+    The switch is retried; a database already in WAL answers without a lock.
+    """
+
+    for attempt in range(_WAL_SWITCH_ATTEMPTS):
+        try:
+            cursor.execute("PRAGMA journal_mode=WAL")
+        except sqlite3.OperationalError as exc:
+            if "locked" not in str(exc) or attempt == _WAL_SWITCH_ATTEMPTS - 1:
+                raise
+            time.sleep(_WAL_SWITCH_PAUSE_SECONDS)
+        else:
+            return
 
 
 class DatabaseManager:
@@ -237,12 +261,12 @@ class DatabaseManager:
             @event.listens_for(self._engine.sync_engine, "connect")
             def set_sqlite_pragmas(dbapi_conn, connection_record):
                 cursor = dbapi_conn.cursor()
+                # 30 second busy timeout, before anything that takes a lock
+                cursor.execute("PRAGMA busy_timeout=30000")
                 # WAL mode for better concurrent access
-                cursor.execute("PRAGMA journal_mode=WAL")
+                _enter_wal_mode(cursor)
                 # Faster syncs (still safe with WAL)
                 cursor.execute("PRAGMA synchronous=NORMAL")
-                # 30 second busy timeout
-                cursor.execute("PRAGMA busy_timeout=30000")
                 # Enable foreign keys
                 cursor.execute("PRAGMA foreign_keys=ON")
                 # Use memory for temp tables
