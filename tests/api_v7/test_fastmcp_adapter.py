@@ -215,6 +215,91 @@ class FastMCPAdapterTests(unittest.TestCase):
         self.assertEqual(len(server.resources), 1)
         self.assertIs(server.resources[0][1]["task"], False)
 
+    def _resource_reader(self, handler, *, requires_workspace: bool = True):
+        from daem0nmcp.api.v7.fastmcp import _resource_adapter
+        from daem0nmcp.api.v7.registry import ResourceSpec
+
+        if requires_workspace:
+            spec = ResourceSpec(
+                uri_template="memory://workspaces/{workspace_id}/warnings",
+                name="workspace_warnings",
+                description="Newest active warnings.",
+                handler=handler,
+                output_model=_Output,
+            )
+        else:
+            spec = ResourceSpec(
+                uri_template="ui://daem0n/search",
+                name="dashboard_search",
+                description="A fixed shell.",
+                handler=handler,
+                output_model=None,
+                mime_type="text/html;profile=mcp-app",
+                requires_workspace=False,
+            )
+        return _resource_adapter(spec)
+
+    def test_workspace_resource_states_its_declared_mime_type(self) -> None:
+        read = self._resource_reader(_resource_handler)
+
+        result = asyncio.run(read(workspace_id="ws_test"))
+
+        [content] = result.contents
+        self.assertEqual(content.mime_type, "application/json")
+        self.assertEqual(content.content, '{"value":"ws_test"}')
+        wire = result.to_mcp_result("memory://workspaces/ws_test/warnings")
+        self.assertEqual(wire.contents[0].mimeType, "application/json")
+
+    def test_resource_refusal_and_failure_use_real_protocol_codes(self) -> None:
+        from mcp import McpError
+        from mcp.types import INTERNAL_ERROR
+
+        from daem0nmcp.api.v7.middleware import (
+            RESOURCE_NOT_FOUND,
+            ResourceInvocationContextError,
+        )
+        from daem0nmcp.api.v7.resources import ResourceAccessError
+
+        async def refused(workspace_id: str) -> _Output:
+            raise ResourceAccessError()
+
+        async def broken(workspace_id: str) -> _Output:
+            raise RuntimeError(f"private detail about {workspace_id}")
+
+        async def malformed(workspace_id: str) -> dict:
+            return {"unexpected": workspace_id}
+
+        async def broken_static() -> str:
+            raise RuntimeError("private detail")
+
+        async def oversized_static() -> str:
+            return "x" * 2_000_001
+
+        with self.assertRaises(McpError) as caught:
+            asyncio.run(self._resource_reader(refused)(workspace_id="ws_test"))
+        refusal = caught.exception.error
+        self.assertEqual(
+            (refusal.code, refusal.message, refusal.data),
+            (RESOURCE_NOT_FOUND, "Resource unavailable", None),
+        )
+        # Exactly what the middleware answers before any handler runs.
+        self.assertEqual(refusal, ResourceInvocationContextError().error)
+
+        for reader, arguments in (
+            (self._resource_reader(broken), {"workspace_id": "ws_test"}),
+            (self._resource_reader(malformed), {"workspace_id": "ws_test"}),
+            (self._resource_reader(broken_static, requires_workspace=False), {}),
+            (self._resource_reader(oversized_static, requires_workspace=False), {}),
+        ):
+            with self.subTest(reader=reader.__name__, arguments=arguments):
+                with self.assertRaises(McpError) as caught:
+                    asyncio.run(reader(**arguments))
+                failure = caught.exception.error
+                self.assertEqual(
+                    (failure.code, failure.message, failure.data),
+                    (INTERNAL_ERROR, "Resource read failed", None),
+                )
+
     def test_synthetic_callable_annotations_match_the_wire_signature(self) -> None:
         from daem0nmcp.api.v7.fastmcp import build_fastmcp_server
 

@@ -25,9 +25,11 @@ from .gateway_operations import (
 from .middleware import (
     EnvelopeErrorMiddleware,
     ListedToolsMiddleware,
+    ResourceUnavailableError,
     V7InvocationMiddleware,
 )
 from .registry import ToolSpec, V7Manifest
+from .resources import ResourceAccessError
 from .responses import ResponseFactory
 from .task_dispatcher import DurableTaskDispatcher, TaskDispatcherError, TaskView
 from .tasks import (
@@ -300,26 +302,52 @@ def _tool_adapter(
     return invoke
 
 
+def _resource_failure() -> Exception:
+    """An unexpected read failure, with a real JSON-RPC code and no detail."""
+    from mcp import McpError
+    from mcp.types import INTERNAL_ERROR, ErrorData
+
+    return McpError(ErrorData(code=INTERNAL_ERROR, message="Resource read failed"))
+
+
 def _resource_adapter(spec: Any):
-    async def read_workspace(workspace_id: str) -> str:
-        result = spec.handler(workspace_id=workspace_id)
-        if inspect.isawaitable(result):
-            result = await result
-        response = spec.output_model.model_validate(result)
-        return json.dumps(
-            response.model_dump(mode="json"),
-            sort_keys=True,
-            separators=(",", ":"),
-            ensure_ascii=False,
-            allow_nan=False,
-        )
+    async def read_workspace(workspace_id: str) -> Any:
+        from fastmcp.resources import ResourceContent, ResourceResult
+
+        try:
+            result = spec.handler(workspace_id=workspace_id)
+            if inspect.isawaitable(result):
+                result = await result
+            response = spec.output_model.model_validate(result)
+            text = json.dumps(
+                response.model_dump(mode="json"),
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=False,
+                allow_nan=False,
+            )
+        except ResourceAccessError:
+            # FastMCP would mask this as "Error reading resource <uri>", which
+            # differs from the refusal an unknown workspace gets before the
+            # handler runs.  Answer with that same refusal instead.
+            raise ResourceUnavailableError() from None
+        except Exception as exc:
+            raise _resource_failure() from exc
+        # FastMCP 3.4.7 labels a bare ``str`` from a resource template as
+        # text/plain whatever the template declares, so state the type here.
+        return ResourceResult([ResourceContent(text, mime_type=spec.mime_type)])
 
     async def read_static() -> str:
-        result = spec.handler()
-        if inspect.isawaitable(result):
-            result = await result
+        try:
+            result = spec.handler()
+            if inspect.isawaitable(result):
+                result = await result
+        except Exception as exc:
+            raise _resource_failure() from exc
         if not isinstance(result, str) or len(result.encode("utf-8")) > 2_000_000:
-            raise FastMCPCompatibilityError("static resource output is invalid")
+            raise _resource_failure() from FastMCPCompatibilityError(
+                "static resource output is invalid"
+            )
         return result
 
     read = read_workspace if spec.requires_workspace else read_static

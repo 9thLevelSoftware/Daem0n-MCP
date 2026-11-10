@@ -457,6 +457,11 @@ The read-only JSON resources are:
 - `memory://workspaces/{workspace_id}/rules`
 - `memory://workspaces/{workspace_id}/active-context`
 
+A read returns `application/json`. Every refusal (an unknown workspace, one the
+caller may not read, or one this session has not briefed) is the same JSON-RPC
+error, code `-32002` with the message `Resource unavailable`; brief the
+workspace first.
+
 See [`docs/v6-to-v7-tools.json`](docs/v6-to-v7-tools.json) for the generated
 mapping of every v6 operation to its v7 replacement.
 

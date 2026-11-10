@@ -33,15 +33,22 @@ if TYPE_CHECKING:
     from fastmcp.exceptions import ResourceError as _BaseResourceError
     from fastmcp.exceptions import ToolError as _BaseToolError
     from fastmcp.server.middleware import Middleware as _MiddlewareBase
+    from mcp import McpError as _McpError
+    from mcp.types import INVALID_PARAMS as _INVALID_PARAMS
+    from mcp.types import ErrorData as _ErrorData
 else:
     try:  # Keep the model-free boundary importable without FastMCP.
         from fastmcp.exceptions import ResourceError as _BaseResourceError
         from fastmcp.exceptions import ToolError as _BaseToolError
         from fastmcp.server.middleware import Middleware as _MiddlewareBase
+        from mcp import McpError as _McpError
+        from mcp.types import INVALID_PARAMS as _INVALID_PARAMS
+        from mcp.types import ErrorData as _ErrorData
 
         FASTMCP_MIDDLEWARE_AVAILABLE = True
     except ImportError:
         FASTMCP_MIDDLEWARE_AVAILABLE = False
+        _INVALID_PARAMS = -32602
 
         class _MiddlewareBase:
             pass
@@ -51,6 +58,16 @@ else:
 
         class _BaseResourceError(RuntimeError):
             pass
+
+        class _ErrorData:
+            def __init__(self, *, code: int, message: str) -> None:
+                self.code = code
+                self.message = message
+
+        class _McpError(RuntimeError):
+            def __init__(self, error: _ErrorData) -> None:
+                super().__init__(error.message)
+                self.error = error
 
 
 TransportMode = Literal["stdio", "streamable-http"]
@@ -69,11 +86,42 @@ class ToolInvocationContextError(_BaseToolError):
         super().__init__("Invocation unavailable")
 
 
-class ResourceInvocationContextError(_BaseResourceError):
-    """Sanitized failure to establish a resource invocation scope."""
+# MCP's "resource not found" code.  The ``mcp`` package has no constant for
+# it; FastMCP answers an unregistered URI with the same literal.
+RESOURCE_NOT_FOUND = -32002
+
+
+class ResourceUnavailableError(_McpError):
+    """The one refusal a resource read puts on the wire.
+
+    An unknown workspace, one the caller may not read, one that has not been
+    briefed and a failed read all produce this exact code and message, so a
+    resource read cannot be used to learn which workspaces exist.
+    """
 
     def __init__(self) -> None:
-        super().__init__("Resource unavailable")
+        super().__init__(
+            _ErrorData(code=RESOURCE_NOT_FOUND, message="Resource unavailable")
+        )
+
+
+class ResourceInvocationContextError(ResourceUnavailableError):
+    """Sanitized failure to establish a resource invocation scope."""
+
+
+class ResourceAdmissionLimitError(_McpError):
+    """A resource read refused because too many requests are in flight."""
+
+    def __init__(self) -> None:
+        # The same code the task endpoints use for this refusal.
+        super().__init__(
+            _ErrorData(
+                code=_INVALID_PARAMS,
+                message=(
+                    "ADMISSION_LIMIT_REACHED: retry after an active request completes"
+                ),
+            )
+        )
 
 
 class ResourceAuthorizationError(_BaseResourceError):
@@ -437,12 +485,9 @@ class V7InvocationMiddleware(_MiddlewareBase):
             or principal_count >= self._max_inflight_per_principal
             or workspace_count >= self._max_inflight_per_workspace
         ):
-            error_type = (
-                _BaseResourceError
-                if hasattr(context.message, "uri")
-                else _BaseToolError
-            )
-            raise error_type(
+            if hasattr(context.message, "uri"):
+                raise ResourceAdmissionLimitError()
+            raise _BaseToolError(
                 "ADMISSION_LIMIT_REACHED: retry after an active request completes"
             )
         self._inflight += 1
@@ -564,10 +609,13 @@ __all__ = [
     "EnvelopeErrorMiddleware",
     "FASTMCP_MIDDLEWARE_AVAILABLE",
     "ListedToolsMiddleware",
+    "RESOURCE_NOT_FOUND",
     "RESOURCE_SUFFIXES",
+    "ResourceAdmissionLimitError",
     "ResourceAuthorizationError",
     "ResourceCommunionAuthorizer",
     "ResourceInvocationContextError",
+    "ResourceUnavailableError",
     "ToolInvocationContextError",
     "TransportMode",
     "V7InvocationMiddleware",
