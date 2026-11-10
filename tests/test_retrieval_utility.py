@@ -147,6 +147,30 @@ class UtilityFoldingTests(unittest.TestCase):
         self.assertEqual(1.0, utility_signal(UtilityEstimate(1.0, 1.0, 10, 0), "trace"))
 
 
+class UtilityOrderTests(unittest.TestCase):
+    def test_in_band_order_is_the_stable_combined_score_sort(self):
+        from itertools import product
+
+        from daem0nmcp.retrieval.utility import utility_order
+
+        for signals in product((-1.0, -0.4, 0.0, 0.4, 1.0), repeat=4):
+            expected = sorted(
+                range(4),
+                key=lambda index: (-(61 / (61 + index) + 0.1 * signals[index]), index),
+            )
+            self.assertEqual(
+                tuple(expected), utility_order((0.5,) * 4, signals, 0.1), signals
+            )
+
+    def test_out_of_band_relevance_blocks_overtaking_at_any_weight(self):
+        from daem0nmcp.retrieval.utility import utility_order
+
+        self.assertEqual((0, 1), utility_order((1.0, 0.94), (0.0, 1.0), 1.0))
+        self.assertEqual((1, 0), utility_order((1.0, 0.95), (0.0, 1.0), 1.0))
+        self.assertEqual((0, 1), utility_order((1.0, 0.94), (-1.0, 0.0), 1.0))
+        self.assertEqual((), utility_order((), (), 1.0))
+
+
 class UtilityRepository(CanonicalRepository):
     def __init__(self, contributions=None, *, fail=False):
         super().__init__()
@@ -161,6 +185,82 @@ class UtilityRepository(CanonicalRepository):
         if self.fail:
             raise RuntimeError("private outcome database detail")
         return self.contributions
+
+
+class UtilityHarmTests(unittest.IsolatedAsyncioTestCase):
+    """Utility breaks near-ties; it never outranks clearly better matches."""
+
+    DIGITS = "123456789abcdef"
+
+    def _saturated(self, digit, reward):
+        from daem0nmcp.retrieval.utility import UtilityContribution
+
+        return {
+            _record_id(digit): tuple(
+                UtilityContribution(index, f"evt_{index}", 1, reward, 1.0)
+                for index in range(20)
+            )
+        }
+
+    async def _order(self, contributions, *, dense=(), **changes):
+        providers = {
+            "lexical": StaticProvider(
+                "lexical",
+                _provider_result(
+                    "lexical",
+                    *(
+                        _candidate(digit, "lexical", rank)
+                        for rank, digit in enumerate(self.DIGITS, start=1)
+                    ),
+                ),
+                [],
+            )
+        }
+        if dense:
+            providers["dense"] = StaticProvider(
+                "dense",
+                _provider_result(
+                    "dense",
+                    *(
+                        _candidate(digit, "dense", rank)
+                        for rank, digit in enumerate(dense, start=1)
+                    ),
+                ),
+                [],
+            )
+        result = await _service(
+            providers=providers,
+            repository=UtilityRepository(contributions),
+            utility_mode="apply",
+            **changes,
+        ).retrieve_candidates(
+            _query(limit=len(self.DIGITS), candidate_limit=len(self.DIGITS))
+        )
+        self.assertEqual("UTILITY_APPLIED", result.providers[-1].reason)
+        return "".join(source.candidate.record_id[-1] for source in result.selected)
+
+    async def test_default_weight_keeps_seventh_match_below_the_best_match(self):
+        order = await self._order(self._saturated("7", 1.0))
+        self.assertEqual("1237456", order[:7])
+
+    async def test_maximum_weight_keeps_last_match_below_the_best_match(self):
+        order = await self._order(self._saturated("f", 1.0), utility_weight=1.0)
+        self.assertEqual("1", order[0])
+        self.assertGreater(order.index("f"), order.index("9"))
+
+    async def test_single_channel_match_stays_below_cross_channel_agreement(self):
+        order = await self._order(
+            self._saturated("2", 1.0), dense="1", utility_weight=1.0
+        )
+        self.assertEqual("12", order[:2])
+
+    async def test_failures_do_not_sink_the_best_match_below_distant_matches(self):
+        order = await self._order(self._saturated("1", 0.0), utility_weight=1.0)
+        self.assertEqual("23415", order[:5])
+
+    async def test_near_tie_is_still_reordered_at_default_weight(self):
+        order = await self._order(self._saturated("2", 1.0))
+        self.assertEqual("213", order[:3])
 
 
 class UtilityStageTests(unittest.IsolatedAsyncioTestCase):

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Literal
 
@@ -11,6 +11,8 @@ GAMMA = 0.8
 LAMBDA = 0.7
 MAX_DEPTH = 4
 MAX_DESCENDANTS = 64
+RANK_PRIOR_K = 61
+RELEVANCE_BAND = 0.95
 
 
 @dataclass(frozen=True, slots=True)
@@ -78,3 +80,38 @@ def utility_signal(
     else:
         q, support = estimate.q_trace, estimate.evidence_count
     return (q - 0.5) * 2 * min(1.0, support / 3)
+
+
+def utility_order(
+    relevance: Sequence[float], signals: Sequence[float], weight: float
+) -> tuple[int, ...]:
+    """Order ranked candidates by rank prior plus weighted utility.
+
+    ``relevance`` holds each candidate's fused score in the incoming rank
+    order.  Utility only breaks near-ties: a candidate overtakes the one
+    directly above it when its combined score is higher and both its rank
+    prior and its fused score are within ``RELEVANCE_BAND`` of that
+    candidate's, so outcome history cannot lift a clearly weaker match over
+    a clearly stronger one, nor sink a strong match below distant ones.
+    """
+
+    priors = tuple(
+        RANK_PRIOR_K / (RANK_PRIOR_K + index) for index in range(len(relevance))
+    )
+    combined = tuple(
+        prior + weight * signal for prior, signal in zip(priors, signals, strict=True)
+    )
+    order: list[int] = []
+    for index in range(len(relevance)):
+        position = len(order)
+        while position:
+            above = order[position - 1]
+            if (
+                combined[index] <= combined[above]
+                or priors[index] < RELEVANCE_BAND * priors[above]
+                or relevance[index] < RELEVANCE_BAND * relevance[above]
+            ):
+                break
+            position -= 1
+        order.insert(position, index)
+    return tuple(order)

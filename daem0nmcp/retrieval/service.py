@@ -45,7 +45,13 @@ from .types import (
     RetrievalResult,
     _aware_datetime,
 )
-from .utility import UtilityContribution, UtilityEstimate, fold_utility, utility_signal
+from .utility import (
+    UtilityContribution,
+    UtilityEstimate,
+    fold_utility,
+    utility_order,
+    utility_signal,
+)
 
 _VALIDITY_WORKERS = BoundedWorkerPool(
     max_workers=2, thread_name_prefix="daem0nmcp-validity"
@@ -733,20 +739,19 @@ class RetrievalService:
                 )
                 for candidate in head
             }
-            ranked = sorted(
-                enumerate(head),
-                key=lambda pair: (
-                    -(
-                        61 / (61 + pair[0])
-                        + self._utility_weight
-                        * utility_signal(
-                            estimates[pair[1].record_id], self._utility_credit
+            sorted_head = tuple(
+                head[index]
+                for index in utility_order(
+                    tuple(candidate.score for candidate in head),
+                    tuple(
+                        utility_signal(
+                            estimates[candidate.record_id], self._utility_credit
                         )
+                        for candidate in head
                     ),
-                    pair[0],
-                ),
+                    self._utility_weight,
+                )
             )
-            sorted_head = tuple(candidate for _, candidate in ranked)
             if self._utility_mode == "apply":
                 result = sorted_head + ordered[len(head) :]
                 reason = "UTILITY_APPLIED"
