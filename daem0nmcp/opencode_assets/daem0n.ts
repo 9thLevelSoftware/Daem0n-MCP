@@ -202,12 +202,31 @@ function isEditPreflightTool(tool: string): boolean {
   );
 }
 
+function extractAdditionalContext(stdout: string): string {
+  if (!stdout) return "";
+  try {
+    const parsed = JSON.parse(stdout);
+    const context = parsed?.hookSpecificOutput?.additionalContext;
+    if (typeof context === "string" && context.trim()) {
+      return context.trim();
+    }
+  } catch {
+    // Fall back to plain text stdout when not JSON.
+  }
+  return stdout.trim();
+}
+
+function reminderKey(input: { callID?: string; sessionID?: string; tool: string }): string {
+  return input.callID || `${input.sessionID ?? "session"}:${input.tool}`;
+}
+
 // ---------------------------------------------------------------------------
 // Plugin export
 // ---------------------------------------------------------------------------
 
 export const Daem0nPlugin: Plugin = async ({ directory }) => {
   const bridgeEnvironment = await loadBridgeEnvironment(directory);
+  const pendingReminders = new Map<string, string>();
   return {
     // -----------------------------------------------------------------------
     // HOOK 1: System prompt injection
@@ -223,9 +242,9 @@ export const Daem0nPlugin: Plugin = async ({ directory }) => {
     },
 
     // -----------------------------------------------------------------------
-    // HOOK 2: Pre-tool enforcement (pre-edit + pre-bash)
-    // Blocks edits without preflight token (exit 2 from Python).
-    // Blocks bash commands matching must_not rules (exit 2 from Python).
+    // HOOK 2: Pre-tool guidance & enforcement (pre-edit + pre-bash)
+    // Captures pre_edit / pre_bash additionalContext reminders for tool output
+    // and blocks only if a hook explicitly returns exit code 2.
     // -----------------------------------------------------------------------
     "tool.execute.before": async (input, output) => {
       if (isEditTool(input.tool)) {
@@ -242,12 +261,16 @@ export const Daem0nPlugin: Plugin = async ({ directory }) => {
           },
           bridgeEnvironment,
           5_000,
-          true,
+          false,
         );
         if (result.exitCode === 2) {
           throw new Error(
             result.stderr || result.stdout || "[Daem0n blocks] Preflight required",
           );
+        }
+        const reminder = extractAdditionalContext(result.stdout);
+        if (reminder) {
+          pendingReminders.set(reminderKey(input), reminder);
         }
       }
 
@@ -265,15 +288,25 @@ export const Daem0nPlugin: Plugin = async ({ directory }) => {
             result.stderr || result.stdout || "[Daem0n blocks] Rule violation",
           );
         }
+        const reminder = extractAdditionalContext(result.stdout);
+        if (reminder) {
+          pendingReminders.set(reminderKey(input), reminder);
+        }
       }
     },
 
     // -----------------------------------------------------------------------
     // HOOK 3: Post-edit suggestions (informational, never blocks)
-    // Suggests replay-safe v7 memory calls for significant changes.
+    // Appends any pre-tool reminder and post-edit guidance to tool output.
     // -----------------------------------------------------------------------
     "tool.execute.after": async (input, output) => {
       try {
+        const key = reminderKey(input);
+        const preReminder = pendingReminders.get(key);
+        if (preReminder) {
+          pendingReminders.delete(key);
+          output.output = (output.output || "") + "\n" + preReminder;
+        }
         if (isEditPreflightTool(input.tool)) {
           // OpenCode 1.18.21 passes the raw MCP CallToolResult to this hook.
           // Forward that host-observed object; never reconstruct it from text.
@@ -296,8 +329,9 @@ export const Daem0nPlugin: Plugin = async ({ directory }) => {
             tool_response: output,
             tool_use_id: input.callID,
           }, bridgeEnvironment);
-          if (result.stdout) {
-            output.output = (output.output || "") + "\n" + result.stdout;
+          const postReminder = extractAdditionalContext(result.stdout);
+          if (postReminder) {
+            output.output = (output.output || "") + "\n" + postReminder;
           }
         }
       } catch {

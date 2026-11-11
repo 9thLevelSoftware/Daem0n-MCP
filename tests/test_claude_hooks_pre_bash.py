@@ -94,3 +94,53 @@ def test_no_project_exits_clean(tmp_path, monkeypatch):
     with pytest.raises(SystemExit) as exc_info:
         main()
     assert exc_info.value.code == 0
+
+
+def test_v7_governance_rules_stdin_reminder(tmp_path):
+    import json
+    import sqlite3
+
+    from daem0nmcp.claude_hooks.pre_bash import reminder
+
+    storage = tmp_path / ".daem0nmcp" / "storage"
+    storage.mkdir(parents=True)
+    db_file = storage / "daem0nmcp.db"
+    conn = sqlite3.connect(db_file)
+    try:
+        conn.execute(
+            "CREATE TABLE governance_rules ("
+            "rule_id TEXT PRIMARY KEY, "
+            "trigger TEXT NOT NULL, "
+            "must_not_json TEXT NOT NULL, "
+            "warnings_json TEXT NOT NULL, "
+            "priority INTEGER NOT NULL DEFAULT 0, "
+            "enabled INTEGER NOT NULL DEFAULT 1"
+            ")"
+        )
+        conn.execute(
+            "INSERT INTO governance_rules VALUES (?, ?, ?, ?, ?, ?)",
+            (
+                "rul_1",
+                "executing bash dangerous git force push",
+                json.dumps(["Never force push to main"]),
+                json.dumps([]),
+                10,
+                1,
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    output_raw = reminder(
+        {
+            "cwd": str(tmp_path),
+            "tool_name": "Bash",
+            "tool_input": {"command": "git push --force origin main"},
+        }
+    )
+    assert output_raw is not None
+    output = json.loads(output_raw)["hookSpecificOutput"]
+    assert output["hookEventName"] == "PreToolUse"
+    assert "Never force push to main" in output["additionalContext"]
+    assert "permissionDecision" not in output

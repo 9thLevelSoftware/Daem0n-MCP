@@ -9,7 +9,8 @@ on:
 jobs:
   test:
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
+    # The full suite exceeds 30 minutes on Windows while still making progress.
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:

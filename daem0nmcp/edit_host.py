@@ -773,7 +773,9 @@ class EditHostConfig:
         if self.mode == "local":
             from .workspace import WorkspaceRegistry
 
-            return WorkspaceRegistry(default_root=project_root).default.workspace_id
+            return WorkspaceRegistry(
+                default_root=project_root, live_storage=True
+            ).default.workspace_id
         binding = self.remote_workspace
         if binding is None or not binding.matches(project_root):
             raise ValueError("remote workspace binding does not match project root")

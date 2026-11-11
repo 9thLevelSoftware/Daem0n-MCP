@@ -1392,6 +1392,39 @@ class TestPinnedHTTPAdapterAdditional(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(resolver.calls), 2)
         self.assertEqual(len(delegate.connect_calls), 2)
 
+    async def test_resolve_pinned_redirect_url_validates_public_and_blocks_private_hops(
+        self,
+    ):
+        from daem0nmcp.pinned_http import resolve_pinned_redirect_url
+
+        resolver = SequenceResolver(
+            ("93.184.216.34",),
+            ("10.0.0.1",),
+        )
+        public_hop = await resolve_pinned_redirect_url(
+            "https://docs.example.test/start",
+            "/v7/guide",
+            allowed_schemes=("https",),
+            resolver=resolver,
+        )
+        self.assertEqual(public_hop, "https://docs.example.test/v7/guide")
+
+        private_dns_hop = await resolve_pinned_redirect_url(
+            "https://docs.example.test/start",
+            "https://internal.example.test/secret",
+            allowed_schemes=("https",),
+            resolver=resolver,
+        )
+        self.assertIsNone(private_dns_hop)
+
+        loopback_hop = await resolve_pinned_redirect_url(
+            "https://docs.example.test/start",
+            "https://127.0.0.1/private",
+            allowed_schemes=("https",),
+            resolver=SequenceResolver(),
+        )
+        self.assertIsNone(loopback_hop)
+
 
 if __name__ == "__main__":
     unittest.main()

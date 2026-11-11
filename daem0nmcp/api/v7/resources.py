@@ -16,7 +16,7 @@ from typing import Annotated, Generic, Literal, Protocol, TypeVar, cast
 
 from pydantic import Field, StringConstraints, TypeAdapter
 
-from ...workspace import Workspace
+from ...workspace import Workspace, WorkspaceIdentityError
 from .dashboard_resources import build_dashboard_resource_specs
 from .models import (
     RECORD_CONTENT_NOTICE,
@@ -269,6 +269,8 @@ class ResourceHandlers:
             or workspace.workspace_id != validated_id
         ):
             raise ValueError("workspace resolver returned a mismatched workspace")
+        if workspace.identity_block is not None:
+            raise WorkspaceIdentityError(workspace.identity_block)
         resource_uri = uri_template.format(workspace_id=validated_id)
         authorization = self._dependencies.communion_authorizer.authorize(
             workspace=workspace,

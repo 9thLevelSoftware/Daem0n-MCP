@@ -455,6 +455,61 @@ async def validate_public_url(
     return None
 
 
+async def resolve_pinned_redirect_url(
+    current_url: str,
+    location: str | None,
+    *,
+    allowed_schemes: Iterable[str],
+    resolver: AddressResolver | None = None,
+) -> str | None:
+    """Resolve and validate one redirect Location header against SSRF rules."""
+    if not isinstance(location, str):
+        return None
+    stripped = location.strip()
+    if not stripped or any(
+        ord(character) < 32 or ord(character) == 127 for character in stripped
+    ):
+        return None
+    try:
+        base = httpx.URL(current_url)
+        target = base.join(stripped)
+        scheme = target.scheme.casefold()
+        hostname = target.raw_host.decode("ascii")
+    except (AttributeError, TypeError, UnicodeError, httpx.InvalidURL):
+        return None
+
+    allowed = {candidate.casefold() for candidate in allowed_schemes}
+    if scheme not in {"http", "https"} or scheme not in allowed or not hostname:
+        return None
+
+    normalized_hostname = hostname.casefold().rstrip(".")
+    if normalized_hostname in {
+        "localhost",
+        "localhost.localdomain",
+    } or normalized_hostname.endswith(".localhost"):
+        return None
+
+    try:
+        literal = ipaddress.ip_address(hostname)
+    except ValueError:
+        literal = None
+    if literal is not None:
+        try:
+            select_public_address((str(literal),))
+        except PinnedAddressError:
+            return None
+
+    target_url = str(target)
+    issue = await validate_public_url(
+        target_url,
+        allowed_schemes=allowed,
+        resolver=resolver,
+    )
+    if issue is not None:
+        return None
+    return target_url
+
+
 class PinnedPublicNetworkBackend(
     _NETWORK_BACKEND_BASE  # type: ignore[misc,valid-type]
 ):

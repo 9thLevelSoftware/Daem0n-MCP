@@ -241,7 +241,9 @@ def _extract_decisions(text: str) -> list[dict]:
 
 
 def _workspace_id(project_path: str) -> str:
-    return WorkspaceRegistry(default_root=project_path).default.workspace_id
+    return WorkspaceRegistry(
+        default_root=project_path, live_storage=True
+    ).default.workspace_id
 
 
 def _relative_record_path(project_path: str, mentioned_path: str | None) -> str | None:

@@ -65,7 +65,12 @@ def test_cli_uninstall_accepts_project_path_after_the_subcommand(
     project.mkdir()
 
     code, _out = _cli(
-        monkeypatch, capsys, "--project-path", str(project), "install-claude-hooks"
+        monkeypatch,
+        capsys,
+        "--project-path",
+        str(project),
+        "install-claude-hooks",
+        "--enable-edit-bridge",
     )
     assert code == 0
     bridges = home / ".daem0nmcp" / "edit-bridges"
@@ -112,7 +117,10 @@ def test_cli_remove_credentials_defaults_to_the_current_directory(
     project.mkdir()
     monkeypatch.chdir(project)
 
-    assert _cli(monkeypatch, capsys, "install-claude-hooks")[0] == 0
+    assert (
+        _cli(monkeypatch, capsys, "install-claude-hooks", "--enable-edit-bridge")[0]
+        == 0
+    )
     code, out = _cli(
         monkeypatch, capsys, "uninstall-claude-hooks", "--remove-credentials"
     )

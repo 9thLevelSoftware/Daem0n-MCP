@@ -184,7 +184,9 @@ def _authorize(workspace: Workspace, request: AdmittedRequest, tool: str) -> Non
         raise ExternalOperationError("UNAUTHORIZED_WORKSPACE")
     try:
         root = workspace.root.resolve(strict=True)
-        expected = WorkspaceRegistry([root], default_root=root).default
+        expected = WorkspaceRegistry(
+            [root], default_root=root, live_storage=True
+        ).default
     except (OSError, RuntimeError, TypeError, ValueError):
         raise ExternalOperationError("UNAUTHORIZED_WORKSPACE") from None
     if expected.workspace_id != workspace.workspace_id or os.path.normcase(
@@ -200,13 +202,22 @@ def _chunks(text: str, size: int) -> tuple[str, ...]:
     return values
 
 
-async def _fetch_document(url: str) -> tuple[bytes, str]:
+_REDIRECT_STATUS_CODES = frozenset({301, 302, 303, 307, 308})
+_MAX_REDIRECTS = 5
+
+
+async def _fetch_document(
+    url: str,
+    *,
+    max_redirects: int = _MAX_REDIRECTS,
+) -> tuple[bytes, str]:
     import httpx
 
     from ...pinned_http import (
         PinnedAsyncHTTPTransport,
         PinnedResponseError,
         read_bounded_identity_body,
+        resolve_pinned_redirect_url,
         validate_public_url,
     )
 
@@ -215,35 +226,50 @@ async def _fetch_document(url: str) -> tuple[bytes, str]:
         raise ExternalOperationError("INVALID_ARGUMENT")
     transport = PinnedAsyncHTTPTransport()
     try:
-        async with (
-            httpx.AsyncClient(
-                transport=transport,
-                follow_redirects=False,
-                trust_env=False,
-                timeout=httpx.Timeout(15.0),
-            ) as client,
-            client.stream(
-                "GET",
-                url,
-                headers={
-                    "accept": "text/plain, text/markdown, text/html, application/json",
-                    "accept-encoding": "identity",
-                },
-            ) as response,
-        ):
-            if 300 <= response.status_code < 400 or response.status_code != 200:
-                raise ExternalOperationError("NOT_FOUND")
-            content_type = (
-                response.headers.get("content-type", "")
-                .split(";", 1)[0]
-                .strip()
-                .casefold()
-            )
-            if content_type not in _DOCUMENT_TYPES:
-                raise ExternalOperationError("INVALID_ARGUMENT")
-            return await read_bounded_identity_body(
-                response, max_bytes=_MAX_DOCUMENT_BYTES
-            ), content_type
+        async with httpx.AsyncClient(
+            transport=transport,
+            follow_redirects=False,
+            trust_env=False,
+            timeout=httpx.Timeout(15.0),
+        ) as client:
+            current_url = url
+            visited_urls: set[str] = {current_url}
+            for hop in range(max_redirects + 1):
+                async with client.stream(
+                    "GET",
+                    current_url,
+                    headers={
+                        "accept": "text/plain, text/markdown, text/html, application/json",
+                        "accept-encoding": "identity",
+                    },
+                ) as response:
+                    if response.status_code in _REDIRECT_STATUS_CODES:
+                        if hop >= max_redirects:
+                            raise ExternalOperationError("NOT_FOUND")
+                        next_url = await resolve_pinned_redirect_url(
+                            current_url,
+                            response.headers.get("location"),
+                            allowed_schemes=("https",),
+                        )
+                        if next_url is None or next_url in visited_urls:
+                            raise ExternalOperationError("NOT_FOUND")
+                        visited_urls.add(next_url)
+                        current_url = next_url
+                        continue
+                    if response.status_code != 200:
+                        raise ExternalOperationError("NOT_FOUND")
+                    content_type = (
+                        response.headers.get("content-type", "")
+                        .split(";", 1)[0]
+                        .strip()
+                        .casefold()
+                    )
+                    if content_type not in _DOCUMENT_TYPES:
+                        raise ExternalOperationError("INVALID_ARGUMENT")
+                    return await read_bounded_identity_body(
+                        response, max_bytes=_MAX_DOCUMENT_BYTES
+                    ), content_type
+            raise ExternalOperationError("NOT_FOUND")
     except ExternalOperationError:
         raise
     except PinnedResponseError:

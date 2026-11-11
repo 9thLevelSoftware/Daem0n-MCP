@@ -143,7 +143,7 @@ class DatabaseManager:
         else:
             workspace_root = self.storage_path.parent
         self.workspace_id = WorkspaceRegistry(
-            [workspace_root], default_root=workspace_root
+            [workspace_root], default_root=workspace_root, live_storage=True
         ).default.workspace_id
         if db_name != "daem0nmcp.db":
             raise ValueError(

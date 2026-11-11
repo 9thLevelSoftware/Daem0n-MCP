@@ -130,6 +130,59 @@ class DocumentFetchTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(caught.exception.code, "NOT_FOUND")
 
+    async def test_fetch_follows_validated_public_https_redirect(self) -> None:
+        from daem0nmcp.api.v7 import external_operations
+
+        observed: list[str] = []
+
+        class BodyStream(httpx.AsyncByteStream):
+            def __init__(self, body: bytes) -> None:
+                self._body = body
+
+            async def __aiter__(self):
+                yield self._body
+
+        def respond(request: httpx.Request) -> httpx.Response:
+            observed.append(str(request.url))
+            if str(request.url) == "https://docs.example.test/start":
+                return httpx.Response(
+                    302,
+                    headers={"location": "/guide"},
+                    stream=BodyStream(b""),
+                )
+            return httpx.Response(
+                200,
+                headers={"content-type": "text/plain"},
+                stream=BodyStream(b"redirected document"),
+            )
+
+        transport = httpx.MockTransport(respond)
+        with (
+            patch.object(
+                pinned_http,
+                "validate_public_url",
+                new=AsyncMock(return_value=None),
+            ),
+            patch.object(
+                pinned_http,
+                "PinnedAsyncHTTPTransport",
+                return_value=transport,
+            ),
+        ):
+            body, content_type = await external_operations._fetch_document(
+                "https://docs.example.test/start"
+            )
+
+        self.assertEqual(
+            observed,
+            [
+                "https://docs.example.test/start",
+                "https://docs.example.test/guide",
+            ],
+        )
+        self.assertEqual(body, b"redirected document")
+        self.assertEqual(content_type, "text/plain")
+
     async def test_fetch_rejects_unreviewed_media_type_before_ingestion(self) -> None:
         from daem0nmcp.api.v7.external_operations import ExternalOperationError
 

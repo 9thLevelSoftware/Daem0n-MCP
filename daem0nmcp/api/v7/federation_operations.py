@@ -110,7 +110,9 @@ def _exact_workspace(value: object, expected_id: str) -> Workspace:
         raise FederationOperationError("UNAUTHORIZED_WORKSPACE")
     try:
         canonical = value.root.resolve(strict=True)
-        registered = WorkspaceRegistry([canonical], default_root=canonical).default
+        registered = WorkspaceRegistry(
+            [canonical], default_root=canonical, live_storage=True
+        ).default
         exact_root = os.path.normcase(str(value.root)) == os.path.normcase(
             str(canonical)
         )

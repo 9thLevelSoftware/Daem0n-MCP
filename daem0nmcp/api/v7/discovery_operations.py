@@ -474,7 +474,9 @@ def _authorize(
         raise DiscoveryOperationError("UNAUTHORIZED_WORKSPACE")
     try:
         canonical = workspace.root.resolve(strict=True)
-        registered = WorkspaceRegistry([canonical], default_root=canonical).default
+        registered = WorkspaceRegistry(
+            [canonical], default_root=canonical, live_storage=True
+        ).default
         exact_root = os.path.normcase(str(workspace.root)) == os.path.normcase(
             str(canonical)
         )
@@ -2137,18 +2139,137 @@ def _generation_is_current_sync(
     _read_snapshot(dependencies, workspace, reader)
 
 
+def _try_inline_graph_catchup_sync(
+    dependencies: DiscoveryOperationDependencies,
+    workspace: Workspace,
+) -> bool:
+    if dependencies.capability_statuses.get("graph") != "ready":
+        return False
+    connection: sqlite3.Connection | None = None
+    try:
+        with dependencies.storage_resolver.locked_active(workspace) as active:
+            connection = sqlite3.connect(
+                active.path,
+                timeout=0.25,
+                isolation_level=None,
+            )
+            connection.row_factory = sqlite3.Row
+            connection.execute("PRAGMA busy_timeout=250")
+            connection.execute("PRAGMA foreign_keys=ON")
+            _verify_database_connection(connection)
+            queued = connection.execute(
+                "SELECT 1 FROM background_jobs WHERE workspace_id=? "
+                "AND job_type='retrieval.projection_rebuild' "
+                "AND status='queued' "
+                "AND idempotency_key='active-projection:graph' LIMIT 1",
+                (workspace.workspace_id,),
+            ).fetchone()
+            if queued is None:
+                return False
+            from ...retrieval.specialized_projection import (
+                SpecializedProjectionBuilder,
+            )
+
+            if SpecializedProjectionBuilder(connection).active_is_current(
+                workspace.workspace_id, "graph"
+            ):
+                return False
+            from ...graph_projection import GraphProjectionBuilder
+
+            GraphProjectionBuilder(connection).rebuild(workspace.workspace_id)
+            now_us = _datetime_us(dependencies.clock())
+            connection.execute("BEGIN IMMEDIATE")
+            connection.execute(
+                "UPDATE background_jobs SET status='succeeded',finished_at_us=? "
+                "WHERE workspace_id=? AND job_type='retrieval.projection_rebuild' "
+                "AND status='queued' "
+                "AND idempotency_key='active-projection:graph'",
+                (now_us, workspace.workspace_id),
+            )
+            connection.commit()
+            return True
+    except Exception:
+        if connection is not None and connection.in_transaction:
+            with suppress(Exception):
+                connection.rollback()
+        return False
+    finally:
+        if connection is not None:
+            connection.close()
+
+
+def _try_inline_lexical_catchup_sync(
+    dependencies: DiscoveryOperationDependencies,
+    workspace: Workspace,
+    record_ids: tuple[str, ...],
+) -> bool:
+    if not record_ids:
+        return False
+    connection: sqlite3.Connection | None = None
+    try:
+        with dependencies.storage_resolver.locked_active(workspace) as active:
+            connection = sqlite3.connect(
+                active.path,
+                timeout=0.25,
+                isolation_level=None,
+            )
+            connection.row_factory = sqlite3.Row
+            connection.execute("PRAGMA busy_timeout=250")
+            connection.execute("PRAGMA foreign_keys=ON")
+            _verify_database_connection(connection)
+            queued = connection.execute(
+                "SELECT 1 FROM background_jobs WHERE workspace_id=? "
+                "AND job_type='retrieval.projection_rebuild' "
+                "AND status='queued' "
+                "AND idempotency_key='active-projection:lexical' LIMIT 1",
+                (workspace.workspace_id,),
+            ).fetchone()
+            if queued is None:
+                return False
+            from ...retrieval.projections import LexicalProjectionBuilder
+
+            LexicalProjectionBuilder(connection).rebuild(workspace.workspace_id)
+            now_us = _datetime_us(dependencies.clock())
+            connection.execute("BEGIN IMMEDIATE")
+            connection.execute(
+                "UPDATE background_jobs SET status='succeeded',finished_at_us=? "
+                "WHERE workspace_id=? AND job_type='retrieval.projection_rebuild' "
+                "AND status='queued' "
+                "AND idempotency_key='active-projection:lexical'",
+                (now_us, workspace.workspace_id),
+            )
+            connection.commit()
+            return True
+    except Exception:
+        if connection is not None and connection.in_transaction:
+            with suppress(Exception):
+                connection.rollback()
+        return False
+    finally:
+        if connection is not None:
+            connection.close()
+
+
 async def _memory_recall_entity(
     dependencies: DiscoveryOperationDependencies,
     workspace: Workspace,
     request: AdmittedRequest,
 ) -> Page[RecordSummary]:
+    from .runtime_services import Task8RecallService
+
+    service = dependencies.recall_service
+    is_real_recall_service = isinstance(service, Task8RecallService)
+    if is_real_recall_service:
+        await _run_blocking(
+            dependencies,
+            lambda: _try_inline_graph_catchup_sync(dependencies, workspace),
+        )
     selection = await _run_blocking(
         dependencies,
         lambda: _entity_selection_sync(dependencies, workspace, request),
     )
     if not selection.record_ids:
         return Page[RecordSummary](items=[], next_cursor=None, truncated=False)
-    service = dependencies.recall_service
     if service is None:
         raise DiscoveryOperationError("CAPABILITY_DEGRADED")
     try:
@@ -2188,9 +2309,30 @@ async def _memory_recall_entity(
                     selection.lexical_generation,
                 ),
             )
-            raise DiscoveryOperationError(
-                "DATABASE_IN_USE" if pending else "CAPABILITY_DEGRADED"
-            )
+            if pending and is_real_recall_service:
+                caught_up = await _run_blocking(
+                    dependencies,
+                    lambda: _try_inline_lexical_catchup_sync(
+                        dependencies,
+                        workspace,
+                        missing,
+                    ),
+                )
+                if caught_up:
+                    retry_value = service.retrieve(workspace, query, frozenset())
+                    if inspect.isawaitable(retry_value):
+                        retry_value = await retry_value
+                    retry_result = RetrievalData.model_validate(retry_value)
+                    indexed = {}
+                    for item in retry_result.items:
+                        record_id = item.record.record_id
+                        if record_id in indexed:
+                            raise DiscoveryOperationError("CAPABILITY_DEGRADED")
+                        indexed[record_id] = item.record
+            if set(indexed) != set(selection.record_ids):
+                raise DiscoveryOperationError(
+                    "DATABASE_IN_USE" if pending else "CAPABILITY_DEGRADED"
+                )
         await _run_blocking(
             dependencies,
             lambda: _generation_is_current_sync(

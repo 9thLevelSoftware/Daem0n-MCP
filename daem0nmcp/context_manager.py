@@ -90,7 +90,7 @@ _EVICTION_INTERVAL_SECONDS: float = 60.0
 
 # Settings already include the environment, the file DAEM0NMCP_ENV_FILE names
 # (a `.env` in the working directory is not read), and the default directory.
-workspace_registry = WorkspaceRegistry.from_settings(settings)
+workspace_registry = WorkspaceRegistry.from_settings(settings, live_storage=True)
 try:
     _default_project_path: str | None = str(workspace_registry.default.root)
 except WorkspaceAccessError:

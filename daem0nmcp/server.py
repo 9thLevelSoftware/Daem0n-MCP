@@ -270,6 +270,14 @@ _LEGACY_EXPORTS: dict[str, tuple[str, str]] = {
     "TODO_PATTERN": ("daem0nmcp.tools.code_tools", "TODO_PATTERN"),
     "compress_context": ("daem0nmcp.tools.agency_tools", "compress_context"),
     "execute_python": ("daem0nmcp.tools.agency_tools", "execute_python"),
+    "_capability_manager": (
+        "daem0nmcp.tools.agency_tools",
+        "_capability_manager",
+    ),
+    "_sandbox_executor": (
+        "daem0nmcp.tools.agency_tools",
+        "_sandbox_executor",
+    ),
     "ingest_doc": ("daem0nmcp.tools.agency_tools", "ingest_doc"),
     "MAX_CHUNKS": ("daem0nmcp.tools.agency_tools", "MAX_CHUNKS"),
     "export_data": ("daem0nmcp.tools.maintenance", "export_data"),

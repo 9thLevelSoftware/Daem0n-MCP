@@ -4691,6 +4691,16 @@
       "status": "pending"
     },
     {
+      "acceptance": "python -m daem0nmcp.cli workspace-id parses and exercises its documented result contract.",
+      "entry_point": "daem0nmcp.cli:main",
+      "evidence": [],
+      "id": "cli.workspace-id",
+      "kind": "cli",
+      "owner": "cli",
+      "package": "daem0nmcp.cli",
+      "status": "pending"
+    },
+    {
       "acceptance": "Install profile agency-e2b and exercise its advertised capability.",
       "entry_point": "optional-dependency:agency-e2b",
       "evidence": [],
@@ -4952,7 +4962,7 @@
     },
     {
       "acceptance": "edit_preflight is registered and exercised through the production MCP server.",
-      "entry_point": "unwired",
+      "entry_point": "daem0nmcp.api.v7.production:create_v7_server -> daem0nmcp.api.v7.edit_capture_operations:build_edit_capture_operations",
       "evidence": [],
       "id": "planned-tool.edit_preflight",
       "kind": "planned-tool",
@@ -4962,7 +4972,7 @@
     },
     {
       "acceptance": "memory_capture_list is registered and exercised through the production MCP server.",
-      "entry_point": "unwired",
+      "entry_point": "daem0nmcp.api.v7.production:create_v7_server -> daem0nmcp.api.v7.edit_capture_operations:build_edit_capture_operations",
       "evidence": [],
       "id": "planned-tool.memory_capture_list",
       "kind": "planned-tool",
@@ -4972,7 +4982,7 @@
     },
     {
       "acceptance": "memory_capture_promote is registered and exercised through the production MCP server.",
-      "entry_point": "unwired",
+      "entry_point": "daem0nmcp.api.v7.production:create_v7_server -> daem0nmcp.api.v7.edit_capture_operations:build_edit_capture_operations",
       "evidence": [],
       "id": "planned-tool.memory_capture_promote",
       "kind": "planned-tool",
@@ -4982,7 +4992,7 @@
     },
     {
       "acceptance": "workspace_consolidation_preview is registered and exercised through the production MCP server.",
-      "entry_point": "unwired",
+      "entry_point": "daem0nmcp.api.v7.production:create_v7_server -> daem0nmcp.api.v7.consolidation_operations:build_consolidation_operations",
       "evidence": [],
       "id": "planned-tool.workspace_consolidation_preview",
       "kind": "planned-tool",
@@ -5895,8 +5905,8 @@
     "tests/test_legacy_vector_migration_guards.py"
   ],
   "observed_surface": {
-    "atomic_requirements": 586,
-    "cli_commands": 21,
+    "atomic_requirements": 587,
+    "cli_commands": 22,
     "dependency_profiles": 11,
     "hooks": 15,
     "registered_tools": 77,

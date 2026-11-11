@@ -12,6 +12,7 @@ import json
 import os
 import sqlite3
 import stat
+import sys
 import threading
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
@@ -155,6 +156,29 @@ def _resolve_storage_file(storage: Path, relative_name: str, field: str) -> Path
     if not resolved.is_file():
         raise _invalid(f"{field} target is not a file")
     return resolved
+
+
+def readonly_database_uri(path: str | os.PathLike[str]) -> str:
+    """Return an offline read URI that preserves database and sidecar data.
+
+    With no ``-wal``, ``-shm`` or ``-journal`` the main file is the whole
+    database and is read as immutable, preventing SQLite from creating WAL
+    sidecars. Existing sidecars must remain visible so their committed data is
+    included. Windows uses the no-lock VFS; POSIX uses the default VFS because
+    ``unix-none`` cannot open WAL databases. Reads with sidecars can update the
+    volatile ``-shm`` wal-index read marks.
+    """
+
+    resolved = Path(path).resolve()
+    if not any(
+        Path(f"{resolved}{suffix}").exists() for suffix in ("-wal", "-shm", "-journal")
+    ):
+        parameters = "&immutable=1"
+    elif sys.platform == "win32":
+        parameters = "&vfs=win32-none"
+    else:
+        parameters = ""
+    return sqlite_file_uri(resolved, mode="ro") + parameters
 
 
 def validate_pointer(pointer: ActiveDatabasePointer) -> ActiveDatabasePointer:

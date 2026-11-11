@@ -1428,6 +1428,30 @@ class DiscoveryOperationTests(unittest.IsolatedAsyncioTestCase):
             {record.record_id for record in retried.data.items},
         )
 
+    async def test_real_task8_recall_service_catches_up_queued_lexical_inline(
+        self,
+    ) -> None:
+        from daem0nmcp.api.v7.runtime_services import Task8RecallService
+        from daem0nmcp.config import Settings
+
+        fixture = self._activate_discovery(content_prefix="Authentication ")
+        recall = Task8RecallService(
+            config=Settings(retrieval_rerank_enabled=False),
+            capability_statuses={},
+        )
+        self.addCleanup(recall.close)
+
+        handler = self._handler("memory_recall_entity", recall_service=recall)
+        response = await handler(
+            workspace_id=self.workspace.workspace_id,
+            entity_name="Authentication",
+        )
+        self.assertTrue(response.ok)
+        self.assertEqual(
+            set(fixture["records"][:2]),
+            {record.record_id for record in response.data.items},
+        )
+
     async def test_nonbusy_lexical_catchup_failure_is_not_retryable(self) -> None:
         self._activate_discovery()
         test_case = self

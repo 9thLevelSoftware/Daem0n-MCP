@@ -13,7 +13,7 @@ import sys
 from pathlib import Path
 
 from ..storage_activation import PointerValidationError, resolve_active_database
-from ..workspace import WorkspaceRegistry, sqlite_file_uri
+from ..workspace import WorkspaceIdentity, sqlite_file_uri, workspace_identity
 from ._client import (
     REINSTALL_NOTICE,
     get_project_path,
@@ -24,9 +24,32 @@ from ._client import (
 _BUSY_TIMEOUT_MS = 2000
 
 
-def _workspace_id(project_path: str) -> str:
-    """Return the stable opaque ID for the hook's configured project root."""
-    return WorkspaceRegistry(default_root=project_path).default.workspace_id
+# The hook is read-only: it resolves the recorded identity and never writes
+# one.  Only the server, ``migrate-v7 --apply`` and ``workspace-id`` persist.
+_MOVED_NOTE = (
+    "[Daem0n] This folder looks moved or copied; if a shared server also "
+    "serves the original, run `workspace-id --new` here."
+)
+
+
+def _hook_message(identity: WorkspaceIdentity) -> str:
+    """Name the workspace to brief, or say why the folder is blocked."""
+    if identity.blocked is not None:
+        return (
+            f"[Daem0n] This workspace is unavailable ({identity.blocked}). Run "
+            "`python -m daem0nmcp.cli workspace-id` in the project directory "
+            "to see why and settle it."
+        )
+    lines = [
+        "[Daem0n] IMPORTANT: The first Daem0n call establishes this invocation's "
+        "v7 session and brief automatically (meta.covenant.auto_brief). "
+        f'Use workspace_id="{identity.workspace_id}". Call '
+        f'mcp__daem0nmcp__session_brief(workspace_id="{identity.workspace_id}") '
+        "for the full brief."
+    ]
+    if not identity.root_key_matches:
+        lines.append(_MOVED_NOTE)
+    return "\n".join(lines)
 
 
 async def async_main(project_path: str) -> str:
@@ -112,14 +135,7 @@ def main() -> None:
             # project they open, not only in Daem0n ones.
             succeed(json.dumps({"systemMessage": REINSTALL_NOTICE}))
         sys.exit(0)
-    workspace_id = _workspace_id(project_path)
-    message = (
-        "[Daem0n] IMPORTANT: The first Daem0n call establishes this invocation's "
-        "v7 session and brief automatically (meta.covenant.auto_brief). "
-        f'Use workspace_id="{workspace_id}". Call '
-        f'mcp__daem0nmcp__session_brief(workspace_id="{workspace_id}") '
-        "for the full brief."
-    )
+    message = _hook_message(workspace_identity(project_path, live_storage=True))
     if started_by_module_switch():
         # JSON output lets the notice reach the user, not only the model.
         succeed(

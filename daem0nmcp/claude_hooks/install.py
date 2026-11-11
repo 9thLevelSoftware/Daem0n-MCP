@@ -228,6 +228,7 @@ def install_claude_hooks(
     dry_run: bool = False,
     *,
     project_path: str | Path | None = None,
+    enable_edit_bridge: bool | None = None,
     bridge_config_root: Path | None = None,
     remote_workspace_id: str | None = None,
     remote_credential_path: str | Path | None = None,
@@ -251,8 +252,23 @@ def install_claude_hooks(
     project_root = (
         None if project_path is None else Path(project_path).resolve(strict=True)
     )
+    should_pair_bridge = (
+        enable_edit_bridge
+        if enable_edit_bridge is not None
+        else any(
+            item is not None
+            for item in (
+                bridge_config_root,
+                remote_workspace_id,
+                remote_credential_path,
+                remote_base_url,
+                remote_ca_file,
+                remote_origin,
+            )
+        )
+    )
     installation = None
-    if project_root is not None and not dry_run:
+    if project_root is not None and should_pair_bridge and not dry_run:
         try:
             installation = provision_client_bridge_installation(
                 project_root,
@@ -446,6 +462,11 @@ if __name__ == "__main__":
     parser.add_argument("--uninstall", action="store_true", help="Remove hooks")
     parser.add_argument("--dry-run", action="store_true", help="Show what would change")
     parser.add_argument("--project-path", default=".", help="Project root")
+    parser.add_argument(
+        "--enable-edit-bridge",
+        action="store_true",
+        help="Also provision project-local edit-bridge credentials",
+    )
     parser.add_argument("--remote-workspace-id")
     parser.add_argument("--remote-credential-file")
     parser.add_argument("--remote-url")
@@ -464,6 +485,7 @@ if __name__ == "__main__":
         ok, msg = install_claude_hooks(
             dry_run=args.dry_run,
             project_path=args.project_path,
+            enable_edit_bridge=True if args.enable_edit_bridge else None,
             remote_workspace_id=args.remote_workspace_id,
             remote_credential_path=args.remote_credential_file,
             remote_base_url=args.remote_url,
