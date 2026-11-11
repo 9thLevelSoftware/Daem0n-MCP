@@ -6,7 +6,6 @@ import asyncio
 import json
 import shutil
 import sqlite3
-import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -181,7 +180,6 @@ class V7DryRunTests(unittest.TestCase):
             finally:
                 writer.close()
 
-    @unittest.skipIf(sys.platform == "win32", "Windows always uses win32-none")
     def test_sidecar_files_keep_the_source_off_the_immutable_path(self):
         from daem0nmcp.migrations import v7
 

@@ -70,6 +70,7 @@ class Workspace:
     root: Path
     identity_block: str | None = None
     storage_unavailable: bool = False
+    storage_busy: bool = False
 
 
 def _canonical_root(root: str | os.PathLike[str]) -> Path:
@@ -161,6 +162,21 @@ def sqlite_file_uri(
     return uri if mode is None else f"{uri}?mode={mode}"
 
 
+def is_sqlite_busy(error: BaseException | None) -> bool:
+    """Recognize SQLite contention, including Python 3.10 diagnostics."""
+
+    if not isinstance(error, sqlite3.OperationalError):
+        return False
+    code = getattr(error, "sqlite_errorcode", None)
+    if isinstance(code, int):
+        return code & 0xFF in {5, 6}  # SQLITE_BUSY, SQLITE_LOCKED
+    return str(error).casefold() in {
+        "database is locked",
+        "database table is locked",
+        "database schema is locked",
+    }
+
+
 def _workspace_id(root: Path) -> str:
     digest = hashlib.sha256(_root_key(root).encode("utf-8")).hexdigest()[:24]
     return f"ws_{digest}"
@@ -211,6 +227,7 @@ class WorkspaceIdentity:
     sole_holder: bool = True
     stored_ids: frozenset[str] = field(default_factory=frozenset)
     storage_unavailable: bool = False
+    storage_busy: bool = False
 
     @property
     def root_key_matches(self) -> bool:
@@ -389,34 +406,30 @@ def _load_stored_workspace_ids(
 
     try:
         connection = _open_identity_reader(root, live_storage=live_storage)
-    except ProtectedPathError:
-        raise
-    except Exception:
-        return None
-    if connection is None:
-        return frozenset()
-    found: set[str] = set()
-    with closing(connection):
-        try:
+        if connection is None:
+            return frozenset()
+        found: set[str] = set()
+        with closing(connection):
             tables = {
                 row[0]
                 for row in connection.execute(
                     "SELECT name FROM sqlite_master WHERE type='table'"
                 )
             }
-        except sqlite3.Error:
-            return None
-        for table in ("memory_events", "governance_events"):
-            if table not in tables:
-                continue
-            try:
+            for table in ("memory_events", "governance_events"):
+                if table not in tables:
+                    continue
                 rows = connection.execute(
                     f"SELECT DISTINCT workspace_id FROM {table}"  # noqa: S608
                 ).fetchall()
-            except sqlite3.Error:
-                return None
-            found.update(value for (value,) in rows if isinstance(value, str))
-    return frozenset(found)
+                found.update(value for (value,) in rows if isinstance(value, str))
+        return frozenset(found)
+    except ProtectedPathError:
+        raise
+    except Exception as error:
+        if live_storage and is_sqlite_busy(error):
+            raise
+        return None
 
 
 def stored_event_counts(root: str | os.PathLike[str]) -> dict[str, int]:
@@ -457,8 +470,12 @@ def _claim_identity(root: Path, *, live_storage: bool = False) -> WorkspaceIdent
     current = _identity_root_key(root)
     path_hash = _workspace_id(root)
     recorded, malformed = _read_identity_file(root)
+    storage_busy = False
     try:
         stored = _load_stored_workspace_ids(root, live_storage=live_storage)
+    except sqlite3.OperationalError as error:
+        stored = None
+        storage_busy = is_sqlite_busy(error)
     except ProtectedPathError:
         return WorkspaceIdentity(
             workspace_id=path_hash,
@@ -486,6 +503,7 @@ def _claim_identity(root: Path, *, live_storage: bool = False) -> WorkspaceIdent
             has_file=True,
             stored_ids=stored,
             storage_unavailable=storage_unavailable,
+            storage_busy=storage_busy,
         )
     if recorded is None:
         if not stored:
@@ -500,6 +518,7 @@ def _claim_identity(root: Path, *, live_storage: bool = False) -> WorkspaceIdent
             current_root_key=current,
             stored_ids=stored,
             storage_unavailable=storage_unavailable,
+            storage_busy=storage_busy,
         )
     # A fork only hides ``forked_from``; adopt (no fork) hides every other ID.
     allowed = {recorded.workspace_id}
@@ -519,6 +538,7 @@ def _claim_identity(root: Path, *, live_storage: bool = False) -> WorkspaceIdent
         has_file=True,
         stored_ids=stored,
         storage_unavailable=storage_unavailable,
+        storage_busy=storage_busy,
     )
 
 
@@ -535,6 +555,7 @@ def _block(identity: WorkspaceIdentity, root: Path, code: str) -> WorkspaceIdent
         sole_holder=False,
         stored_ids=identity.stored_ids,
         storage_unavailable=identity.storage_unavailable,
+        storage_busy=identity.storage_busy,
     )
 
 
@@ -598,6 +619,7 @@ def _resolve_identities(
                 ),
                 stored_ids=identity.stored_ids,
                 storage_unavailable=identity.storage_unavailable,
+                storage_busy=identity.storage_busy,
             )
     return identities
 
@@ -891,6 +913,7 @@ class WorkspaceRegistry:
                 canonical,
                 identity.blocked,
                 identity.storage_unavailable,
+                identity.storage_busy,
             )
             self._by_root[key] = workspace
             self._by_id.setdefault(workspace.workspace_id, workspace)

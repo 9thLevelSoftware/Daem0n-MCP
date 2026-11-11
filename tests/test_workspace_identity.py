@@ -231,6 +231,7 @@ def test_unavailable_identity_is_retried_after_a_transient_read_failure(
     monkeypatch.setattr(workspace_module, "_open_identity_reader", read)
     first = workspace_identity(root)
     assert first.storage_unavailable
+    assert not first.storage_busy
     assert first.workspace_id == path_hash_workspace_id(root)
     before = _database_digest(root)
 
@@ -241,6 +242,89 @@ def test_unavailable_identity_is_retried_after_a_transient_read_failure(
     assert reads == [False, False]
     assert _database_digest(root) == before
     assert not _identity_file(root).exists()
+
+
+@pytest.mark.parametrize("stage", ["open", "schema", "memory", "governance"])
+@pytest.mark.parametrize("error_code", [None, 261, 262])
+@pytest.mark.parametrize("recorded", [False, True])
+def test_live_identity_preserves_contention_at_each_read_stage(
+    tmp_path, monkeypatch, stage, error_code, recorded
+):
+    from daem0nmcp import workspace as workspace_module
+
+    root = _project(tmp_path, "contended-store")
+    _seed_events(root, FOREIGN)
+    if recorded:
+        write_workspace_identity(root, workspace_id=FOREIGN)
+    before = _identity_file(root).read_bytes() if recorded else None
+    opened = []
+
+    def locked():
+        error = sqlite3.OperationalError(
+            "database is locked" if error_code is None else "numeric SQLite contention"
+        )
+        if error_code is not None:
+            error.sqlite_errorcode = error_code
+        raise error
+
+    class Reader:
+        closed = False
+
+        def execute(self, statement):
+            if "sqlite_master" in statement:
+                if stage == "schema":
+                    locked()
+                return [("memory_events",), ("governance_events",)]
+            if statement.endswith(f"FROM {stage}_events"):
+                locked()
+            cursor = mock.Mock()
+            cursor.fetchall.return_value = [(FOREIGN,)]
+            return cursor
+
+        def close(self):
+            self.closed = True
+
+    def open_reader(_root, *, live_storage=False):
+        assert live_storage
+        if stage == "open":
+            locked()
+        reader = Reader()
+        opened.append(reader)
+        return reader
+
+    monkeypatch.setattr(workspace_module, "_open_identity_reader", open_reader)
+    identity = workspace_identity(root, live_storage=True)
+    assert identity.storage_unavailable
+    assert identity.storage_busy
+    assert identity.blocked is None
+    expected = FOREIGN if recorded else path_hash_workspace_id(root)
+    assert identity.workspace_id == expected
+    workspace = WorkspaceRegistry([root], live_storage=True).default
+    assert workspace.storage_unavailable and workspace.storage_busy
+    assert workspace.workspace_id == expected
+    ensure_workspace_identity([root], live_storage=True)
+    assert all(reader.closed for reader in opened)
+    if recorded:
+        assert _identity_file(root).read_bytes() == before
+    else:
+        assert not _identity_file(root).exists()
+
+
+@pytest.mark.parametrize(
+    ("message", "error_code"),
+    [
+        ("no such table: locked_cache", None),
+        ("no such table: busy_records", None),
+        ("database is locked", 11),
+    ],
+)
+def test_sqlite_contention_classifier_rejects_non_lock_errors(message, error_code):
+    from daem0nmcp.workspace import is_sqlite_busy
+
+    error = sqlite3.OperationalError(message)
+    if error_code is not None:
+        error.sqlite_errorcode = error_code
+    assert not is_sqlite_busy(error)
 
 
 def test_identity_reader_keeps_a_snapshot_while_a_writer_grows_the_database(
@@ -356,6 +440,32 @@ def test_offline_identity_reader_preserves_database_pointer_and_sidecars(tmp_pat
         assert {path.name: path.read_bytes() for path in storage.iterdir()} == before
 
     assert {path.name: path.read_bytes() for path in storage.iterdir()} == before
+
+    with closing(sqlite3.connect(database)) as writer:
+        writer.execute("INSERT INTO memory_events VALUES (?, ?)", (OTHER, "wal-only"))
+        writer.commit()
+        assert Path(f"{database}-wal").stat().st_size > 0
+
+        def sidecar_state():
+            return {
+                path.name: (
+                    path.stat().st_size,
+                    path.stat().st_mtime_ns,
+                    # SQLite can mmap-update volatile WAL read-lock words.
+                    None if path.name.endswith("-shm") else path.read_bytes(),
+                )
+                for path in storage.iterdir()
+            }
+
+        before = sidecar_state()
+        with closing(workspace_module._open_identity_reader(root)) as connection:
+            assert set(
+                connection.execute(
+                    "SELECT DISTINCT workspace_id FROM memory_events"
+                ).fetchall()
+            ) == {(FOREIGN,), (OTHER,)}
+            assert sidecar_state() == before
+        assert sidecar_state() == before
 
 
 def test_live_identity_does_not_reuse_an_offline_cached_resolution(

@@ -137,7 +137,7 @@ class WriterServiceTests(
         ):
             fallback = WorkspaceRegistry([relocated], default_root=relocated).default
             self.assertNotEqual(self.workspace.workspace_id, fallback.workspace_id)
-            with self.assertRaisesRegex(RuntimeServiceError, "ACTIVE_V7_UNAVAILABLE"):
+            with self.assertRaisesRegex(RuntimeServiceError, "DATABASE_IN_USE"):
                 await writer.store(
                     fallback,
                     self._store_command(idempotency_key="unknown-identity-write"),

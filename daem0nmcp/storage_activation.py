@@ -159,25 +159,23 @@ def _resolve_storage_file(storage: Path, relative_name: str, field: str) -> Path
 
 
 def readonly_database_uri(path: str | os.PathLike[str]) -> str:
-    """Return a URI that reads a database without writing a byte beside it.
+    """Return an offline read URI that preserves database and sidecar data.
 
-    An ordinary read-only connection still creates the ``-shm`` wal-index,
-    which an offline inspection may not do.  On Windows the no-lock VFS keeps
-    read-only connections off the read marks.  POSIX has no equivalent --
-    ``unix-none`` lacks shared memory, so it cannot open a WAL database at all
-    -- so with no ``-wal``, ``-shm`` or ``-journal`` the main file is the whole
-    database and is read as immutable (SQLite would otherwise create the WAL
-    files); anything else is read through the default VFS, whose only write is
-    the volatile ``-shm`` wal-index.
+    With no ``-wal``, ``-shm`` or ``-journal`` the main file is the whole
+    database and is read as immutable, preventing SQLite from creating WAL
+    sidecars. Existing sidecars must remain visible so their committed data is
+    included. Windows uses the no-lock VFS; POSIX uses the default VFS because
+    ``unix-none`` cannot open WAL databases. Reads with sidecars can update the
+    volatile ``-shm`` wal-index read marks.
     """
 
     resolved = Path(path).resolve()
-    if sys.platform == "win32":
-        parameters = "&vfs=win32-none"
-    elif not any(
+    if not any(
         Path(f"{resolved}{suffix}").exists() for suffix in ("-wal", "-shm", "-journal")
     ):
         parameters = "&immutable=1"
+    elif sys.platform == "win32":
+        parameters = "&vfs=win32-none"
     else:
         parameters = ""
     return sqlite_file_uri(resolved, mode="ro") + parameters

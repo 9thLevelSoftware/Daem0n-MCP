@@ -139,6 +139,12 @@ def _validated_workspace(
         ).default
     except (OSError, RuntimeError, TypeError, ValueError) as exc:
         raise RuntimeServiceError("INVALID_WORKSPACE") from exc
+    if (
+        registered.storage_busy
+        and registered.identity_block is None
+        and not allow_unavailable_storage
+    ):
+        raise RuntimeServiceError("DATABASE_IN_USE")
     if registered.identity_block is not None or (
         registered.storage_unavailable and not allow_unavailable_storage
     ):

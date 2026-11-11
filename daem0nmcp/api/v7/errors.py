@@ -6,11 +6,11 @@ must update the schema/conformance fixture in the same review.
 
 from __future__ import annotations
 
-import sqlite3
 from enum import Enum
 from types import MappingProxyType
 
 from ...bounded_workers import BoundedWorkerBusyError
+from ...workspace import is_sqlite_busy
 
 
 class ErrorCode(str, Enum):
@@ -129,18 +129,7 @@ def is_database_busy(error: BaseException | None) -> bool:
         return True
     if getattr(error, "code", None) == ErrorCode.DATABASE_IN_USE.value:
         return True
-    if not isinstance(error, sqlite3.OperationalError):
-        return False
-    code = getattr(error, "sqlite_errorcode", None)
-    if isinstance(code, int):
-        return code & 0xFF in {5, 6}  # SQLITE_BUSY, SQLITE_LOCKED
-    # sqlite_errorcode is unavailable on Python 3.10; match SQLite's fixed
-    # lock diagnostics only, never arbitrary detail text.
-    return str(error).casefold() in {
-        "database is locked",
-        "database table is locked",
-        "database schema is locked",
-    }
+    return is_sqlite_busy(error)
 
 
 __all__ = [
