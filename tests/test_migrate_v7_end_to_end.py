@@ -405,7 +405,7 @@ async def test_migrated_v6_workspace_is_usable_end_to_end(tmp_path):
             for item in recall["data"]["items"]
             if item["record"]["relative_file_path"] == "src/db.py"
         ]
-        assert linked, recall["data"]["items"]
+        assert linked, recall
 
         outcome = await call(
             session,

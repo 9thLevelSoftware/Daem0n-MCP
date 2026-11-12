@@ -928,6 +928,40 @@ class TestPinnedBackend(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(connect_call["local_address"], "0.0.0.0")
         self.assertEqual(connect_call["socket_options"], socket_options)
 
+    async def test_connect_budget_cannot_grow_from_clock_rounding(self):
+        from daem0nmcp.pinned_http import PinnedPublicNetworkBackend
+
+        # Adding 2.5 then subtracting this timestamp rounds above 2.5.
+        started = 2047.9999999999998
+        loop = asyncio.get_running_loop()
+        for resolution_elapsed in (0.0, 1.0):
+            with self.subTest(resolution_elapsed=resolution_elapsed):
+                stream = ScriptedNetworkStream(server_addr=("93.184.216.34", 443))
+                delegate = RecordingBackend(stream)
+                clock = types.SimpleNamespace(now=started)
+
+                async def resolve(
+                    host, port, *, clock=clock, elapsed=resolution_elapsed
+                ):
+                    clock.now += elapsed
+                    return ("93.184.216.34",)
+
+                backend = PinnedPublicNetworkBackend(
+                    resolver=resolve, delegate=delegate
+                )
+                with patch.object(
+                    loop, "time", side_effect=lambda clock=clock: clock.now
+                ):
+                    result = await backend.connect_tcp(
+                        "docs.example.test", 443, timeout=2.5
+                    )
+
+                self.assertIs(result, stream)
+                self.assertGreater(delegate.connect_calls[0]["timeout"], 0)
+                self.assertLessEqual(
+                    delegate.connect_calls[0]["timeout"], 2.5 - resolution_elapsed
+                )
+
     async def test_unix_socket_path_is_rejected_without_delegation(self):
         from daem0nmcp.pinned_http import PinnedPublicNetworkBackend
 

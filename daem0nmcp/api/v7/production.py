@@ -273,16 +273,14 @@ class _OptionalNativeRuntimeLifecycle:
         for profile, modules in _NATIVE_PROFILE_MODULES.items():
             if self._statuses.get(profile) != "ready":
                 continue
-            eager = self._explicitly_enabled(profile)
+            eager = os.name == "nt" or self._explicitly_enabled(profile)
             for module in modules:
-                # Explicitly enabled profiles import on the main thread so
-                # broken native DLLs degrade upfront; auto-enabled profiles use
-                # lightweight spec checks to avoid multi-second startup imports.
+                # Windows native DLL imports can deadlock with concurrent
+                # worker startup. Initialize every ready profile's entry points
+                # here, including auto-enabled profiles, before providers run.
+                # Elsewhere, auto profiles keep lightweight spec checks.
                 try:
-                    # Windows can deadlock when a worker loads NumPy's DLLs
-                    # while the main thread starts another worker. Initialize
-                    # that shared prerequisite before any provider runs.
-                    if eager or (os.name == "nt" and module == "numpy"):
+                    if eager:
                         importlib.import_module(module)
                     elif importlib.util.find_spec(module) is None:
                         raise ModuleNotFoundError(module)

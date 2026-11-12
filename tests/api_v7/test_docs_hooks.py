@@ -69,8 +69,9 @@ LEGACY_MEMORY_CALL = re.compile(
 )
 
 RAW_SCOPE_EXAMPLE = re.compile(
-    r"(?i)(?:--project-path\b|[\"']project_path[\"']\s*:|"
-    r"\bproject_path\s*=)"
+    # Operator CLI commands select a project with --project-path. MCP calls
+    # must still use the server-issued workspace_id rather than a path field.
+    r"(?i)(?:[\"']project_path[\"']\s*:|\bproject_path\s*=)"
 )
 
 OBSOLETE_TRANSPORT_EXAMPLE = re.compile(
