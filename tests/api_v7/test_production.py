@@ -86,7 +86,7 @@ class ProductionCompositionTests(unittest.TestCase):
             production._OptionalNativeRuntimeLifecycle(
                 {"local": "ready", "models-local": "disabled"}
             ).start()
-            self.assertEqual(["qdrant_client"], imported)
+            self.assertEqual(["numpy", "qdrant_client"], imported)
             production._OptionalNativeRuntimeLifecycle(
                 {"local": "disabled", "models-local": "ready"}
             ).start()
@@ -94,7 +94,9 @@ class ProductionCompositionTests(unittest.TestCase):
 
         self.assertEqual(
             [
+                "numpy",
                 "qdrant_client",
+                "numpy",
                 "sentence_transformers",
                 "onnx",
                 "onnxruntime",
@@ -132,6 +134,106 @@ class ProductionCompositionTests(unittest.TestCase):
         }
         self.assertEqual("degraded", states["graph"].status)
         self.assertIn("igraph", str(states["graph"].remediation))
+
+    def test_windows_auto_native_profiles_initialize_numpy_before_workers(self) -> None:
+        from daem0nmcp.api.v7 import production
+
+        for profile in ("local", "models-local", "late-interaction"):
+            with self.subTest(profile=profile):
+                calls: list[tuple[str, str]] = []
+                with (
+                    patch.object(production.os, "name", "nt"),
+                    patch.object(
+                        production.importlib,
+                        "import_module",
+                        side_effect=lambda name, calls=calls: calls.append(
+                            ("import", name)
+                        ),
+                    ),
+                    patch.object(
+                        production.importlib.util,
+                        "find_spec",
+                        side_effect=lambda name, calls=calls: (
+                            calls.append(("spec", name)) or object()
+                        ),
+                    ),
+                ):
+                    production._OptionalNativeRuntimeLifecycle(
+                        {profile: "ready"}, environ={}
+                    ).start()
+
+                self.assertEqual(("import", "numpy"), calls[0])
+                self.assertEqual(
+                    [("import", "numpy")],
+                    [call for call in calls if call[0] == "import"],
+                )
+
+    def test_windows_broken_numpy_degrades_only_its_ready_dependents(self) -> None:
+        from daem0nmcp.api.v7 import production
+
+        statuses = {
+            "local": "ready",
+            "models-local": "ready",
+            "late-interaction": "ready",
+            "graph": "ready",
+            "apps": "ready",
+        }
+
+        def import_module(name):
+            self.assertEqual("numpy", name)
+            raise OSError("native array runtime unavailable")
+
+        with (
+            patch.object(production.os, "name", "nt"),
+            patch.object(production.importlib, "import_module", import_module),
+            patch.object(production.importlib.util, "find_spec", return_value=object()),
+        ):
+            lifecycle = production._OptionalNativeRuntimeLifecycle(statuses, environ={})
+            lifecycle.start()
+
+        for profile in ("local", "models-local", "late-interaction"):
+            self.assertEqual("degraded", statuses[profile])
+            self.assertIn("numpy", lifecycle.failures[profile])
+        self.assertEqual("ready", statuses["graph"])
+        self.assertEqual("ready", statuses["apps"])
+
+    def test_posix_auto_native_profiles_keep_imports_lazy(self) -> None:
+        from daem0nmcp.api.v7 import production
+
+        with (
+            patch.object(production.os, "name", "posix"),
+            patch.object(production.importlib, "import_module") as imported,
+            patch.object(production.importlib.util, "find_spec", return_value=object()),
+        ):
+            production._OptionalNativeRuntimeLifecycle(
+                {
+                    "local": "ready",
+                    "models-local": "ready",
+                    "late-interaction": "ready",
+                    "graph": "ready",
+                },
+                environ={},
+            ).start()
+        imported.assert_not_called()
+
+    def test_disabled_native_profiles_initialize_no_prerequisites(self) -> None:
+        from daem0nmcp.api.v7 import production
+
+        with (
+            patch.object(production.os, "name", "nt"),
+            patch.object(production.importlib, "import_module") as imported,
+            patch.object(production.importlib.util, "find_spec") as inspected,
+        ):
+            production._OptionalNativeRuntimeLifecycle(
+                {
+                    "local": "disabled",
+                    "models-local": "disabled",
+                    "late-interaction": "disabled",
+                },
+                environ={},
+            ).start()
+        imported.assert_not_called()
+        inspected.assert_not_called()
 
     def test_capability_states_carry_the_registry_remediation(self) -> None:
         """Health must say how to enable a profile, not 'review' it."""

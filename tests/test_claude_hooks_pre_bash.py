@@ -96,11 +96,17 @@ def test_no_project_exits_clean(tmp_path, monkeypatch):
     assert exc_info.value.code == 0
 
 
-def test_v7_governance_rules_stdin_reminder(tmp_path):
+@pytest.mark.parametrize("pointer_state", ["legacy", "active", "malformed", "missing"])
+def test_v7_governance_rules_stdin_reminder(tmp_path, pointer_state):
     import json
     import sqlite3
 
     from daem0nmcp.claude_hooks.pre_bash import reminder
+    from daem0nmcp.event_store import canonical_json_bytes
+    from daem0nmcp.storage_activation import (
+        ActiveDatabasePointer,
+        write_active_pointer,
+    )
 
     storage = tmp_path / ".daem0nmcp" / "storage"
     storage.mkdir(parents=True)
@@ -132,6 +138,35 @@ def test_v7_governance_rules_stdin_reminder(tmp_path):
     finally:
         conn.close()
 
+    if pointer_state == "active":
+        active_file = storage / "current-v7.db"
+        with sqlite3.connect(db_file) as source, sqlite3.connect(active_file) as active:
+            source.backup(active)
+            active.execute(
+                "UPDATE governance_rules SET must_not_json = ?",
+                (json.dumps(["Never force push from the active generation"]),),
+            )
+        write_active_pointer(
+            storage,
+            ActiveDatabasePointer(
+                7, 2, active_file.name, db_file.name, "mig_" + "a" * 64
+            ),
+        )
+    elif pointer_state == "malformed":
+        (storage / "active-db.json").write_text("invalid JSON", encoding="utf-8")
+    elif pointer_state == "missing":
+        (storage / "active-db.json").write_bytes(
+            canonical_json_bytes(
+                {
+                    "format_version": 7,
+                    "generation": 2,
+                    "active_db": "missing.db",
+                    "previous_db": db_file.name,
+                    "migration_run_id": "mig_" + "a" * 64,
+                }
+            ),
+        )
+
     output_raw = reminder(
         {
             "cwd": str(tmp_path),
@@ -139,8 +174,16 @@ def test_v7_governance_rules_stdin_reminder(tmp_path):
             "tool_input": {"command": "git push --force origin main"},
         }
     )
+    if pointer_state in {"malformed", "missing"}:
+        assert output_raw is None
+        return
     assert output_raw is not None
     output = json.loads(output_raw)["hookSpecificOutput"]
     assert output["hookEventName"] == "PreToolUse"
-    assert "Never force push to main" in output["additionalContext"]
+    expected = (
+        "Never force push from the active generation"
+        if pointer_state == "active"
+        else "Never force push to main"
+    )
+    assert expected in output["additionalContext"]
     assert "permissionDecision" not in output

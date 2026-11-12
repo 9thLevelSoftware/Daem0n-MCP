@@ -40,6 +40,16 @@ has no CPython 3.10 distribution. On Python 3.10, the resolver omits this
 profile's dependencies and the runtime reports the Python-version remediation;
 core installation remains supported.
 
+For telemetry, install `observability` and set `OTEL_EXPORTER_OTLP_ENDPOINT`
+and optionally `OTEL_SERVICE_NAME` before launching either server entry point.
+OTLP uses `grpc` by default; set `OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf`
+for an HTTP collector (normally port 4318). The standard `OTEL_*_TRACES_*`
+overrides and exporter authentication/TLS settings are also honored.
+`OTEL_SDK_DISABLED=true` or `DAEM0NMCP_OBSERVABILITY_ENABLED=false` disables
+setup. Missing dependencies or invalid exporter configuration produce a stderr
+warning while core MCP operations remain available. A provider already installed
+by the embedding application is preserved and remains its responsibility.
+
 The server, not an MCP caller, establishes the workspace set. Configure the
 default root and any allowed additional roots before launch:
 
@@ -535,7 +545,7 @@ remind only:
 |-----------------|------|--------------|-------|--------------|
 | `SessionStart` | `session_start` | Explains that the first gated call briefs automatically and `session_brief` returns the full brief | `CLAUDE_PROJECT_DIR` env | Yes |
 | `PreToolUse` (`Edit\|Write\|NotebookEdit`) | `pre_edit` | Inside a Daem0n project, adds a one-line `additionalContext` reminder to use `daem0n_tool_call` for `memory_recall_file`; silent elsewhere | stdin event | Yes |
-| `PreToolUse` (`Bash`) | `pre_bash` | Checks the command against Daem0n rules. Currently inert: it reads a `TOOL_INPUT` env var that Claude Code does not set | `TOOL_INPUT` env | Yes (always exits 0) |
+| `PreToolUse` (`Bash`) | `pre_bash` | Reads active-generation Daem0n rules in read-only SQLite mode and emits matching `additionalContext` reminders | stdin event (`TOOL_INPUT` fallback) | Yes (always exits 0) |
 | `PostToolUse` (`mcp__.*__edit_preflight`) | `post_edit_preflight` | Edit-bridge plumbing: stages an `edit_preflight` receipt for a bridge edit request. Nothing in Claude Code creates those requests any more, so it is a no-op | stdin event | Yes |
 | `PostToolUse` (`Edit\|Write\|NotebookEdit`) | `post_edit` | Edit-bridge plumbing: reports a bridge-approved edit as a capture candidate. Only loads the bridge when the project is paired; a no-op in Claude Code today | stdin event | Yes |
 | `Stop`, `SubagentStop` | `stop` | When the transcript shows a finished task with no recorded outcome, suggests direct replay-safe `memory_store`/`memory_record_outcome` calls and counsel-challenge retry guidance as a `systemMessage`. Never writes memory | stdin event (`transcript_path`) | Yes |
@@ -543,7 +553,7 @@ remind only:
 No hook blocks a tool call or keeps the agent running: every hook exits 0 and none
 returns a `permissionDecision` or `decision`.
 
-Pairing writes an owner-only credential to
+With `--enable-edit-bridge`, optional pairing writes an owner-only credential to
 `~/.daem0nmcp/edit-bridges/<authority>/credential.json`, uses
 `~/.daem0nmcp/edit-bridges/run/<authority[:16]>/` for the bridge socket, and
 adds `DAEM0NMCP_EDIT_BRIDGE_CREDENTIAL_FILE`, `DAEM0NMCP_EDIT_BRIDGE_RUNTIME_DIR`,
@@ -562,11 +572,18 @@ python -m daem0nmcp.cli --project-path /srv/project-a install-opencode --interfa
 ```
 
 The installer copies the packaged `daem0n.ts` asset and provisions host-side
-credentials. Native edit flow is exact: the host creates an edit request,
-`edit_preflight` returns a one-use receipt for that native edit, the identical
-edit is retried, capture is listed with `memory_capture_list`, and promotion
-uses `memory_capture_promote` after a matching `memory_preflight`. Do not add
-forgeable `_client_meta` fields to a plugin or tool call.
+credentials. The V1 plugin injects the Covenant guidance, runs the same
+remind-only edit and Bash hooks, and appends their reminders to tool results.
+Use the MCP memory tools to store, recall, and record outcomes; the plugin
+does not require approval before a native edit.
+
+The retained edit-bridge API supports explicit host-created edit requests,
+one-use `edit_preflight` receipts, capture listing, and preflight-protected
+promotion. The current Claude Code and OpenCode hooks do not create those
+requests, so pairing alone does not enable native-edit capture or a
+deny/preflight/retry workflow in either client. Bridge subprocess tests cover
+that API separately from the installed host integration. Do not add forgeable
+`_client_meta` fields to a plugin or tool call.
 
 Protected remote pairing uses the installer’s explicit remote credential,
 workspace, URL, CA-file, and origin options through `install_opencode`; it is

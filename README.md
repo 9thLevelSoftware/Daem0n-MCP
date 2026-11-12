@@ -702,8 +702,8 @@ one-line reminder in every session. The same `PYTHONPATH` limit as for the
 | `SessionStart` | `session_start` | Explains that the first Daem0n call establishes the session and brief; `session_brief` returns the full brief | `CLAUDE_PROJECT_DIR` env | Yes |
 | `PreToolUse` (`Edit\|Write\|NotebookEdit`) | `pre_edit` | Inside a Daem0n project, adds a one-line `additionalContext` reminder to call `daem0n_tool_call` targeting `memory_recall_file`; silent elsewhere | stdin event | Yes |
 | `PreToolUse` (`Bash`) | `pre_bash` | Checks the command against active Daem0n rules (`governance_rules` / `rules`) in read-only SQLite mode and emits matching `additionalContext` reminders | stdin event (`TOOL_INPUT` fallback) | Yes (always exits 0) |
-| `PostToolUse` (`mcp__.*__edit_preflight`) | `post_edit_preflight` | Edit-bridge plumbing: stages an `edit_preflight` receipt for a bridge edit request when the project is paired with `--enable-edit-bridge` | stdin event | Yes |
-| `PostToolUse` (`Edit\|Write\|NotebookEdit`) | `post_edit` | Edit-bridge plumbing: reports a bridge-approved edit as a capture candidate. Only loads the bridge when the project is paired | stdin event | Yes |
+| `PostToolUse` (`mcp__.*__edit_preflight`) | `post_edit_preflight` | Retained edit-bridge plumbing: stages a receipt for an explicit host-created request. The current remind-only hooks create no requests, so pairing alone does not activate this flow | stdin event | Yes |
+| `PostToolUse` (`Edit\|Write\|NotebookEdit`) | `post_edit` | Retained edit-bridge plumbing: reports an approved edit as a capture candidate. The current remind-only hooks create no requests, so ordinary client edits produce no bridge capture | stdin event | Yes |
 | `Stop`, `SubagentStop` | `stop` | When the transcript shows a finished task with no recorded outcome, suggests direct `memory_store` and `memory_record_outcome` calls with counsel-challenge retry guidance as a `systemMessage`. Never writes memory | stdin event (`transcript_path`) | Yes |
 
 No hook blocks a tool call or keeps the agent running: every hook exits 0 and none
@@ -738,6 +738,11 @@ A Claude Code skill is included at `.claude/skills/daem0nmcp-protocol/SKILL.md` 
 ## OpenCode Integration
 
 OpenCode connects to Daem0n-MCP via the same MCP server. No server changes required -- the daemon serves all clients equally.
+
+The V1 plugin provides Covenant guidance and edit/Bash reminders. Its installed
+hooks do not create native edit-bridge requests or enforce a
+deny/preflight/retry flow; bridge API acceptance is separate from this
+remind-only client integration.
 
 ### Configuration
 
@@ -1003,9 +1008,9 @@ daem0nmcp/
 ├── claude_hooks/        # Claude Code native hooks
 │   ├── install.py       # install/uninstall-claude-hooks CLI
 │   ├── session_start.py # Suggest scoped v7 briefing
-│   ├── pre_edit.py      # Fail-closed v7 preflight guidance
-│   ├── pre_bash.py      # Rule enforcement on commands
-│   ├── post_edit.py     # Significance detection
+│   ├── pre_edit.py      # Remind-only file recall guidance
+│   ├── pre_bash.py      # Read-only command-rule reminders
+│   ├── post_edit.py     # Retained edit-bridge capture reporting
 │   ├── stop.py          # Read-only outcome/memory suggestions
 │   └── _client.py       # Hook helper utilities
 ├── compression/         # LLMLingua-2 context compression
