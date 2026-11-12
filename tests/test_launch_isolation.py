@@ -367,6 +367,20 @@ def _registered_commands(text: str) -> list[list[str]]:
         command, _end = decoder.raw_decode(text, match.end())
         if any("daem0nmcp" in part for part in command):
             commands.append(command)
+    # Claude project configuration splits the interpreter and arguments into
+    # separate fields. Exercise these documented launches alongside CLI and
+    # OpenCode registrations instead of silently omitting them from isolation.
+    for block in re.findall(r"```json\s*\n(.*?)\n```", text, re.DOTALL):
+        if '"mcpServers"' not in block or not re.search(r'"command":\s*"', block):
+            continue
+        configuration = json.loads(block)
+        for server in configuration.get("mcpServers", {}).values():
+            interpreter = server.get("command")
+            arguments = server.get("args", [])
+            if isinstance(interpreter, str) and any(
+                "daem0nmcp" in argument for argument in arguments
+            ):
+                commands.append([interpreter, *arguments])
     return commands
 
 

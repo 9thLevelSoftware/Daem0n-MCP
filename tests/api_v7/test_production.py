@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import tempfile
+import threading
 import unittest
 from dataclasses import replace
 from datetime import datetime, timezone
@@ -135,38 +136,106 @@ class ProductionCompositionTests(unittest.TestCase):
         self.assertEqual("degraded", states["graph"].status)
         self.assertIn("igraph", str(states["graph"].remediation))
 
-    def test_windows_auto_native_profiles_initialize_numpy_before_workers(self) -> None:
+    def test_windows_auto_native_profiles_preload_before_runtime_assembly(self) -> None:
         from daem0nmcp.api.v7 import production
 
-        for profile in ("local", "models-local", "late-interaction"):
-            with self.subTest(profile=profile):
-                calls: list[tuple[str, str]] = []
+        expected = [
+            "numpy",
+            "qdrant_client",
+            "numpy",
+            "sentence_transformers",
+            "onnx",
+            "onnxruntime",
+            "numpy",
+            "networkx",
+            "igraph",
+            "leidenalg",
+        ]
+        profiles = ("local", "models-local", "late-interaction", "graph")
+
+        class AssemblyBoundaryError(Exception):
+            pass
+
+        for environ in (
+            {},
+            {
+                f"DAEM0NMCP_{p.upper().replace('-', '_')}_ENABLED": "auto"
+                for p in profiles
+            },
+        ):
+            with self.subTest(environ=environ):
+                imported: list[tuple[str, threading.Thread]] = []
                 with (
                     patch.object(production.os, "name", "nt"),
                     patch.object(
+                        production.CapabilityRegistry,
+                        "all",
+                        return_value={p: {"status": "ready"} for p in profiles},
+                    ),
+                    patch.object(
                         production.importlib,
                         "import_module",
-                        side_effect=lambda name, calls=calls: calls.append(
-                            ("import", name)
+                        side_effect=lambda name, imported=imported: imported.append(
+                            (name, threading.current_thread())
                         ),
                     ),
                     patch.object(
-                        production.importlib.util,
-                        "find_spec",
-                        side_effect=lambda name, calls=calls: (
-                            calls.append(("spec", name)) or object()
-                        ),
+                        production.importlib.util, "find_spec", return_value=object()
                     ),
+                    patch.object(
+                        production,
+                        "ensure_workspace_identity",
+                        side_effect=AssemblyBoundaryError,
+                    ),
+                    self.assertRaises(AssemblyBoundaryError),
                 ):
-                    production._OptionalNativeRuntimeLifecycle(
-                        {profile: "ready"}, environ={}
-                    ).start()
+                    production._assemble(
+                        "stdio", host=None, settings=self.settings, environ=environ
+                    )
 
-                self.assertEqual(("import", "numpy"), calls[0])
                 self.assertEqual(
-                    [("import", "numpy")],
-                    [call for call in calls if call[0] == "import"],
+                    [(name, threading.main_thread()) for name in expected], imported
                 )
+
+    def test_windows_auto_broken_model_runtime_degrades_only_its_profile(self) -> None:
+        from daem0nmcp.api.v7 import production
+
+        statuses = {"local": "ready", "models-local": "ready", "graph": "ready"}
+        imported: list[str] = []
+
+        def import_module(name: str) -> object:
+            imported.append(name)
+            if name == "sentence_transformers":
+                raise OSError("private native loader detail")
+            return object()
+
+        with (
+            patch.object(production.os, "name", "nt"),
+            patch.object(production.importlib, "import_module", import_module),
+            patch.object(production.importlib.util, "find_spec", return_value=object()),
+        ):
+            lifecycle = production._OptionalNativeRuntimeLifecycle(statuses, environ={})
+            lifecycle.start()
+
+        self.assertEqual(
+            {"local": "ready", "models-local": "degraded", "graph": "ready"}, statuses
+        )
+        self.assertEqual(
+            {"models-local": "importing sentence_transformers raised OSError"},
+            lifecycle.failures,
+        )
+        self.assertEqual(
+            [
+                "numpy",
+                "qdrant_client",
+                "numpy",
+                "sentence_transformers",
+                "networkx",
+                "igraph",
+                "leidenalg",
+            ],
+            imported,
+        )
 
     def test_windows_broken_numpy_degrades_only_its_ready_dependents(self) -> None:
         from daem0nmcp.api.v7 import production
@@ -180,8 +249,9 @@ class ProductionCompositionTests(unittest.TestCase):
         }
 
         def import_module(name):
-            self.assertEqual("numpy", name)
-            raise OSError("native array runtime unavailable")
+            if name == "numpy":
+                raise OSError("native array runtime unavailable")
+            return object()
 
         with (
             patch.object(production.os, "name", "nt"),
@@ -229,6 +299,7 @@ class ProductionCompositionTests(unittest.TestCase):
                     "local": "disabled",
                     "models-local": "disabled",
                     "late-interaction": "disabled",
+                    "graph": "degraded",
                 },
                 environ={},
             ).start()

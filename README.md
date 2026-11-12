@@ -61,13 +61,16 @@ reports Python-version remediation while core installation remains supported.
 
 The server owns workspace registration. Set `DAEM0NMCP_PROJECT_ROOT` to the
 default workspace and, when needed, `DAEM0NMCP_WORKSPACE_ROOTS` to the allowed
-additional roots. Operators derive the stable opaque ID from that configured
-root and provide it in the protected client configuration or pairing flow;
-`session_brief` then confirms that ID. Clients do not choose filesystem paths. Leave
+additional roots. Operators obtain the stable opaque ID from the local CLI
+and provide it in the protected client configuration or pairing flow;
+`session_brief` then confirms that ID. Use the local `workspace-id` CLI to inspect
+the project's recorded identity; do not recalculate an ID after moving an existing
+workspace. Clients do not choose filesystem paths. Leave
 `DAEM0NMCP_STORAGE_PATH` unset when serving multiple registered workspaces.
 
-A workspace ID is an identifier, not a secret. It is a truncated SHA-256 of the
-canonical root path, so anyone who knows or guesses the path can compute it.
+A workspace ID is an identifier, not a secret. New IDs derive from the canonical
+root path, while a moved workspace can retain its recorded ID. Read the current
+identity with the CLI rather than inferring it from the current path.
 "Opaque" means only that it is not a path and carries no meaning for clients.
 Access is decided by the authenticated principal and its grants, never by
 knowledge of the ID.
@@ -103,11 +106,11 @@ proxied deployment.
 `python -m` resolves `daem0nmcp` from the current directory first, so type these
 commands (and the `python -m daem0nmcp.cli` ones) from a directory you trust.
 Commands that a host launches for you inside a project never use `-m`: the
-installers and the [registration command](#linux--macos-stdio-transport) drop
+installers and the [registration command](#stdio-all-supported-platforms) drop
 the current directory from the import path first.
 
 The complete setup, exact preflight examples, migrations, native client
-installers, diagnostics, and all **75** registered v7 tools are in
+installers, diagnostics, and all **77** registered v7 tools are in
 [the v7 operations guide](docs/v7-operations.md). The release ledger remains
 in progress; these instructions do not claim a published v7 release.
 
@@ -336,9 +339,25 @@ AI agents start each session fresh. They don't remember:
 
 ### Claude Code (The Easy Way)
 
-1. Copy `Summon_Daem0n.md` to your project
-2. Start a Claude Code session in that project
-3. Claude will read the file and perform the summoning ritual automatically
+1. Copy [Summon_Daem0n.md](Summon_Daem0n.md) into the project you want Daem0n to remember.
+2. Open Claude Code in that project and say:
+
+   > Read Summon_Daem0n.md and perform the complete summoning ritual for this project.
+
+3. Let Claude inspect the machine, install the source checkout into a dedicated
+   environment, configure the workspace and MCP server, install the hooks and
+   project instructions, and verify the result. Restart Claude Code when it
+   requests the transport handoff, then ask it to resume the ritual.
+
+The file is a self-contained instruction manual for the AI. Copying it alone
+does not execute it. The default ritual uses Python 3.12 when available,
+project-scoped stdio on Windows, macOS and Linux, and the `local`, `graph`,
+`apps`, and `models-local` extras. These local models need downloads and disk
+space; the grimoire also covers an explicitly requested small-core setup.
+E2B cloud execution, Redis tasks and telemetry are optional, not setup
+prerequisites. Existing memories, unrelated settings and other MCP servers
+are preserved. Authentication and Claude Code's own trust prompts may require
+your participation; the AI must report those handoffs instead of claiming success.
 
 ### OpenCode
 
@@ -351,36 +370,49 @@ For the full ritual walkthrough, see `Summon_Daem0n_OpenCode.md`.
 
 ### Manual Installation
 
+For the complete install, existing-data migration, upgrade and verification
+sequence, use [the grimoire](Summon_Daem0n.md). These commands show the package
+installation portion from a trusted source directory:
+
 ```bash
 # Clone the repository
-git clone https://github.com/9thlevelsoftware/Daem0n-MCP.git ~/Daem0n-MCP
+git clone https://github.com/9thLevelSoftware/Daem0n-MCP.git "$HOME/Daem0n-MCP"
+cd "$HOME/Daem0n-MCP"
 
-# Install
-pip install -e ~/Daem0n-MCP
+# macOS/Linux; use the selected Python 3.11 or 3.12 interpreter
+python3.12 -m venv .venv
+.venv/bin/python -m pip install -e '.[local,graph,apps,models-local]'
+```
 
-# Run the MCP server (Linux/macOS — stdio transport)
-python -m daem0nmcp.server
-
-# Run the MCP server (Windows — HTTP transport required)
-python ~/Daem0n-MCP/start_server.py --port 9876
+```powershell
+# Windows, from the source checkout
+py -3.12 -m venv .venv
+& .\.venv\Scripts\python.exe -m pip install -e '.[local,graph,apps,models-local]'
 ```
 
 ## Installation by Platform
 
-### Linux / macOS (stdio transport)
+### Stdio (all supported platforms)
+
+Stdio is the default, including on Windows. Claude Code starts and stops the
+server; no separate terminal, port, Startup shortcut or background service is
+needed. Run registration from the target project, using the absolute path of
+the installed virtual environment's interpreter and the absolute project root:
 
 ```bash
-# Find your Python path
-python3 -c "import sys; print(sys.executable)"
-
-# Register with Claude Code (replace <PYTHON_PATH>)
-claude mcp add daem0nmcp --scope user -- <PYTHON_PATH> -c "import sys; sys.path = [p for p in sys.path if p]; import runpy; runpy.run_module('daem0nmcp.server', run_name='__main__', alter_sys=True)"
-
-# Restart Claude Code
+claude mcp add daem0nmcp --scope project --transport stdio -e "DAEM0NMCP_PROJECT_ROOT=<PROJECT_ROOT>" -- "<PYTHON_PATH>" -c "import sys; sys.path = [p for p in sys.path if p]; import runpy; runpy.run_module('daem0nmcp.server', run_name='__main__', alter_sys=True)"
 ```
 
-Do not register `<PYTHON_PATH> -m daem0nmcp.server` at user scope. Claude Code
-starts a user-scoped server inside whatever project you open, and `python -m`
+If a Daem0n entry already exists, follow the grimoire's inspect-and-merge flow
+instead of deleting it. Obtain the workspace selector with the installed
+interpreter's `python -m daem0nmcp.cli --json workspace-id`, with
+`DAEM0NMCP_PROJECT_ROOT` set to the same project. Store the returned ID in the
+project protocol, then restart Claude Code and approve the project server when
+prompted. Run `session_brief` and `system_health` with that ID before the
+grimoire's write/recall/restart acceptance checks.
+
+Do not register `<PYTHON_PATH> -m daem0nmcp.server`. Claude Code
+starts the server inside the opened project, and `python -m`
 puts that directory first on `sys.path`, so a repository that contains its own
 `daem0nmcp/` directory would run in place of the installed server. The command
 above runs the same module after dropping the working directory from the import
@@ -392,40 +424,43 @@ it (a leading or trailing `:`, or `.`) names the working directory, which puts
 the opened project back on the import path: keep `PYTHONPATH` unset or absolute
 in the environment your MCP host starts from.
 
-### Windows (HTTP transport required)
+### Optional Streamable HTTP
 
-Windows has a known bug where Python MCP servers using stdio transport hang indefinitely. Use HTTP transport instead:
+Use HTTP when you deliberately want a separately managed server. It is not a
+Windows requirement. Set `DAEM0NMCP_PROJECT_ROOT` in the server's environment
+before starting it from a trusted directory with the installed interpreter:
 
-1. **Start the server** (keep this terminal open):
 ```bash
-python ~/Daem0n-MCP/start_server.py --port 9876
+python -m daem0nmcp.server --transport streamable-http --host 127.0.0.1 --port 9876
 ```
-Or use `start_daem0nmcp_server.bat`
 
-2. **Add to `~/.claude.json`**:
+Merge this entry into the target project's existing `.mcp.json`:
 ```json
 {
   "mcpServers": {
     "daem0nmcp": {
       "type": "http",
-      "url": "http://localhost:9876/mcp"
+      "url": "http://127.0.0.1:9876/mcp"
     }
   }
 }
 ```
 
-3. **Start Claude Code** (after server is running)
+Start Claude Code after the HTTP server is ready. Keep storage derived per
+workspace. Remote or shared-host HTTP requires the authentication configuration
+described in [the operations guide](docs/v7-operations.md); local stdio needs no
+network listener.
 
 ### Transport Modes
 
 | Method | Transport | Default Port | Use Case |
 |--------|-----------|-------------|----------|
 | `python -m daem0nmcp.server` | `stdio` | n/a | Local process channel |
-| `python start_server.py` | Streamable HTTP at `/mcp` | 9876 | Windows HTTP, remote access |
+| `python start_server.py` | Streamable HTTP at `/mcp` | 9876 | Optional separately managed HTTP server |
 
 `python -m daem0nmcp.server` is for a terminal you started yourself. When an MCP
 host launches the stdio server for you, register the command from
-[Linux / macOS](#linux--macos-stdio-transport) instead: hosts start it inside
+[Stdio](#stdio-all-supported-platforms) instead: hosts start it inside
 whatever project is open.
 
 For OpenCode setup, see the [OpenCode Integration](#opencode-integration) section below, or run `python -m daem0nmcp.cli install-opencode` for automated setup.
@@ -680,7 +715,7 @@ Use `system_health` for bounded diagnostics. The complete protocol lives in
 python -m daem0nmcp.cli install-claude-hooks
 ```
 
-This writes six hook entries to the user-level `~/.claude/settings.json`, so
+This writes the packaged hook entries to the user-level `~/.claude/settings.json`, so
 they run in every project; each runs `daem0nmcp.claude_hooks.<hook>`
 with the interpreter you installed from. A hook only acts inside a Daem0n
 project: the session directory, `CLAUDE_PROJECT_DIR`, or one of their parent
@@ -695,7 +730,11 @@ way it could with `python -m`. Commands written by an earlier version keep the
 `-m` form until you re-run `install-claude-hooks`, which replaces them and
 reports how many it replaced; until then the `SessionStart` hook shows a
 one-line reminder in every session. The same `PYTHONPATH` limit as for the
-[registration command](#linux--macos-stdio-transport) applies.
+[registration command](#stdio-all-supported-platforms) applies.
+
+The installer currently uses the operating-system home directory, not
+`CLAUDE_CONFIG_DIR`. The grimoire handles custom Claude configuration directories
+by generating and merging the Daem0n hook entries into the actual settings file.
 
 | Event (matcher) | Hook | What it does | Input | Reminds only |
 |-----------------|------|--------------|-------|--------------|
@@ -770,7 +809,7 @@ directory found there. `install-opencode` writes the same command with the full
 path of the interpreter it ran under, and fixes that interpreter in the plugin
 it installs; the plugin never reads an interpreter from `opencode.json`.
 
-For Windows (where HTTP transport is required), use:
+For a separately managed Streamable HTTP server, use:
 
 ```json
 {
@@ -942,7 +981,8 @@ variables (`FASTMCP_SERVER_AUTH*`) are read only from the process environment.
 | `DAEM0NMCP_RECALL_COMPLEX_MAX_MEMORIES` | `20` | Max memories for complex queries |
 | `DAEM0NMCP_FACT_PROMOTION_THRESHOLD` | `3` | Outcomes to promote to fact |
 
-See `Summon_Daem0n.md` for the complete configuration reference (~50 settings).
+See [Summon_Daem0n.md](Summon_Daem0n.md) for automatic setup and feature choices,
+and [the v7 operations guide](docs/v7-operations.md) for deployment settings.
 
 ## Architecture
 
@@ -1097,13 +1137,28 @@ Use MCP `memory_record_outcome` for v7 outcomes. It requires an opaque
 
 ## Upgrading
 
+Ask Claude Code to read the current [Summon_Daem0n.md](Summon_Daem0n.md) and
+resume the ritual. It inventories the existing installation, preserves data and
+configuration, upgrades the selected environment, refreshes its own integration
+entries, and verifies persistence. It does not reset a workspace or overwrite
+unrelated settings. Use the following notes for manual maintenance.
+
 ### 1. Update the Code
 
 ```bash
-# If installed from source (recommended)
-cd ~/Daem0n-MCP && git pull && pip install -e .
-
+# Inspect before updating; retain local work and record the prior revision.
+cd "$HOME/Daem0n-MCP"
+git status --short --branch
+git rev-parse HEAD
+# With a clean checkout on the intended branch:
+git pull --ff-only
+# Use the existing environment's Python and the previously selected extras.
+.venv/bin/python -m pip install -e '.[local,graph,apps,models-local]'
 ```
+
+On Windows use `& .\.venv\Scripts\python.exe` for the final command. Stop
+affected Daem0n processes before upgrading their environment or migrating their
+storage; do not terminate unrelated Python or Claude processes.
 
 ### 2. Re-encode Embeddings (legacy format 6 only)
 
@@ -1279,27 +1334,26 @@ reports `RERANKER_UNAVAILABLE`; it never silently substitutes embedding rerankin
 
 **Fixes:**
 
-1. **Start server before Claude Code (Windows):**
-   ```bash
-   # Terminal 1: Start Daem0n server first
-   python ~/Daem0n-MCP/start_server.py --port 9876
-   # Wait for "Uvicorn running on http://localhost:9876"
-
-   # Terminal 2: Then start Claude Code
-   claude
-   ```
-
-2. **Re-register the server:**
-   ```bash
-   claude mcp remove daem0nmcp -s user
-   claude mcp add daem0nmcp http://localhost:9876/mcp -s user
-   ```
+1. Inspect `claude mcp list` and `claude mcp get daem0nmcp` from the target
+   project. Check the configured interpreter, transport and project root.
+2. Restart Claude Code after configuration changes and complete its project
+   server trust prompt. A running session does not automatically gain tools
+   from a newly written configuration file.
+3. For stdio, let Claude Code launch the configured process. For deliberately
+   configured HTTP, start that server first and verify its `/mcp` endpoint with
+   an MCP client. Do not switch transports just because the host is Windows.
+4. Resume the grimoire's diagnostics; retain other MCP entries and inspect
+   local/project/user scope conflicts before changing registration.
 
 ### Hooks Not Firing
 
-1. MCP server running: `curl http://localhost:9876/mcp` should respond
-2. Hooks configured: check `~/.claude/settings.json` or `.claude/settings.json`
-3. Project has `.daem0nmcp/` directory
+1. Check the hook commands in Claude's actual user settings and any project
+   settings; ensure their interpreter still exists. See the custom
+   `CLAUDE_CONFIG_DIR` note above.
+2. Check that the project has a `.daem0nmcp/` directory and that hook events
+   identify the expected project.
+3. Hooks remind; they do not block edits or write memories automatically.
+   MCP server connectivity is a separate check.
 
 ### Covenant Errors
 
@@ -1424,4 +1478,6 @@ rm -rf .daem0nmcp/
                               ~ Daem0n
 ```
 
-*Daem0nMCP v6.6.6: ModernBERT Deep Sight (256-dim Matryoshka, ONNX quantized, asymmetric encoding). 8 workflow tools with 59 actions + 3 cognitive tools (simulate_decision, evolve_rule, debate_internal). Background Dreaming, Auto-Zoom Retrieval Routing, Active Context, Visual Portals (MCP Apps), GraphRAG, bi-temporal knowledge, LLMLingua-2 compression. Claude Code native hooks + OpenCode integration (plugins, commands, covenant enforcement). 500+ tests. The daemon reaches beyond the veil.*
+*Daem0nMCP v7 development: persistent memory, replay-safe decisions and outcomes,
+workspace-scoped tools, and optional local search, models, graphs and visual
+portals. Read the grimoire. Complete the ritual. Verify what awakened.*
