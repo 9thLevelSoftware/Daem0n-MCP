@@ -119,6 +119,16 @@ timeouts or retry behavior. The same test passed once on Windows Python 3.12
 this is a diagnostic improvement, not a claimed runtime repair. A subsequent CI
 failure will retain the missing evidence.
 
+The same CI run's Windows Python 3.10 job exposed floating-point cancellation in
+the pinned HTTP connection budget: adding an absolute deadline and subtracting
+the current clock yielded `2.5000000000002274` for a 2.5-second limit. The backend
+now subtracts elapsed time from the original budget for DNS and the subsequent
+dial. A controlled-clock regression reproduced that exact overshoot before the
+fix and verifies both the limit and time spent resolving. The backend checks
+passed (nine tests, 18 subtests); after a test closure-binding lint correction,
+the affected regression passed again (one test, two subtests), with scoped Ruff
+and formatting checks passing. The original strict limit assertion is unchanged.
+
 ## Evidence and limits
 
 Raw, ignored evidence is under `.test_tmp/acceptance-20261112-summon/evidence/`:

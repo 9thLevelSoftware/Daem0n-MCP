@@ -538,20 +538,22 @@ class PinnedPublicNetworkBackend(
         socket_options: Iterable[tuple] | None = None,
     ) -> httpcore.AsyncNetworkStream:
         loop = asyncio.get_running_loop()
-        deadline = None if timeout is None else loop.time() + max(float(timeout), 0.0)
+        budget = None if timeout is None else max(float(timeout), 0.0)
+        started = loop.time()
         stream: httpcore.AsyncNetworkStream | None = None
         try:
-            if deadline is None:
+            if budget is None:
                 addresses = await self._resolver(host, port)
             else:
-                remaining = deadline - loop.time()
+                # Subtract elapsed time to avoid rounding an absolute deadline up.
+                remaining = budget - (loop.time() - started)
                 if remaining <= 0:
                     raise asyncio.TimeoutError
                 addresses = await asyncio.wait_for(
                     self._resolver(host, port), timeout=remaining
                 )
             selected = select_public_address(addresses)
-            remaining = None if deadline is None else deadline - loop.time()
+            remaining = None if budget is None else budget - (loop.time() - started)
             if remaining is not None and remaining <= 0:
                 raise asyncio.TimeoutError
             delegate_call = self._delegate.connect_tcp(
