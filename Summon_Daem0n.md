@@ -37,6 +37,14 @@ This tome is self-contained: it works when copied alone into another project.
 The target project is the project being equipped; the Daem0n source checkout is
 its separately installed machinery. Keep those two absolute paths distinct.
 
+Choose the host being equipped from the user's request or the AI session running
+this ritual: **Claude Code, Codex, agy (Antigravity CLI), OpenCode V1, omp (Oh My
+Pi), or pi (Earendil Works Pi)**. Configure that host only; finding several CLI
+executables is not permission to register every one. Record the command and
+version in the checkpoint. When the user explicitly requests several hosts,
+repeat each host's registration and verification against the intended workspace.
+Rituals I–III and VI–IX are shared. Rituals IV–V contain the host-specific branch.
+
 Default binding: **Python 3.12 (3.11 minimum for this full-local ritual), a
 dedicated virtual environment, source-installed v7, project-scoped stdio,
 guided covenant, core tool listing, local storage, local models, graph and apps.**
@@ -44,6 +52,8 @@ Windows uses stdio too. If the user explicitly chooses a small-core installation
 No Redis, hosted service, E2B account, telemetry exporter,
 remote listener, or paid model is required. v7 is a development version, not yet
 the published package; a successful package install is not release certification.
+The selected AI host still needs its own working provider/login for a real model
+acceptance turn; Daem0n does not supply or change that account.
 
 ## I. Survey the circle and preserve its wards
 
@@ -51,7 +61,7 @@ Before changing anything, do the following and maintain a local setup checkpoint
 at `<PROJECT>/.daem0nmcp/summoning-checkpoint.json`. Keep secrets out of it.
 Merge an existing checkpoint rather than overwriting another installation's work.
 Record phase, canonical project/source/venv/interpreter paths, source origin and
-SHA, package version, workspace ID once known, selected profiles, transport,
+SHA, package version, host/version, workspace ID once known, selected profiles, transport,
 configuration paths and exact keys changed, timestamped backup paths, verification
 record ID and stable idempotency keys, completed checks, and next action.
 
@@ -59,20 +69,26 @@ record ID and stable idempotency keys, completed checks, and next action.
    Inspect its guidance and version-control status. If this file is inside the
    Daem0n checkout but the user's target is another project, use that project.
    Do not equip a guessed directory when multiple projects are plausible.
-2. Inspect existing MCP entries (`claude mcp list`, and `claude mcp get daem0nmcp`
-   when present), `.mcp.json`, project `.claude/settings.local.json`,
-   `~/.claude/settings.json`, project `CLAUDE.md`, `.daem0nmcp/`, existing
-   virtual environments, and any explicit Daem0n environment configuration.
-   Do not print secret values. Inspect only relevant configuration keys.
+2. Inspect the selected host's existing MCP entries, project configuration and
+   instruction files using Ritual IV's table. For Claude, use `claude mcp list`
+   and `claude mcp get daem0nmcp` when present; inspect `.mcp.json`, project
+   `.claude/settings.local.json`, actual user settings and `CLAUDE.md`. For the
+   other hosts inspect their project config, effective instruction file (including
+   Codex overrides/configured fallbacks and OpenCode's `CLAUDE.md` fallback), and
+   any higher-precedence binding. Also inspect
+   `.daem0nmcp/`, existing virtual environments and explicit Daem0n environment
+   configuration. Do not print secret values. Read only relevant keys.
 3. Reuse a healthy compatible v7 binding and its data. An already visible tool
    does not prove it addresses this project: compare its configured root and ID.
    Preserve other projects' user-scoped MCP bindings; a project-scoped binding
    is the default for this project. Record conflicting entries before changing
    only this project's Daem0n entry.
 4. Back up each existing file before its first edit, including Claude's relevant
-   user configuration if the CLI will modify it. Use a timestamped private backup
-   outside tracked project content. Parse JSON, merge the owned keys, preserve
-   unknown fields, and write valid UTF-8 JSON. On repeated runs reuse equivalent
+   user configuration if its hook CLI will modify it. Use a timestamped private
+   backup outside tracked project content. Preserve the selected host's JSON,
+   JSONC or TOML syntax, comments and unrelated keys. The project client installer
+   performs its own guarded merge and reports its backups; retain those paths.
+   On repeated runs reuse equivalent
    entries; do not append duplicate hooks or protocol blocks. Stop on invalid
    existing JSON and report the exact file instead of replacing it with `{}`.
 5. Keep `.daem0nmcp/`, local credentials, virtual environments and local settings
@@ -93,7 +109,8 @@ Discover Python and Git before writing configuration. On Windows inspect
 interpreter to confirm version and `sys.executable`. Prefer an available 3.12;
 use 3.11 when needed. If neither exists, report the missing prerequisite and
 precise platform-appropriate installation next step; do not silently install a
-system runtime or claim completion. Likewise report missing Git or Claude CLI.
+system runtime or claim completion. Likewise report missing Git or the selected
+host's CLI. Do not install or upgrade a different client as a substitute.
 
 Discover the source in the current checkout, the existing editable installation,
 or a previously recorded setup. Validate `pyproject.toml`, `daem0nmcp/` and Git
@@ -260,6 +277,98 @@ with the CLI configured for that root and verify it separately.
 
 ## IV. Bind the direct channel
 
+### Choose the gate
+
+Each selected host starts its own stdio connection. Use its native MCP manager;
+do not create an HTTP service or a per-tool subprocess bridge for local setup.
+The same initialized connection must carry the brief, counsel, remedy and write:
+preflight capabilities are bound to that server-issued session.
+
+| Selected host | Command | Project MCP configuration | Check from the project |
+| --- | --- | --- | --- |
+| Claude Code | `claude` | `.mcp.json` | `claude mcp list` |
+| Codex | `codex` | `.codex/config.toml` | `codex mcp list` after project trust |
+| Antigravity CLI | `agy` | `.agents/mcp_config.json` | Native tool discovery and a real Daem0n call; see listing caveat below |
+| OpenCode V1 | `opencode` | `opencode.json(c)` or `.opencode/opencode.json(c)` | `opencode mcp list` |
+| Oh My Pi | `omp` | `.omp/mcp.json` | `/mcp list` in the host |
+| Earendil Works Pi | `pi` | `.pi/mcp.json` | `pi mcp list` after project trust |
+
+These are separate products and configuration schemas. In particular, `agy` is
+Antigravity CLI, and `omp` is not the `pi` package. Record the selected binary's
+actual `--version` output. The Windows core workflow and restart tests passed on
+Codex 0.167.0, agy 1.4.7, OpenCode 1.18.21, omp 18.16.0 and Earendil Works Pi
+1.0.0. Those results do not establish every optional feature or another version.
+The repository's [multi-CLI acceptance report](docs/release/v7/multi-cli-acceptance-2026-11-12.md)
+records the tested versions and remaining live-client limitations; it does not
+replace this project's own acceptance ritual.
+
+**For Codex, agy, OpenCode V1, omp or pi**, run the installed project client
+installer from the trusted Daem0n source directory with the same interpreter
+and root environment used in Ritual III:
+
+```text
+<VENV_PYTHON> -m daem0nmcp.cli --project-path "<PROJECT>" --json install-client <CLIENT> --client-version "<OBSERVED_VERSION>" --dry-run
+<VENV_PYTHON> -m daem0nmcp.cli --project-path "<PROJECT>" --json install-client <CLIENT> --client-version "<OBSERVED_VERSION>"
+```
+
+Substitute exactly one of `codex`, `agy`, `opencode`, `omp` or `pi` for
+`<CLIENT>`, the surveyed version for `<OBSERVED_VERSION>`, and apply the shell
+quoting rules in Ritual II. Check that `install-client --help` exists before
+using it; an older checkout requires the controlled source/environment upgrade
+in Ritual IX, not guessed configuration keys.
+
+Inspect the dry-run's file actions, then perform the planned install. It creates
+the host's project MCP entry and a concise owned covenant section in the effective
+instruction file: normally `AGENTS.md`, an effective Codex override/project
+fallback, or OpenCode's existing `CLAUDE.md` fallback. It preserves unrelated
+configuration and instructions. The fixed interpreter starts with `-E` to ignore
+Python import environment settings, and the cwd-free bootstrap binds the
+intended project. Existing
+equivalent bindings are reused; a foreign binding, stale project root, malformed
+file or linked target is an actionable conflict. Inspect that evidence before
+changing the owned entry; do not erase the file or use a whole-file force write.
+Record the returned paths and backup paths in the checkpoint.
+
+Codex can also configure instruction fallbacks globally or by profile. The
+installer does not read those global files; inspect the active host's effective
+instructions and confirm that it loaded the covenant during acceptance.
+
+This installer does not modify global client settings, provider credentials,
+permission policies or project-trust decisions. It does not provision legacy
+edit-bridge credentials or install native hooks for these five clients. Native
+MCP plus the covenant supplies the core v7 workflow; proactive host reminders
+are a separately configured feature. Continue with the non-Claude branch of
+Ritual V, then perform every applicable check in Ritual VI.
+
+OpenCode's public V2 docs use `mcp.servers` and `disabled`, unlike V1's `mcp`
+entries and `enabled`. This installer targets V1 and rejects an explicit V2
+selection; do not upgrade the client or put a V1 entry into V2 to finish setup.
+OMP can import MCP entries from other products. Inspect `/mcp list` for the
+resolved Daem0n source and root; a connected same-name server from another
+project is not this project's binding.
+
+For agy, preserve the user's normal Google-account sign-in. Google AI credits
+belong to that account route; a Gemini API key uses separate API billing and is
+not required for Daem0n. If the user wants credit overages, agy's `/settings` or
+`/config` offers **Use AI Credits** (`useG1Credits`); `/credits` shows the balance and `/usage`
+shows quota. Credits apply after included quota is exhausted. Do not change this
+spending preference as part of installing Daem0n. API-key mode requires both
+`modelProvider: "gemini"` and `GEMINI_API_KEY`; the key alone does not switch
+authentication. See the official [credit guide](https://antigravity.google/docs/cli/credits)
+and [authentication guide](https://antigravity.google/docs/install/).
+
+In the tested agy 1.4.7 build, `agy mcp list` reported no servers even though the
+project server initialized and real calls succeeded. Treat that listing as
+inconclusive; use native lazy tool discovery and the actual v7 response. Confirm
+the model reads the generated covenant when automatic instruction loading is
+uncertain.
+
+### Claude Code's gate
+
+**For Claude Code only**, follow the registration below. The other five hosts
+have already registered through `install-client` and must not receive `.mcp.json`
+or Claude settings as a second binding.
+
 In the target project's directory, merge only `mcpServers.daem0nmcp` in
 `<PROJECT>/.mcp.json` with the following shape. Substitute absolute paths. Existing
 entries and unrelated fields survive. This is a **project-scoped** Claude MCP
@@ -306,6 +415,44 @@ that host-required handoff if shown; do not describe the setup as connected unti
 the server is accepted and tools are visible.
 
 ## V. Set the sentinels and inscribe the covenant
+
+### Codex, agy, OpenCode V1, omp and pi
+
+Inspect the generated owned covenant section and the effective host instructions.
+Keep the opaque ID from Ritual III in the checkpoint; never substitute a path.
+If the section describes the maintained CLI lookup, follow it using the bound
+interpreter and project rather than inventing an ID. Preserve established
+`AGENTS.md`, `AGENTS.override.md`, `GEMINI.md`, `CLAUDE.md` and host prompt files.
+In Pi, `.pi/SYSTEM.md` replaces its normal system prompt, so do not create that
+file merely to add Daem0n guidance.
+
+Complete the selected host's own project/MCP trust prompt, then check the
+resolved connection using the table above. Codex project config and Pi project
+MCP config require host trust. Headless execution may deny a requested tool
+without producing a nonzero process exit; inspect actual tool events and results.
+An unavailable provider login is a model-authentication blocker, separate from
+whether Daem0n connected. Do not disable approvals, invent credentials or upgrade
+the host to hide either failure. Save the checkpoint and hand off only the exact
+authentication or approval action required, then resume.
+
+Codex, agy and Pi can expose tools through lazy discovery or a host tool wrapper.
+Find the `daem0nmcp` server and exact v7 tool basenames using that host's MCP/tool
+discovery facility. For example, agy can route through `call_mcp_tool` with the
+server, tool and unchanged arguments; Pi may route through its tool search or
+codemode surface. Use the actual discovered form, not a guessed prefix, substring
+match or legacy alias. Discover `session_brief`, `memory_preflight`,
+`memory_recall`, `memory_store`, `memory_record_outcome`, `system_health`,
+`daem0n_tools_search` and `daem0n_tool_call`. Keep returned `error.counsel`, exact
+`error.remedy` and `meta.covenant.auto_brief` intact.
+
+The guided memory calls named below auto-brief an unbriefed session; these bindings do not claim a
+separate startup hook invokes it. Current native edit hooks are reminders, not
+edit enforcement or automatic memory writes. Verify any optional host hook
+separately. Continue to Ritual VI without running Claude's hook installer.
+
+### Claude Code's sentinels
+
+**For Claude Code only**, retain the maintained hooks and covenant flow below.
 
 Use the installed hook installer, not copied historical hook scripts. Back up
 `~/.claude/settings.json` first, then preview and install using the root
@@ -369,7 +516,7 @@ merge the same scoped block there without replacing its existing policy.
 > Detect `session_brief`, `memory_preflight`, `memory_recall`, `memory_store`,
 > `memory_record_outcome`, and `system_health` in bare form,
 > `daem0nmcp_<tool>`, or `mcp__daem0nmcp__<tool>` form only.
-> The first Daem0n call in a session briefs automatically; the compact brief is returned in `meta.covenant.auto_brief`. Call `session_brief` for the full brief.
+> Guided mode automatically briefs an unbriefed session on `memory_recall`, `memory_preflight`, `memory_store`, or `memory_record_outcome`, returning `meta.covenant.auto_brief`. Diagnostic and discovery calls do not trigger briefing. Call `session_brief` for the full brief.
 > Call `memory_store` (or any protected tool) directly. If it returns `COUNSEL_REQUIRED`, read `error.counsel` (guidance and reasons), then retry exactly `error.remedy`. `memory_preflight` remains available for planning a change in advance.
 > Use `daem0n_tools_search(query)`, then `daem0n_tool_call(workspace_id, tool, arguments)`.
 > Recall bounded relevant history before decisions. Respect warnings, failed
@@ -392,6 +539,8 @@ to repeat installation. After restart read the checkpoint and continue.
 Use actual exposed MCP tools, not Python helpers or direct SQL writes, for the
 following proof. Substitute the persisted values and preserve returned IDs.
 Use a stable setup-specific suffix recorded once in the checkpoint.
+For a lazy host, invoke these exact server tools through its native discovery
+or wrapper interface with the same arguments and live MCP connection.
 
 ```text
 session_brief(workspace_id="<WORKSPACE_ID>")
@@ -500,6 +649,12 @@ Bounded read-only resources, substituting the opaque ID, are:
 - `memory://workspaces/{workspace_id}/rules`
 - `memory://workspaces/{workspace_id}/active-context`
 
+Use the selected host's native MCP resource reader when it supplies one. A CLI's
+resource browser or rich MCP app rendering may be absent even while its memory
+tools work. Report that host capability separately; do not claim a rendered app
+or resource read from a tool-list check. In particular, agy CLI resource access
+requires its own evidence rather than assuming the IDE's resource support.
+
 Keep scope server-configured. The authenticated transport and server-issued
 session establish identity; arbitrary headers, addresses or client descriptions
 do not grant authority.
@@ -528,6 +683,9 @@ this local ritual; report the precise missing deployment inputs instead.
 | Evidence | Next action |
 | --- | --- |
 | No tools after registration | Check the project entry, executable, host trust and restart checkpoint. |
+| Tools are lazy or indirect | Use the selected host's tool discovery/wrapper for the exact `daem0nmcp` server and v7 basename. |
+| Host provider login fails | Repair that host's login through its own supported flow; preserve the Daem0n configuration checkpoint. |
+| Unsupported OpenCode V2 config | Preserve the file; use a separately verified V2 integration instead of writing V1 keys. |
 | Import/module failure | Check the exact venv package, source revision, bootstrap and trusted import path. |
 | Wrong workspace/identity conflict | Compare configured root with CLI inventory; preserve inherited IDs and data. |
 | `COUNSEL_REQUIRED` | Read counsel and retry exactly the returned remedy. |
@@ -543,6 +701,10 @@ same selected profiles, stop the affected service, run migration inspection and
 apply supported changes, update only owned binding paths if needed, reconnect,
 and repeat affected protocol/persistence checks. Never `git pull` over unknown
 work or automatically reset a database after an upgrade failure.
+For the five `install-client` hosts, preview the selected client again with its
+observed version. If the existing entry refers to the previous interpreter or a
+different root, inspect the reported conflict and backup before a scoped update;
+do not bypass the conflict by replacing unrelated settings or changing trust.
 
 Migration rollback uses the offline command `migrate-v7 --rollback latest` with
 the same root environment and installed interpreter. Restore the compatible
@@ -559,7 +721,9 @@ ledger. Do not replace whole files if unrelated changes followed setup. The
 `--project-path "<PROJECT>" uninstall-claude-hooks --dry-run` and
 `--project-path "<PROJECT>" uninstall-claude-hooks` CLI commands operate
 on global Daem0n hook registrations: use them only when no other project still
-needs those registrations. Credential removal is separately destructive; keep
+needs those registrations, and only for a Claude installation. For the other
+hosts, remove the owned project MCP entry and covenant section using the
+checkpoint; keep other imported or user-scoped servers intact. Credential removal is separately destructive; keep
 bridge credentials unless removal is explicitly requested. Leave memories,
 backups, source checkout and venv intact unless deletion is explicitly requested.
 Report any shared installation still in use.

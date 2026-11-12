@@ -710,6 +710,7 @@ def _drain_projection_jobs_sync(
         runner = ProjectionJobRunner(
             connection,
             builders=builders,
+            lexical_only=not include_optional,
             cancelled=(
                 cancellation_event.is_set if cancellation_event is not None else None
             ),

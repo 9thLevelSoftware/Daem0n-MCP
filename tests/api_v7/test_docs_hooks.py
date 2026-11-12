@@ -127,9 +127,10 @@ def _run_root_hook(
 class ProtocolGoldenTests(unittest.TestCase):
     def test_guided_contract_is_injected_into_active_clients(self) -> None:
         sentences = (
-            "The first Daem0n call in a session briefs automatically; the compact "
-            "brief is returned in meta.covenant.auto_brief. Call session_brief "
-            "for the full brief.",
+            "Guided mode automatically briefs an unbriefed session on memory_recall, "
+            "memory_preflight, memory_store, or memory_record_outcome, returning "
+            "meta.covenant.auto_brief. Diagnostic and discovery calls do not trigger "
+            "briefing. Call session_brief for the full brief.",
             "Call memory_store (or any protected tool) directly. If it returns "
             "COUNSEL_REQUIRED, read error.counsel (guidance and reasons), then "
             "retry exactly error.remedy. memory_preflight remains available for "
@@ -146,9 +147,17 @@ class ProtocolGoldenTests(unittest.TestCase):
             ROOT / ".claude" / "skills" / "summon_daem0n" / "SKILL.md",
             ROOT / ".claude" / "skills" / "openspec-daem0n-bridge" / "SKILL.md",
         )
-        for path in paths:
-            text = _read(path).replace("`", "")
-            with self.subTest(path=path.relative_to(ROOT)):
+        surfaces = [(str(path.relative_to(ROOT)), _read(path)) for path in paths]
+        from daem0nmcp.client_install import install_client
+
+        with tempfile.TemporaryDirectory() as directory:
+            install_client("pi", directory)
+            surfaces.append(
+                ("generated client AGENTS.md", _read(Path(directory) / "AGENTS.md"))
+            )
+        for label, content in surfaces:
+            text = content.replace("`", "")
+            with self.subTest(path=label):
                 for sentence in sentences:
                     self.assertIn(sentence, text)
 

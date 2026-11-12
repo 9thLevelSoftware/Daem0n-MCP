@@ -509,6 +509,126 @@ class RetrievalRuntimeTests(unittest.IsolatedAsyncioTestCase):
             [candidate.evidence.record_id for candidate in result.candidates],
         )
 
+    async def test_core_drain_leaves_due_procedure_for_full_worker(self):
+        from unittest.mock import patch
+
+        from daem0nmcp.retrieval.job_queue import enqueue_projection_rebuild
+        from daem0nmcp.retrieval.runtime import drain_projection_jobs
+
+        connection = sqlite3.connect(self.path)
+        try:
+            for projection, available in (("procedure", 100), ("lexical", 1_000)):
+                enqueue_projection_rebuild(
+                    connection,
+                    workspace_id=WORKSPACE_ID,
+                    projection_name=projection,
+                    source_event_id=None,
+                    recorded_at_us=100,
+                    available_at_us=available,
+                )
+            connection.commit()
+        finally:
+            connection.close()
+
+        # The fixed clock puts an optional job before the delayed lexical job,
+        # without relying on the duration of a background thread or a sleep.
+        with patch("time.time_ns", return_value=500_000):
+            core = await drain_projection_jobs(
+                self.path, config=_settings(), include_optional=False
+            )
+            self.assertEqual((), core)
+            connection = sqlite3.connect(self.path)
+            try:
+                self.assertEqual(
+                    ("queued", 0, None, None, None),
+                    connection.execute(
+                        "SELECT status,attempts,lease_owner,lease_token,last_error_json "
+                        "FROM background_jobs WHERE idempotency_key=?",
+                        ("active-projection:procedure",),
+                    ).fetchone(),
+                )
+            finally:
+                connection.close()
+
+            full = await drain_projection_jobs(
+                self.path,
+                config=_settings(),
+                include_optional=True,
+                capability_statuses={
+                    "local": "disabled",
+                    "models-local": "disabled",
+                    "graph": "disabled",
+                },
+            )
+
+        self.assertEqual(1, len(full))
+        self.assertEqual(("procedure",), full[0].projections)
+        self.assertEqual("succeeded", full[0].status)
+        connection = sqlite3.connect(self.path)
+        try:
+            self.assertEqual(
+                ("queued", 0, 1_000),
+                connection.execute(
+                    "SELECT status,attempts,available_at_us FROM background_jobs "
+                    "WHERE idempotency_key=?",
+                    ("active-projection:lexical",),
+                ).fetchone(),
+            )
+            self.assertIsNotNone(
+                connection.execute(
+                    "SELECT 1 FROM projection_manifests WHERE projection_name='procedure' "
+                    "AND status='active'"
+                ).fetchone()
+            )
+        finally:
+            connection.close()
+
+    async def test_core_drain_selects_lexical_among_mixed_due_jobs(self):
+        from unittest.mock import patch
+
+        from daem0nmcp.retrieval.job_queue import enqueue_projection_rebuild
+        from daem0nmcp.retrieval.runtime import drain_projection_jobs
+
+        connection = sqlite3.connect(self.path)
+        try:
+            for projection in ("procedure", "lexical"):
+                enqueue_projection_rebuild(
+                    connection,
+                    workspace_id=WORKSPACE_ID,
+                    projection_name=projection,
+                    source_event_id=None,
+                    recorded_at_us=100,
+                )
+            # Scope, rather than priority, must keep the core lane lexical-only.
+            connection.execute(
+                "UPDATE background_jobs SET priority=200 WHERE idempotency_key=?",
+                ("active-projection:procedure",),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+
+        with patch("time.time_ns", return_value=500_000):
+            core = await drain_projection_jobs(
+                self.path, config=_settings(), include_optional=False
+            )
+
+        self.assertEqual(1, len(core))
+        self.assertEqual(("lexical",), core[0].projections)
+        self.assertEqual("succeeded", core[0].status)
+        connection = sqlite3.connect(self.path)
+        try:
+            self.assertEqual(
+                ("queued", 0, None, None, None),
+                connection.execute(
+                    "SELECT status,attempts,lease_owner,lease_token,last_error_json "
+                    "FROM background_jobs WHERE idempotency_key=?",
+                    ("active-projection:procedure",),
+                ).fetchone(),
+            )
+        finally:
+            connection.close()
+
     async def test_owned_runtime_drain_resumes_due_dense_gc_after_restart(self):
         from unittest.mock import patch
 

@@ -17,7 +17,7 @@
 
 The public v7 MCP surface is guided and workspace-scoped:
 
-1. The first Daem0n call in a session briefs automatically; the compact brief is returned in `meta.covenant.auto_brief`. Call `session_brief` for the full brief.
+1. Guided mode automatically briefs an unbriefed session on `memory_recall`, `memory_preflight`, `memory_store`, or `memory_record_outcome`, returning `meta.covenant.auto_brief`. Diagnostic and discovery calls do not trigger briefing. Call `session_brief` for the full brief.
 2. Call `memory_store` (or any protected tool) directly. If it returns `COUNSEL_REQUIRED`, read `error.counsel` (guidance and reasons), then retry exactly `error.remedy`. `memory_preflight` remains available for planning a change in advance.
 3. Use `daem0n_tools_search(query)`, then `daem0n_tool_call(workspace_id, tool, arguments)`.
 
@@ -337,17 +337,54 @@ AI agents start each session fresh. They don't remember:
 
 ## Quick Start
 
-### Claude Code (The Easy Way)
+### Let your CLI perform the ritual
 
 1. Copy [Summon_Daem0n.md](Summon_Daem0n.md) into the project you want Daem0n to remember.
-2. Open Claude Code in that project and say:
+2. Open your selected AI CLI in that project and say:
 
    > Read Summon_Daem0n.md and perform the complete summoning ritual for this project.
 
-3. Let Claude inspect the machine, install the source checkout into a dedicated
-   environment, configure the workspace and MCP server, install the hooks and
-   project instructions, and verify the result. Restart Claude Code when it
-   requests the transport handoff, then ask it to resume the ritual.
+3. Let the AI inspect the machine, install the source checkout into a dedicated
+   environment, configure the workspace and its native MCP connection, preserve
+   project instructions, and verify the result. Complete the host's trust or
+   restart handoff when requested, then ask it to resume the ritual.
+
+The grimoire selects the current host, or the one named in your request. It
+does not register every CLI found on the machine.
+
+| Host | Project installation | Native MCP config |
+| --- | --- | --- |
+| Claude Code (`claude`) | Claude branch of the grimoire, including maintained reminder hooks | `.mcp.json` |
+| Codex (`codex`) | `install-client codex` | `.codex/config.toml` |
+| Antigravity CLI (`agy`) | `install-client agy` | `.agents/mcp_config.json` |
+| OpenCode V1 (`opencode`) | `install-client opencode` | `opencode.json(c)` or `.opencode/opencode.json(c)` |
+| Oh My Pi (`omp`) | `install-client omp` | `.omp/mcp.json` |
+| Earendil Works Pi (`pi`) | `install-client pi` | `.pi/mcp.json` |
+
+The project client installer adds native MCP registration and a concise owned
+covenant in the effective instruction file: normally `AGENTS.md`, a Codex
+override/project fallback, or OpenCode's existing `CLAUDE.md` fallback. It preserves
+unrelated configuration and comments, reports backups/conflicts, and leaves
+global settings, provider credentials and permission policies alone. The five
+new client paths do not automatically install host hooks or legacy edit-bridge
+pairing. Guided memory calls return the automatic brief for an unbriefed session;
+proactive host reminders are a separate feature.
+
+Client support is version-specific. Real Windows client tests passed the core
+memory workflow, restart recall and replay checks on Codex 0.167.0, agy 1.4.7,
+OpenCode 1.18.21, omp 18.16.0 and Earendil Works Pi 1.0.0. See the source-backed
+[Codex/agy](docs/research/cli-hosts-codex-agy-2026-11-12.md),
+[OpenCode](docs/research/cli-hosts-opencode-2026-11-12.md) and
+[OMP/Pi](docs/research/cli-hosts-omp-pi-2026-11-12.md) findings for feature and
+acceptance boundaries. OpenCode V2 has a different schema and requires separate
+integration evidence. Actual setup and live-client results are recorded in the
+[multi-CLI acceptance report](docs/release/v7/multi-cli-acceptance-2026-11-12.md).
+
+For agy, keep your normal Google-account sign-in. A Gemini API key is a separate,
+optional billing route. To use Google AI credits after your included quota runs
+out, enable **Use AI Credits** in agy's `/settings` or `/config`; `/credits`
+shows the balance. Daem0n's installer does not change this spending preference.
+See [Antigravity's credit instructions](https://antigravity.google/docs/cli/credits).
 
 The file is a self-contained instruction manual for the AI. Copying it alone
 does not execute it. The default ritual uses Python 3.12 when available,
@@ -356,17 +393,25 @@ project-scoped stdio on Windows, macOS and Linux, and the `local`, `graph`,
 space; the grimoire also covers an explicitly requested small-core setup.
 E2B cloud execution, Redis tasks and telemetry are optional, not setup
 prerequisites. Existing memories, unrelated settings and other MCP servers
-are preserved. Authentication and Claude Code's own trust prompts may require
+are preserved. Authentication and the selected host's trust prompts may require
 your participation; the AI must report those handoffs instead of claiming success.
 
-### OpenCode
+### Register a configured environment manually
 
-1. Install Daem0n-MCP: `pip install -e ~/Daem0n-MCP`
-2. Run the installer: `python -m daem0nmcp.cli install-opencode`
-3. Launch OpenCode in your project directory
-4. Run `/commune <workspace_id>`; this host shortcut calls `session_brief`
+After the grimoire's source/environment and workspace-ID steps, run from the
+trusted source checkout using its dedicated interpreter. Replace `<CLIENT>`
+with one of `codex`, `agy`, `opencode`, `omp` or `pi`, and pass the selected
+client's observed `--version` output:
 
-For the full ritual walkthrough, see `Summon_Daem0n_OpenCode.md`.
+```text
+<VENV_PYTHON> -m daem0nmcp.cli --project-path "<PROJECT>" --json install-client <CLIENT> --client-version "<OBSERVED_VERSION>" --dry-run
+<VENV_PYTHON> -m daem0nmcp.cli --project-path "<PROJECT>" --json install-client <CLIENT> --client-version "<OBSERVED_VERSION>"
+```
+
+Review the returned file actions and complete the normal host trust/restart
+flow. Configuration recognition is followed by actual brief, health, write,
+recall, outcome and restart checks from the grimoire. For OpenCode-specific
+protocol details, see [its companion](Summon_Daem0n_OpenCode.md).
 
 ### Manual Installation
 
@@ -394,9 +439,10 @@ py -3.12 -m venv .venv
 
 ### Stdio (all supported platforms)
 
-Stdio is the default, including on Windows. Claude Code starts and stops the
+Stdio is the default, including on Windows. The selected native MCP host starts and stops the
 server; no separate terminal, port, Startup shortcut or background service is
-needed. Run registration from the target project, using the absolute path of
+needed. Codex, agy, OpenCode V1, omp and pi use the project installer above.
+For Claude Code, run registration from the target project, using the absolute path of
 the installed virtual environment's interpreter and the absolute project root:
 
 ```bash
@@ -463,7 +509,9 @@ host launches the stdio server for you, register the command from
 [Stdio](#stdio-all-supported-platforms) instead: hosts start it inside
 whatever project is open.
 
-For OpenCode setup, see the [OpenCode Integration](#opencode-integration) section below, or run `python -m daem0nmcp.cli install-opencode` for automated setup.
+For the five other CLI hosts, use the project-scoped
+[client installer](#register-a-configured-environment-manually). OpenCode's
+optional legacy plugin workflow is described under [OpenCode Integration](#opencode-integration).
 
 ## v7 MCP API
 
@@ -472,7 +520,7 @@ default core-plus-gateway listing is:
 
 | Tool | Purpose |
 |---|---|
-| `session_brief` | Return the full briefing; the first gated call already briefs automatically |
+| `session_brief` | Return the full briefing; guided memory calls automatically brief an unbriefed session |
 | `memory_preflight` | Plan ahead with guidance and a capability for one exact protected request |
 | `memory_recall` | Retrieve bounded, evidence-bearing records |
 | `memory_store` | Append one replay-safe memory record |
@@ -628,12 +676,18 @@ Recognize only the exact canonical name or its host prefix:
 
 Host metadata is never an identity source. Authentication comes from the
 transport, and every scoped request is resolved through `workspace_id`.
+Codex, agy and Pi may expose tools through lazy discovery or a native wrapper.
+Use the client's discovered `daem0nmcp` server and exact v7 tool basename, keeping
+arguments and structured counsel/remedy fields intact. A missing direct tool
+name does not establish that a lazy tool is unavailable. MCP resource browsing
+and rich app rendering are separate host capabilities; they are not implied by
+a successful memory tool call.
 
 ## Usage Examples
 
 ### Session Start
 
-The first gated call returns a compact automatic brief. Request the full brief
+Guided `memory_recall` returns a compact automatic brief for an unbriefed session. Request the full brief
 explicitly when needed:
 
 ```text
@@ -697,7 +751,7 @@ memory_record_outcome(
 The recommended workflow for AI agents:
 
 ```text
-first gated call (automatic brief)
+memory_recall or memory_preflight (automatic brief in guided mode)
     -> memory_recall (when relevant)
     -> protected tool directly
     -> review error.counsel and retry error.remedy (only when challenged)
@@ -738,7 +792,7 @@ by generating and merging the Daem0n hook entries into the actual settings file.
 
 | Event (matcher) | Hook | What it does | Input | Reminds only |
 |-----------------|------|--------------|-------|--------------|
-| `SessionStart` | `session_start` | Explains that the first Daem0n call establishes the session and brief; `session_brief` returns the full brief | `CLAUDE_PROJECT_DIR` env | Yes |
+| `SessionStart` | `session_start` | Explains guided memory calls auto-brief an unbriefed session; diagnostics and discovery do not; `session_brief` returns the full brief | `CLAUDE_PROJECT_DIR` env | Yes |
 | `PreToolUse` (`Edit\|Write\|NotebookEdit`) | `pre_edit` | Inside a Daem0n project, adds a one-line `additionalContext` reminder to call `daem0n_tool_call` targeting `memory_recall_file`; silent elsewhere | stdin event | Yes |
 | `PreToolUse` (`Bash`) | `pre_bash` | Checks the command against active Daem0n rules (`governance_rules` / `rules`) in read-only SQLite mode and emits matching `additionalContext` reminders | stdin event (`TOOL_INPUT` fallback) | Yes (always exits 0) |
 | `PostToolUse` (`mcp__.*__edit_preflight`) | `post_edit_preflight` | Retained edit-bridge plumbing: stages a receipt for an explicit host-created request. The current remind-only hooks create no requests, so pairing alone does not activate this flow | stdin event | Yes |
@@ -776,16 +830,21 @@ A Claude Code skill is included at `.claude/skills/daem0nmcp-protocol/SKILL.md` 
 
 ## OpenCode Integration
 
-OpenCode connects to Daem0n-MCP via the same MCP server. No server changes required -- the daemon serves all clients equally.
+OpenCode V1 connects through its native MCP manager. For a new project use
+`install-client opencode` from [Quick Start](#quick-start), then finish the
+grimoire's real MCP and restart verification. The new installer creates the
+project binding and managed covenant without requiring the legacy plugin.
 
-The V1 plugin provides Covenant guidance and edit/Bash reminders. Its installed
+The optional existing V1 plugin provides Covenant guidance and edit/Bash reminders. Its installed
 hooks do not create native edit-bridge requests or enforce a
 deny/preflight/retry flow; bridge API acceptance is separate from this
 remind-only client integration.
 
 ### Configuration
 
-Create `opencode.json` at your project root:
+For inspecting an existing **V1** entry, the shape is below. Replace the
+interpreter and project placeholders with absolute paths; the project installer
+performs the preserving merge for a new registration:
 
 ```json
 {
@@ -793,21 +852,27 @@ Create `opencode.json` at your project root:
   "mcp": {
     "daem0nmcp": {
       "type": "local",
-      "command": ["python", "-c", "import sys; sys.path = [p for p in sys.path if p]; import runpy; runpy.run_module('daem0nmcp', run_name='__main__', alter_sys=True)"],
+      "command": ["<PYTHON_PATH>", "-E", "-u", "-X", "utf8", "-c", "import sys; sys.path = [p for p in sys.path if p]; import runpy; runpy.run_module('daem0nmcp.server', run_name='__main__', alter_sys=True)"],
+      "cwd": "<PROJECT>",
       "enabled": true,
       "environment": {
-        "PYTHONUNBUFFERED": "1"
+        "PYTHONPATH": "",
+        "DAEM0NMCP_PROJECT_ROOT": "<PROJECT>",
+        "DAEM0NMCP_COVENANT_MODE": "guided",
+        "DAEM0NMCP_TOOL_SURFACE": "core"
       }
     }
   }
 }
 ```
 
-The command is the cwd-free equivalent of `python -m daem0nmcp`: OpenCode starts
+The command is the cwd-free equivalent of `python -m daem0nmcp.server`: OpenCode starts
 the server inside the opened project, and `-m` would import a `daem0nmcp/`
-directory found there. `install-opencode` writes the same command with the full
-path of the interpreter it ran under, and fixes that interpreter in the plugin
-it installs; the plugin never reads an interpreter from `opencode.json`.
+directory found there. `install-client opencode` fixes the interpreter to the
+dedicated environment it runs under. Its `-E` flag ignores inherited Python import
+settings before startup, including hosts that discard empty environment overrides.
+It does not replace unrelated servers or provider settings. Public OpenCode V2
+docs use `mcp.servers`/`disabled`; this V1 example must not be copied into V2.
 
 For a separately managed Streamable HTTP server, use:
 
@@ -826,9 +891,20 @@ For a separately managed Streamable HTTP server, use:
 
 ### System Instructions
 
-OpenCode reads `AGENTS.md` from the project root for system prompt injection. The Sacred Covenant protocol is included in `AGENTS.md` with OpenCode-compatible tool names.
+OpenCode reads `AGENTS.md` from the project root, with `CLAUDE.md` as a fallback.
+The installer adds the covenant to the existing effective file so that it does
+not hide the project's other instructions.
 
 If both `AGENTS.md` and `CLAUDE.md` exist in a project, OpenCode uses only `AGENTS.md`.
+
+### Optional legacy plugin workflow
+
+The older `install-opencode` command scaffolds the V1 plugin and can provision
+edit-bridge pairing. It is separate from `install-client opencode` and is not
+required for core memory functionality. Inspect its dry-run and existing files
+before choosing it. In particular, `--force` overwrites configuration and can
+discard other MCP servers; do not use it as an automatic upgrade path. Existing
+plugins and shortcuts may be retained while their own behavior is verified.
 
 ### Tool Names
 
@@ -1082,8 +1158,8 @@ daem0nmcp/
 └── plugins/
     └── daem0n.ts        # Covenant enforcement plugin
 
-Summon_Daem0n.md              # Claude Code installation grimoire
-Summon_Daem0n_OpenCode.md     # OpenCode installation grimoire
+Summon_Daem0n.md              # Complete host-selecting installation grimoire
+Summon_Daem0n_OpenCode.md     # OpenCode V1 protocol and binding companion
 Banish_Daem0n.md              # Uninstallation instructions (both clients)
 start_server.py               # HTTP server launcher (streamable-http transport)
 ```
@@ -1110,16 +1186,21 @@ python -m daem0nmcp.cli projection-status --workspace-id <workspace_id>
 python -m daem0nmcp.cli rebuild-projection --projection dense --workspace-id <workspace_id>
 ```
 
-### Hook & Enforcement Commands
+### Client & Hook Commands
 
 ```bash
+# Register one native CLI host in the selected project (from trusted source cwd)
+python -m daem0nmcp.cli --project-path /path/to/project install-client codex --client-version 0.167.0 --dry-run
+# Replace codex with agy, opencode, omp or pi and use its observed version.
+# Omit --dry-run after inspecting the proposed owned changes.
+
 # Install Claude Code hooks (user-level, all projects)
 python -m daem0nmcp.cli install-claude-hooks [--dry-run]
 
 # Remove Claude Code hooks
 python -m daem0nmcp.cli uninstall-claude-hooks [--dry-run]
 
-# Install OpenCode configuration (project-level)
+# Optional legacy OpenCode V1 plugin/bridge scaffolding (inspect before use)
 python -m daem0nmcp.cli install-opencode [--dry-run] [--force]
 # Creates: opencode.json, .opencode/ directories, .opencode/plugins/daem0n.ts
 # AGENTS.md and command files are not auto-created
@@ -1137,7 +1218,7 @@ Use MCP `memory_record_outcome` for v7 outcomes. It requires an opaque
 
 ## Upgrading
 
-Ask Claude Code to read the current [Summon_Daem0n.md](Summon_Daem0n.md) and
+Ask the selected AI CLI to read the current [Summon_Daem0n.md](Summon_Daem0n.md) and
 resume the ritual. It inventories the existing installation, preserves data and
 configuration, upgrades the selected environment, refreshes its own integration
 entries, and verifies persistence. It does not reset a workspace or overwrite
@@ -1187,7 +1268,7 @@ commands:
 python -m daem0nmcp.cli rebuild-projection --projection dense --workspace-id <workspace-id>
 ```
 
-### 3. Install Claude Code Hooks
+### 3. Install Claude Code Hooks (Claude Code only)
 
 ```bash
 python -m daem0nmcp.cli install-claude-hooks
@@ -1202,23 +1283,24 @@ from any project you open. If you registered the stdio server at user scope as
 where you ran `install-hooks`, re-run it as well: the git pre-commit hook it
 wrote used `python -m` too.
 
-### 4. Restart Claude Code
+### 4. Restart the selected host
 
-After updating, restart Claude Code to load the new MCP tools.
+After updating, restart/reconnect the selected CLI to load the new MCP binding
+and tools, completing its normal trust prompt. Resume the grimoire's affected
+protocol and persistence checks.
 
-### 4b. Update OpenCode Configuration (if using OpenCode)
+### 4b. Refresh project client configuration
 
-```bash
-python -m daem0nmcp.cli install-opencode --force
+```text
+<VENV_PYTHON> -m daem0nmcp.cli --project-path "<PROJECT>" --json install-client <CLIENT> --client-version "<OBSERVED_VERSION>" --dry-run
 ```
 
-This regenerates `opencode.json`, the plugin and the command files to match
-the latest version, discarding anything else you kept in them (other MCP
-servers in `opencode.json`, for example). Without `--force` the installer keeps
-existing files: it still rewrites a `python -m` server command in
-`opencode.json` (or reports one it cannot rewrite), and reports a plugin from an
-earlier version as outdated; delete `.opencode/plugins/daem0n.ts` and re-run to
-replace only the plugin.
+For Codex, agy, OpenCode V1, omp or pi, inspect this dry-run with the same
+project and selected host. Equivalent entries remain unchanged. A different
+interpreter, stale root or custom existing binding may require a scoped,
+backup-backed update after inspecting the reported conflict. Preserve unrelated
+configuration and existing data. Do not replace the file with a template or run
+the legacy OpenCode installer's `--force` as a shortcut.
 
 ### 5. Migrations
 

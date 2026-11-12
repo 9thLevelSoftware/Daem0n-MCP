@@ -41,8 +41,10 @@ def _hook_message(identity: WorkspaceIdentity) -> str:
             "to see why and settle it."
         )
     lines = [
-        "[Daem0n] IMPORTANT: The first Daem0n call establishes this invocation's "
-        "v7 session and brief automatically (meta.covenant.auto_brief). "
+        "[Daem0n] IMPORTANT: Guided mode automatically briefs an unbriefed session "
+        "on memory_recall, memory_preflight, memory_store, or memory_record_outcome "
+        "(meta.covenant.auto_brief). Diagnostic and discovery calls do not trigger "
+        "briefing. "
         f'Use workspace_id="{identity.workspace_id}". Call '
         f'mcp__daem0nmcp__session_brief(workspace_id="{identity.workspace_id}") '
         "for the full brief."
