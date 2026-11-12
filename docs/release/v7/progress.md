@@ -35,11 +35,21 @@ P10 wheel/sdist core and profile installations, accurate complete docs/examples,
 Real MCP calls for every tool/argument/profile; ritual through restart; local/remote native edit and capture workflows; dashboards/dreaming/tasks/previews. Persistence interruption, disk/lock/permission/corruption failures. Python 3.10-3.12 Windows/macOS/Linux. Actual local/remote Qdrant, embeddings/ONNX, Redis/Valkey, E2B and both clients. Full Python/JS/Ruff/packaging/blocking changed-surface type checks. Reference 8-core/32GB/SSD benchmark: 100k memories/1m events; warm 4-way lexical p95 <=500ms, hybrid <=2s; write visibility lexical <=5s, specialized <=60s, dense <=5min; migration <=30min excluding dense; Recall@10/nDCG@10 regression <=0.02; 8h mixed soak without resource accumulation. Publish cold start, initial indexing, disk and stress evidence.
 
 ## Progress
-Accepted final-release requirements: **0 / 571**. The current inventory contains
-75 tools and 10 resources. No package has final-commit acceptance. Counts include
+Accepted final-release requirements: **0 / 587**. The current inventory contains
+77 tools and 10 resources. No package has final-commit acceptance. Counts include
 surface requirements and explicit package scenarios; passing component tests
 alone is not release acceptance. The dated entries below preserve development
 history and can describe findings repaired by later entries.
+
+## Functional acceptance checkpoint - 2026-11-11
+
+The [disposable end-to-end pass](acceptance-2026-11-11.md) records current
+package, real-provider, client, dashboard and transport evidence. It found and
+repaired stale-generation command reminders, missing OTLP initialization,
+Windows NumPy startup ordering and the dashboard D3 global mismatch. The report
+distinguishes verified local functionality from OpenCode provider login, live
+E2B, third-party Apps hosts and the broader release/performance gates. It does
+not convert those outstanding requirements into accepted release evidence.
 
 ## Current local certification checkpoint - 2026-09-17
 

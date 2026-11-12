@@ -104,7 +104,7 @@
     mount.replaceChildren(header, controls, frame);
 
     const context = canvas.getContext("2d");
-    if (!context || !globalThis.D3) {
+    if (!context || !globalThis.d3) {
       loading.hidden = true;
       return;
     }
@@ -252,7 +252,7 @@
       canvas.height = Math.round(height * pixelRatio);
       clampPan();
       if (simulation) {
-        simulation.force("center", globalThis.D3.forceCenter(width / 2, height / 2));
+        simulation.force("center", globalThis.d3.forceCenter(width / 2, height / 2));
         simulation.alpha(0.25).restart();
       }
       draw();
@@ -260,12 +260,12 @@
 
     const progressive = nodes.length > progressiveThreshold;
     activeNodes = progressive ? [] : nodes;
-    const linkForce = globalThis.D3.forceLink([]).id(node => ui.idKey(node.id)).distance(80);
-    simulation = globalThis.D3.forceSimulation(activeNodes)
+    const linkForce = globalThis.d3.forceLink([]).id(node => ui.idKey(node.id)).distance(80);
+    simulation = globalThis.d3.forceSimulation(activeNodes)
       .force("link", linkForce)
-      .force("charge", globalThis.D3.forceManyBody().strength(-120))
-      .force("center", globalThis.D3.forceCenter(width / 2, height / 2))
-      .force("collision", globalThis.D3.forceCollide(14))
+      .force("charge", globalThis.d3.forceManyBody().strength(-120))
+      .force("center", globalThis.d3.forceCenter(width / 2, height / 2))
+      .force("collision", globalThis.d3.forceCollide(14))
       .on("tick", draw);
 
     function rebuildLinks() {

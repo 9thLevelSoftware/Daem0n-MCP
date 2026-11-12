@@ -13,6 +13,10 @@ protected mutation, and asserts stored state after each transition.  The apps
 TODO scenario uses only `DAEM0NMCP_APPS_ENABLED=true`; it is skipped when
 `tree_sitter_language_pack` is unavailable.
 
+`test_process_gateway.py` exercises the default core surface over both
+transports: hidden-tool discovery, gateway writes and reads, idempotent replay,
+exact counsel remedies, spent-token refusal, and persisted state after restart.
+
 | Tool | Process evidence | Status |
 | --- | --- | --- |
 | `active_context_add` | `test_process_surface.py::test_production_stateful_core_surface` (stdio, HTTP) | real process |
@@ -34,6 +38,8 @@ TODO scenario uses only `DAEM0NMCP_APPS_ENABLED=true`; it is skipped when
 | `context_trigger_list` | same; create/delete state assertions | real process |
 | `context_triggers_match` | same; matched trigger ID assertion | real process |
 | `covenant_status` | `test_process_surface.py::test_production_core_read_batch_and_projection_surface` (stdio, HTTP) | real process |
+| `daem0n_tool_call` | `test_process_gateway.py::test_production_gateway_mutation_counsel_replay_and_restart` (stdio, HTTP) | real process |
+| `daem0n_tools_search` | same; hidden-tool descriptors, schema and successful dispatch | real process |
 | `decision_debate` | `test_process_discovery_surface.py::test_production_debate_and_dream_cleanup_surface` (stdio, HTTP) | real process |
 | `decision_simulate` | `test_process_surface.py::test_production_intelligence_time_filter_surface` (stdio, HTTP; RFC3339 transaction time) | real process |
 | `document_ingest_url` | `test_process_external_certification.py::test_actual_public_document_ingestion` (apps, stdio, HTTP; actual HTTPS, provenance and replay); `.tmp/public-ingest-process-final.log` | real process / explicit network run |
@@ -91,11 +97,11 @@ TODO scenario uses only `DAEM0NMCP_APPS_ENABLED=true`; it is skipped when
 | `workspace_links_list` | `test_process_surface.py::test_production_workspace_link_lifecycle_surface` (stdio, HTTP) | real process |
 | `workspace_unlink` | `test_process_surface.py::test_production_workspace_link_lifecycle_surface` (stdio, HTTP) | real process |
 
-There is no registered `rule_delete` tool in the current 75-tool schema.
+There is no registered `rule_delete` tool in the current 77-tool schema.
 Deleting a context trigger is covered above; rule lifecycle has create, list,
 check, and update (including `enabled: false`).
 
-Current successful real-process coverage is **74 of 75 tools**. Public URL
+Current successful real-process coverage is **76 of 77 tools**. Public URL
 ingestion passed with `DAEM0NMCP_CERTIFY_PUBLIC_INGEST=1` on both transports;
 without that opt-in its skip is not certification evidence. Real E2B sandbox
 execution remains open. These scenarios establish successful production paths,

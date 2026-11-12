@@ -230,7 +230,7 @@ function renderApp(appId, payload, options = {}) {
   const trace = { linkCounts: [], nodeCounts: [], simulation: null, tick: null };
   context.document = document;
   context.devicePixelRatio = options.devicePixelRatio ?? 1;
-  context.D3 = options.d3 === false ? undefined : fakeD3(trace);
+  context.d3 = options.d3 === false ? undefined : fakeD3(trace);
   context.requestAnimationFrame = options.animationFrames ? callback => {
     nextAnimationFrame += 1;
     animationFrames.set(nextAnimationFrame, callback);
@@ -244,6 +244,11 @@ function renderApp(appId, payload, options = {}) {
   context.cancelIdleCallback = () => {};
   context.setTimeout = () => 1;
   context.clearTimeout = () => {};
+  context.setInterval = () => 1;
+  context.clearInterval = () => {};
+  if (options.realD3) {
+    vm.runInContext(fs.readFileSync(path.join(root, "daem0nmcp/ui/static/d3.bundle.js"), "utf8"), context);
+  }
   context.addEventListener = () => {};
   const messenger = {
     on(name, handler) { handlers.set(name, handler); },
@@ -278,6 +283,23 @@ function runNextAnimationFrame(rendered, timestamp) {
 
 test("all six fixed renderers register without a DOM", () => {
   assert.deepEqual(Array.from(ui.appIds()), ["test", "search", "briefing", "covenant", "community", "graph"]);
+});
+
+test("community draws populated cells with the shipped D3 bundle", () => {
+  const rendered = renderApp("community", {
+    communities: [{ id: "community_1", name: "Actual layout", member_count: 2, level: 0 }],
+  }, { realD3: true });
+  assert.equal(findAll(rendered.document.mount, node => node.getAttribute("class") === "community-cell__rect").length, 1);
+  assert.ok(findByText(rendered.document.mount, "Actual layout"));
+  assert.equal(findByText(rendered.document.mount, "No communities found."), null);
+});
+
+test("graph draws populated nodes with the shipped D3 bundle", () => {
+  const rendered = renderApp("graph", {
+    nodes: [{ id: "record_1", category: "decision", content: "Actual node" }],
+  }, { realD3: true });
+  assert.ok(rendered.document.canvasContext.operations.some(operation => operation[0] === "arc"));
+  assert.equal(findByClass(rendered.document.mount, "graph-loading").hidden, true);
 });
 
 test("search normalizer clamps numeric values and rejects boolean IDs", () => {

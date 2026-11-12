@@ -92,21 +92,28 @@ def run_server(
 
     if not isinstance(options, ServerOptions):
         raise ValueError("server options are required")
-    if options.transport == "stdio":
-        run_strict_stdio(server)
-        return
-    validate_security(options.host, getattr(server, "auth", None))
-    origin_middleware = build_origin_middleware(options.host, options.port)
-    from ...transport_security import build_uvicorn_security_config
+    if options.transport != "stdio":
+        validate_security(options.host, getattr(server, "auth", None))
+    from ...tracing import configure_tracing, shutdown_tracing
 
-    server.run(
-        transport="streamable-http",
-        host=options.host,
-        port=options.port,
-        middleware=origin_middleware,
-        stateless_http=False,
-        uvicorn_config=build_uvicorn_security_config(),
-    )
+    tracing_provider = configure_tracing()
+    try:
+        if options.transport == "stdio":
+            run_strict_stdio(server)
+            return
+        origin_middleware = build_origin_middleware(options.host, options.port)
+        from ...transport_security import build_uvicorn_security_config
+
+        server.run(
+            transport="streamable-http",
+            host=options.host,
+            port=options.port,
+            middleware=origin_middleware,
+            stateless_http=False,
+            uvicorn_config=build_uvicorn_security_config(),
+        )
+    finally:
+        shutdown_tracing(tracing_provider)
 
 
 __all__ = [

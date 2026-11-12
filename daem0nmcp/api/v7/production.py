@@ -242,8 +242,9 @@ class _ProjectionLifecycle:
 # Only entry points the profile's own extra installs; a module from another
 # profile would fail here and degrade a working one.
 _NATIVE_PROFILE_MODULES = {
-    "local": ("qdrant_client",),
-    "models-local": ("sentence_transformers", "onnx", "onnxruntime"),
+    "local": ("numpy", "qdrant_client"),
+    "models-local": ("numpy", "sentence_transformers", "onnx", "onnxruntime"),
+    "late-interaction": ("numpy",),
     "graph": ("networkx", "igraph", "leidenalg"),
 }
 
@@ -278,7 +279,10 @@ class _OptionalNativeRuntimeLifecycle:
                 # broken native DLLs degrade upfront; auto-enabled profiles use
                 # lightweight spec checks to avoid multi-second startup imports.
                 try:
-                    if eager:
+                    # Windows can deadlock when a worker loads NumPy's DLLs
+                    # while the main thread starts another worker. Initialize
+                    # that shared prerequisite before any provider runs.
+                    if eager or (os.name == "nt" and module == "numpy"):
                         importlib.import_module(module)
                     elif importlib.util.find_spec(module) is None:
                         raise ModuleNotFoundError(module)

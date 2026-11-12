@@ -85,9 +85,9 @@
     svg.setAttribute("aria-label", "Memory communities");
     const details = ui.element("aside", "community-details", "Select a community for details.");
     details.hidden = true;
-    if (data.communities.length && globalThis.D3) {
-      const root = globalThis.D3.hierarchy(hierarchy(data)).sum(value => value.value || 0);
-      globalThis.D3.treemap().size([960, 540]).padding(3)(root);
+    if (data.communities.length && globalThis.d3) {
+      const root = globalThis.d3.hierarchy(hierarchy(data)).sum(value => value.value || 0);
+      globalThis.d3.treemap().size([960, 540]).padding(3)(root);
       for (const leaf of root.leaves()) {
         const item = leaf.data.item;
         if (!item) continue;

@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from ..similarity import TFIDFIndex
+from ..storage_activation import PointerValidationError, resolve_active_database
 from ._client import (
     block,
     find_project_root,
@@ -63,26 +64,10 @@ def _resolve_db_file(project_path: str) -> Path | None:
     storage_dir = Path(project_path) / ".daem0nmcp" / "storage"
     if not storage_dir.is_dir():
         return None
-    pointer_path = storage_dir / "active.json"
-    if pointer_path.is_file():
-        try:
-            pointer = json.loads(pointer_path.read_text(encoding="utf-8"))
-            candidate = (
-                pointer.get("active_generation") if isinstance(pointer, dict) else None
-            )
-            if (
-                isinstance(candidate, str)
-                and candidate
-                and "/" not in candidate
-                and "\\" not in candidate
-            ):
-                candidate_path = storage_dir / candidate
-                if candidate_path.is_file():
-                    return candidate_path
-        except (OSError, ValueError):
-            pass
-    default_db = storage_dir / "daem0nmcp.db"
-    return default_db if default_db.is_file() else None
+    try:
+        return resolve_active_database(storage_dir).path
+    except (OSError, PointerValidationError):
+        return None
 
 
 def _load_active_rules(project_path: str) -> list[_RuleCandidate]:
