@@ -158,6 +158,34 @@ code and the accepted packages are unchanged. New-head CI is tracked on the PR.
 The completed Ubuntu 3.11 verbose log also verified that all 25 platform-only
 tests skipped locally on Windows actually ran and passed.
 
+The [second CI run](https://github.com/9thLevelSoftware/Daem0n-MCP/actions/runs/43142862389),
+for `3fc261870c1ec7495496c71e2b544c6982d8f3af`, passed all 12 CI jobs,
+including all nine OS/Python combinations. GitGuardian and Kilo also completed
+successfully. Kilo's comment still contained a warning and suggestions, which
+were checked separately from its green conclusion:
+
+- The proposed offline SQLite URI substitution is unsafe for this live hook.
+  Actual concurrent writers produced 65 readable rules with the current normal
+  SQLite locking, but zero rules and a false `SQLITE_CORRUPT` read with the
+  proposed immutable helper on both Windows and Linux. The Windows database
+  remained healthy (`quick_check=ok`, 65 rows). Normal read-only SQLite may
+  create temporary WAL coordination files; physically read-only storage with
+  absent sidecars still cannot provide those files. This configuration is not
+  claimed as supported by this acceptance pass. No unsafe fallback was added.
+- Qdrant already declares NumPy as a dependency. Replacing the telemetry resource
+  merge as suggested would lose supported service-name environment precedence.
+  Neither proposal required a runtime change.
+- The community view's missing-library fallback wording predates this change;
+  the accepted packages contain the library and render populated views. The
+  unrelated fallback text was left unchanged.
+- The new OTLP test's parent control did inherit ambient SDK/exporter settings.
+  `OTEL_SDK_DISABLED=true` reproduced a failed control span. The test now clears
+  inherited `OTEL_*` values through `monkeypatch`, restoring them afterward.
+  All three actual collector cases passed in 13.06 seconds with host SDK
+  disablement and gzip compression both set. Explicit server overrides remain
+  covered. This final test-only improvement passed file-level Ruff checks and
+  independent review; new-head CI remains linked from PR #76.
+
 The bounded HTTP mixed-workload run completed in 600.125 seconds with 1,604
 recalls, ten writes, ten outcomes, ten resource reads, ten health checks and two
 briefings. It used concurrency four and retained ten resource samples. Python

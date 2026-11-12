@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
@@ -87,7 +88,11 @@ def _service_spans(messages, service):
         ("stdio", "grpc"),
     ],
 )
-async def test_production_otlp_export(transport, protocol, tmp_path):
+async def test_production_otlp_export(transport, protocol, tmp_path, monkeypatch):
+    # The parent collector control must not inherit host SDK/exporter settings.
+    for name in tuple(os.environ):
+        if name.startswith("OTEL_"):
+            monkeypatch.delenv(name)
     exporter_module = pytest.importorskip(
         "opentelemetry.exporter.otlp.proto."
         + ("http" if protocol == "http/protobuf" else "grpc")
