@@ -56,8 +56,8 @@ and persisted state after restart. No gateway production defect was found.
 Artifacts and raw logs remain under ignored `.test_tmp/acceptance-20261111-*`
 directories. They are local evidence, not published packages. The runtime wheel
 below includes all three Python fixes; the sdist was built in the same invocation.
-A subsequent test-only lambda binding correction does not change packaged
-runtime code. No final commit identity is implied by these development builds.
+Subsequent test-only corrections do not change packaged runtime code.
+No final commit identity is implied by these development builds.
 
 | Artifact | SHA-256 |
 | --- | --- |
@@ -146,6 +146,17 @@ the live E2B and remaining platform cases were not accepted from skipped runs.
 Full Ruff lint/format checks passed
 (505 files), v7 mypy passed (48 source files with `--platform linux`), and
 release inventory passed (77 tools, 10 resources, 587 requirements).
+
+The first [PR #76 CI run](https://github.com/9thLevelSoftware/Daem0n-MCP/actions/runs/43138245898)
+passed eight of nine platform jobs and all three static gates. Windows/Python
+3.11 exposed a test-only floating-point boundary: subtracting monotonic clock
+values yielded `299.9999999999998` for a correctly scheduled 300-second wait.
+The backoff test now compares absolute deadlines, retaining the strict minimum
+wait and existing exponential/reset checks. The affected test and file-level
+Ruff checks passed; independent review approved the assertion repair. Runtime
+code and the accepted packages are unchanged. New-head CI is tracked on the PR.
+The completed Ubuntu 3.11 verbose log also verified that all 25 platform-only
+tests skipped locally on Windows actually ran and passed.
 
 The bounded HTTP mixed-workload run completed in 600.125 seconds with 1,604
 recalls, ten writes, ten outcomes, ten resource reads, ten health checks and two

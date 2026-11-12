@@ -1427,7 +1427,11 @@ async def test_community_refresh_backs_off_after_a_deadline_until_inputs_change(
             False,
         )
         first_wait = state.community_retry_at - passes[-1]
-        assert first_wait >= dreaming_runtime._COMMUNITY_BACKOFF_SECONDS
+        # Subtracting clock values can round a full wait just below 300 seconds.
+        assert (
+            state.community_retry_at
+            >= passes[-1] + dreaming_runtime._COMMUNITY_BACKOFF_SECONDS
+        )
 
         # The same inputs are retried once the wait has elapsed, and a second
         # consecutive deadline waits longer.
