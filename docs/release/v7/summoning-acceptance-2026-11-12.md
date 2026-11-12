@@ -100,6 +100,14 @@ is excluded from stdio parsing; malformed relevant JSON still fails. Independent
 review approved the correction. The affected checks were rerun, not the entire
 already-completed suite.
 
+The first PR CI run also exposed a platform leak in the new assembly-ordering
+test. Its Windows simulation changed shared `os.name`, so macOS `pathlib` tried
+to construct Windows paths while resolving configured roots. The test now
+replaces only the production module's `os` reference. Runtime code is unchanged;
+the same import-order and caller-thread assertions remain. The affected test
+passed with both subcases, and scoped Ruff/format checks passed. Fresh PR CI
+verifies this correction across the platform matrix.
+
 ## Evidence and limits
 
 Raw, ignored evidence is under `.test_tmp/acceptance-20261112-summon/evidence/`:

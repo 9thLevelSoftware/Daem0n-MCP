@@ -166,7 +166,7 @@ class ProductionCompositionTests(unittest.TestCase):
             with self.subTest(environ=environ):
                 imported: list[tuple[str, threading.Thread]] = []
                 with (
-                    patch.object(production.os, "name", "nt"),
+                    patch.object(production, "os", SimpleNamespace(name="nt")),
                     patch.object(
                         production.CapabilityRegistry,
                         "all",
