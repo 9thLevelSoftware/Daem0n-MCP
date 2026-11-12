@@ -63,7 +63,7 @@ legacy tool name.
 
 ### 1. Brief automatically
 
-The first Daem0n call in a session briefs automatically; the compact brief is returned in `meta.covenant.auto_brief`. Call `session_brief` for the full brief.
+Guided mode automatically briefs an unbriefed session on `memory_recall`, `memory_preflight`, `memory_store`, or `memory_record_outcome`, returning `meta.covenant.auto_brief`. Diagnostic and discovery calls do not trigger briefing. Call `session_brief` for the full brief.
 
 The server-issued session and authenticated transport identity establish the
 scope. Headers, IP addresses and client information are not identity inputs.

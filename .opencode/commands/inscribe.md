@@ -25,8 +25,8 @@ daem0nmcp_memory_store(
 
 If `COUNSEL_REQUIRED`, review `error.counsel` (guidance and reasons), then retry
 exactly `error.remedy`, preserving the idempotency key. `memory_preflight`
-remains available for planning a change in advance. The first Daem0n call
-briefs automatically in `meta.covenant.auto_brief`; `session_brief` gives the full brief.
+remains available for planning a change in advance.
+Guided mode automatically briefs an unbriefed session on `memory_recall`, `memory_preflight`, `memory_store`, or `memory_record_outcome`, returning `meta.covenant.auto_brief`. Diagnostic and discovery calls do not trigger briefing. Call `session_brief` for the full brief.
 
 Report the returned `record_id`. After verification, use
 `daem0nmcp_memory_record_outcome` with that ID and a separate stable

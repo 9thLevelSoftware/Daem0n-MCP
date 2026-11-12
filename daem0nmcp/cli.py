@@ -18,6 +18,7 @@ Usage:
     python -m daem0nmcp.cli install-claude-hooks [--dry-run]
     python -m daem0nmcp.cli [--project-path P] uninstall-claude-hooks [--dry-run] [--remove-credentials]
     python -m daem0nmcp.cli install-opencode [--dry-run] [--force]
+    python -m daem0nmcp.cli --project-path P install-client CLIENT [--dry-run]
     python -m daem0nmcp.cli watch [--debounce SECONDS] [--no-system] [--no-log] [--no-poll]
     python -m daem0nmcp.cli index [--path PATH] [--patterns *.py *.ts ...]
     python -m daem0nmcp.cli remember --category CATEGORY --content CONTENT [--rationale TEXT] [--file-path PATH] [--tags TAGS]
@@ -636,6 +637,25 @@ def main():
             "--project-path", default=argparse.SUPPRESS, help="Project root path"
         )
 
+    # Project-local native MCP registration for supported CLI hosts.
+    install_client_parser = subparsers.add_parser(
+        "install-client",
+        help="Configure project-local Daem0n MCP and instructions for a CLI host",
+    )
+    install_client_parser.add_argument(
+        "client", choices=("codex", "agy", "opencode", "omp", "pi")
+    )
+    install_client_parser.add_argument(
+        "--dry-run", action="store_true", help="Preview changes without writing files"
+    )
+    install_client_parser.add_argument(
+        "--client-version",
+        help="Observed host version (required for the OpenCode V1 configuration)",
+    )
+    install_client_parser.add_argument(
+        "--project-path", default=argparse.SUPPRESS, help="Project root path"
+    )
+
     # install-opencode command
     install_oc_parser = subparsers.add_parser(
         "install-opencode",
@@ -1104,7 +1124,45 @@ def main():
     # Handle these before get_storage_path() to avoid creating .daem0nmcp/
     # in the target project directory.
 
-    if args.command == "install-opencode":
+    if args.command == "install-client":
+        from .client_install import ClientInstallError, install_client
+
+        try:
+            payload = install_client(
+                args.client,
+                args.project_path or os.getcwd(),
+                dry_run=args.dry_run,
+                client_version=args.client_version,
+            )
+        except ClientInstallError as error:
+            payload = {
+                "ok": False,
+                "client": args.client,
+                "error": {"code": error.code, "message": str(error)},
+                "files": error.files,
+            }
+        if args.json:
+            print(json.dumps(payload, ensure_ascii=False))
+        else:
+            if payload["ok"]:
+                print(
+                    f"{'Preview' if args.dry_run else 'Configuration'}: {args.client}"
+                )
+            else:
+                print(
+                    f"Error: {payload['error']['code']}: {payload['error']['message']}"
+                )
+            for item in payload.get("files", []):
+                print(f"  {item['action']}: {item['path']}")
+                if item.get("backup"):
+                    print(f"    Backup: {item['backup']}")
+            for warning in payload.get("warnings", []):
+                print(f"Warning: {warning}")
+            for step in payload.get("next_steps", []):
+                print(step)
+        sys.exit(0 if payload["ok"] else 1)
+
+    elif args.command == "install-opencode":
         from .opencode_install import install_opencode
 
         project_path = args.project_path or os.getcwd()

@@ -962,9 +962,11 @@ def _disable_upstream_task_protocol(server: Any) -> None:
 
 _COVENANT_INSTRUCTIONS = {
     "guided": (
-        "The first call in a session briefs automatically and returns the "
-        "compact brief in meta.covenant.auto_brief; call session_brief for the "
-        "full brief. Call memory_store or any protected tool directly: if it "
+        "Guided mode automatically briefs an unbriefed session on memory_recall, "
+        "memory_preflight, memory_store, or memory_record_outcome, returning "
+        "meta.covenant.auto_brief. Diagnostic and discovery calls do not trigger "
+        "briefing. Call session_brief for the full brief. "
+        "Call memory_store or any protected tool directly: if it "
         "returns COUNSEL_REQUIRED, read error.counsel, then retry exactly "
         "error.remedy."
     ),

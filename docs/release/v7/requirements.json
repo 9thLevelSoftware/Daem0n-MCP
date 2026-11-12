@@ -4531,6 +4531,16 @@
       "status": "pending"
     },
     {
+      "acceptance": "python -m daem0nmcp.cli install-client parses and exercises its documented result contract.",
+      "entry_point": "daem0nmcp.cli:main",
+      "evidence": [],
+      "id": "cli.install-client",
+      "kind": "cli",
+      "owner": "cli",
+      "package": "daem0nmcp.cli",
+      "status": "pending"
+    },
+    {
       "acceptance": "python -m daem0nmcp.cli install-hooks parses and exercises its documented result contract.",
       "entry_point": "daem0nmcp.cli:main",
       "evidence": [],
@@ -5905,8 +5915,8 @@
     "tests/test_legacy_vector_migration_guards.py"
   ],
   "observed_surface": {
-    "atomic_requirements": 587,
-    "cli_commands": 22,
+    "atomic_requirements": 588,
+    "cli_commands": 23,
     "dependency_profiles": 11,
     "hooks": 15,
     "registered_tools": 77,

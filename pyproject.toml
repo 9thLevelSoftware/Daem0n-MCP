@@ -29,6 +29,7 @@ dependencies = [
     "greenlet>=3.0.0",  # Required for SQLAlchemy async
     "pydantic-settings>=2.0.0",
     "regex>=2024.11.6",
+    "tomlkit>=0.13.3,<1",  # Preserve existing Codex project configuration.
 ]
 
 [project.optional-dependencies]

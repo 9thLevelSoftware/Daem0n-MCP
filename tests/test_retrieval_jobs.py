@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import itertools
 import json
 import sqlite3
@@ -155,6 +156,107 @@ class RetrievalProjectionJobTests(unittest.TestCase):
         self.assertIsNotNone(result)
         self.assertEqual("succeeded", result.status)
         self.assertEqual([WORKSPACE_ID], calls)
+
+    def test_lexical_only_claim_preserves_optional_queued_and_expired_leases(self):
+        from daem0nmcp.retrieval.job_queue import enqueue_projection_rebuild
+
+        for status in ("queued", "running"):
+            with self.subTest(status=status):
+                self.connection.execute("DELETE FROM background_jobs")
+                enqueue_projection_rebuild(
+                    self.connection,
+                    workspace_id=WORKSPACE_ID,
+                    projection_name="procedure",
+                    source_event_id=None,
+                    recorded_at_us=self._clock,
+                )
+                if status == "running":
+                    self.connection.execute(
+                        "UPDATE background_jobs SET status='running',attempts=1,"
+                        "lease_owner='previous-worker',lease_token='previous-token',"
+                        "lease_expires_at_us=?",
+                        (self._clock - 1,),
+                    )
+                self.connection.commit()
+                before = tuple(
+                    self.connection.execute("SELECT * FROM background_jobs").fetchone()
+                )
+
+                result = self._runner(
+                    {"lexical": lambda _workspace_id: self.fail("not lexical work")},
+                    lexical_only=True,
+                ).run_once()
+
+                self.assertIsNone(result)
+                self.assertEqual(
+                    before,
+                    tuple(
+                        self.connection.execute(
+                            "SELECT * FROM background_jobs"
+                        ).fetchone()
+                    ),
+                )
+                calls = []
+                full = self._runner({"procedure": calls.append}).run_once()
+                self.assertEqual("succeeded", full.status)
+                self.assertEqual([WORKSPACE_ID], calls)
+
+    def test_lexical_only_claim_leaves_mixed_and_malformed_payloads_to_full_worker(
+        self,
+    ):
+        from daem0nmcp.retrieval.job_queue import enqueue_projection_rebuild
+
+        cases = (
+            (json.dumps(["lexical", "procedure"]), "succeeded"),
+            ('["lexical"],"projection_names":["procedure"]', "succeeded"),
+            (json.dumps("malformed"), "dead_letter"),
+        )
+        for names, full_status in cases:
+            with self.subTest(names=names):
+                self.connection.execute("DELETE FROM background_jobs")
+                enqueue_projection_rebuild(
+                    self.connection,
+                    workspace_id=WORKSPACE_ID,
+                    projection_name="procedure",
+                    source_event_id=None,
+                    recorded_at_us=self._clock,
+                )
+                payload = (
+                    '{"projection_names":'
+                    + names
+                    + ',"source_event_id":null,"workspace_id":"'
+                    + WORKSPACE_ID
+                    + '"}'
+                )
+                self.connection.execute(
+                    "UPDATE background_jobs SET payload_json=?,payload_hash=?",
+                    (payload, hashlib.sha256(payload.encode("utf-8")).hexdigest()),
+                )
+                self.connection.commit()
+                before = tuple(
+                    self.connection.execute("SELECT * FROM background_jobs").fetchone()
+                )
+
+                self.assertIsNone(
+                    self._runner(
+                        {"lexical": lambda _workspace_id: None}, lexical_only=True
+                    ).run_once()
+                )
+                self.assertEqual(
+                    before,
+                    tuple(
+                        self.connection.execute(
+                            "SELECT * FROM background_jobs"
+                        ).fetchone()
+                    ),
+                )
+                full = self._runner(
+                    {
+                        "lexical": lambda _workspace_id: None,
+                        "procedure": lambda _workspace_id: None,
+                    }
+                ).run_once()
+                self.assertEqual(full_status, full.status)
 
     def test_availability_must_not_predate_recording(self):
         from daem0nmcp.retrieval.job_queue import enqueue_projection_rebuild
@@ -550,6 +652,37 @@ class RetrievalProjectionJobTests(unittest.TestCase):
         self.assertEqual("succeeded", result.status)
         self.assertEqual("ready", provider.status)
         self.assertEqual(1, len(provider.candidates))
+
+    def test_default_factory_preserves_optional_work_and_allows_explicit_override(self):
+        from daem0nmcp.retrieval.job_queue import enqueue_projection_rebuild
+        from daem0nmcp.retrieval.jobs import create_projection_job_runner
+
+        enqueue_projection_rebuild(
+            self.connection,
+            workspace_id=WORKSPACE_ID,
+            projection_name="procedure",
+            source_event_id=None,
+            recorded_at_us=self._clock,
+        )
+        self.connection.commit()
+        before = tuple(
+            self.connection.execute("SELECT * FROM background_jobs").fetchone()
+        )
+
+        self.assertIsNone(
+            create_projection_job_runner(
+                self.connection, clock_us=lambda: self._clock
+            ).run_once()
+        )
+        self.assertEqual(
+            before,
+            tuple(self.connection.execute("SELECT * FROM background_jobs").fetchone()),
+        )
+        full = create_projection_job_runner(
+            self.connection, clock_us=lambda: self._clock, lexical_only=False
+        ).run_once()
+        self.assertEqual("dead_letter", full.status)
+        self.assertEqual("PROJECTION_BUILDER_UNAVAILABLE", full.reason)
 
 
 if __name__ == "__main__":

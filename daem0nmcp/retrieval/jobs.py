@@ -97,6 +97,7 @@ class ProjectionJobRunner:
         retry_delay_us: int = 1_000_000,
         deferral_delay_us: int = 5_000_000,
         cancelled: Callable[[], bool] | None = None,
+        lexical_only: bool = False,
     ) -> None:
         if not isinstance(connection, sqlite3.Connection):
             raise ValueError("connection must be a SQLite connection")
@@ -107,6 +108,8 @@ class ProjectionJobRunner:
             if name not in _PROJECTIONS or not callable(builder):
                 raise ValueError("builders contain an unsupported projection")
             normalized_builders[name] = builder
+        if not isinstance(lexical_only, bool):
+            raise ValueError("lexical_only must be boolean")
         if not isinstance(lease_owner, str) or _WORKER.fullmatch(lease_owner) is None:
             raise ValueError("lease_owner is invalid")
         for value, field_name in (
@@ -137,6 +140,7 @@ class ProjectionJobRunner:
                     break
         self.connection = connection
         self._builders = normalized_builders
+        self._lexical_only = lexical_only
         self._clock_us = clock_us or (lambda: time.time_ns() // 1_000)
         self._lease_owner = lease_owner
         self._token_factory = token_factory or (lambda: secrets.token_hex(16))
@@ -314,10 +318,28 @@ class ProjectionJobRunner:
             or _LEASE_TOKEN.fullmatch(lease_token) is None
         ):
             raise ProjectionJobError("PROJECTION_JOB_LEASE_INVALID")
+        # A partial core worker must leave other work for the full worker, not
+        # claim it and interpret its own missing builder as a disabled profile.
+        # Guard JSON parsing so malformed jobs remain claimable by the full
+        # worker's existing payload validation. Duplicate fields are ambiguous
+        # between parsers and therefore also stay outside the core lane.
+        projection_filter = (
+            """
+                AND CASE WHEN json_valid(payload_json) THEN
+                    json_type(payload_json, '$.projection_names') = 'array'
+                    AND json_array_length(payload_json, '$.projection_names') = 1
+                    AND json_extract(payload_json, '$.projection_names[0]') = 'lexical'
+                    AND (SELECT count(*) FROM json_each(payload_json)
+                         WHERE key='projection_names') = 1
+                ELSE 0 END
+            """
+            if self._lexical_only
+            else ""
+        )
         try:
             self.connection.execute("BEGIN IMMEDIATE")
             row = self.connection.execute(
-                """
+                f"""
                 SELECT job_id,workspace_id,payload_json,payload_hash,
                        source_event_id,attempts,max_attempts
                 FROM background_jobs
@@ -325,6 +347,7 @@ class ProjectionJobRunner:
                     (status='queued' AND available_at_us<=?) OR
                     (status='running' AND lease_expires_at_us<=?)
                 )
+                {projection_filter}
                 ORDER BY priority DESC,created_at_us ASC,job_id ASC
                 LIMIT 1
                 """,
@@ -606,12 +629,13 @@ def create_projection_job_runner(
     connection: sqlite3.Connection,
     **options: Any,
 ) -> ProjectionJobRunner:
-    """Create the base-profile runner with the mandatory lexical builder."""
+    """Create the base-profile runner restricted to lexical jobs by default."""
 
     from .projections import LexicalProjectionBuilder
 
     clock_us = options.get("clock_us")
     builder = LexicalProjectionBuilder(connection, clock_us=clock_us)
+    options.setdefault("lexical_only", True)
     return ProjectionJobRunner(
         connection,
         builders={"lexical": builder.rebuild},

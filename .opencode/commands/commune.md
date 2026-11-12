@@ -2,8 +2,8 @@
 description: Start the Daem0n v7 session for a registered workspace
 ---
 
-The first Daem0n call establishes the scoped session and briefs automatically
-in `meta.covenant.auto_brief`. For the full brief, call
+Guided mode automatically briefs an unbriefed session on `memory_recall`, `memory_preflight`, `memory_store`, or `memory_record_outcome`, returning `meta.covenant.auto_brief`. Diagnostic and discovery calls do not trigger briefing. Call `session_brief` for the full brief.
+For the full brief, call
 `daem0nmcp_session_brief(workspace_id="$ARGUMENTS")`.
 The argument must be the configured opaque `workspace_id`, not a path.
 

@@ -26,7 +26,7 @@ v7 tools: session_brief, memory_preflight, memory_recall, memory_store,
 memory_record_outcome, system_health, daem0n_tools_search, and daem0n_tool_call.
 
 ### 1. BRIEF
-The first Daem0n call in a session briefs automatically; the compact brief is returned in meta.covenant.auto_brief. Call session_brief for the full brief.
+Guided mode automatically briefs an unbriefed session on memory_recall, memory_preflight, memory_store, or memory_record_outcome, returning meta.covenant.auto_brief. Diagnostic and discovery calls do not trigger briefing. Call session_brief for the full brief.
 
 ### 2. WRITE
 Call memory_store (or any protected tool) directly. If it returns COUNSEL_REQUIRED, read error.counsel (guidance and reasons), then retry exactly error.remedy. memory_preflight remains available for planning a change in advance.
@@ -54,7 +54,7 @@ at /mcp. Migration mapping: docs/v6-to-v7-tools.json.
 const COVENANT_RULES_SIMPLIFIED = `<daem0n-covenant mode="simplified">
 ## Memory Protocol
 
-The first Daem0n call in a session briefs automatically; the compact brief is returned in meta.covenant.auto_brief. Call session_brief for the full brief.
+Guided mode automatically briefs an unbriefed session on memory_recall, memory_preflight, memory_store, or memory_record_outcome, returning meta.covenant.auto_brief. Diagnostic and discovery calls do not trigger briefing. Call session_brief for the full brief.
 Call memory_store (or any protected tool) directly. If it returns COUNSEL_REQUIRED, read error.counsel (guidance and reasons), then retry exactly error.remedy. memory_preflight remains available for planning a change in advance.
 Use daem0n_tools_search(query), then daem0n_tool_call(workspace_id, tool, arguments).
 RECALL: daem0nmcp_memory_recall(workspace_id="<workspace_id>", query="...", limit=10)
@@ -341,7 +341,7 @@ export const Daem0nPlugin: Plugin = async ({ directory }) => {
 
     // -----------------------------------------------------------------------
     // HOOK 4: Session lifecycle events (best-effort, never blocks)
-    // session.created  -> session_start hook (auto-briefing)
+    // session.created  -> session_start hook (briefing reminder)
     // session.idle     -> stop hook (fail-closed memory suggestions)
     // -----------------------------------------------------------------------
     event: async ({ event }) => {

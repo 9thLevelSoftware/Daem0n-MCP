@@ -82,11 +82,11 @@ async def test_initialize_carries_instructions_for_the_active_settings(
     for essential in ESSENTIALS:
         assert essential in instructions, essential
     if covenant_mode == "guided":
-        assert "briefs automatically" in instructions
+        assert "automatically briefs" in instructions
         assert "COUNSEL_REQUIRED" in instructions
         assert "error.counsel" in instructions
     else:
-        assert "briefs automatically" not in instructions
+        assert "automatically briefs" not in instructions
         assert "Call session_brief first" in instructions
         assert "memory_preflight" in instructions
         assert "preflight_token" in instructions

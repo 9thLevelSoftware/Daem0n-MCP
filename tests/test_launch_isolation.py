@@ -471,7 +471,12 @@ def test_every_generated_command_uses_the_one_launch_form(fake_settings):
         assert not set(code) & set('"$`\\%!^&|<>')
         assert f'"{sys.executable}" {flag} "{code}"' in _hook_commands(fake_settings)
         assert _plugin_launch_code(PLUGIN_TEMPLATE, module) == code
-    servers = [module_launch_args("daem0nmcp"), module_launch_args("daem0nmcp.server")]
+    servers = [
+        module_launch_args("daem0nmcp"),
+        module_launch_args("daem0nmcp.server"),
+        # Native client registrations add startup isolation before the same bootstrap.
+        ["-E", "-u", "-X", "utf8", *module_launch_args("daem0nmcp.server")],
+    ]
     for name, command in _documented_server_commands():
         assert command[1:] in servers, name
     flag, code = module_launch_args("daem0nmcp.cli")
