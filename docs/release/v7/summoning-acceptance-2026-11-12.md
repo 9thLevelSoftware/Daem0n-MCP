@@ -108,6 +108,17 @@ the same import-order and caller-thread assertions remain. The affected test
 passed with both subcases, and scoped Ruff/format checks passed. Fresh PR CI
 verifies this correction across the platform matrix.
 
+The next CI run passed that regression on Linux and macOS, but Ubuntu Python
+3.12 returned an empty first recall in the existing migrated-workspace test.
+Its earlier database assertions confirmed the migrated record and file link;
+the failed assertion omitted the response's abstention and provider diagnostics.
+That assertion now includes the full response without changing its requirement,
+timeouts or retry behavior. The same test passed once on Windows Python 3.12
+(9.37 seconds) and once in a fresh Ubuntu/WSL Python 3.12.15 environment with CI's
+`dev,apps,graph` extras (5.82 seconds). The original CI cause remains undetermined;
+this is a diagnostic improvement, not a claimed runtime repair. A subsequent CI
+failure will retain the missing evidence.
+
 ## Evidence and limits
 
 Raw, ignored evidence is under `.test_tmp/acceptance-20261112-summon/evidence/`:
