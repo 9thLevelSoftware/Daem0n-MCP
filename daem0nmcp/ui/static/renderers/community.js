@@ -121,7 +121,9 @@
       message.setAttribute("x", "480");
       message.setAttribute("y", "270");
       message.setAttribute("text-anchor", "middle");
-      message.textContent = "No communities found.";
+      message.textContent = data.communities.length
+        ? "Community map is unavailable."
+        : "No communities found.";
       svg.append(message);
     }
     frame.append(svg, details);

@@ -294,6 +294,21 @@ test("community draws populated cells with the shipped D3 bundle", () => {
   assert.equal(findByText(rendered.document.mount, "No communities found."), null);
 });
 
+test("community distinguishes empty data from a missing visualization library", () => {
+  for (const options of [{ realD3: true }, { d3: false }]) {
+    const empty = renderApp("community", { communities: [] }, options);
+    assert.ok(findByText(empty.document.mount, "No communities found."));
+    assert.equal(findByText(empty.document.mount, "Community map is unavailable."), null);
+  }
+
+  const unavailable = renderApp("community", {
+    communities: [{ id: "community_1", name: "Retained community", member_count: 2 }],
+  }, { d3: false });
+  assert.ok(findByText(unavailable.document.mount, "Community map is unavailable."));
+  assert.equal(findByText(unavailable.document.mount, "No communities found."), null);
+  assert.equal(findAll(unavailable.document.mount, node => node.getAttribute("class") === "community-cell__rect").length, 0);
+});
+
 test("graph draws populated nodes with the shipped D3 bundle", () => {
   const rendered = renderApp("graph", {
     nodes: [{ id: "record_1", category: "decision", content: "Actual node" }],

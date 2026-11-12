@@ -44,7 +44,8 @@ That run predates the fixes below; it is not CI evidence for this branch.
    regressions failed before the fix and passed afterward; they load the
    shipped D3 bundle and check actual SVG cells/canvas drawing. Source browser
    checks now show the populated treemap and linked graph and exercise their
-   controls through actual MCP calls.
+   controls through actual MCP calls. A review follow-up also distinguishes
+   unavailable visualization from an actually empty community payload.
 
 All four production changes received independent correctness and simplicity
 review. The default-core gateway also gained real stdio/HTTP regression tests
@@ -65,12 +66,17 @@ No final commit identity is implied by these development builds.
 | `dist-final/daem0nmcp-7.0.0.dev0.tar.gz` | `98fca909f369d6554ff45c4f6bd636d3f8246539ba9edccc85fdba373f6dbc28` |
 | `dist-ui-fixed/daem0nmcp-7.0.0.dev0-py3-none-any.whl` | `375f83b1fe50f078bba43fa9dd87151425ba54985084aca03fd41303282254c7` |
 | `dist-ui-fixed/daem0nmcp-7.0.0.dev0.tar.gz` | `a7ff7106798416619ec381ad667a7ed448e52eb8d1585f5b6185e71cb5f667e5` |
+| `dist-reviewed/daem0nmcp-7.0.0.dev0-py3-none-any.whl` | `9fb3e25946fe17851a05559793af5f8d34588cc6a8a56c0b1f1174ca848c1e46` |
+| `dist-reviewed/daem0nmcp-7.0.0.dev0.tar.gz` | `2d4d569f4912ef5c14a32308524556f7c5ee52f51f12ac0f6ab2a54957967887` |
 
 The artifact paths above abbreviate `.test_tmp/acceptance-20261111-core/`.
 The rebuilt `dist-ui-fixed` wheel contains the renderer repair. Comparing every
 ZIP member with the earlier wheel found changes only in the two renderer files
 and `RECORD`; all Python runtime bytes are identical. Its private installation
 was verified with `python -I`.
+The final `dist-reviewed` wheel changes only `community.js` and `RECORD` from
+that build, adding the distinct unavailable-map message. Its installed renderer
+bytes match the tested source; every Python runtime file remains identical.
 
 | Check | Observed result |
 | --- | --- |
@@ -175,9 +181,12 @@ were checked separately from its green conclusion:
 - Qdrant already declares NumPy as a dependency. Replacing the telemetry resource
   merge as suggested would lose supported service-name environment precedence.
   Neither proposal required a runtime change.
-- The community view's missing-library fallback wording predates this change;
-  the accepted packages contain the library and render populated views. The
-  unrelated fallback text was left unchanged.
+- The community view's missing-library fallback wording was addressed after
+  explicit review feedback: populated data without D3 reports "Community map
+  is unavailable."; genuinely empty data retains "No communities found.".
+  The new regression failed before the fix; both affected renderer checks
+  passed afterward, covering empty data with/without the real bundle and
+  populated data with/without it. Independent review approved the change.
 - The new OTLP test's parent control did inherit ambient SDK/exporter settings.
   `OTEL_SDK_DISABLED=true` reproduced a failed control span. The test now clears
   inherited `OTEL_*` values through `monkeypatch`, restoring them afterward.
