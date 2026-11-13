@@ -706,6 +706,103 @@ def _generation_inventory(connection: sqlite3.Connection) -> dict[str, int]:
     return inventory
 
 
+def _projection_diagnostics(
+    connection: sqlite3.Connection, workspace_id: str
+) -> list[dict[str, object]]:
+    """Explain derived-state lag without treating pending work as bad authority.
+
+    This is an offline snapshot, so capability availability is reported only
+    when a worker recorded an unavailable-builder error. The verifier cannot
+    infer the profile of the process which will next resume these jobs.
+    """
+    expected_count, expected_root = _event_snapshot(connection, workspace_id)
+    now_us = time.time_ns() // 1_000
+    latest = {}
+    for row in connection.execute(
+        "SELECT projection_name,generation,status,source_event_count,"
+        "source_event_root_hash,cursor_recorded_at_us,cursor_event_id,details_json "
+        "FROM projection_manifests WHERE workspace_id=? "
+        "ORDER BY projection_name,generation DESC",
+        (workspace_id,),
+    ):
+        latest.setdefault(str(row[0]), row)
+    diagnostics: list[dict[str, object]] = []
+    for name in sorted(RETRIEVAL_PROJECTION_NAMES):
+        row = latest.get(name)
+        reasons: list[str] = []
+        item: dict[str, object] = {"projection": name}
+        if row is None:
+            reasons.append("PROJECTION_NOT_BUILT")
+        else:
+            details = parse_canonical_json(str(row[7]))
+            if not isinstance(details, dict):
+                raise ValueError("projection manifest details are invalid")
+            item.update(
+                generation=int(row[1]),
+                manifest_status=str(row[2]),
+                source_event_count=int(row[3]),
+                expected_event_count=expected_count,
+                cursor_recorded_at_us=row[5],
+                cursor_event_id=row[6],
+            )
+            if name != "code" and int(row[3]) != expected_count:
+                reasons.append("SOURCE_EVENT_COUNT_MISMATCH")
+            if name != "code" and str(row[4]) != expected_root:
+                reasons.append("SOURCE_EVENT_ROOT_MISMATCH")
+            if details.get("rebuild_required_event_id") is not None:
+                reasons.append("REBUILD_MARKER")
+                marker = details["rebuild_required_event_id"]
+                if isinstance(marker, str) and re.fullmatch(
+                    r"evt_[0-9a-f]{64}", marker
+                ):
+                    item["rebuild_required_event_id"] = marker
+            if row[2] != "active":
+                reasons.append("MANIFEST_" + str(row[2]).upper())
+        job = connection.execute(
+            "SELECT status,attempts,max_attempts,available_at_us,"
+            "lease_expires_at_us,last_error_json,source_event_id "
+            "FROM background_jobs WHERE workspace_id=? "
+            "AND job_type='retrieval.projection_rebuild' AND idempotency_key=?",
+            (workspace_id, "active-projection:" + name),
+        ).fetchone()
+        queue: dict[str, object] = {"state": "none"}
+        if job is not None:
+            state = str(job[0])
+            if state == "queued" and int(job[3]) > now_us:
+                state = "delayed"
+            elif state == "running" and job[4] is not None and int(job[4]) <= now_us:
+                state = "lease_expired"
+            queue.update(
+                state=state,
+                attempts=int(job[1]),
+                max_attempts=int(job[2]),
+                available_at_us=int(job[3]),
+                lease_expires_at_us=job[4],
+                source_event_id=job[6],
+            )
+            if job[5] is not None:
+                try:
+                    error = parse_canonical_json(str(job[5]))
+                    code = error.get("code") if isinstance(error, dict) else None
+                except (ValueError, TypeError):
+                    code = None
+                if isinstance(code, str) and re.fullmatch(
+                    r"[A-Z][A-Z0-9_]{1,63}", code
+                ):
+                    queue["last_error_code"] = code
+                    if code == "PROJECTION_BUILDER_UNAVAILABLE":
+                        reasons.append("CAPABILITY_UNAVAILABLE")
+            if state == "dead_letter":
+                reasons.append("PROJECTION_JOB_FAILED")
+        item.update(
+            status="ready" if not reasons else "rebuild_required",
+            reason_codes=reasons,
+            queue=queue,
+        )
+        diagnostics.append(item)
+    return diagnostics
+
+
 def _verify_manifests(connection: sqlite3.Connection) -> tuple[int, int, int]:
     from .retrieval.projections import LexicalProjectionBuilder
     from .retrieval.specialized_projection import SpecializedProjectionBuilder
@@ -995,6 +1092,7 @@ def _verify_database(
                 count=manifest_count,
                 rebuild_required=stale,
                 local_rebuild_required=local_stale,
+                projections=_projection_diagnostics(source, workspace_id),
             )
         except Exception as exc:
             checks["projection_manifests"] = _check(False, error=type(exc).__name__)

@@ -89,6 +89,161 @@ class GatewayOperationsTests(unittest.IsolatedAsyncioTestCase):
             )
             self.assertEqual([], empty.structured_content["data"]["tools"])
 
+    async def test_discovery_separates_direct_and_gateway_argument_schemas(
+        self,
+    ) -> None:
+        from jsonschema import Draft202012Validator
+
+        async with Client(self.server) as client:
+            found = await client.call_tool(
+                "daem0n_tools_search", {"query": "code_search", "limit": 5}
+            )
+            descriptor = next(
+                item
+                for item in found.structured_content["data"]["tools"]
+                if item["name"] == "code_search"
+            )
+            direct_schema = descriptor["input_schema"]
+            gateway_schema = descriptor["gateway_arguments_schema"]
+            self.assertIn("workspace_id", direct_schema["required"])
+            self.assertNotIn("workspace_id", gateway_schema["properties"])
+            self.assertNotIn("workspace_id", gateway_schema.get("required", []))
+            self.assertEqual("daem0n_tool_call", descriptor["gateway_tool"])
+            self.assertEqual("top_level", descriptor["gateway_workspace_id_location"])
+            validator = Draft202012Validator(gateway_schema)
+            self.assertTrue(validator.is_valid({"query": "probe", "limit": 10}))
+            self.assertFalse(validator.is_valid({**self.scope, "query": "probe"}))
+            self.assertFalse(validator.is_valid({"query": "probe", "limit": "10"}))
+            self.assertFalse(validator.is_valid({"query": "probe", "limit": None}))
+            await client.call_tool("session_brief", self.scope)
+            (self.root / "probe.py").write_text("def gateway_probe():\n    return 1\n")
+            indexed = await client.call_tool(
+                "daem0n_tool_call",
+                {
+                    **self.scope,
+                    "tool": "code_index",
+                    "arguments": {"patterns": ["*.py"]},
+                },
+            )
+            self.assertTrue(indexed.structured_content["ok"])
+            searched = await client.call_tool(
+                descriptor["gateway_tool"],
+                {
+                    **self.scope,
+                    "tool": descriptor["name"],
+                    "arguments": {"query": "gateway_probe", "limit": 10},
+                },
+            )
+            self.assertTrue(searched.structured_content["ok"])
+            self.assertTrue(searched.structured_content["data"]["data"]["items"])
+
+    async def test_gateway_numeric_errors_explain_types_without_echoing_values(
+        self,
+    ) -> None:
+        async with Client(self.server) as client:
+            for tool, field, maximum in (
+                ("code_search", "limit", 100),
+                ("code_impact_analyze", "max_depth", 10),
+            ):
+                base = (
+                    {"query": "probe"}
+                    if tool == "code_search"
+                    else {"qualified_name": "probe"}
+                )
+                for value in (
+                    "100",
+                    "private-value-never-echo",
+                    None,
+                    True,
+                    1.5,
+                    0,
+                    maximum + 1,
+                ):
+                    with self.subTest(tool=tool, value=value):
+                        result = await client.call_tool(
+                            "daem0n_tool_call",
+                            {
+                                **self.scope,
+                                "tool": tool,
+                                "arguments": {**base, field: value},
+                            },
+                            raise_on_error=False,
+                        )
+                        error = result.structured_content["error"]
+                        self.assertEqual("INVALID_ARGUMENT", error["code"])
+                        diagnostic = error["field_errors"][0]
+                        self.assertEqual("INVALID_VALUE", diagnostic["code"])
+                        self.assertEqual(f"arguments.{field}", diagnostic["field"])
+                        self.assertIn("JSON integer", diagnostic["message"])
+                        self.assertIn(str(maximum), diagnostic["message"])
+                        self.assertNotIn("private-value-never-echo", json.dumps(error))
+
+    async def test_native_descriptions_explain_scope_types_and_persisted_indexes(
+        self,
+    ) -> None:
+        async with Client(self.server) as client:
+            listed = {item.name: item for item in await client.list_tools()}
+            self.assertIn("top level", listed["daem0n_tool_call"].description)
+            result = await client.call_tool(
+                "daem0n_tools_search", {"query": "code_search", "limit": 5}
+            )
+            descriptor = next(
+                item
+                for item in result.structured_content["data"]["tools"]
+                if item["name"] == "code_search"
+            )
+            self.assertIn("persisted", descriptor["description"])
+            self.assertIn(
+                "JSON integer",
+                descriptor["input_schema"]["properties"]["limit"]["description"],
+            )
+            self.assertIn(
+                "returned",
+                descriptor["input_schema"]["properties"]["cursor"]["description"],
+            )
+
+    def test_gateway_schema_keeps_references_nested_scope_and_original_unchanged(
+        self,
+    ) -> None:
+        from copy import deepcopy
+
+        from jsonschema import Draft202012Validator
+
+        from daem0nmcp.api.v7.gateway_operations import gateway_arguments_schema
+
+        original = {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["workspace_id", "payload"],
+            "properties": {
+                "workspace_id": {"type": "string"},
+                "payload": {"$ref": "#/$defs/Payload"},
+            },
+            "$defs": {
+                "Payload": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "properties": {"workspace_id": {"type": "string"}},
+                    "required": ["workspace_id"],
+                }
+            },
+        }
+        before = deepcopy(original)
+        gateway = gateway_arguments_schema(original)
+        validator = Draft202012Validator(gateway)
+        valid = {"payload": {"workspace_id": "legitimate nested user data"}}
+        self.assertTrue(validator.is_valid(valid))
+        self.assertFalse(validator.is_valid({"payload": {}}))
+        self.assertFalse(validator.is_valid({**valid, "workspace_id": "forbidden"}))
+        gateway["$defs"]["Payload"]["required"].clear()
+        self.assertEqual(before, original)
+        global_schema = {
+            "type": "object",
+            "properties": {},
+            "additionalProperties": False,
+        }
+        self.assertEqual(global_schema, gateway_arguments_schema(global_schema))
+
     async def test_gateway_call_advertises_the_hints_of_what_it_can_dispatch(
         self,
     ) -> None:

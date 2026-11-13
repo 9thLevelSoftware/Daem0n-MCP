@@ -11,6 +11,7 @@ import threading
 import time
 import types
 import unittest
+from contextlib import closing
 from datetime import datetime, timezone
 from importlib.util import find_spec
 from pathlib import Path
@@ -1442,6 +1443,107 @@ class RetrievalRuntimeTests(unittest.IsolatedAsyncioTestCase):
             await second
 
         self.assertEqual(2, calls)
+
+    async def test_real_delayed_job_survives_shutdown_and_resumes_without_a_write(self):
+        from unittest.mock import patch
+
+        from daem0nmcp.retrieval.runtime import (
+            await_projection_job_drains,
+            schedule_projection_job_drain,
+        )
+
+        now_us = time.time_ns() // 1_000
+        with closing(sqlite3.connect(self.path)) as connection:
+            with patch("daem0nmcp.event_store._PROJECTION_REBUILD_GRACE_US", 150_000):
+                second_id = _append(connection, "4", "resume final write", now_us)
+            # This profile serves only lexical; other optional jobs are not the
+            # subject of this scheduler lifecycle regression.
+            connection.execute(
+                "DELETE FROM background_jobs WHERE idempotency_key "
+                "<> 'active-projection:lexical'"
+            )
+            connection.commit()
+        statuses = {
+            "local": "disabled",
+            "models-local": "disabled",
+            "graph": "disabled",
+        }
+        first = schedule_projection_job_drain(
+            self.path, config=_settings(), capability_statuses=statuses
+        )
+        await asyncio.sleep(0)
+        await asyncio.wait_for(await_projection_job_drains((self.path,)), timeout=1)
+        self.assertTrue(first.done())
+        with closing(sqlite3.connect(self.path)) as connection:
+            self.assertEqual(
+                ("queued", 0),
+                connection.execute(
+                    "SELECT status,attempts FROM background_jobs"
+                ).fetchone(),
+            )
+        # No additional event, enqueue, or direct builder call is needed.
+        await asyncio.wait_for(
+            schedule_projection_job_drain(
+                self.path, config=_settings(), capability_statuses=statuses
+            ),
+            timeout=2,
+        )
+        with closing(sqlite3.connect(self.path)) as connection:
+            self.assertEqual(
+                ("succeeded", 1),
+                connection.execute(
+                    "SELECT status,attempts FROM background_jobs"
+                ).fetchone(),
+            )
+            self.assertIsNotNone(
+                connection.execute(
+                    "SELECT 1 FROM retrieval_documents WHERE record_id=?",
+                    (second_id,),
+                ).fetchone()
+            )
+
+    async def test_scheduler_reclaims_a_real_expired_lease_after_restart(self):
+        from daem0nmcp.retrieval.runtime import schedule_projection_job_drain
+
+        with closing(sqlite3.connect(self.path)) as connection:
+            second_id = _append(connection, "5", "reclaim interrupted write", 300)
+            connection.execute(
+                "DELETE FROM background_jobs WHERE idempotency_key "
+                "<> 'active-projection:lexical'"
+            )
+            # Retain the durable state of a worker that died while holding a
+            # lease, rather than using a fake drain or bypassing the runner.
+            connection.execute(
+                "UPDATE background_jobs SET status='running',attempts=1,"
+                "lease_owner='terminated-host',lease_token='old-lease',"
+                "lease_expires_at_us=1"
+            )
+            connection.commit()
+        await asyncio.wait_for(
+            schedule_projection_job_drain(
+                self.path,
+                config=_settings(),
+                capability_statuses={
+                    "local": "disabled",
+                    "models-local": "disabled",
+                    "graph": "disabled",
+                },
+            ),
+            timeout=2,
+        )
+        with closing(sqlite3.connect(self.path)) as connection:
+            self.assertEqual(
+                ("succeeded", 2, None),
+                connection.execute(
+                    "SELECT status,attempts,lease_token FROM background_jobs"
+                ).fetchone(),
+            )
+            self.assertIsNotNone(
+                connection.execute(
+                    "SELECT 1 FROM retrieval_documents WHERE record_id=?",
+                    (second_id,),
+                ).fetchone()
+            )
 
 
 if __name__ == "__main__":

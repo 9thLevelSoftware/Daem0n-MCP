@@ -141,3 +141,55 @@ def test_human_failure_reports_changed_files_and_recovery_paths(
     assert f"updated: {configuration}" in output
     assert f"Backup: {backup}" in output
     assert f"cleanup_pending: {pending}" in output
+
+
+def test_explicit_automation_and_v2_options_reach_public_installer(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    result = _run(
+        [
+            "install-client",
+            "opencode",
+            "--client-version",
+            "2.0.0",
+            "--opencode-interface",
+            "v2",
+            "--opencode-code-mode",
+            "direct",
+            "--automation",
+            "off",
+            "--project-path",
+            str(project),
+            "--dry-run",
+        ],
+        tmp_path,
+    )
+    assert result.returncode == 0, result.stderr
+    response = json.loads(result.stdout)
+    assert response["opencode_interface"] == "v2"
+    assert response["automation"]["mode"] == "off"
+    assert list(project.iterdir()) == []
+
+
+def test_unsupported_enforcement_reports_capability_without_writes(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    result = _run(
+        [
+            "install-client",
+            "agy",
+            "--automation",
+            "enforce",
+            "--project-path",
+            str(project),
+        ],
+        tmp_path,
+    )
+    assert result.returncode == 1
+    response = json.loads(result.stdout)
+    assert response["error"]["code"] == "UNSUPPORTED_AUTOMATION"
+    assert list(project.iterdir()) == []

@@ -57,9 +57,10 @@ COMMAND_TEMPLATES = {
 }
 
 _PLUGIN_PYTHON_LINE = 'const PYTHON_EXECUTABLE = "python";'
+_PLUGIN_MODE_LINE = "const INSTALLED_AUTOMATION_MODE: string | undefined = undefined;"
 
 
-def render_plugin(python: str) -> str:
+def render_plugin(python: str, *, automation: str | None = None) -> str:
     """Return the plugin source with *python* as the interpreter for its hooks.
 
     The interpreter is fixed here, at install time: a value the plugin read
@@ -68,9 +69,30 @@ def render_plugin(python: str) -> str:
     """
     if PLUGIN_TEMPLATE.count(_PLUGIN_PYTHON_LINE) != 1:
         raise ValueError("the packaged plugin has no interpreter line")
-    return PLUGIN_TEMPLATE.replace(
+    rendered = PLUGIN_TEMPLATE.replace(
         _PLUGIN_PYTHON_LINE, f"const PYTHON_EXECUTABLE = {json.dumps(python)};"
     )
+    if automation is not None:
+        if automation not in {"off", "remind", "enforce"}:
+            raise ValueError("automation mode is invalid")
+        if rendered.count(_PLUGIN_MODE_LINE) != 1:
+            raise ValueError("the packaged plugin has no automation mode line")
+        rendered = rendered.replace(
+            _PLUGIN_MODE_LINE,
+            f"const INSTALLED_AUTOMATION_MODE: string | undefined = {json.dumps(automation)};",
+        )
+    return rendered
+
+
+def render_v2_plugin(python: str, *, automation: str) -> str:
+    """Render the independent V2 entrypoint without importing its runtime API."""
+    template = _ASSETS.joinpath("daem0n-v2.ts").read_text(encoding="utf-8")
+    marker = 'const AUTOMATION_MODE = "remind";'
+    if automation not in {"off", "remind", "enforce"} or template.count(marker) != 1:
+        raise ValueError("the packaged V2 plugin automation mode is invalid")
+    return template.replace(
+        marker, f"const AUTOMATION_MODE = {json.dumps(automation)};"
+    ).replace(_PLUGIN_PYTHON_LINE, f"const PYTHON_EXECUTABLE = {json.dumps(python)};")
 
 
 # The statement every current launch runs first; see ``module_launch_args``.

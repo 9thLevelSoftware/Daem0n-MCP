@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Awaitable, Callable, Mapping
+from copy import deepcopy
 from typing import Any
 
 from pydantic import ValidationError
@@ -71,6 +72,60 @@ MAX_REPORTED_ARGUMENT_PROBLEMS = 10
 # Failures looked at before giving up on finding further distinct ones: many
 # bad entries of one map all reduce to the same reported path.
 MAX_EXAMINED_ARGUMENT_PROBLEMS = 100
+
+
+def gateway_arguments_schema(schema: Mapping[str, Any]) -> dict[str, Any]:
+    """Describe only gateway arguments, keeping schema references rooted here."""
+    result = deepcopy(dict(schema))
+    result.get("properties", {}).pop("workspace_id", None)
+    if "required" in result:
+        result["required"] = [
+            name for name in result["required"] if name != "workspace_id"
+        ]
+    return result
+
+
+def _argument_constraint_message(
+    schema: Mapping[str, Any], location: tuple[object, ...], rule: str
+) -> str:
+    """Explain only public schema constraints, never caller values or contexts."""
+    node: Any = schema
+    for part in location:
+        for _ in range(8):
+            reference = node.get("$ref") if isinstance(node, Mapping) else None
+            if not isinstance(reference, str) or not reference.startswith("#/$defs/"):
+                break
+            node = schema.get("$defs", {}).get(reference.removeprefix("#/$defs/"), {})
+        if not isinstance(node, Mapping):
+            break
+        if isinstance(part, int):
+            node = node.get("items", {})
+        else:
+            node = node.get("properties", {}).get(part, {})
+    if not isinstance(node, Mapping):
+        node = {}
+    if rule == "extra_forbidden":
+        return "Remove fields not declared by the tool's input schema."
+    kind = node.get("type")
+    if kind == "integer":
+        minimum, maximum = node.get("minimum"), node.get("maximum")
+        bounds = ""
+        if type(minimum) is int and type(maximum) is int:
+            bounds = f" from {minimum} through {maximum}"
+        return (
+            f"Expected a JSON integer{bounds}; strings, null and booleans are invalid."
+        )
+    if isinstance(kind, str) and kind in {
+        "string",
+        "number",
+        "boolean",
+        "array",
+        "object",
+    }:
+        return f"Expected a JSON {kind} matching the tool's declared constraints."
+    if rule == "missing":
+        return "Supply this required field according to the tool's input schema."
+    return "Arguments must satisfy the tool's input schema."
 
 
 def argument_rejection_text(problems: list[tuple[str, str]]) -> str:
@@ -161,6 +216,9 @@ def bind_gateway_handlers(
                     open_world=spec.annotations["openWorldHint"],
                     listed=listed_tools is None or spec.name in listed_tools,
                     input_schema=spec.input_schema,
+                    gateway_arguments_schema=gateway_arguments_schema(
+                        spec.input_schema
+                    ),
                 )
             )
         return response.success(ToolsSearchData(tools=descriptors))
@@ -199,18 +257,26 @@ def bind_gateway_handlers(
         try:
             result = await adapters[tool](**target)
         except _ToolArgumentValidationError as exc:
-            field_errors = [
-                FieldError(
-                    field=_argument_field(error["loc"], declared_names[tool]),
-                    code="INVALID_VALUE",
-                    message="Invalid value.",
+            diagnostics = dict.fromkeys(
+                (
+                    _argument_field(tuple(error["loc"]), declared_names[tool]),
+                    _argument_constraint_message(
+                        specs[tool].input_schema, tuple(error["loc"]), error["type"]
+                    ),
                 )
-                for error in exc.errors()[:50]
+                for error in exc.errors(
+                    include_url=False, include_context=False, include_input=False
+                )[:MAX_EXAMINED_ARGUMENT_PROBLEMS]
+            )
+            field_errors = [
+                FieldError(field=field, code="INVALID_VALUE", message=message)
+                for field, message in list(diagnostics)[:MAX_REPORTED_ARGUMENT_PROBLEMS]
             ]
             return response.failure(
                 ErrorCode.INVALID_ARGUMENT,
-                "Arguments do not match the tool's input schema; "
-                "see daem0n_tools_search.",
+                "Arguments do not match gateway_arguments_schema from "
+                "daem0n_tools_search. Preserve JSON types and omit workspace_id "
+                "inside arguments.",
                 field_errors=field_errors,
             )
         except Exception as exc:

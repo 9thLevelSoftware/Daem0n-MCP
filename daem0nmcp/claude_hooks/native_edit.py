@@ -15,9 +15,27 @@ from typing import Any
 
 from ..edit_bridge import FilePreimage, NativeEditRequest
 
-_PATH_FIELDS = ("file_path", "notebook_path", "filePath", "notebookPath")
+_PATH_FIELDS = (
+    "file_path",
+    "notebook_path",
+    "filePath",
+    "notebookPath",
+    "TargetFile",
+    "path",
+)
 _DEFAULT_EDIT_TOOLS = frozenset(
-    {"Edit", "Write", "NotebookEdit", "edit", "write", "apply_patch"}
+    {
+        "Edit",
+        "Write",
+        "NotebookEdit",
+        "edit",
+        "write",
+        "apply_patch",
+        "patch",
+        "write_to_file",
+        "replace_file_content",
+        "multi_replace_file_content",
+    }
 )
 _MAX_PREIMAGE_BYTES = 16 * 1024 * 1024
 _MAX_PATCH_BYTES = 128 * 1024
@@ -118,12 +136,17 @@ def _normalized_edit(
         normalized = json.loads(json.dumps(dict(tool_input), sort_keys=True))
     except (TypeError, ValueError, RecursionError) as exc:
         raise NativeEditNormalizationError("native edit input is invalid") from exc
-    if tool_name == "apply_patch":
-        if set(normalized) != {"patchText"} or not isinstance(
-            normalized.get("patchText"), str
+    if tool_name in {"apply_patch", "patch"}:
+        patch_field = (
+            "command"
+            if tool_name == "apply_patch" and set(normalized) == {"command"}
+            else "patchText"
+        )
+        if set(normalized) != {patch_field} or not isinstance(
+            normalized.get(patch_field), str
         ):
             raise NativeEditNormalizationError("native patch input is invalid")
-        return normalized, _apply_patch_bindings(root, normalized["patchText"])
+        return normalized, _apply_patch_bindings(root, normalized[patch_field])
 
     paths: set[str] = set()
     for field in _PATH_FIELDS:
@@ -139,7 +162,7 @@ def _normalized_edit(
 
 
 def _relative_path(root: Path, value: object) -> str:
-    if not isinstance(value, str) or not value:
+    if not isinstance(value, str) or not value or value.startswith(("\\\\", "//")):
         raise NativeEditNormalizationError("native edit path is invalid")
     try:
         candidate = Path(value)

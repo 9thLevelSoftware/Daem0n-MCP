@@ -131,9 +131,15 @@ def _parameter_default(field: Any) -> Any:
 
 def _parameter_annotation(field: Any) -> Any:
     metadata_items = tuple(field.metadata)
-    if field.default_factory is not None:
+    if field.description is not None or field.default_factory is not None:
+        # FieldInfo stores descriptions separately from constraint/validator
+        # metadata. Carry the wire guidance without changing parameter names,
+        # aliases, or the defaults managed by _parameter_default.
         metadata_items = (
-            Field(default_factory=field.default_factory),
+            Field(
+                description=field.description,
+                default_factory=field.default_factory,
+            ),
             *metadata_items,
         )
     if not metadata_items:

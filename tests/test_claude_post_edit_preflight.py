@@ -2,8 +2,15 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import pytest
+
 from daem0nmcp.claude_hooks import post_edit_preflight
 from daem0nmcp.edit_bridge_transport import BridgeResponse
+
+
+@pytest.fixture(autouse=True)
+def isolated_project_discovery(monkeypatch):
+    monkeypatch.setattr(post_edit_preflight, "find_project_root", lambda *_args: None)
 
 
 def test_rejects_assistant_visible_text_without_loading_credentials(monkeypatch):
@@ -53,6 +60,7 @@ def test_stages_opencode_raw_structured_mcp_response(monkeypatch):
             return BridgeResponse(200, {"ok": True})
 
     config = SimpleNamespace(
+        mode="local",
         identity=SimpleNamespace(credential_id="cred_1"),
         workspace_id=lambda _path: "ws_" + "a" * 24,
         build_client=lambda: FakeClient(),
@@ -120,6 +128,7 @@ def test_stages_claude_host_mcp_metadata_without_parsing_rendered_text(monkeypat
             return BridgeResponse(200, {"ok": True})
 
     config = SimpleNamespace(
+        mode="local",
         identity=SimpleNamespace(credential_id="cred_1"),
         workspace_id=lambda _path: "ws_" + "a" * 24,
         build_client=lambda: FakeClient(),
@@ -175,6 +184,7 @@ def test_stages_claude_actual_tool_response_json_string(monkeypatch):
             return BridgeResponse(200, {"ok": True})
 
     config = SimpleNamespace(
+        mode="local",
         identity=SimpleNamespace(credential_id="cred_1"),
         workspace_id=lambda _path: "ws_" + "a" * 24,
         build_client=lambda: FakeClient(),
@@ -241,6 +251,7 @@ def test_rejects_lookalike_tool_even_with_structured_response():
 
 def test_rejects_workspace_id_not_bound_to_event_cwd(monkeypatch):
     config = SimpleNamespace(
+        mode="local",
         identity=SimpleNamespace(credential_id="cred_1"),
         workspace_id=lambda _path: "ws_" + "a" * 24,
     )

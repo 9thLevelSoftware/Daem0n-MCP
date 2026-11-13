@@ -358,6 +358,7 @@ does not register every CLI found on the machine.
 | Codex (`codex`) | `install-client codex` | `.codex/config.toml` |
 | Antigravity CLI (`agy`) | `install-client agy` | `.agents/mcp_config.json` |
 | OpenCode V1 (`opencode`) | `install-client opencode` | `opencode.json(c)` or `.opencode/opencode.json(c)` |
+| OpenCode V2 (`opencode`) | `install-client opencode --opencode-interface v2 --client-version <version>` | V2 `mcp.servers` in its own project configuration |
 | Oh My Pi (`omp`) | `install-client omp` | `.omp/mcp.json` |
 | Earendil Works Pi (`pi`) | `install-client pi` | `.pi/mcp.json` |
 
@@ -365,10 +366,15 @@ The project client installer adds native MCP registration and a concise owned
 covenant in the effective instruction file: normally `AGENTS.md`, a Codex
 override/project fallback, or OpenCode's existing `CLAUDE.md` fallback. It preserves
 unrelated configuration and comments, reports backups/conflicts, and leaves
-global settings, provider credentials and permission policies alone. The five
-new client paths do not automatically install host hooks or legacy edit-bridge
-pairing. Guided memory calls return the automatic brief for an unbriefed session;
-proactive host reminders are a separate feature.
+global settings, provider credentials and permission policies alone. Omitting
+`--automation` preserves the previous MCP-only installation behavior. Select
+`--automation off|remind|enforce` explicitly to manage supported project hooks
+or edit-bridge pairing. Unsupported enforcement requests fail before modifying
+the project. See [native automation](docs/native-automation.md) for version
+requirements and covered tools, and [client installation](docs/native-client-automation.md)
+for configuration examples. Guided memory calls return the automatic brief for
+an unbriefed session; instruction loading, reminders, and native edit enforcement
+have separate acceptance evidence.
 
 Client support is version-specific. Real Windows client tests passed the core
 memory workflow, restart recall and replay checks on Codex 0.167.0, agy 1.4.7,
@@ -378,7 +384,10 @@ OpenCode 1.18.21, omp 18.16.0 and Earendil Works Pi 1.0.0. See the source-backed
 [OMP/Pi](docs/research/cli-hosts-omp-pi-2026-11-12.md) findings for feature and
 acceptance boundaries. OpenCode V2 has a different schema and requires separate
 integration evidence. Actual setup and live-client results are recorded in the
-[multi-CLI acceptance report](docs/release/v7/multi-cli-acceptance-2026-11-12.md).
+[historical multi-CLI acceptance report](docs/release/v7/multi-cli-acceptance-2026-11-12.md).
+The [native integration follow-up](docs/release/v7/native-integration-2026-11-12.md)
+separately records real-source indexing, automation, Windows/macOS/Ubuntu WSL
+evidence, frozen backend builds, failed workflows and external blockers.
 
 For agy, keep your normal Google-account sign-in. A Gemini API key is a separate,
 optional billing route. To use Google AI credits after your included quota runs
@@ -769,6 +778,12 @@ Use `system_health` for bounded diagnostics. The complete protocol lives in
 python -m daem0nmcp.cli install-claude-hooks
 ```
 
+For explicit project automation, use `--project-path <project>` before
+`install-claude-hooks`, followed by `--automation off|remind|enforce`.
+Enforcement additionally requires `--client-version <observed-version>` at
+2.1.295 or later. Explicit modes write the project's local settings; omitting
+the option retains the user-level behavior described below.
+
 This writes the packaged hook entries to the user-level `~/.claude/settings.json`, so
 they run in every project; each runs `daem0nmcp.claude_hooks.<hook>`
 with the interpreter you installed from. A hook only acts inside a Daem0n
@@ -799,15 +814,18 @@ by generating and merging the Daem0n hook entries into the actual settings file.
 | `PostToolUse` (`Edit\|Write\|NotebookEdit`) | `post_edit` | Retained edit-bridge plumbing: reports an approved edit as a capture candidate. The current remind-only hooks create no requests, so ordinary client edits produce no bridge capture | stdin event | Yes |
 | `Stop`, `SubagentStop` | `stop` | When the transcript shows a finished task with no recorded outcome, suggests direct `memory_store` and `memory_record_outcome` calls with counsel-challenge retry guidance as a `systemMessage`. Never writes memory | stdin event (`transcript_path`) | Yes |
 
-No hook blocks a tool call or keeps the agent running: every hook exits 0 and none
-returns a `permissionDecision` or `decision`.
+The reminder behavior in this table applies to the legacy installation with
+`--automation` omitted and to explicit reminder mode. It does not block edits
+or keep the agent running. Explicit `--automation enforce` enables the
+[native edit gate](docs/native-automation.md) for its declared edit tools.
 
 **What optional pairing writes.** When `--enable-edit-bridge` (or explicit remote bridge flags) are passed, the installer also pairs the current project (or
 `--project-path`) with the local edit bridge:
 
 - an owner-only credential at `~/.daem0nmcp/edit-bridges/<authority>/credential.json`
   (the secret is never written into the project), with the bridge socket under
-  `~/.daem0nmcp/edit-bridges/run/<authority[:16]>/`;
+  `~/.daem0nmcp/edit-bridges/run/<authority[:16]>/`, or a protected short per-user
+  temporary endpoint when the Unix socket path would be too long;
 - the env keys `DAEM0NMCP_EDIT_BRIDGE_CREDENTIAL_FILE`,
   `DAEM0NMCP_EDIT_BRIDGE_RUNTIME_DIR`, `DAEM0NMCP_PROJECT_ROOT` and
   `DAEM0NMCP_STORAGE_PATH` in `<project>/.claude/settings.local.json`.
@@ -835,10 +853,12 @@ OpenCode V1 connects through its native MCP manager. For a new project use
 grimoire's real MCP and restart verification. The new installer creates the
 project binding and managed covenant without requiring the legacy plugin.
 
-The optional existing V1 plugin provides Covenant guidance and edit/Bash reminders. Its installed
-hooks do not create native edit-bridge requests or enforce a
-deny/preflight/retry flow; bridge API acceptance is separate from this
-remind-only client integration.
+The legacy/default V1 plugin provides Covenant guidance and edit/Bash reminders.
+Explicit `install-client opencode --automation enforce` installs the native
+deny/preflight/retry flow for declared edit tools. See
+[native automation](docs/native-automation.md) for coverage and version
+requirements, and the [native acceptance report](docs/release/v7/native-automation-acceptance-2026-11-12.md)
+for observed host behavior.
 
 ### Configuration
 

@@ -7,7 +7,7 @@ import sys
 from collections.abc import Mapping
 from typing import Any
 
-from ._client import read_hook_event
+from ._client import find_project_root, read_hook_event
 
 # Pairing writes this into the project's Claude settings; without it there is
 # no edit bridge, so the heavy bridge modules are never imported.
@@ -19,8 +19,40 @@ def _ok(response: object) -> bool:
     return isinstance(body, Mapping) and body.get("ok") is True
 
 
+def _completion_outcome(event: Mapping[str, Any]) -> str | None:
+    """Recognize terminal host events without treating missing results as success."""
+    event_name = event.get("hook_event_name")
+    if event_name not in ("PostToolUse", "PostToolUseFailure"):
+        return None
+    status = event.get("execution_status")
+    if status in ("failed", "skipped", "cancelled", "denied"):
+        return "failed"
+    if event_name == "PostToolUseFailure":
+        return "failed"
+    if status is not None and status != "succeeded":
+        return None
+    response = event.get("tool_response")
+    if response is None:
+        return None
+    if isinstance(response, Mapping):
+        if response.get("isError") is True or response.get("success") is False:
+            return "failed"
+        if response.get("status") in (
+            "error",
+            "failed",
+            "skipped",
+            "cancelled",
+            "denied",
+        ):
+            return "failed"
+    return "succeeded"
+
+
 def handle_post_edit(event: Mapping[str, Any], project_path: str) -> bool:
     """Stage only a bounded host-generated candidate for a consumed request."""
+    outcome = _completion_outcome(event)
+    if outcome is None:
+        return False
     try:
         from ..edit_host import (
             EditHostConfig,
@@ -42,6 +74,9 @@ def handle_post_edit(event: Mapping[str, Any], project_path: str) -> bool:
         ) or not isinstance(tool_input, Mapping):
             return False
         config = EditHostConfig.from_environment(os.environ)
+        project = find_project_root(dict(event)) if config.mode == "local" else None
+        if project is not None:
+            project_path = str(project)
         workspace_id = config.workspace_id(project_path)
         store = EditHostStateStore(config)
         consumed = store.get_consumed(
@@ -51,6 +86,24 @@ def handle_post_edit(event: Mapping[str, Any], project_path: str) -> bool:
             native_request_id=native_request_id,
         )
         if consumed is None:
+            return False
+        from ..native_edit_gate import native_input_hash
+
+        if consumed.native_input_hash is not None:
+            if consumed.native_input_hash != native_input_hash(tool_name, tool_input):
+                return False
+        elif os.environ.get("DAEM0NMCP_AUTOMATION_MODE") == "enforce":
+            return False
+        if outcome == "failed":
+            if consumed.native_input_hash is not None:
+                store.settle_failed(
+                    workspace_id=workspace_id,
+                    native_session_id=native_session_id,
+                    credential_id=config.identity.credential_id,
+                    native_request_id=native_request_id,
+                    edit_request_id=consumed.edit_request_id,
+                    native_input_hash=consumed.native_input_hash,
+                )
             return False
         relative_paths = native_edit_relative_paths(
             project_path=project_path,

@@ -41,6 +41,32 @@ def _pre_edit(event: dict | str, home: Path, env: dict | None = None):
     return _run(["-m", "daem0nmcp.claude_hooks.pre_edit"], event, home, env)
 
 
+def test_enforcement_denies_missing_bridge_and_malformed_native_events(tmp_path):
+    project = tmp_path / "enforced"
+    (project / ".daem0nmcp").mkdir(parents=True)
+    event = _write_event(project, str(project / "a.py"))
+    mode = {"DAEM0NMCP_AUTOMATION_MODE": "enforce"}
+    unavailable = _pre_edit(event, tmp_path, mode)
+    assert unavailable.returncode == 2
+    assert "EDIT_BRIDGE_UNAVAILABLE" in unavailable.stderr
+    assert not (project / "a.py").exists()
+    malformed = _pre_edit("not json", tmp_path, mode)
+    assert malformed.returncode == 2
+    assert "WORKSPACE_UNAVAILABLE" in malformed.stderr
+
+
+def test_explicit_off_does_not_run_edit_guidance(tmp_path):
+    project = tmp_path / "disabled"
+    (project / ".daem0nmcp").mkdir(parents=True)
+    result = _pre_edit(
+        _write_event(project, str(project / "a.py")),
+        tmp_path,
+        {"DAEM0NMCP_AUTOMATION_MODE": "off"},
+    )
+    assert result.returncode == 0
+    assert result.stdout == ""
+
+
 def _write_event(cwd: Path, file_path: str) -> dict:
     return {
         "session_id": "s-1",

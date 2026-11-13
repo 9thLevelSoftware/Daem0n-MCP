@@ -851,6 +851,7 @@ class PendingEditBinding:
     edit_request_id: str
     edit_hash: str
     expires_at: datetime
+    native_input_hash: str | None = None
 
     def __post_init__(self) -> None:
         if (
@@ -860,6 +861,10 @@ class PendingEditBinding:
             or not _OPAQUE_ID.fullmatch(self.edit_request_id)
             or not self.edit_request_id.startswith("edt_")
             or not _HASH.fullmatch(self.edit_hash)
+            or (
+                self.native_input_hash is not None
+                and not _HASH.fullmatch(self.native_input_hash)
+            )
         ):
             raise ValueError("pending edit binding is invalid")
         _utc_us(self.expires_at)
@@ -930,6 +935,18 @@ class EditHostStateStore:
                 ) WITHOUT ROWID;
                 """
             )
+            # Existing host state remains usable, but old pending entries have
+            # no exact native-input proof and cannot authorize enforcing edits.
+            connection.execute("BEGIN IMMEDIATE")
+            columns = {
+                str(row[1])
+                for row in connection.execute("PRAGMA table_info(pending_edits)")
+            }
+            if "native_input_hash" not in columns:
+                connection.execute(
+                    "ALTER TABLE pending_edits ADD COLUMN native_input_hash TEXT"
+                )
+            connection.commit()
 
     def load_or_create_session(
         self,
@@ -1031,12 +1048,13 @@ class EditHostStateStore:
                 updated = connection.execute(
                     "INSERT INTO pending_edits(binding_key,edit_hash,native_request_hash,"
                     "workspace_id,host_session_id,edit_request_id,expires_at_us,status,"
-                    "consumed_at_us,updated_at_us) VALUES (?,?,?,?,?,?,?,?,?,?) "
+                    "consumed_at_us,updated_at_us,native_input_hash) VALUES (?,?,?,?,?,?,?,?,?,?,?) "
                     "ON CONFLICT(binding_key,edit_hash) DO UPDATE "
                     "SET native_request_hash=excluded.native_request_hash,"
                     "host_session_id=excluded.host_session_id,"
                     "edit_request_id=excluded.edit_request_id,"
                     "expires_at_us=excluded.expires_at_us,status='pending',"
+                    "native_input_hash=excluded.native_input_hash,"
                     "consumed_at_us=NULL,updated_at_us=excluded.updated_at_us "
                     "WHERE pending_edits.status='pending'",
                     (
@@ -1050,6 +1068,7 @@ class EditHostStateStore:
                         "pending",
                         None,
                         now_us,
+                        pending.native_input_hash,
                     ),
                 )
                 if updated.rowcount != 1:
@@ -1092,6 +1111,7 @@ class EditHostStateStore:
                 edit_request_id=str(row["edit_request_id"]),
                 edit_hash=str(row["edit_hash"]),
                 expires_at=_from_us(int(row["expires_at_us"])),
+                native_input_hash=row["native_input_hash"],
             )
         except (OSError, sqlite3.Error) as exc:
             raise EditHostStateError("pending edit state unavailable") from exc
@@ -1126,6 +1146,7 @@ class EditHostStateStore:
                 edit_request_id=str(row["edit_request_id"]),
                 edit_hash=str(row["edit_hash"]),
                 expires_at=_from_us(int(row["expires_at_us"])),
+                native_input_hash=row["native_input_hash"],
             )
         except (OSError, sqlite3.Error) as exc:
             raise EditHostStateError("pending edit state unavailable") from exc
@@ -1172,6 +1193,7 @@ class EditHostStateStore:
                 edit_request_id=str(row["edit_request_id"]),
                 edit_hash=str(row["edit_hash"]),
                 expires_at=_from_us(int(row["expires_at_us"])),
+                native_input_hash=row["native_input_hash"],
             )
         except (OSError, sqlite3.Error) as exc:
             raise EditHostStateError("pending edit state unavailable") from exc
@@ -1201,6 +1223,7 @@ class EditHostStateStore:
                 edit_request_id=str(row["edit_request_id"]),
                 edit_hash=str(row["edit_hash"]),
                 expires_at=_from_us(int(row["expires_at_us"])),
+                native_input_hash=row["native_input_hash"],
             )
         except (OSError, sqlite3.Error) as exc:
             raise EditHostStateError("consumed edit state unavailable") from exc
@@ -1228,6 +1251,39 @@ class EditHostStateStore:
                 return result.rowcount == 1
         except (OSError, sqlite3.Error) as exc:
             raise EditHostStateError("pending edit state unavailable") from exc
+
+    def settle_failed(
+        self,
+        *,
+        workspace_id: str,
+        native_session_id: str,
+        credential_id: str,
+        native_request_id: str,
+        edit_request_id: str,
+        native_input_hash: str,
+    ) -> bool:
+        """Release an exact observed unsuccessful call without reviving its receipt.
+
+        The broker retains the spent receipt. Removing only this host-local
+        consumed binding permits a new edit request and a fresh approval.
+        """
+        if not _HASH.fullmatch(native_input_hash):
+            raise ValueError("native input hash is invalid")
+        if not _OPAQUE_ID.fullmatch(edit_request_id) or not edit_request_id.startswith(
+            "edt_"
+        ):
+            raise ValueError("edit request ID is invalid")
+        key = _binding_key(workspace_id, native_session_id, credential_id)
+        try:
+            with self._connect() as connection:
+                result = connection.execute(
+                    "DELETE FROM pending_edits WHERE binding_key=? AND edit_request_id=? "
+                    "AND native_request_hash=? AND native_input_hash=? AND status='consumed'",
+                    (key, edit_request_id, _hash(native_request_id), native_input_hash),
+                )
+                return result.rowcount == 1
+        except (OSError, sqlite3.Error) as exc:
+            raise EditHostStateError("failed edit settlement unavailable") from exc
 
 
 def native_edit_capture_body(

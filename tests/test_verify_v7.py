@@ -6,6 +6,7 @@ import os
 import sqlite3
 import subprocess
 import sys
+import time
 from pathlib import Path
 from unittest.mock import patch
 
@@ -199,6 +200,78 @@ def test_verify_v7_replays_every_authority_domain(tmp_path: Path) -> None:
     assert report["checks"]["active_pointer"]["generation"] == 1
 
 
+@pytest.mark.parametrize(
+    ("job_status", "delay_us", "lease_offset_us", "expected_state", "error_code"),
+    [
+        ("queued", 60_000_000, None, "delayed", None),
+        ("queued", -1, None, "queued", None),
+        ("running", -1, -1, "lease_expired", None),
+        ("running", -1, 60_000_000, "running", None),
+        ("dead_letter", -1, None, "dead_letter", "PROJECTION_BUILDER_UNAVAILABLE"),
+    ],
+)
+def test_verify_v7_explains_projection_lag_and_durable_job_state(
+    tmp_path: Path,
+    job_status: str,
+    delay_us: int,
+    lease_offset_us: int | None,
+    expected_state: str,
+    error_code: str | None,
+) -> None:
+    storage, database = _storage(tmp_path)
+    now_us = time.time_ns() // 1_000
+    with sqlite3.connect(database) as connection:
+        LexicalProjectionBuilder(connection).rebuild(WORKSPACE_ID)
+        EventStore(connection).append_and_project(
+            EventCommand(
+                workspace_id=WORKSPACE_ID,
+                stream_id="mem_" + "2" * 64,
+                stream_kind="memory",
+                event_type="memory.created",
+                occurred_at_us=now_us,
+                recorded_at_us=now_us,
+                actor_type="user",
+                payload={"record": _state("new event awaiting projection")},
+            )
+        )
+        connection.execute(
+            "UPDATE background_jobs SET status=?,available_at_us=?,"
+            "lease_expires_at_us=?,last_error_json=?,lease_owner=?,lease_token=? "
+            "WHERE workspace_id=? "
+            "AND idempotency_key='active-projection:lexical'",
+            (
+                job_status,
+                now_us + delay_us,
+                None if lease_offset_us is None else now_us + lease_offset_us,
+                None
+                if error_code is None
+                else json.dumps({"code": error_code}, separators=(",", ":")),
+                "test-worker" if job_status == "running" else None,
+                "test-lease" if job_status == "running" else None,
+                WORKSPACE_ID,
+            ),
+        )
+        connection.commit()
+    report = verify_v7(storage, WORKSPACE_ID)
+    manifests = report["checks"]["projection_manifests"]
+    assert report["status"] == "verified"
+    assert manifests["local_rebuild_required"] == 1
+    lexical = next(p for p in manifests["projections"] if p["projection"] == "lexical")
+    assert lexical["source_event_count"] == 1
+    assert lexical["expected_event_count"] == 2
+    assert lexical["status"] == "rebuild_required"
+    assert set(lexical["reason_codes"]) >= {
+        "SOURCE_EVENT_COUNT_MISMATCH",
+        "SOURCE_EVENT_ROOT_MISMATCH",
+        "REBUILD_MARKER",
+    }
+    assert lexical["queue"]["state"] == expected_state
+    if error_code is not None:
+        assert lexical["queue"]["last_error_code"] == error_code
+        assert "CAPABILITY_UNAVAILABLE" in lexical["reason_codes"]
+        assert "PROJECTION_JOB_FAILED" in lexical["reason_codes"]
+
+
 def test_verify_v7_reports_superseded_generation_counts(tmp_path: Path) -> None:
     """A GC that has stopped making progress must be visible without logs."""
     from daem0nmcp.retrieval.projections import LexicalProjectionBuilder
@@ -233,6 +306,49 @@ def test_verify_v7_accepts_intact_active_code_generation(tmp_path: Path) -> None
 
     assert report["status"] == "verified"
     assert report["checks"]["projection_manifests"]["ok"] is True
+    code = next(
+        p
+        for p in report["checks"]["projection_manifests"]["projections"]
+        if p["projection"] == "code"
+    )
+    assert code["status"] == "ready"
+    assert code["reason_codes"] == []
+
+
+def test_projection_diagnostics_do_not_echo_arbitrary_marker_or_job_error(
+    tmp_path: Path,
+) -> None:
+    storage, database = _storage(tmp_path)
+    private_text = "untrusted diagnostics must not echo this text"
+    with sqlite3.connect(database) as connection:
+        LexicalProjectionBuilder(connection).rebuild(WORKSPACE_ID)
+        details = json.loads(
+            connection.execute(
+                "SELECT details_json FROM projection_manifests "
+                "WHERE projection_name='lexical' AND status='active'"
+            ).fetchone()[0]
+        )
+        details["rebuild_required_event_id"] = private_text
+        connection.execute(
+            "UPDATE projection_manifests SET details_json=? "
+            "WHERE projection_name='lexical' AND status='active'",
+            (json.dumps(details, sort_keys=True, separators=(",", ":")),),
+        )
+        connection.execute(
+            "UPDATE background_jobs SET last_error_json=?",
+            (json.dumps({"code": private_text}, separators=(",", ":")),),
+        )
+        connection.commit()
+    report = verify_v7(storage, WORKSPACE_ID)
+    lexical = next(
+        p
+        for p in report["checks"]["projection_manifests"]["projections"]
+        if p["projection"] == "lexical"
+    )
+    assert "REBUILD_MARKER" in lexical["reason_codes"]
+    assert "rebuild_required_event_id" not in lexical
+    assert "last_error_code" not in lexical["queue"]
+    assert private_text not in json.dumps(report)
 
 
 def test_verify_v7_rejects_missing_code_edge_table(tmp_path: Path) -> None:

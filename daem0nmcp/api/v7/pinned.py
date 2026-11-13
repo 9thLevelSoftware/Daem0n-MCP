@@ -45,6 +45,7 @@ from .models import (
     RecordSummary,
     RetrievalData,
 )
+from .remedies import compact_remedy_arguments
 from .responses import ResponseContext, ResponseFactory
 from .tasks import (
     durable_task_execution_var,
@@ -914,10 +915,15 @@ class PinnedHandlers:
                     ErrorCode.COUNSEL_REQUIRED,
                     "Review error.counsel, then retry exactly error.remedy.",
                     remedy_tool="memory_store",
-                    remedy_arguments={
-                        **request.model_dump(mode="json", exclude={"preflight_token"}),
-                        "preflight_token": outcome.challenge.preflight_token,
-                    },
+                    remedy_arguments=compact_remedy_arguments(
+                        MemoryStoreInput,
+                        {
+                            **request.model_dump(
+                                mode="json", exclude={"preflight_token"}
+                            ),
+                            "preflight_token": outcome.challenge.preflight_token,
+                        },
+                    ),
                     counsel=outcome.challenge,
                 )
         if is_capacity_violation(violation):

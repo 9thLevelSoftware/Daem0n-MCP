@@ -45,6 +45,25 @@ def _request(tool_name: str, **arguments: object) -> AdmittedRequest:
     )
 
 
+class _MinimalPythonIndexer:
+    """Keep parser dependencies out of real file/SQLite publication regressions."""
+
+    available = True
+
+    @staticmethod
+    def get_supported_extensions():
+        return [".py"]
+
+    @staticmethod
+    def index_source_strict(file_path, _project_path, _source_bytes):
+        yield {
+            "entity_type": "function",
+            "qualified_name": f"{file_path.stem}.entry",
+            "line_start": 1,
+            "line_end": 2,
+        }
+
+
 class DiscoveryOperationTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
         from daem0nmcp.storage_activation import (
@@ -427,6 +446,110 @@ class DiscoveryOperationTests(unittest.IsolatedAsyncioTestCase):
                 "SELECT relative_file_path,qualified_name FROM discovery_code_entities"
             ).fetchone()
             self.assertEqual(("src/auth.py", "auth.login"), row)
+
+    async def test_code_index_default_root_publishes_despite_own_sqlite_journal(
+        self,
+    ) -> None:
+        """The public defaults must index a workspace containing its own storage."""
+        (self.root / "auth.py").write_text(
+            "def entry():\n    return True\n", encoding="utf-8"
+        )
+        operation = self._operations(code_indexer_factory=_MinimalPythonIndexer)[
+            "code_index"
+        ]
+        result = await operation(
+            workspace=self.workspace,
+            request=_request("code_index", workspace_id=self.workspace.workspace_id),
+        )
+        self.assertEqual((1, 1), (result.files_seen, result.files_indexed))
+        with closing(sqlite3.connect(self.database)) as connection:
+            paths = connection.execute(
+                "SELECT relative_file_path FROM discovery_code_entities"
+            ).fetchall()
+        self.assertEqual([("auth.py",)], paths)
+
+    async def test_code_index_scope_expansion_publishes_new_generation_then_reuses(
+        self,
+    ) -> None:
+        """A broader scope may add source without treating storage writes as races."""
+        (self.root / "src").mkdir()
+        (self.root / "src/auth.py").write_text(
+            "def entry():\n    return True\n", encoding="utf-8"
+        )
+        (self.root / "adapter.py").write_text(
+            "def entry():\n    return False\n", encoding="utf-8"
+        )
+        operation = self._operations(code_indexer_factory=_MinimalPythonIndexer)[
+            "code_index"
+        ]
+        first = await operation(
+            workspace=self.workspace,
+            request=_request(
+                "code_index",
+                workspace_id=self.workspace.workspace_id,
+                relative_root="src",
+                patterns=["**/*.py"],
+            ),
+        )
+        broader = await operation(
+            workspace=self.workspace,
+            request=_request("code_index", workspace_id=self.workspace.workspace_id),
+        )
+        unchanged = await operation(
+            workspace=self.workspace,
+            request=_request("code_index", workspace_id=self.workspace.workspace_id),
+        )
+        self.assertEqual(
+            (1, 2, 2),
+            (first.files_indexed, broader.files_indexed, unchanged.files_indexed),
+        )
+        self.assertGreater(broader.manifest.generation, first.manifest.generation)
+        self.assertEqual(broader.manifest, unchanged.manifest)
+        self.assertEqual(
+            ["CODE_INDEX_CURRENT"], [item.code for item in unchanged.diagnostics]
+        )
+
+    async def test_code_index_added_source_before_publication_still_rolls_back(
+        self,
+    ) -> None:
+        """Ignoring non-source counters must not permit eligible-file races."""
+        source_root = self.root / "src"
+        source_root.mkdir()
+        (source_root / "auth.py").write_text(
+            "def entry():\n    return True\n", encoding="utf-8"
+        )
+
+        class AddingIndexer(_MinimalPythonIndexer):
+            @staticmethod
+            def index_source_strict(file_path, project_path, source_bytes):
+                (source_root / "late.py").write_text(
+                    "def entry():\n    return False\n", encoding="utf-8"
+                )
+                yield from _MinimalPythonIndexer.index_source_strict(
+                    file_path, project_path, source_bytes
+                )
+
+        from daem0nmcp.api.v7.discovery_operations import DiscoveryOperationError
+
+        operation = self._operations(code_indexer_factory=AddingIndexer)["code_index"]
+        with self.assertRaises(DiscoveryOperationError) as error:
+            await operation(
+                workspace=self.workspace,
+                request=_request(
+                    "code_index",
+                    workspace_id=self.workspace.workspace_id,
+                    relative_root="src",
+                    patterns=["**/*.py"],
+                ),
+            )
+        self.assertEqual("EVENT_STREAM_CONFLICT", error.exception.code)
+        with closing(sqlite3.connect(self.database)) as connection:
+            self.assertEqual(
+                0,
+                connection.execute(
+                    "SELECT count(*) FROM discovery_code_entities"
+                ).fetchone()[0],
+            )
 
     async def test_code_index_filters_unsupported_files_and_counts_them(self) -> None:
         """A broad glob must not report README and binary files as indexed code."""
