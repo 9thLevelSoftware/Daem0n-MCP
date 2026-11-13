@@ -61,14 +61,19 @@ def test_local_installation_reuses_host_only_authority_credential(tmp_path):
     config = EditHostConfig.from_environment(first.environment())
     assert config.identity.principal_id == first.principal_id
     assert config.runtime_directory == first.runtime_directory
-    # The default root is ~/.daem0nmcp/edit-bridges; with this suffix the
-    # socket fits macOS's 104-byte AF_UNIX limit for usernames up to 17 chars.
+    # Long configuration roots use a private short directory so the complete
+    # endpoint fits the Unix socket byte limit, independent of the user's home.
     address = local_bridge_address(
         first.runtime_directory, config.identity.credential_id
     )
+    assert address == local_bridge_address(
+        second.runtime_directory, config.identity.credential_id
+    )
     if sys.platform != "win32":
-        suffix = Path(address).relative_to(host_root.resolve())
-        assert len(str(suffix)) <= 52, suffix
+        assert len(os.fsencode(address)) <= 103
+        metadata = Path(address).parent.stat()
+        assert metadata.st_mode & 0o777 == 0o700
+        assert metadata.st_uid == os.getuid()
     assert (
         config.workspace_id(project)
         == WorkspaceRegistry(default_root=project).default.workspace_id

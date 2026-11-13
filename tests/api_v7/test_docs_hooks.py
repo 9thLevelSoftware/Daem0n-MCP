@@ -130,13 +130,11 @@ class ProtocolGoldenTests(unittest.TestCase):
             "Guided mode automatically briefs an unbriefed session on memory_recall, "
             "memory_preflight, memory_store, or memory_record_outcome, returning "
             "meta.covenant.auto_brief. Diagnostic and discovery calls do not trigger "
-            "briefing. Call session_brief for the full brief.",
+            "briefing.",
             "Call memory_store (or any protected tool) directly. If it returns "
             "COUNSEL_REQUIRED, read error.counsel (guidance and reasons), then "
             "retry exactly error.remedy. memory_preflight remains available for "
             "planning a change in advance.",
-            "Use daem0n_tools_search(query), then "
-            "daem0n_tool_call(workspace_id, tool, arguments).",
         )
         paths = (
             ROOT / "AGENTS.md",
@@ -156,10 +154,27 @@ class ProtocolGoldenTests(unittest.TestCase):
                 ("generated client AGENTS.md", _read(Path(directory) / "AGENTS.md"))
             )
         for label, content in surfaces:
-            text = content.replace("`", "")
+            text = " ".join(content.replace("`", "").split())
             with self.subTest(path=label):
                 for sentence in sentences:
                     self.assertIn(sentence, text)
+                if label in {
+                    str(Path(".opencode") / "plugins" / "daem0n.ts"),
+                    "generated client AGENTS.md",
+                }:
+                    self.assertIn("full session_brief is optional in guided mode", text)
+                    self.assertIn("strict mode", text)
+                    self.assertIn("Prefer directly listed typed tools.", text)
+                    self.assertIn("hidden or unlisted targets", text)
+                    self.assertIn("daem0n_tools_search", text)
+                    self.assertIn("daem0n_tool_call", text)
+                else:
+                    self.assertIn("Call session_brief for the full brief.", text)
+                    self.assertIn(
+                        "Use daem0n_tools_search(query), then "
+                        "daem0n_tool_call(workspace_id, tool, arguments).",
+                        text,
+                    )
 
     def test_maintained_surfaces_have_no_executable_v6_rituals(self) -> None:
         offenders: list[str] = []

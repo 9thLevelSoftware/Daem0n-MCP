@@ -7,6 +7,7 @@ import multiprocessing.connection
 import os
 import socket
 import ssl
+import subprocess
 import sys
 import threading
 import time
@@ -440,9 +441,14 @@ async def test_remote_https_requires_tls_and_authenticated_principal(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("entrypoint", [False, True])
 async def test_remote_hooks_bind_different_desktop_root_to_server_workspace(
     tmp_path,
+    entrypoint,
 ):
+    # A checkout without local storage may be nested in another local project.
+    # Its protected remote binding must remain authoritative in every hook.
+    (tmp_path / ".daem0nmcp").mkdir()
     server_root = tmp_path / "server" / "workspace"
     client_root = tmp_path / "desktop" / "checkout"
     storage = server_root / ".daem0nmcp" / "storage"
@@ -494,11 +500,26 @@ async def test_remote_hooks_bind_different_desktop_root_to_server_workspace(
         origin="https://desktop.example",
     )
     environment = installation.environment()
+    if entrypoint:
+        environment["DAEM0NMCP_AUTOMATION_MODE"] = "enforce"
+
+    def invoke_hook(module, event):
+        return subprocess.run(
+            [sys.executable, "-m", f"daem0nmcp.claude_hooks.{module}"],
+            input=json.dumps(event),
+            text=True,
+            capture_output=True,
+            env={**os.environ, **environment},
+            timeout=15,
+            check=False,
+        )
+
     target = client_root / "src" / "app.py"
     target.parent.mkdir()
     target.write_text("before", encoding="utf-8")
     native_session_id = "remote-client-session"
     first_event = {
+        "cwd": str(client_root),
         "session_id": native_session_id,
         "tool_use_id": "remote-denied-1",
         "tool_name": "Edit",
@@ -509,8 +530,11 @@ async def test_remote_hooks_bind_different_desktop_root_to_server_workspace(
         },
     }
     try:
-        with patch.dict(os.environ, environment, clear=False):
-            denied = drive_native_edit(first_event, str(client_root))
+        if entrypoint:
+            denied = invoke_hook("pre_edit", first_event).returncode == 0
+        else:
+            with patch.dict(os.environ, environment, clear=False):
+                denied = drive_native_edit(first_event, str(client_root))
         assert not denied
         assert (
             workspace.workspace_id
@@ -551,27 +575,39 @@ async def test_remote_hooks_bind_different_desktop_root_to_server_workspace(
             "error": None,
             "meta": {"workspace_id": workspace.workspace_id},
         }
-        assert handle_edit_preflight_response(
-            {
-                "session_id": native_session_id,
-                "cwd": str(client_root),
-                "tool_name": "mcp__daem0n__edit_preflight",
-                "tool_input": {
-                    "workspace_id": workspace.workspace_id,
-                    "edit_request_id": pending.edit_request_id,
-                    "description": "Apply the exact remote desktop edit",
-                },
-                "tool_response": {"structuredContent": actual_response},
+        preflight_event = {
+            "session_id": native_session_id,
+            "cwd": str(client_root),
+            "tool_name": "mcp__daem0n__edit_preflight",
+            "tool_input": {
+                "workspace_id": workspace.workspace_id,
+                "edit_request_id": pending.edit_request_id,
+                "description": "Apply the exact remote desktop edit",
             },
-            environ=environment,
-        )
+            "tool_response": {"structuredContent": actual_response},
+        }
+        if entrypoint:
+            assert invoke_hook("post_edit_preflight", preflight_event).returncode == 0
+        else:
+            assert handle_edit_preflight_response(preflight_event, environ=environment)
         retry_event = {**first_event, "tool_use_id": "remote-allowed-2"}
-        with patch.dict(os.environ, environment, clear=False):
-            allowed = drive_native_edit(retry_event, str(client_root))
+        if entrypoint:
+            allowed = invoke_hook("pre_edit", retry_event).returncode == 0
+        else:
+            with patch.dict(os.environ, environment, clear=False):
+                allowed = drive_native_edit(retry_event, str(client_root))
         assert allowed
         target.write_text("after", encoding="utf-8")
-        with patch.dict(os.environ, environment, clear=False):
-            assert handle_post_edit(retry_event, str(client_root))
+        post_event = {
+            **retry_event,
+            "hook_event_name": "PostToolUse",
+            "tool_response": {"success": True},
+        }
+        if entrypoint:
+            assert invoke_hook("post_edit", post_event).returncode == 0
+        else:
+            with patch.dict(os.environ, environment, clear=False):
+                assert handle_post_edit(post_event, str(client_root))
         staged, boundary = await candidates.list_pending(
             workspace, limit=10, before=None
         )

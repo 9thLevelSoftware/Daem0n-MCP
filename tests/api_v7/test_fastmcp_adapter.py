@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import io
 import logging
 import pathlib
@@ -10,7 +11,14 @@ from dataclasses import dataclass
 from typing import Annotated
 from unittest.mock import patch
 
-from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError
+from pydantic import (
+    AfterValidator,
+    BaseModel,
+    ConfigDict,
+    Field,
+    TypeAdapter,
+    ValidationError,
+)
 
 from daem0nmcp import __version__
 from daem0nmcp.covenant import CovenantLevel
@@ -345,6 +353,106 @@ class FastMCPAdapterTests(unittest.TestCase):
                     TypeAdapter(adapter).json_schema(),
                     spec.input_schema,
                 )
+
+    def test_real_fastmcp_tool_list_preserves_argument_guidance(self) -> None:
+        from fastmcp import Client, FastMCP
+
+        from daem0nmcp.api.v7.fastmcp import _tool_adapter
+        from daem0nmcp.api.v7.policy import V7_TOOL_LEVELS
+        from daem0nmcp.api.v7.tools import build_tool_specs
+
+        async def handler(**arguments):
+            return arguments
+
+        names = {"code_impact_analyze", "code_index", "code_search", "daem0n_tool_call"}
+        specs = [
+            spec
+            for spec in build_tool_specs(dict.fromkeys(V7_TOOL_LEVELS, handler))
+            if spec.name in names
+        ]
+        server = FastMCP("argument-guidance-regression")
+        for spec in specs:
+            server.tool(name=spec.name)(
+                _tool_adapter(spec, tasks_enabled=False, sync_timeout_seconds=15)
+            )
+
+        async def list_schemas():
+            async with Client(server) as client:
+                return {
+                    tool.name: tool.inputSchema for tool in await client.list_tools()
+                }
+
+        schemas = asyncio.run(list_schemas())
+        self.assertEqual(set(schemas), names)
+        for spec in specs:
+            with self.subTest(tool=spec.name):
+                properties = schemas[spec.name]["properties"]
+                self.assertEqual(set(properties), set(spec.input_schema["properties"]))
+                described_fields = 0
+                # FastMCP deliberately prunes schema titles at registration;
+                # descriptions and argument types must survive on the wire.
+                for name, expected in spec.input_schema["properties"].items():
+                    if "description" in expected:
+                        described_fields += 1
+                        self.assertEqual(
+                            properties[name]["description"], expected["description"]
+                        )
+                    if "type" in expected:
+                        self.assertEqual(properties[name]["type"], expected["type"])
+                self.assertGreater(described_fields, 0)
+        self.assertIn(
+            "Do not quote", schemas["code_search"]["properties"]["limit"]["description"]
+        )
+
+    def test_described_factory_preserves_defaults_validators_and_model_alias(
+        self,
+    ) -> None:
+        from pydantic_core import PydanticUndefined
+
+        from daem0nmcp.api.v7.fastmcp import _parameter_annotation, _parameter_default
+
+        calls = []
+
+        def fresh_values():
+            calls.append(True)
+            return []
+
+        def even_values(values):
+            if any(value % 2 for value in values):
+                raise ValueError("Only even values")
+            return values
+
+        class DescribedInput(BaseModel):
+            values: Annotated[
+                list[Annotated[int, Field(strict=True, ge=1)]],
+                AfterValidator(even_values),
+            ] = Field(
+                default_factory=fresh_values,
+                description="Explicit integer values.",
+                alias="wire_values",
+            )
+
+        field = DescribedInput.model_fields["values"]
+        original_metadata = list(field.metadata)
+        adapter = TypeAdapter(_parameter_annotation(field))
+        self.assertEqual(calls, [])
+        self.assertIs(_parameter_default(field), inspect.Parameter.empty)
+        self.assertEqual(adapter.json_schema()["description"], field.description)
+        first = adapter.validate_python(PydanticUndefined)
+        second = adapter.validate_python(PydanticUndefined)
+        self.assertEqual(first, [])
+        self.assertIsNot(first, second)
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(adapter.validate_python([2]), [2])
+        for invalid in (["2"], [0], [3]):
+            with self.subTest(invalid=invalid), self.assertRaises(ValidationError):
+                adapter.validate_python(invalid)
+        self.assertEqual(field.alias, "wire_values")
+        self.assertIs(field.default_factory, fresh_values)
+        self.assertEqual(field.metadata, original_metadata)
+        self.assertEqual(
+            DescribedInput.model_validate({"wire_values": [2]}).values, [2]
+        )
 
     def test_adapter_input_error_retains_validation_details(self) -> None:
         from daem0nmcp.api.v7.fastmcp import _tool_adapter

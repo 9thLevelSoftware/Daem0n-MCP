@@ -1,0 +1,1130 @@
+{
+  "scope": "Portable selection metadata for the November 12 native integration work; raw evidence stays local and is not embedded here.",
+  "qualification": "These are mixed historical selections, not a fresh all-platform final-tree run. V2 historical host behavior was not reaudited with the latest companion. No pass is synthesized across attempts.",
+  "source_matrices": {
+    "primary_sha256": "e1944075662ed456f2f73584ec77ce13a1663b627d59aa7efb031112297c7260",
+    "v2_sha256": "7579826f5ec9418e341467bd7eea22e6e08a68e8133b3b4f044a28676a471b1f"
+  },
+  "primary": {
+    "counts": {
+      "blocked": 6,
+      "passed": 30
+    },
+    "platform_counts": {
+      "Windows": {
+        "blocked": 2,
+        "passed": 10
+      },
+      "Ubuntu WSL": {
+        "blocked": 2,
+        "passed": 10
+      },
+      "macOS": {
+        "blocked": 2,
+        "passed": 10
+      }
+    },
+    "rows": [
+      {
+        "platform": "Windows",
+        "client": "claude",
+        "source": "daem0n",
+        "status": "blocked",
+        "historical_client_version": "2.1.295 (Claude Code)",
+        "qualification": "Historical result retained; not rerun on freeze-09.",
+        "selected_stages": {}
+      },
+      {
+        "platform": "Windows",
+        "client": "claude",
+        "source": "legion",
+        "status": "blocked",
+        "historical_client_version": "2.1.295 (Claude Code)",
+        "qualification": "Historical result retained; not rerun on freeze-09.",
+        "selected_stages": {}
+      },
+      {
+        "platform": "Windows",
+        "client": "codex",
+        "source": "daem0n",
+        "status": "passed",
+        "historical_client_version": "codex-cli 0.167.2",
+        "qualification": "Historical result retained; not rerun on freeze-09.",
+        "selected_stages": {}
+      },
+      {
+        "platform": "Windows",
+        "client": "codex",
+        "source": "legion",
+        "status": "passed",
+        "historical_client_version": "codex-cli 0.167.2",
+        "qualification": "Historical result retained; not rerun on freeze-09.",
+        "selected_stages": {}
+      },
+      {
+        "platform": "Windows",
+        "client": "agy",
+        "source": "daem0n",
+        "status": "passed",
+        "historical_client_version": "1.5.7",
+        "qualification": "Historical result retained; not rerun on freeze-09.",
+        "selected_stages": {}
+      },
+      {
+        "platform": "Windows",
+        "client": "agy",
+        "source": "legion",
+        "status": "passed",
+        "historical_client_version": "1.5.7",
+        "qualification": "Historical result retained; not rerun on freeze-09.",
+        "selected_stages": {}
+      },
+      {
+        "platform": "Windows",
+        "client": "opencode",
+        "source": "daem0n",
+        "status": "passed",
+        "historical_client_version": "1.18.21",
+        "qualification": "Selected repair stages plus unchanged historical passes; exact versions and backend hashes are in linked attempts.",
+        "selected_stages": {
+          "remove": {
+            "status": "passed",
+            "summary_sha256": "74c08d3a987ff6a696345e2477e8a7d82f989a84ac848283cd5123d99fdc369e"
+          }
+        }
+      },
+      {
+        "platform": "Windows",
+        "client": "opencode",
+        "source": "legion",
+        "status": "passed",
+        "historical_client_version": "1.18.21",
+        "qualification": "Selected repair stages plus unchanged historical passes; exact versions and backend hashes are in linked attempts.",
+        "selected_stages": {
+          "remove": {
+            "status": "passed",
+            "summary_sha256": "ed7c9498b394b9f2f34a9f674cef9a3e6e6952dbe4b18f167636bf7142c734d8"
+          }
+        }
+      },
+      {
+        "platform": "Windows",
+        "client": "omp",
+        "source": "daem0n",
+        "status": "passed",
+        "historical_client_version": "omp/18.16.0",
+        "qualification": "Selected repair stages plus unchanged historical passes; exact versions and backend hashes are in linked attempts.",
+        "selected_stages": {
+          "mutate": {
+            "status": "passed",
+            "summary_sha256": "e6aef55d338d2835ba80b926941adde07fc754af5386aa5eed78ba69760311fc"
+          },
+          "remove": {
+            "status": "passed",
+            "summary_sha256": "c4df3fe1d72176fa2694c7c2bc14d9723976fe6fd62788a9a5857498adcd7b3d"
+          }
+        }
+      },
+      {
+        "platform": "Windows",
+        "client": "omp",
+        "source": "legion",
+        "status": "passed",
+        "historical_client_version": "omp/18.16.0",
+        "qualification": "Selected repair-10 whole stages plus explicitly retained historical stages. Profiles are per-attempt; full-profile passes do not qualify default core. Required setup failures remain failures.",
+        "selected_stages": {
+          "initial": {
+            "status": "passed",
+            "summary_sha256": "46e5fb3dcb49c2cbe31c8bf9e4d6dca97b874ee9b4addeda251dd2ebfabb4314"
+          },
+          "mutate": {
+            "status": "passed",
+            "client_version": "omp/18.16.0\n",
+            "backend_sha256": "5de43b4a7f3eb3ceff40fe254b10a0d5200fed63d78fd855aa0436731e5e08e7",
+            "backend_wheel_sha256": "5de43b4a7f3eb3ceff40fe254b10a0d5200fed63d78fd855aa0436731e5e08e7",
+            "tool_surface": "core",
+            "summary_sha256": "d85b625ae7c2d7ce15c2730b1262413a2c072e4bf1f4b1274d11de6a27445800",
+            "phase": "repair-10"
+          },
+          "remove": {
+            "status": "passed",
+            "client_version": "omp/18.16.0\n",
+            "backend_sha256": "5de43b4a7f3eb3ceff40fe254b10a0d5200fed63d78fd855aa0436731e5e08e7",
+            "backend_wheel_sha256": "5de43b4a7f3eb3ceff40fe254b10a0d5200fed63d78fd855aa0436731e5e08e7",
+            "tool_surface": "core",
+            "summary_sha256": "528404ff23c2759c0cddeaa5fb49467d85a7ec90f4283fa578d44c23286170aa",
+            "phase": "repair-10"
+          },
+          "restart": {
+            "status": "passed",
+            "client_version": "omp/18.16.0\n",
+            "backend_sha256": "5de43b4a7f3eb3ceff40fe254b10a0d5200fed63d78fd855aa0436731e5e08e7",
+            "backend_wheel_sha256": "5de43b4a7f3eb3ceff40fe254b10a0d5200fed63d78fd855aa0436731e5e08e7",
+            "tool_surface": "core",
+            "summary_sha256": "667c6d71aeffff82cf3b4815e198cfb82dad6e591bdab01b393828df6d7c8fc0",
+            "phase": "repair-10"
+          }
+        }
+      },
+      {
+        "platform": "Windows",
+        "client": "pi",
+        "source": "daem0n",
+        "status": "passed",
+        "historical_client_version": "1.0.0",
+        "qualification": "Selected repair stages plus unchanged historical passes; exact versions and backend hashes are in linked attempts.",
+        "selected_stages": {
+          "remove": {
+            "status": "passed",
+            "summary_sha256": "239ed8d1e86f0ca430386a2127c925a0ed802f4e35e8e279f904fd39459d33e2"
+          },
+          "restart": {
+            "status": "passed",
+            "summary_sha256": "bb61720c064e18093d100fcb53330efdaef08b47aaa90b49eba56d043665fe86"
+          }
+        }
+      },
+      {
+        "platform": "Windows",
+        "client": "pi",
+        "source": "legion",
+        "status": "passed",
+        "historical_client_version": "1.0.0",
+        "qualification": "Selected repair stages plus unchanged historical passes; exact versions and backend hashes are in linked attempts.",
+        "selected_stages": {
+          "initial": {
+            "status": "passed",
+            "summary_sha256": "20f4fc3137bb7f36ef42fd9d6fc0442ab234af653e3a40c1d6626254af37256f"
+          },
+          "remove": {
+            "status": "passed",
+            "summary_sha256": "934c198256a37d14e36ddd61e35d8b2f7d4c5a60d481759e5f072a87ca6751ba"
+          }
+        }
+      },
+      {
+        "platform": "macOS",
+        "client": "claude",
+        "source": "daem0n",
+        "status": "blocked",
+        "historical_client_version": "2.1.295",
+        "qualification": "Historical result retained; not rerun on freeze-09.",
+        "selected_stages": {}
+      },
+      {
+        "platform": "macOS",
+        "client": "claude",
+        "source": "legion",
+        "status": "blocked",
+        "historical_client_version": "2.1.295",
+        "qualification": "Historical result retained; not rerun on freeze-09.",
+        "selected_stages": {}
+      },
+      {
+        "platform": "macOS",
+        "client": "codex",
+        "source": "daem0n",
+        "status": "passed",
+        "historical_client_version": "0.167.0",
+        "qualification": "Historical result retained; not rerun on freeze-09.",
+        "selected_stages": {}
+      },
+      {
+        "platform": "macOS",
+        "client": "codex",
+        "source": "legion",
+        "status": "passed",
+        "historical_client_version": "0.167.0",
+        "qualification": "Historical result retained; not rerun on freeze-09.",
+        "selected_stages": {}
+      },
+      {
+        "platform": "macOS",
+        "client": "agy",
+        "source": "daem0n",
+        "status": "passed",
+        "historical_client_version": "1.5.7",
+        "qualification": "Historical result retained; not rerun on freeze-09.",
+        "selected_stages": {}
+      },
+      {
+        "platform": "macOS",
+        "client": "agy",
+        "source": "legion",
+        "status": "passed",
+        "historical_client_version": "1.5.7",
+        "qualification": "Historical result retained; not rerun on freeze-09.",
+        "selected_stages": {}
+      },
+      {
+        "platform": "macOS",
+        "client": "opencode",
+        "source": "daem0n",
+        "status": "passed",
+        "historical_client_version": "1.18.21",
+        "qualification": "Latest whole-stage repair attempts plus explicitly retained historical stages; no claim all were rerun on freeze-09.",
+        "selected_stages": {
+          "initial": {
+            "status": "passed",
+            "strict_status": "passed",
+            "client_version": "1.18.21",
+            "backend_wheel_sha256": "a6c371a0c1a5b2f69f6e68b04d16caa5c77a2a5b1fc4689915b2e6fe6b571010",
+            "summary_sha256": "054801e27d844c7861b84f233b5bc61625b03bef2c329d98bbc201e8daef31e7"
+          }
+        }
+      },
+      {
+        "platform": "macOS",
+        "client": "opencode",
+        "source": "legion",
+        "status": "passed",
+        "historical_client_version": "1.18.21",
+        "qualification": "Freeze-11 full/enforce setup and necessary cleanup passed strict native checks. Initial/mutation/removal/restart retain their recorded earlier versions and receipts; they were not rerun on freeze-11. Prior setup failures remain historical evidence. Full-profile passes do not qualify default core.",
+        "selected_stages": {
+          "initial": {
+            "status": "passed",
+            "strict_status": "passed",
+            "client_version": "1.18.21",
+            "backend_wheel_sha256": "1a7082b687ae6759934d6ee480a732722f6b9a8798b36d834f9f5d116a627609",
+            "summary_sha256": "19ed40684235916f90115cf66cf20fab32684afa229db8098c7927cf1bb82d69"
+          },
+          "mutate": {
+            "status": "passed",
+            "strict_status": "passed",
+            "client_version": "1.18.21",
+            "backend_wheel_sha256": "a6c371a0c1a5b2f69f6e68b04d16caa5c77a2a5b1fc4689915b2e6fe6b571010",
+            "summary_sha256": "7fc37bf3e067b1ced3ff09796352d632c76f9722803aa0a07cea31da6fe91921"
+          },
+          "remove": {
+            "status": "passed",
+            "client_version": "1.18.21",
+            "backend_sha256": "5de43b4a7f3eb3ceff40fe254b10a0d5200fed63d78fd855aa0436731e5e08e7",
+            "tool_surface": "full",
+            "surfaced_profile": "full/enforce",
+            "summary_sha256": "f7ad036a644e4ee3c058a035c38ab6e76e4f097c34eede3638b5a065c5923b95",
+            "phase": "repair-10"
+          },
+          "restart": {
+            "status": "passed",
+            "client_version": "1.18.21",
+            "backend_sha256": "5de43b4a7f3eb3ceff40fe254b10a0d5200fed63d78fd855aa0436731e5e08e7",
+            "tool_surface": "full",
+            "surfaced_profile": "full/enforce",
+            "summary_sha256": "1a2d25698e746f4f10bf8fe95ba183c5f33191323e2c11ca97a3d63a1cd9e0c5",
+            "phase": "repair-10"
+          },
+          "index_setup": {
+            "status": "passed",
+            "client_version": "1.18.21",
+            "backend_sha256": "0d8d9087888b09860297619d25c74cb2a47f0d8c7fa8f5cc92d872393f42c687",
+            "tool_surface": "full",
+            "profile": "full/enforce",
+            "summary_sha256": "5720a09ac340d81c2e853d0568c5c294d75f643d3327f8aaa318e8895cf9c5b3",
+            "phase": "repair-11"
+          },
+          "index_setup_clean": {
+            "status": "passed",
+            "client_version": "1.18.21",
+            "backend_sha256": "0d8d9087888b09860297619d25c74cb2a47f0d8c7fa8f5cc92d872393f42c687",
+            "tool_surface": "full",
+            "profile": "full/enforce",
+            "summary_sha256": "64839b9555a4e36561adc74ca082206233e6a6dab933984bceed9c6baa5de4a8",
+            "phase": "repair-11"
+          }
+        }
+      },
+      {
+        "platform": "macOS",
+        "client": "omp",
+        "source": "daem0n",
+        "status": "passed",
+        "historical_client_version": "18.16.0",
+        "qualification": "Selected repair-10 whole stages plus explicitly retained historical stages. Profiles are per-attempt; full-profile passes do not qualify default core. Required setup failures remain failures.",
+        "selected_stages": {
+          "initial": {
+            "status": "passed",
+            "strict_status": "passed",
+            "client_version": "18.16.0",
+            "backend_wheel_sha256": "1a7082b687ae6759934d6ee480a732722f6b9a8798b36d834f9f5d116a627609",
+            "summary_sha256": "707789f78e1f89d6d3a65914429dc6b4ccc654b6954a3e1328e44cb315a194c3"
+          },
+          "mutate": {
+            "status": "passed",
+            "strict_status": "passed",
+            "client_version": "18.16.0",
+            "backend_wheel_sha256": "1a7082b687ae6759934d6ee480a732722f6b9a8798b36d834f9f5d116a627609",
+            "summary_sha256": "9e4532dbeba23face798aab1a9b8bf82af5b22da414832a9ec6f64b78ad1a842"
+          },
+          "remove": {
+            "status": "passed",
+            "strict_status": "passed",
+            "client_version": "18.16.0",
+            "backend_wheel_sha256": "1a7082b687ae6759934d6ee480a732722f6b9a8798b36d834f9f5d116a627609",
+            "summary_sha256": "3ffb58bfc2cce9848f732c2bbb393c78cbb8cd0db73280ddf94713e34c671cc7"
+          },
+          "restart": {
+            "status": "passed",
+            "client_version": "18.16.0",
+            "backend_sha256": "5de43b4a7f3eb3ceff40fe254b10a0d5200fed63d78fd855aa0436731e5e08e7",
+            "tool_surface": "core",
+            "surfaced_profile": "core/remind",
+            "summary_sha256": "558bf90a0fd0a0ad7672c2efeb8ccb08374ea55d2d65e113a6d3fd4da0ecedf3",
+            "phase": "repair-10"
+          }
+        }
+      },
+      {
+        "platform": "macOS",
+        "client": "omp",
+        "source": "legion",
+        "status": "passed",
+        "historical_client_version": "18.16.0",
+        "qualification": "Selected repair-10 whole stages plus explicitly retained historical stages. Profiles are per-attempt; full-profile passes do not qualify default core. Required setup failures remain failures.",
+        "selected_stages": {
+          "initial": {
+            "status": "passed",
+            "strict_status": "passed",
+            "client_version": "18.16.0",
+            "backend_wheel_sha256": "1a7082b687ae6759934d6ee480a732722f6b9a8798b36d834f9f5d116a627609",
+            "summary_sha256": "28b5fcd9a2fff0593d4144ad9fc044a2d6db777fbe8fdc87e6221d5e3d597660"
+          },
+          "mutate": {
+            "status": "passed",
+            "strict_status": "passed",
+            "client_version": "18.16.0",
+            "backend_wheel_sha256": "1a7082b687ae6759934d6ee480a732722f6b9a8798b36d834f9f5d116a627609",
+            "summary_sha256": "6c8aa66e3cc613eb3a40cbb855d4fbacfad44cec35de9a98c987fdcf4fcf7999"
+          },
+          "remove": {
+            "status": "passed",
+            "strict_status": "passed",
+            "client_version": "18.16.0",
+            "backend_wheel_sha256": "1a7082b687ae6759934d6ee480a732722f6b9a8798b36d834f9f5d116a627609",
+            "summary_sha256": "d732b2ba2a56c97401829108a25c883f711549c9c2a9a8fb589699bb94c575e1"
+          },
+          "restart": {
+            "status": "passed",
+            "client_version": "18.16.0",
+            "backend_sha256": "5de43b4a7f3eb3ceff40fe254b10a0d5200fed63d78fd855aa0436731e5e08e7",
+            "tool_surface": "core",
+            "surfaced_profile": "core/remind",
+            "summary_sha256": "4170a1adca8aee7d624423fc1b08e7269e7c7bc322ea2e19b65c806fc7e1fdb3",
+            "phase": "repair-10"
+          }
+        }
+      },
+      {
+        "platform": "macOS",
+        "client": "pi",
+        "source": "daem0n",
+        "status": "passed",
+        "historical_client_version": "1.0.0",
+        "qualification": "Historical result retained; not rerun on freeze-09.",
+        "selected_stages": {}
+      },
+      {
+        "platform": "macOS",
+        "client": "pi",
+        "source": "legion",
+        "status": "passed",
+        "historical_client_version": "1.0.0",
+        "qualification": "Historical result retained; not rerun on freeze-09.",
+        "selected_stages": {}
+      },
+      {
+        "platform": "Ubuntu WSL",
+        "client": "claude",
+        "source": "daem0n",
+        "status": "blocked",
+        "historical_client_version": "2.1.295",
+        "qualification": "Historical result retained; not rerun on freeze-09.",
+        "selected_stages": {}
+      },
+      {
+        "platform": "Ubuntu WSL",
+        "client": "claude",
+        "source": "legion",
+        "status": "blocked",
+        "historical_client_version": "2.1.295",
+        "qualification": "Historical result retained; not rerun on freeze-09.",
+        "selected_stages": {}
+      },
+      {
+        "platform": "Ubuntu WSL",
+        "client": "codex",
+        "source": "daem0n",
+        "status": "passed",
+        "historical_client_version": "0.167.0",
+        "qualification": "Historical result retained; not rerun on freeze-09.",
+        "selected_stages": {}
+      },
+      {
+        "platform": "Ubuntu WSL",
+        "client": "codex",
+        "source": "legion",
+        "status": "passed",
+        "historical_client_version": "0.167.0",
+        "qualification": "Historical result retained; not rerun on freeze-09.",
+        "selected_stages": {}
+      },
+      {
+        "platform": "Ubuntu WSL",
+        "client": "agy",
+        "source": "daem0n",
+        "status": "passed",
+        "historical_client_version": "1.5.7",
+        "qualification": "Historical result retained; not rerun on freeze-09.",
+        "selected_stages": {}
+      },
+      {
+        "platform": "Ubuntu WSL",
+        "client": "agy",
+        "source": "legion",
+        "status": "passed",
+        "historical_client_version": "1.5.7",
+        "qualification": "Historical result retained; not rerun on freeze-09.",
+        "selected_stages": {}
+      },
+      {
+        "platform": "Ubuntu WSL",
+        "client": "opencode",
+        "source": "daem0n",
+        "status": "passed",
+        "historical_client_version": "1.18.21",
+        "qualification": "Latest whole-stage repair attempts plus explicitly retained historical stages; no claim all were rerun on freeze-09.",
+        "selected_stages": {
+          "initial": {
+            "status": "passed",
+            "strict_status": "passed",
+            "client_version": "1.18.21",
+            "backend_wheel_sha256": "1a7082b687ae6759934d6ee480a732722f6b9a8798b36d834f9f5d116a627609",
+            "summary_sha256": "6c673ea4682cf2b5d8b0e9c8fed885af4becfb88e26e7f943bbe1b6f67e4978a"
+          }
+        }
+      },
+      {
+        "platform": "Ubuntu WSL",
+        "client": "opencode",
+        "source": "legion",
+        "status": "passed",
+        "historical_client_version": "1.18.21",
+        "qualification": "Historical result retained; not rerun on freeze-09.",
+        "selected_stages": {}
+      },
+      {
+        "platform": "Ubuntu WSL",
+        "client": "omp",
+        "source": "daem0n",
+        "status": "passed",
+        "historical_client_version": "18.16.0",
+        "qualification": "Selected repair-10 whole stages plus explicitly retained historical stages. Profiles are per-attempt; full-profile passes do not qualify default core. Required setup failures remain failures.",
+        "selected_stages": {
+          "initial": {
+            "status": "passed",
+            "strict_status": "passed",
+            "client_version": "18.16.0",
+            "backend_wheel_sha256": "1a7082b687ae6759934d6ee480a732722f6b9a8798b36d834f9f5d116a627609",
+            "summary_sha256": "fa485548a23be1fc4c5ab5ad31b231048b642cb748a6ae0c4c2dfe572ae2c9a5"
+          },
+          "mutate": {
+            "status": "passed",
+            "strict_status": "passed",
+            "client_version": "18.16.0",
+            "backend_wheel_sha256": "1a7082b687ae6759934d6ee480a732722f6b9a8798b36d834f9f5d116a627609",
+            "summary_sha256": "e4587a7f59c8a90ef2720084bc631ab849f7be7fdff593cea0598b24e70a8efd"
+          },
+          "remove": {
+            "status": "passed",
+            "strict_status": "passed",
+            "client_version": "18.16.0",
+            "backend_wheel_sha256": "1a7082b687ae6759934d6ee480a732722f6b9a8798b36d834f9f5d116a627609",
+            "summary_sha256": "014f824e8f3c35edeb3b7cd4a437183df61a530fbe63b798cec249cc444fbe7c"
+          },
+          "restart": {
+            "status": "passed",
+            "client_version": "18.16.0",
+            "backend_sha256": "5de43b4a7f3eb3ceff40fe254b10a0d5200fed63d78fd855aa0436731e5e08e7",
+            "tool_surface": "core",
+            "surfaced_profile": "core/remind",
+            "summary_sha256": "6c92e153251822685c13be4c3a4395eea0a85005a6b5496015c703ec75c4759a",
+            "phase": "repair-10"
+          }
+        }
+      },
+      {
+        "platform": "Ubuntu WSL",
+        "client": "omp",
+        "source": "legion",
+        "status": "passed",
+        "historical_client_version": "18.16.0",
+        "qualification": "Selected repair-10 whole stages plus explicitly retained historical stages. Profiles are per-attempt; full-profile passes do not qualify default core. Required setup failures remain failures.",
+        "selected_stages": {
+          "initial": {
+            "status": "passed",
+            "strict_status": "passed",
+            "client_version": "18.16.0",
+            "backend_wheel_sha256": "1a7082b687ae6759934d6ee480a732722f6b9a8798b36d834f9f5d116a627609",
+            "summary_sha256": "d2bc872b5a2fa931cdad097458909f7353d30c43a449dfb479f07564b6b4d1e6"
+          },
+          "mutate": {
+            "status": "passed",
+            "strict_status": "passed",
+            "client_version": "18.16.0",
+            "backend_wheel_sha256": "1a7082b687ae6759934d6ee480a732722f6b9a8798b36d834f9f5d116a627609",
+            "summary_sha256": "b26091748be08b2ed863bd564952075441d3ab6ce0ff806a47d1f73bef5ec5ef"
+          },
+          "remove": {
+            "status": "passed",
+            "strict_status": "passed",
+            "client_version": "18.16.0",
+            "backend_wheel_sha256": "1a7082b687ae6759934d6ee480a732722f6b9a8798b36d834f9f5d116a627609",
+            "summary_sha256": "070d3de8214e13c6b1afd469706f6d21ac0713a7dc51e6faa7cbc4391cf7a281"
+          },
+          "restart": {
+            "status": "passed",
+            "client_version": "18.16.0",
+            "backend_sha256": "5de43b4a7f3eb3ceff40fe254b10a0d5200fed63d78fd855aa0436731e5e08e7",
+            "tool_surface": "core",
+            "surfaced_profile": "core/remind",
+            "summary_sha256": "10cf1441f36bf031250e638e178865d74a26e00a881c567e08e4446bcbbb7440",
+            "phase": "repair-10"
+          }
+        }
+      },
+      {
+        "platform": "Ubuntu WSL",
+        "client": "pi",
+        "source": "daem0n",
+        "status": "passed",
+        "historical_client_version": "1.0.0",
+        "qualification": "Latest whole-stage repair attempts plus explicitly retained historical stages; no claim all were rerun on freeze-09.",
+        "selected_stages": {
+          "mutate": {
+            "status": "passed",
+            "strict_status": "passed",
+            "client_version": "1.0.0",
+            "backend_wheel_sha256": "1a7082b687ae6759934d6ee480a732722f6b9a8798b36d834f9f5d116a627609",
+            "summary_sha256": "77be0d3b967047d61b8f5d4acaaf0ae28dcdbd37e9bf29a79e7fb62d9af46011"
+          },
+          "remove": {
+            "status": "passed",
+            "strict_status": "passed",
+            "client_version": "1.0.0",
+            "backend_wheel_sha256": "1a7082b687ae6759934d6ee480a732722f6b9a8798b36d834f9f5d116a627609",
+            "summary_sha256": "11ded3efdc9b5060e9bb5199ee244219524bf3b67a090b0dc70cf969321c7c92"
+          }
+        }
+      },
+      {
+        "platform": "Ubuntu WSL",
+        "client": "pi",
+        "source": "legion",
+        "status": "passed",
+        "historical_client_version": "1.0.0",
+        "qualification": "Historical result retained; not rerun on freeze-09.",
+        "selected_stages": {}
+      }
+    ]
+  },
+  "opencode_v2": {
+    "client_version": "2.2.7",
+    "model": "minimax-coding-plan/MiniMax-M3",
+    "counts": {
+      "latest_selected_overall": {
+        "passed": 16,
+        "failed": 2
+      },
+      "latest_selected_backend": {
+        "passed": 16,
+        "failed": 2
+      },
+      "new_model_attempt_overall": {
+        "failed": 4
+      },
+      "new_model_attempt_backend": {
+        "failed": 3,
+        "passed": 1
+      }
+    },
+    "qualification": "Select whole latest attempts. Sixteen historical passes retain their original profiles/freeze/evidence and audit limitations; they were not rerun or reaudited with the new companion. Both latest native restarts failed. First Mac backend16-check pass is history only, never merged with later readiness.",
+    "selected": [
+      {
+        "platform": "Windows native",
+        "lane": "code-legion",
+        "mode": "code",
+        "source": "legion",
+        "stage": "mutate",
+        "freeze": "08",
+        "backend_wheel_sha256": "1a7082b687ae6759934d6ee480a732722f6b9a8798b36d834f9f5d116a627609",
+        "observed_client_versions": [
+          "2.2.7"
+        ],
+        "status": "passed",
+        "overall_status": "passed",
+        "strict_backend_checks_status": "passed",
+        "native_host_qualification": {
+          "status": null,
+          "evaluation": "Historical nativehost behavior not reaudited in phase10"
+        },
+        "verdict_basis": "Retained historical selected verdict; no new nativehost-clean claim"
+      },
+      {
+        "platform": "Windows native",
+        "lane": "code-legion",
+        "mode": "code",
+        "source": "legion",
+        "stage": "remove",
+        "freeze": "08",
+        "backend_wheel_sha256": "1a7082b687ae6759934d6ee480a732722f6b9a8798b36d834f9f5d116a627609",
+        "observed_client_versions": [
+          "2.2.7"
+        ],
+        "status": "passed",
+        "overall_status": "passed",
+        "strict_backend_checks_status": "passed",
+        "native_host_qualification": {
+          "status": null,
+          "evaluation": "Historical nativehost behavior not reaudited in phase10"
+        },
+        "verdict_basis": "Retained historical selected verdict; no new nativehost-clean claim"
+      },
+      {
+        "platform": "Windows native",
+        "lane": "code-legion",
+        "mode": "code",
+        "source": "legion",
+        "stage": "restart",
+        "freeze": "08",
+        "backend_wheel_sha256": "1a7082b687ae6759934d6ee480a732722f6b9a8798b36d834f9f5d116a627609",
+        "observed_client_versions": [
+          "2.2.7"
+        ],
+        "status": "passed",
+        "overall_status": "passed",
+        "strict_backend_checks_status": "passed",
+        "native_host_qualification": {
+          "status": null,
+          "evaluation": "Historical nativehost behavior not reaudited in phase10"
+        },
+        "verdict_basis": "Retained historical selected verdict; no new nativehost-clean claim"
+      },
+      {
+        "platform": "Windows native",
+        "lane": "direct-legion",
+        "mode": "direct",
+        "source": "legion",
+        "stage": "mutate",
+        "freeze": "08",
+        "backend_wheel_sha256": "1a7082b687ae6759934d6ee480a732722f6b9a8798b36d834f9f5d116a627609",
+        "observed_client_versions": [
+          "2.2.7"
+        ],
+        "status": "passed",
+        "overall_status": "passed",
+        "strict_backend_checks_status": "passed",
+        "native_host_qualification": {
+          "status": null,
+          "evaluation": "Historical nativehost behavior not reaudited in phase10"
+        },
+        "verdict_basis": "Retained historical selected verdict; no new nativehost-clean claim"
+      },
+      {
+        "platform": "Windows native",
+        "lane": "direct-legion",
+        "mode": "direct",
+        "source": "legion",
+        "stage": "remove",
+        "freeze": "08",
+        "backend_wheel_sha256": "1a7082b687ae6759934d6ee480a732722f6b9a8798b36d834f9f5d116a627609",
+        "observed_client_versions": [
+          "2.2.7"
+        ],
+        "status": "passed",
+        "overall_status": "passed",
+        "strict_backend_checks_status": "passed",
+        "native_host_qualification": {
+          "status": null,
+          "evaluation": "Historical nativehost behavior not reaudited in phase10"
+        },
+        "verdict_basis": "Retained historical selected verdict; no new nativehost-clean claim"
+      },
+      {
+        "platform": "Ubuntu WSL",
+        "lane": "optional02b-code-daem0n",
+        "mode": "code",
+        "source": "daem0n",
+        "stage": "mutate",
+        "freeze": "08",
+        "backend_wheel_sha256": "1a7082b687ae6759934d6ee480a732722f6b9a8798b36d834f9f5d116a627609",
+        "observed_client_versions": [
+          "2.2.7"
+        ],
+        "status": "passed",
+        "overall_status": "passed",
+        "strict_backend_checks_status": "passed",
+        "native_host_qualification": {
+          "status": null,
+          "evaluation": "Historical nativehost behavior not reaudited in phase10"
+        },
+        "verdict_basis": "Retained historical selected verdict; no new nativehost-clean claim",
+        "reason": null
+      },
+      {
+        "platform": "Ubuntu WSL",
+        "lane": "optional02b-code-daem0n",
+        "mode": "code",
+        "source": "daem0n",
+        "stage": "remove",
+        "freeze": "08",
+        "backend_wheel_sha256": "1a7082b687ae6759934d6ee480a732722f6b9a8798b36d834f9f5d116a627609",
+        "observed_client_versions": [
+          "2.2.7"
+        ],
+        "status": "passed",
+        "overall_status": "passed",
+        "strict_backend_checks_status": "passed",
+        "native_host_qualification": {
+          "status": null,
+          "evaluation": "Historical nativehost behavior not reaudited in phase10"
+        },
+        "verdict_basis": "Retained historical selected verdict; no new nativehost-clean claim",
+        "reason": null
+      },
+      {
+        "platform": "Ubuntu WSL",
+        "lane": "optional02b-direct-legion",
+        "mode": "direct",
+        "source": "legion",
+        "stage": "index",
+        "freeze": "08",
+        "backend_wheel_sha256": "1a7082b687ae6759934d6ee480a732722f6b9a8798b36d834f9f5d116a627609",
+        "observed_client_versions": [
+          "2.2.7"
+        ],
+        "status": "passed",
+        "overall_status": "passed",
+        "strict_backend_checks_status": "passed",
+        "native_host_qualification": {
+          "status": null,
+          "evaluation": "Historical nativehost behavior not reaudited in phase10"
+        },
+        "verdict_basis": "Retained historical selected verdict; no new nativehost-clean claim",
+        "reason": null
+      },
+      {
+        "platform": "Ubuntu WSL",
+        "lane": "optional02b-direct-legion",
+        "mode": "direct",
+        "source": "legion",
+        "stage": "mutate",
+        "freeze": "08",
+        "backend_wheel_sha256": "1a7082b687ae6759934d6ee480a732722f6b9a8798b36d834f9f5d116a627609",
+        "observed_client_versions": [
+          "2.2.7"
+        ],
+        "status": "passed",
+        "overall_status": "passed",
+        "strict_backend_checks_status": "passed",
+        "native_host_qualification": {
+          "status": null,
+          "evaluation": "Historical nativehost behavior not reaudited in phase10"
+        },
+        "verdict_basis": "Retained historical selected verdict; no new nativehost-clean claim",
+        "reason": null
+      },
+      {
+        "platform": "Ubuntu WSL",
+        "lane": "optional02b-direct-legion",
+        "mode": "direct",
+        "source": "legion",
+        "stage": "remove",
+        "freeze": "08",
+        "backend_wheel_sha256": "1a7082b687ae6759934d6ee480a732722f6b9a8798b36d834f9f5d116a627609",
+        "observed_client_versions": [
+          "2.2.7"
+        ],
+        "status": "passed",
+        "overall_status": "passed",
+        "strict_backend_checks_status": "passed",
+        "native_host_qualification": {
+          "status": null,
+          "evaluation": "Historical nativehost behavior not reaudited in phase10"
+        },
+        "verdict_basis": "Retained historical selected verdict; no new nativehost-clean claim",
+        "reason": null
+      },
+      {
+        "platform": "Ubuntu WSL",
+        "lane": "optional02b-direct-legion",
+        "mode": "direct",
+        "source": "legion",
+        "stage": "restart",
+        "freeze": "11",
+        "backend_wheel_sha256": "0d8d9087888b09860297619d25c74cb2a47f0d8c7fa8f5cc92d872393f42c687",
+        "tool_surface": "full",
+        "launch_mode": "authenticated ready-service",
+        "attempt": "repair11-ready-full-restart-02",
+        "status": "failed",
+        "overall_status": "failed",
+        "strict_backend_checks_status": "failed",
+        "native_host_qualification": {
+          "status": "failed",
+          "audit_evidence": ".test_tmp\\native-followup-20261112\\repair-11\\v2\\linux\\repair11-ready-full-restart-02-host-audit-derived.json",
+          "reason": "Intended project collector contained setup only; required first context absent. Pinned native run prefers inherited PWD over actual cwd; reproduced stale ambient PWD selected a different session location. Wrapper IndexError retained; native stdout proves real out-of-scope operations."
+        },
+        "reason": "Intended project collector contained setup only; required first context absent. Pinned native run prefers inherited PWD over actual cwd; reproduced stale ambient PWD selected a different session location. Wrapper IndexError retained; native stdout proves real out-of-scope operations."
+      },
+      {
+        "platform": "macOS native",
+        "lane": "optional02b-code-daem0n",
+        "mode": "code",
+        "source": "daem0n",
+        "stage": "restart",
+        "freeze": "09",
+        "backend_wheel_sha256": "a6c371a0c1a5b2f69f6e68b04d16caa5c77a2a5b1fc4689915b2e6fe6b571010",
+        "observed_client_versions": [
+          "2.2.7"
+        ],
+        "status": "passed",
+        "overall_status": "passed",
+        "strict_backend_checks_status": "passed",
+        "native_host_qualification": {
+          "status": null,
+          "evaluation": "Historical nativehost behavior not reaudited in phase10"
+        },
+        "verdict_basis": "Retained historical selected verdict; no new nativehost-clean claim",
+        "reason": null
+      },
+      {
+        "platform": "macOS native",
+        "lane": "optional02b-code-daem0n",
+        "mode": "code",
+        "source": "daem0n",
+        "stage": "mutate",
+        "freeze": "09",
+        "backend_wheel_sha256": "a6c371a0c1a5b2f69f6e68b04d16caa5c77a2a5b1fc4689915b2e6fe6b571010",
+        "observed_client_versions": [
+          "2.2.7"
+        ],
+        "status": "passed",
+        "overall_status": "passed",
+        "strict_backend_checks_status": "passed",
+        "native_host_qualification": {
+          "status": null,
+          "evaluation": "Historical nativehost behavior not reaudited in phase10"
+        },
+        "verdict_basis": "Retained historical selected verdict; no new nativehost-clean claim",
+        "reason": null
+      },
+      {
+        "platform": "macOS native",
+        "lane": "optional02b-code-daem0n",
+        "mode": "code",
+        "source": "daem0n",
+        "stage": "remove",
+        "freeze": "09",
+        "backend_wheel_sha256": "a6c371a0c1a5b2f69f6e68b04d16caa5c77a2a5b1fc4689915b2e6fe6b571010",
+        "observed_client_versions": [
+          "2.2.7"
+        ],
+        "status": "passed",
+        "overall_status": "passed",
+        "strict_backend_checks_status": "passed",
+        "native_host_qualification": {
+          "status": null,
+          "evaluation": "Historical nativehost behavior not reaudited in phase10"
+        },
+        "verdict_basis": "Retained historical selected verdict; no new nativehost-clean claim",
+        "reason": null
+      },
+      {
+        "platform": "macOS native",
+        "lane": "optional02b-direct-legion",
+        "mode": "direct",
+        "source": "legion",
+        "stage": "index",
+        "freeze": "08",
+        "backend_wheel_sha256": "1a7082b687ae6759934d6ee480a732722f6b9a8798b36d834f9f5d116a627609",
+        "observed_client_versions": [
+          "2.2.7"
+        ],
+        "status": "passed",
+        "overall_status": "passed",
+        "strict_backend_checks_status": "passed",
+        "native_host_qualification": {
+          "status": null,
+          "evaluation": "Historical nativehost behavior not reaudited in phase10"
+        },
+        "verdict_basis": "Retained historical selected verdict; no new nativehost-clean claim",
+        "reason": null
+      },
+      {
+        "platform": "macOS native",
+        "lane": "optional02b-direct-legion",
+        "mode": "direct",
+        "source": "legion",
+        "stage": "mutate",
+        "freeze": "09",
+        "backend_wheel_sha256": "a6c371a0c1a5b2f69f6e68b04d16caa5c77a2a5b1fc4689915b2e6fe6b571010",
+        "observed_client_versions": [
+          "2.2.7"
+        ],
+        "status": "passed",
+        "overall_status": "passed",
+        "strict_backend_checks_status": "passed",
+        "native_host_qualification": {
+          "status": null,
+          "evaluation": "Historical nativehost behavior not reaudited in phase10"
+        },
+        "verdict_basis": "Retained historical selected verdict; no new nativehost-clean claim",
+        "reason": null
+      },
+      {
+        "platform": "macOS native",
+        "lane": "optional02b-direct-legion",
+        "mode": "direct",
+        "source": "legion",
+        "stage": "remove",
+        "freeze": "09",
+        "backend_wheel_sha256": "a6c371a0c1a5b2f69f6e68b04d16caa5c77a2a5b1fc4689915b2e6fe6b571010",
+        "observed_client_versions": [
+          "2.2.7"
+        ],
+        "status": "passed",
+        "overall_status": "passed",
+        "strict_backend_checks_status": "passed",
+        "native_host_qualification": {
+          "status": null,
+          "evaluation": "Historical nativehost behavior not reaudited in phase10"
+        },
+        "verdict_basis": "Retained historical selected verdict; no new nativehost-clean claim",
+        "reason": null
+      },
+      {
+        "platform": "macOS native",
+        "lane": "optional02b-direct-legion",
+        "mode": "direct",
+        "source": "legion",
+        "stage": "restart",
+        "freeze": "11",
+        "backend_wheel_sha256": "0d8d9087888b09860297619d25c74cb2a47f0d8c7fa8f5cc92d872393f42c687",
+        "tool_surface": "full",
+        "launch_mode": "authenticated ready-service",
+        "attempt": "repair11-ready-full-restart-02",
+        "status": "failed",
+        "overall_status": "failed",
+        "strict_backend_checks_status": "failed",
+        "native_host_qualification": {
+          "status": "failed",
+          "audit_evidence": ".test_tmp\\native-followup-20261112\\repair-11\\v2\\macos\\repair11-ready-full-restart-02-host-audit-derived.json",
+          "reason": "Intended project collector contained setup only; required first context absent. Pinned native run prefers inherited PWD over actual cwd; reproduced stale ambient PWD selected a different session location. Wrapper IndexError retained; native stdout proves real out-of-scope operations."
+        },
+        "reason": "Intended project collector contained setup only; required first context absent. Pinned native run prefers inherited PWD over actual cwd; reproduced stale ambient PWD selected a different session location. Wrapper IndexError retained; native stdout proves real out-of-scope operations."
+      }
+    ],
+    "new_attempts": [
+      {
+        "platform": "Ubuntu WSL",
+        "lane": "optional02b-direct-legion",
+        "mode": "direct",
+        "source": "legion",
+        "stage": "restart",
+        "freeze": "11",
+        "backend_wheel_sha256": "0d8d9087888b09860297619d25c74cb2a47f0d8c7fa8f5cc92d872393f42c687",
+        "tool_surface": "full",
+        "launch_mode": "ordinary standalone",
+        "attempt": "repair11-full-restart-01",
+        "status": "failed",
+        "overall_status": "failed",
+        "strict_backend_checks_status": "failed",
+        "native_host_qualification": {
+          "status": "failed",
+          "audit_evidence": ".test_tmp\\native-followup-20261112\\repair-11\\v2\\linux\\repair11-full-restart-01-host-audit-derived.json",
+          "reason": "Missing direct MCP definitions in first standalone request; subsequent wrong-route Code Mode calls. Actual Mac scoped metadata succeeded but unknown-tool errors remain; WSL unscoped resource fallback/read attempts failed."
+        },
+        "reason": "Missing direct MCP definitions in first standalone request; subsequent wrong-route Code Mode calls. Actual Mac scoped metadata succeeded but unknown-tool errors remain; WSL unscoped resource fallback/read attempts failed."
+      },
+      {
+        "platform": "Ubuntu WSL",
+        "lane": "optional02b-direct-legion",
+        "mode": "direct",
+        "source": "legion",
+        "stage": "restart",
+        "freeze": "11",
+        "backend_wheel_sha256": "0d8d9087888b09860297619d25c74cb2a47f0d8c7fa8f5cc92d872393f42c687",
+        "tool_surface": "full",
+        "launch_mode": "authenticated ready-service",
+        "attempt": "repair11-ready-full-restart-02",
+        "status": "failed",
+        "overall_status": "failed",
+        "strict_backend_checks_status": "failed",
+        "native_host_qualification": {
+          "status": "failed",
+          "audit_evidence": ".test_tmp\\native-followup-20261112\\repair-11\\v2\\linux\\repair11-ready-full-restart-02-host-audit-derived.json",
+          "reason": "Intended project collector contained setup only; required first context absent. Pinned native run prefers inherited PWD over actual cwd; reproduced stale ambient PWD selected a different session location. Wrapper IndexError retained; native stdout proves real out-of-scope operations."
+        },
+        "reason": "Intended project collector contained setup only; required first context absent. Pinned native run prefers inherited PWD over actual cwd; reproduced stale ambient PWD selected a different session location. Wrapper IndexError retained; native stdout proves real out-of-scope operations."
+      },
+      {
+        "platform": "macOS native",
+        "lane": "optional02b-direct-legion",
+        "mode": "direct",
+        "source": "legion",
+        "stage": "restart",
+        "freeze": "11",
+        "backend_wheel_sha256": "0d8d9087888b09860297619d25c74cb2a47f0d8c7fa8f5cc92d872393f42c687",
+        "tool_surface": "full",
+        "launch_mode": "ordinary standalone",
+        "attempt": "repair11-full-restart-01",
+        "status": "failed",
+        "overall_status": "failed",
+        "strict_backend_checks_status": "passed",
+        "native_host_qualification": {
+          "status": "failed",
+          "audit_evidence": ".test_tmp\\native-followup-20261112\\repair-11\\v2\\macos\\repair11-full-restart-01-host-audit-derived.json",
+          "reason": "Missing direct MCP definitions in first standalone request; subsequent wrong-route Code Mode calls. Actual Mac scoped metadata succeeded but unknown-tool errors remain; WSL unscoped resource fallback/read attempts failed."
+        },
+        "reason": "Missing direct MCP definitions in first standalone request; subsequent wrong-route Code Mode calls. Actual Mac scoped metadata succeeded but unknown-tool errors remain; WSL unscoped resource fallback/read attempts failed."
+      },
+      {
+        "platform": "macOS native",
+        "lane": "optional02b-direct-legion",
+        "mode": "direct",
+        "source": "legion",
+        "stage": "restart",
+        "freeze": "11",
+        "backend_wheel_sha256": "0d8d9087888b09860297619d25c74cb2a47f0d8c7fa8f5cc92d872393f42c687",
+        "tool_surface": "full",
+        "launch_mode": "authenticated ready-service",
+        "attempt": "repair11-ready-full-restart-02",
+        "status": "failed",
+        "overall_status": "failed",
+        "strict_backend_checks_status": "failed",
+        "native_host_qualification": {
+          "status": "failed",
+          "audit_evidence": ".test_tmp\\native-followup-20261112\\repair-11\\v2\\macos\\repair11-ready-full-restart-02-host-audit-derived.json",
+          "reason": "Intended project collector contained setup only; required first context absent. Pinned native run prefers inherited PWD over actual cwd; reproduced stale ambient PWD selected a different session location. Wrapper IndexError retained; native stdout proves real out-of-scope operations."
+        },
+        "reason": "Intended project collector contained setup only; required first context absent. Pinned native run prefers inherited PWD over actual cwd; reproduced stale ambient PWD selected a different session location. Wrapper IndexError retained; native stdout proves real out-of-scope operations."
+      }
+    ]
+  },
+  "remaining": {
+    "failed": [
+      "Mac and Ubuntu WSL V2 direct/legion restart workflows; first-turn tool readiness and stale inherited PWD remain unresolved natively."
+    ],
+    "blocked": [
+      "Claude native workflows: observed account quota",
+      "MCPJam Apps rendering: no existing account",
+      "E2B live execution: no usable existing credentials"
+    ],
+    "unsupported": [
+      "Hosted embeddings: provider adapter absent; token counting is a separate capability"
+    ],
+    "unexplained": [
+      "Earlier intermittent Windows rename WinError 5",
+      "Mac cleanup PermissionError, with subsequent exact owned-process absence verified"
+    ]
+  },
+  "evidence_availability": "Phase reports include local .test_tmp links for retained raw receipts. Those paths are intentionally not committed or available through GitHub. Use this portable summary and the committed narrative reports for PR review; full raw reproduction evidence requires the original acceptance workspace."
+}

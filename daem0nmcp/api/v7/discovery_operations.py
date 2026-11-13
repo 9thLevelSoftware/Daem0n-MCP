@@ -28,6 +28,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Literal, Protocol
+from urllib.parse import unquote
 
 from ...bounded_workers import BoundedWorkerBusyError, BoundedWorkerPool
 from ...discovery_projection import (
@@ -276,7 +277,10 @@ def _python_relationships(
 
 
 def _relationship_slice(
-    values: list[dict[str, object]], start_line: object, end_line: object
+    values: list[dict[str, object]],
+    start_line: object,
+    end_line: object,
+    qualified_name: object = None,
 ) -> list[dict[str, object]]:
     if (
         isinstance(start_line, bool)
@@ -287,6 +291,8 @@ def _relationship_slice(
         raise TypeError("tree-sitter entity lines are malformed")
     result: list[dict[str, object]] = []
     for value in values:
+        if "owner" in value and value["owner"] != qualified_name:
+            continue
         line = value.get("line")
         if isinstance(line, int) and start_line <= line <= end_line:
             result.append(value)
@@ -354,6 +360,12 @@ class _StrictTreeSitterProducer:
                 else file_path.stem
             )
             calls, imports, references = _python_relationships(source, module_name)
+        elif language_name in {"typescript", "tsx"}:
+            from .typescript_relationships import typescript_relationships
+
+            calls, imports, references = typescript_relationships(
+                tree, source, relative, limit=_MAX_RELATIONSHIPS_PER_FILE
+            )
         else:
             calls = []
             references = []
@@ -381,9 +393,11 @@ class _StrictTreeSitterProducer:
                 value = dict(entity)
                 start_line = value.get("line_start")
                 end_line = value.get("line_end")
-                value["calls"] = _relationship_slice(calls, start_line, end_line)
+                value["calls"] = _relationship_slice(
+                    calls, start_line, end_line, value.get("qualified_name")
+                )
                 value["references"] = _relationship_slice(
-                    references, start_line, end_line
+                    references, start_line, end_line, value.get("qualified_name")
                 )
                 # A file-level import does not make every function in that
                 # file depend on the imported symbol. Attribute import edges
@@ -392,16 +406,25 @@ class _StrictTreeSitterProducer:
                     str(item["name"])
                     for item in (*value["calls"], *value["references"])
                 }
-                inline_imports = _relationship_slice(imports, start_line, end_line)
+                inline_imports = (
+                    []
+                    if language_name in {"typescript", "tsx"}
+                    else _relationship_slice(imports, start_line, end_line)
+                )
                 value["imports"] = [
                     item
                     for item in imports
                     if item in inline_imports
                     or any(
-                        name == item["name"] or name.startswith(str(item["name"]) + ".")
+                        name == item["name"]
+                        or name.startswith(str(item["name"]) + ".")
+                        or (
+                            item.get("namespace") is True
+                            and name.startswith(str(item["name"]))
+                        )
                         for name in used_names
                     )
-                    or language_name != "python"
+                    or language_name not in {"python", "typescript", "tsx"}
                 ]
                 yield value
 
@@ -1330,10 +1353,21 @@ def _resolve_code_edges(
     exact: dict[str, list[str]] = {}
     leaf: dict[str, list[str]] = {}
     modules: dict[str, list[str]] = {}
+    typescript: dict[tuple[str, str], list[str]] = {}
     for source_key, seed in seeds.items():
         normalized = unicodedata.normalize("NFC", seed.qualified_name)
         exact.setdefault(normalized, []).append(source_key)
         path = Path(seed.relative_file_path)
+        if path.suffix in {
+            ".ts",
+            ".tsx",
+            ".js",
+            ".jsx",
+            ".mjs",
+            ".cjs",
+        } and normalized.startswith(path.stem + "."):
+            symbol = normalized[len(path.stem) + 1 :]
+            typescript.setdefault((path.as_posix(), symbol), []).append(source_key)
         if path.suffix == ".py":
             module_path = path.with_suffix("")
             if path.stem == "__init__":
@@ -1352,6 +1386,33 @@ def _resolve_code_edges(
     for source_key in sorted(relationships):
         for kind, raw_name, source_line in relationships[source_key]:
             normalized = unicodedata.normalize("NFC", raw_name)
+            if normalized.startswith("ts://"):
+                module, separator, symbol = normalized.removeprefix("ts://").partition(
+                    "#"
+                )
+                candidates = (
+                    typescript.get((unquote(module), unquote(symbol)), [])
+                    # A declaration name does not authenticate a module export.
+                    # Export aliases and private declarations must not create
+                    # guessed cross-file edges. Local targets keep the exact
+                    # source path; imported module targets remain unresolved.
+                    if separator
+                    and unquote(module) == seeds[source_key].relative_file_path
+                    else []
+                )
+                if len(candidates) != 1:
+                    continue
+                target_key = candidates[0]
+                if target_key != source_key:
+                    edge_key = (source_key, target_key, kind)
+                    prior = resolved.get(edge_key)
+                    if prior is None or (
+                        source_line is not None and source_line < prior
+                    ):
+                        resolved[edge_key] = source_line
+                    if len(resolved) > _MAX_INDEX_EDGES:
+                        raise DiscoveryOperationError("TASK_REQUIRED")
+                continue
             if normalized.startswith("."):
                 level = len(normalized) - len(normalized.lstrip("."))
                 package = Path(seeds[source_key].relative_file_path).parent.parts
@@ -1556,18 +1617,17 @@ def _code_index_sync(
                 def before_commit() -> None:
                     if cancelled.is_set():
                         raise _DiscoveryMutationCancelledError
-                    current_files, current_skipped, current_seen = _index_files(
+                    current_files, _, _ = _index_files(
                         workspace,
                         index_root,
                         list(request.patterns),
                         supported_extensions,
                         cancelled,
                     )
-                    if (
-                        current_files != files
-                        or current_skipped != skipped
-                        or current_seen != files_seen
-                    ):
+                    # Skipped/seen are initial-scan diagnostics, not source
+                    # preimages. Our own storage journal can change those
+                    # counters while this transaction publishes a generation.
+                    if current_files != files:
                         raise DiscoveryOperationError("EVENT_STREAM_CONFLICT")
                     for source_path in current_files:
                         current = resolve_index_file(workspace.root, source_path)

@@ -1,13 +1,14 @@
-"""Claude Code PreToolUse hook for edits: remind, never block.
+"""Claude Code PreToolUse hook: reminders by default, explicit edit enforcement.
 
 Stdlib only (plus the ``_client`` helpers) so it stays fast on every edit.  Outside
 a Daem0n project it is silent; inside one it adds a one-line reminder to the
-model's context and always exits 0.
+model's context. Explicit enforcement uses the protected native edit bridge.
 """
 
 from __future__ import annotations
 
 import json
+import os
 import sys
 
 from ._client import find_project_root, read_hook_event, relative_project_path
@@ -41,8 +42,33 @@ def reminder(event: dict) -> str | None:
 
 
 def main() -> None:
+    event = read_hook_event()
+    mode = os.environ.get("DAEM0NMCP_AUTOMATION_MODE")
+    if mode == "off":
+        sys.exit(0)
+    if mode == "enforce":
+        from ..native_edit_gate import approve_native_edit
+
+        if os.environ.get("DAEM0NMCP_EDIT_BRIDGE_MODE") == "remote-https":
+            # The bridge validates this exact checkout against its protected
+            # remote binding. A remote checkout need not have local storage.
+            project_path = event.get("cwd")
+        else:
+            project = find_project_root(event)
+            project_path = str(project) if project is not None else None
+        if not isinstance(project_path, str) or not project_path:
+            print("EDIT_HOST_WORKSPACE_UNAVAILABLE", file=sys.stderr)
+            sys.exit(2)
+        decision = approve_native_edit(event, project_path, environ=os.environ)
+        if not decision.allowed:
+            print(decision.explanation(), file=sys.stderr)
+            sys.exit(2)
+        sys.exit(0)
+    if mode not in (None, "remind"):
+        print("EDIT_AUTOMATION_MODE_INVALID", file=sys.stderr)
+        sys.exit(2)
     try:
-        output = reminder(read_hook_event())
+        output = reminder(event)
     except Exception:
         output = None
     if output:

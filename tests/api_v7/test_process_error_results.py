@@ -204,7 +204,7 @@ async def test_rejected_arguments_are_described_without_echoing_them(
             {
                 "field": "arguments.query",
                 "code": "INVALID_VALUE",
-                "message": "Invalid value.",
+                "message": "Expected a JSON string matching the tool's declared constraints.",
             }
         ]
         assert MARKER not in relayed.content[0].text
@@ -218,7 +218,11 @@ async def test_rejected_arguments_are_described_without_echoing_them(
         )
         assert relayed.isError is True
         assert _envelope(relayed)["error"]["field_errors"] == [
-            {"field": "arguments", "code": "INVALID_VALUE", "message": "Invalid value."}
+            {
+                "field": "arguments",
+                "code": "INVALID_VALUE",
+                "message": "Remove fields not declared by the tool's input schema.",
+            }
         ]
         assert MARKER not in relayed.content[0].text
 

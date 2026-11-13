@@ -28,6 +28,7 @@ from .errors import (
 )
 from .models import CapabilityState
 from .policy import V7_TOOL_LEVELS
+from .remedies import compact_remedy_arguments
 from .responses import ResponseFactory
 from .tasks import (
     durable_task_execution_var,
@@ -283,14 +284,17 @@ class V7ToolRouter:
                             ErrorCode.COUNSEL_REQUIRED,
                             "Review error.counsel, then retry exactly error.remedy.",
                             remedy_tool=tool_name,
-                            remedy_arguments={
-                                **{
-                                    k: v
-                                    for k, v in effective.items()
-                                    if k != "preflight_token"
+                            remedy_arguments=compact_remedy_arguments(
+                                input_model,
+                                {
+                                    **{
+                                        k: v
+                                        for k, v in effective.items()
+                                        if k != "preflight_token"
+                                    },
+                                    "preflight_token": outcome.challenge.preflight_token,
                                 },
-                                "preflight_token": outcome.challenge.preflight_token,
-                            },
+                            ),
                             counsel=outcome.challenge,
                         )
             if is_capacity_violation(violation):

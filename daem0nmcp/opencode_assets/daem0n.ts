@@ -18,15 +18,28 @@ import type { Plugin } from "@opencode-ai/plugin";
 // Covenant rules injected into every system prompt
 // ---------------------------------------------------------------------------
 
+const WORKFLOW_SCOPE = `Follow the current task's allowed operations and call order.
+system_health is optional; source indexing does not require a health check.
+It is not a prerequisite for memory or code tools. Use it only for requested
+diagnostics or to investigate an observed failure within that scope; do not
+add a startup health probe. The full session_brief is optional in guided mode,
+not a prerequisite; strict mode keeps its explicit briefing requirements.
+Prefer directly listed typed tools. Discover hidden or unlisted targets with
+daem0n_tools_search, then use the gateway for those targets only.
+Indexing or searching alone does not require inventing memory writes or outcomes.`;
+
 const COVENANT_RULES_FULL = `<daem0n-covenant>
 ## The Daem0n v7 Covenant
 
 This project is bound to Daem0n for persistent AI memory. Use exact workspace-scoped
 v7 tools: session_brief, memory_preflight, memory_recall, memory_store,
 memory_record_outcome, system_health, daem0n_tools_search, and daem0n_tool_call.
+Every scoped call must use the supplied opaque workspace_id, never a path or {}.
+
+${WORKFLOW_SCOPE}
 
 ### 1. BRIEF
-Guided mode automatically briefs an unbriefed session on memory_recall, memory_preflight, memory_store, or memory_record_outcome, returning meta.covenant.auto_brief. Diagnostic and discovery calls do not trigger briefing. Call session_brief for the full brief.
+Guided mode automatically briefs an unbriefed session on memory_recall, memory_preflight, memory_store, or memory_record_outcome, returning meta.covenant.auto_brief. Diagnostic and discovery calls do not trigger briefing.
 
 ### 2. WRITE
 Call memory_store (or any protected tool) directly. If it returns COUNSEL_REQUIRED, read error.counsel (guidance and reasons), then retry exactly error.remedy. memory_preflight remains available for planning a change in advance.
@@ -36,7 +49,7 @@ valid for 300 seconds, bound to workspace, principal, session, tool and argument
 Use a stable idempotency_key for memory_store and save its record_id.
 
 ### 3. OTHER CAPABILITIES
-Use daem0n_tools_search(query), then daem0n_tool_call(workspace_id, tool, arguments).
+For hidden or unlisted tools, use daem0n_tools_search(query), then daem0n_tool_call(workspace_id, tool, arguments).
 Defaults: DAEM0NMCP_COVENANT_MODE=guided and DAEM0NMCP_TOOL_SURFACE=core.
 DAEM0NMCP_COVENANT_MODE=strict requires explicit session_brief, exact
 memory_preflight, and token-bearing writes; DAEM0NMCP_TOOL_SURFACE=full lists all tools.
@@ -54,9 +67,11 @@ at /mcp. Migration mapping: docs/v6-to-v7-tools.json.
 const COVENANT_RULES_SIMPLIFIED = `<daem0n-covenant mode="simplified">
 ## Memory Protocol
 
-Guided mode automatically briefs an unbriefed session on memory_recall, memory_preflight, memory_store, or memory_record_outcome, returning meta.covenant.auto_brief. Diagnostic and discovery calls do not trigger briefing. Call session_brief for the full brief.
+${WORKFLOW_SCOPE}
+
+Guided mode automatically briefs an unbriefed session on memory_recall, memory_preflight, memory_store, or memory_record_outcome, returning meta.covenant.auto_brief. Diagnostic and discovery calls do not trigger briefing.
 Call memory_store (or any protected tool) directly. If it returns COUNSEL_REQUIRED, read error.counsel (guidance and reasons), then retry exactly error.remedy. memory_preflight remains available for planning a change in advance.
-Use daem0n_tools_search(query), then daem0n_tool_call(workspace_id, tool, arguments).
+For hidden or unlisted tools, use daem0n_tools_search(query), then daem0n_tool_call(workspace_id, tool, arguments).
 RECALL: daem0nmcp_memory_recall(workspace_id="<workspace_id>", query="...", limit=10)
 STORE: daem0nmcp_memory_store(workspace_id="<workspace_id>", record_type="decision", content="...", idempotency_key="<stable-key>")
 OUTCOME: daem0nmcp_memory_record_outcome(workspace_id="<workspace_id>", record_id="<mem_id>", outcome_text="...", worked=true|false, idempotency_key="<stable-key>")
@@ -66,7 +81,7 @@ Strict ceremony: DAEM0NMCP_COVENANT_MODE=strict. Full listing: DAEM0NMCP_TOOL_SU
 Rules:
 - Never use paths as workspace selectors.
 - Reuse an idempotency key when retrying the same write.
-- Use daem0nmcp_system_health for diagnostics.
+- Use daem0nmcp_system_health only for diagnostics within the task's scope.
 - Exact host-prefixed names are accepted; lookalike substrings are not.
 - Migration mapping: docs/v6-to-v7-tools.json.
 </daem0n-covenant>`;
@@ -81,6 +96,7 @@ type HookResult = { exitCode: number; stdout: string; stderr: string };
 // under into its copy of this file; it is never read from opencode.json or any
 // other file or variable the opened project can supply.
 const PYTHON_EXECUTABLE = "python";
+const INSTALLED_AUTOMATION_MODE: string | undefined = undefined;
 
 // Hooks start inside the opened project, where "python -m" would import the
 // project's own "daem0nmcp" directory first. This runs the module the same way
@@ -100,6 +116,7 @@ const BRIDGE_ENV_KEYS = new Set([
   "DAEM0NMCP_EDIT_HOST_STATE_FILE",
   "DAEM0NMCP_PROJECT_ROOT",
   "DAEM0NMCP_STORAGE_PATH",
+  "DAEM0NMCP_AUTOMATION_MODE",
 ]);
 
 async function loadBridgeEnvironment(directory: string): Promise<Record<string, string>> {
@@ -202,6 +219,17 @@ function isEditPreflightTool(tool: string): boolean {
   );
 }
 
+function editExecutionStatus(result: unknown): "succeeded" | "failed" {
+  if (!result || typeof result !== "object") return "failed";
+  const value = result as Record<string, unknown>;
+  if (value.isError === true || value.success === false) return "failed";
+  if (["error", "failed", "skipped", "cancelled", "denied"].includes(String(value.status))) {
+    return "failed";
+  }
+  // V1 invokes execute.after for an actual completed tool execution.
+  return "succeeded";
+}
+
 function extractAdditionalContext(stdout: string): string {
   if (!stdout) return "";
   try {
@@ -226,6 +254,12 @@ function reminderKey(input: { callID?: string; sessionID?: string; tool: string 
 
 export const Daem0nPlugin: Plugin = async ({ directory }) => {
   const bridgeEnvironment = await loadBridgeEnvironment(directory);
+  const automationMode = INSTALLED_AUTOMATION_MODE ?? bridgeEnvironment.DAEM0NMCP_AUTOMATION_MODE;
+  if (automationMode === "off") return {};
+  const enforce = automationMode === "enforce";
+  if (INSTALLED_AUTOMATION_MODE !== undefined) {
+    bridgeEnvironment.DAEM0NMCP_AUTOMATION_MODE = INSTALLED_AUTOMATION_MODE;
+  }
   const pendingReminders = new Map<string, string>();
   return {
     // -----------------------------------------------------------------------
@@ -261,7 +295,7 @@ export const Daem0nPlugin: Plugin = async ({ directory }) => {
           },
           bridgeEnvironment,
           5_000,
-          false,
+          enforce,
         );
         if (result.exitCode === 2) {
           throw new Error(
@@ -318,6 +352,7 @@ export const Daem0nPlugin: Plugin = async ({ directory }) => {
             tool_input: input.args ?? {},
             tool_response: output,
             tool_use_id: input.callID,
+            execution_status: editExecutionStatus(output),
           }, bridgeEnvironment);
         } else if (isEditTool(input.tool)) {
           const result = await runHook(directory, "post_edit", {
@@ -328,6 +363,7 @@ export const Daem0nPlugin: Plugin = async ({ directory }) => {
             tool_input: input.args ?? {},
             tool_response: output,
             tool_use_id: input.callID,
+            execution_status: editExecutionStatus(output),
           }, bridgeEnvironment);
           const postReminder = extractAdditionalContext(result.stdout);
           if (postReminder) {
@@ -358,6 +394,20 @@ export const Daem0nPlugin: Plugin = async ({ directory }) => {
             cwd: directory,
             hook_event_name: "Stop",
           }, bridgeEnvironment, 15_000);
+        } else if (event.type === "message.part.updated") {
+          const part = event.properties?.part;
+          if (enforce && part?.type === "tool" && part.state?.status === "error" && isEditTool(part.tool)) {
+            await runHook(directory, "post_edit", {
+              session_id: part.sessionID,
+              cwd: directory,
+              hook_event_name: "PostToolUseFailure",
+              tool_name: part.tool,
+              tool_input: part.state.input,
+              tool_response: { isError: true },
+              tool_use_id: part.callID,
+              execution_status: "failed",
+            }, bridgeEnvironment);
+          }
         }
       } catch {
         // Never throw from event hooks. Best-effort only.

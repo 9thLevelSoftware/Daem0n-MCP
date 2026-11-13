@@ -63,6 +63,62 @@ def test_native_edit_records_missing_file_without_model_hash(tmp_path):
     assert request.preimages[0].sha256 is None
 
 
+def test_codex_or_agy_native_arguments_preserve_exact_host_payloads(tmp_path):
+    patch = "*** Begin Patch\n*** Add File: added.py\n+created\n*** End Patch"
+    codex = native_edit_request(
+        project_path=tmp_path,
+        tool_name="apply_patch",
+        tool_input={"command": patch},
+        configured_tools=configured_native_edit_tools({}),
+    )
+    assert codex.arguments == {"command": patch}
+    assert codex.preimages[0].relative_file_path == "added.py"
+    agy = native_edit_request(
+        project_path=tmp_path,
+        tool_name="multi_replace_file_content",
+        tool_input={"TargetFile": str(tmp_path / "added.py"), "ReplacementChunks": []},
+        configured_tools=configured_native_edit_tools({}),
+    )
+    assert agy.arguments == {"TargetFile": "added.py", "ReplacementChunks": []}
+    assert agy.preimages[0].state == "missing"
+
+
+def test_opencode_v2_patch_binds_native_patchtext_and_rejects_command_alias(tmp_path):
+    patch = "*** Begin Patch\n*** Add File: v2.py\n+created\n*** End Patch"
+    edit = native_edit_request(
+        project_path=tmp_path,
+        tool_name="patch",
+        tool_input={"patchText": patch},
+        configured_tools=configured_native_edit_tools({}),
+    )
+    assert edit.arguments == {"patchText": patch}
+    assert edit.preimages[0].relative_file_path == "v2.py"
+    with pytest.raises(NativeEditNormalizationError):
+        native_edit_request(
+            project_path=tmp_path,
+            tool_name="patch",
+            tool_input={"command": patch},
+            configured_tools=configured_native_edit_tools({}),
+        )
+
+
+def test_codex_or_agy_rejects_ambiguous_patch_and_network_paths(tmp_path):
+    with pytest.raises(NativeEditNormalizationError):
+        native_edit_request(
+            project_path=tmp_path,
+            tool_name="apply_patch",
+            tool_input={"command": "patch", "patchText": "patch"},
+            configured_tools=configured_native_edit_tools({}),
+        )
+    with pytest.raises(NativeEditNormalizationError):
+        native_edit_request(
+            project_path=tmp_path,
+            tool_name="write_to_file",
+            tool_input={"TargetFile": "//server/share/file.py", "CodeContent": "x"},
+            configured_tools=configured_native_edit_tools({}),
+        )
+
+
 def test_notebook_edit_binds_notebook_preimage_and_post_edit_path(tmp_path):
     notebook = tmp_path / "analysis.ipynb"
     notebook.write_text('{"cells":[]}', encoding="utf-8")

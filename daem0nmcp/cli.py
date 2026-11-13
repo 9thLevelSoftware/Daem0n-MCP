@@ -618,6 +618,15 @@ def main():
         action="store_true",
         help="Also provision project-local edit-bridge credentials",
     )
+    install_claude_parser.add_argument(
+        "--automation",
+        choices=("off", "remind", "enforce"),
+        help="Select native hook automation; omission preserves the existing behavior",
+    )
+    install_claude_parser.add_argument(
+        "--client-version",
+        help="Observed Claude Code version (required for enforcement)",
+    )
 
     # uninstall-claude-hooks command
     uninstall_claude_parser = subparsers.add_parser(
@@ -650,7 +659,27 @@ def main():
     )
     install_client_parser.add_argument(
         "--client-version",
-        help="Observed host version (required for the OpenCode V1 configuration)",
+        help="Observed host version (required for OpenCode)",
+    )
+    install_client_parser.add_argument(
+        "--automation",
+        choices=("off", "remind", "enforce"),
+        help="Select native automation; omission leaves current hooks unchanged",
+    )
+    install_client_parser.add_argument(
+        "--tool-surface",
+        choices=("core", "full"),
+        help="Select the core gateway or full typed native tools; omission preserves existing configuration",
+    )
+    install_client_parser.add_argument(
+        "--opencode-interface",
+        choices=("v1", "v2"),
+        help="Select the OpenCode configuration generation explicitly (default: v1)",
+    )
+    install_client_parser.add_argument(
+        "--opencode-code-mode",
+        choices=("code", "direct"),
+        help="V2 only: use Code Mode (default) or direct native MCP tools",
     )
     install_client_parser.add_argument(
         "--project-path", default=argparse.SUPPRESS, help="Project root path"
@@ -1133,6 +1162,10 @@ def main():
                 args.project_path or os.getcwd(),
                 dry_run=args.dry_run,
                 client_version=args.client_version,
+                automation=args.automation,
+                tool_surface=args.tool_surface,
+                opencode_interface=args.opencode_interface,
+                opencode_code_mode=args.opencode_code_mode,
             )
         except ClientInstallError as error:
             payload = {
@@ -1148,6 +1181,14 @@ def main():
                 print(
                     f"{'Preview' if args.dry_run else 'Configuration'}: {args.client}"
                 )
+                automation_result = payload["automation"]
+                print(f"Automation: {automation_result['mode']}")
+                print(f"Tool surface: {payload['tool_surface']}")
+                if automation_result["covered_tools"]:
+                    print(
+                        "  Native edit tools: "
+                        + ", ".join(automation_result["covered_tools"])
+                    )
             else:
                 print(
                     f"Error: {payload['error']['code']}: {payload['error']['message']}"
@@ -1209,6 +1250,8 @@ def main():
             enable_edit_bridge=True
             if getattr(args, "enable_edit_bridge", False)
             else None,
+            automation=args.automation,
+            client_version=args.client_version,
         )
         if args.json:
             print(json.dumps({"success": success, "message": message}))

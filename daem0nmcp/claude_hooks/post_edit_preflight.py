@@ -10,7 +10,7 @@ from collections.abc import Mapping
 from typing import Any
 
 from ..edit_host import EditHostConfig, EditHostStateStore
-from ._client import read_hook_event
+from ._client import find_project_root, read_hook_event
 
 _EDIT_PREFLIGHT_TOOL = re.compile(
     r"^(?:edit_preflight|mcp__[^\s]+__edit_preflight|[A-Za-z0-9][A-Za-z0-9_.-]{0,127}_edit_preflight)$"
@@ -98,6 +98,12 @@ def handle_edit_preflight_response(
             return False
         environment = os.environ if environ is None else environ
         config = EditHostConfig.from_environment(environment)
+        # A remote checkout need not contain local Daem0n storage. Its exact
+        # root is authenticated by the remote binding below; ancestor discovery
+        # must not replace it with an unrelated enclosing local workspace.
+        project = find_project_root(dict(event)) if config.mode == "local" else None
+        if project is not None:
+            project_path = str(project)
         if config.workspace_id(project_path) != workspace_id:
             return False
         store = EditHostStateStore(config)

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import concurrent.futures
+import errno
 import hashlib
 import hmac
 import json
@@ -43,7 +44,10 @@ from .edit_bridge import (
 )
 from .event_store import canonical_json_bytes
 from .protected_files import (
+    ProtectedPathError,
     ensure_owner_only_directory,
+    guard_directory_ancestry,
+    verify_owner_only_directory,
     verify_owner_only_file,
     write_new_owner_only_file,
 )
@@ -576,7 +580,230 @@ def local_bridge_address(runtime_directory: Path, credential_id: str) -> str:
     if sys.platform == "win32":
         return rf"\\.\pipe\daem0nmcp-{digest}"
     directory = ensure_owner_only_directory(runtime_directory)
-    return str(directory / f"b-{digest}.sock")
+    address = str(directory / f"b-{digest}.sock")
+    # Darwin's sockaddr_un allows 103 path bytes plus its NUL terminator.
+    # Preserve existing short endpoints, but do not derive long endpoints from
+    # a user's home/configuration path: even a normal macOS username can exceed
+    # that bound. Both server and client use this deterministic derivation.
+    if len(os.fsencode(address)) <= 103:
+        return address
+    temporary_root = Path("/private/tmp" if sys.platform == "darwin" else "/tmp")
+    short_directory = ensure_owner_only_directory(
+        temporary_root / f"daem0nmcp-{os.getuid()}"
+    )
+    endpoint_digest = hashlib.sha256(
+        canonical_json_bytes(
+            {"runtime_directory": str(directory), "credential_id": credential_id}
+        )
+    ).hexdigest()[:48]
+    address = str(short_directory / f"b-{endpoint_digest}.sock")
+    if len(os.fsencode(address)) > 103:
+        raise ValueError("edit bridge socket path exceeds the Unix socket byte limit")
+    return address
+
+
+def _socket_identity(metadata: os.stat_result) -> tuple[int, int, int, int, int]:
+    return (
+        metadata.st_dev,
+        metadata.st_ino,
+        metadata.st_mode,
+        metadata.st_uid,
+        metadata.st_ctime_ns,
+    )
+
+
+class _UnixEndpointLease:
+    """Serialize a private Unix endpoint and remove only a proven stale socket."""
+
+    def __init__(self, address: str) -> None:
+        import fcntl
+
+        endpoint = Path(address)
+        if not endpoint.is_absolute():
+            raise ProtectedPathError("local bridge endpoint must be absolute")
+        directory = verify_owner_only_directory(endpoint.parent)
+        self._directory = directory
+        self.name = endpoint.name
+        self._lock_name = self.name + ".lock"
+        self.address = str(directory / self.name)
+        self._guard = guard_directory_ancestry(directory, boundary=directory)
+        self._directory_fd: int | None = None
+        self._lock_fd: int | None = None
+        try:
+            self._directory_fd = self._guard.duplicate_target_descriptor()
+            flags = os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK
+            flags |= getattr(os, "O_CLOEXEC", 0)
+            try:
+                # Darwin can return ENOENT when nonexclusive O_CREAT calls
+                # race. Create atomically, then open an existing lock without
+                # O_CREAT; all ownership and inode checks still follow below.
+                self._lock_fd = os.open(
+                    self._lock_name,
+                    flags | os.O_CREAT | os.O_EXCL,
+                    0o600,
+                    dir_fd=self._directory_fd,
+                )
+            except FileExistsError:
+                self._lock_fd = os.open(
+                    self._lock_name, flags, dir_fd=self._directory_fd
+                )
+            opened = os.fstat(self._lock_fd)
+            named = os.stat(
+                self._lock_name, dir_fd=self._directory_fd, follow_symlinks=False
+            )
+            if (
+                not stat.S_ISREG(opened.st_mode)
+                or opened.st_uid != os.getuid()
+                or stat.S_IMODE(opened.st_mode) != 0o600
+                or opened.st_nlink != 1
+                or not os.path.samestat(opened, named)
+            ):
+                raise ProtectedPathError("local bridge lock is not owner-only")
+            try:
+                fcntl.flock(self._lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError as exc:
+                raise FileExistsError("local bridge endpoint is in use") from exc
+            self.verify()
+            if not os.path.samestat(
+                opened,
+                os.stat(
+                    self._lock_name, dir_fd=self._directory_fd, follow_symlinks=False
+                ),
+            ):
+                raise ProtectedPathError("local bridge lock identity changed")
+        except BaseException:
+            self.close()
+            raise
+
+    def verify(self) -> None:
+        self._guard.verify()
+        verify_owner_only_directory(self._directory)
+        if self._directory_fd is None or self._lock_fd is None:
+            raise ProtectedPathError("local bridge endpoint lease is closed")
+        opened = os.fstat(self._lock_fd)
+        named = os.stat(
+            self._lock_name, dir_fd=self._directory_fd, follow_symlinks=False
+        )
+        if (
+            not os.path.samestat(opened, named)
+            or not stat.S_ISREG(opened.st_mode)
+            or opened.st_uid != os.getuid()
+            or stat.S_IMODE(opened.st_mode) != 0o600
+            or opened.st_nlink != 1
+        ):
+            raise ProtectedPathError("local bridge lock identity or protection changed")
+
+    def metadata(self) -> os.stat_result:
+        self.verify()
+        return os.stat(self.name, dir_fd=self._directory_fd, follow_symlinks=False)
+
+    @staticmethod
+    def validate_socket(metadata: os.stat_result) -> None:
+        if (
+            not stat.S_ISSOCK(metadata.st_mode)
+            or metadata.st_uid != os.getuid()
+            or stat.S_IMODE(metadata.st_mode) != 0o600
+            or metadata.st_nlink != 1
+        ):
+            raise ProtectedPathError(
+                "local bridge endpoint is not an owner-only socket"
+            )
+
+    def unlink_unchanged(self, expected: os.stat_result) -> None:
+        current = self.metadata()
+        if _socket_identity(current) != _socket_identity(expected):
+            raise ProtectedPathError("local bridge endpoint identity changed")
+        self.validate_socket(current)
+        os.unlink(self.name, dir_fd=self._directory_fd)
+
+    def reclaim_stale(self) -> None:
+        try:
+            existing = self.metadata()
+        except FileNotFoundError:
+            return
+        self.validate_socket(existing)
+        probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        try:
+            probe.settimeout(0.2)
+            result = probe.connect_ex(self.address)
+        finally:
+            probe.close()
+        if result != errno.ECONNREFUSED:
+            raise FileExistsError("local bridge endpoint is live or cannot be checked")
+        self.unlink_unchanged(existing)
+
+    def close(self) -> None:
+        try:
+            if self._lock_fd is not None:
+                os.close(self._lock_fd)
+                self._lock_fd = None
+        finally:
+            try:
+                if self._directory_fd is not None:
+                    os.close(self._directory_fd)
+                    self._directory_fd = None
+            finally:
+                self._guard.close()
+
+
+class _UnixBridgeListener:
+    """A listener whose cleanup cannot unlink a replacement pathname."""
+
+    def __init__(self, address: str, backlog: int) -> None:
+        self._lease = _UnixEndpointLease(address)
+        self._socket: socket.socket | None = None
+        self._identity: os.stat_result | None = None
+        try:
+            self._lease.reclaim_stale()
+            peer = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            self._socket = peer
+            self._lease.verify()
+            peer.bind(self._lease.address)
+            bound = self._lease.metadata()
+            os.chmod(
+                self._lease.address,
+                stat.S_IRUSR | stat.S_IWUSR,
+                follow_symlinks=False,
+            )
+            protected = self._lease.metadata()
+            if not os.path.samestat(bound, protected):
+                raise ProtectedPathError("local bridge endpoint identity changed")
+            self._lease.validate_socket(protected)
+            self._identity = protected
+            peer.listen(backlog)
+        except BaseException:
+            self.close()
+            raise
+
+    def accept(self) -> _LocalConnection:
+        if self._socket is None:
+            raise OSError("local bridge listener is closed")
+        peer, _ = self._socket.accept()
+        try:
+            peer.setblocking(True)
+            descriptor = peer.detach()
+            try:
+                return multiprocessing.connection.Connection(descriptor)
+            except Exception:
+                os.close(descriptor)
+                raise
+        finally:
+            peer.close()
+
+    def close(self) -> None:
+        try:
+            if self._socket is not None:
+                self._socket.close()
+                self._socket = None
+            if self._identity is not None:
+                try:
+                    self._lease.unlink_unchanged(self._identity)
+                except FileNotFoundError:
+                    pass
+                finally:
+                    self._identity = None
+        finally:
+            self._lease.close()
 
 
 class LocalBridgeServer:
@@ -594,7 +821,9 @@ class LocalBridgeServer:
         self._protocol = protocol
         self.address = address
         self._authkey = authkey
-        self._listener: multiprocessing.connection.Listener | None = None
+        self._listener: (
+            multiprocessing.connection.Listener | _UnixBridgeListener | None
+        ) = None
         self._thread: threading.Thread | None = None
         self._workers: list[threading.Thread] = []
         self._pending: queue.Queue[_LocalConnection | None] = queue.Queue(
@@ -619,30 +848,41 @@ class LocalBridgeServer:
             raise RuntimeError("local bridge is already running")
         family = "AF_PIPE" if sys.platform == "win32" else "AF_UNIX"
         if family == "AF_UNIX":
-            endpoint = Path(self.address)
-            if endpoint.exists() or endpoint.is_symlink():
-                raise FileExistsError("local bridge endpoint already exists")
-        self._listener = multiprocessing.connection.Listener(
-            self.address,
-            family=family,
-            backlog=BRIDGE_MAX_ACTIVE_REQUESTS + BRIDGE_MAX_QUEUED_REQUESTS,
-        )
-        if family == "AF_UNIX":
-            os.chmod(self.address, stat.S_IRUSR | stat.S_IWUSR)
-        self._thread = threading.Thread(
-            target=self._serve,
-            name="daem0nmcp-edit-bridge-ipc",
-            daemon=True,
-        )
-        self._thread.start()
-        for index in range(BRIDGE_MAX_ACTIVE_REQUESTS):
-            worker = threading.Thread(
-                target=self._work,
-                name=f"daem0nmcp-edit-bridge-ipc-{index}",
+            self._listener = _UnixBridgeListener(
+                self.address, BRIDGE_MAX_ACTIVE_REQUESTS + BRIDGE_MAX_QUEUED_REQUESTS
+            )
+        else:
+            self._listener = multiprocessing.connection.Listener(
+                self.address,
+                family=family,
+                backlog=BRIDGE_MAX_ACTIVE_REQUESTS + BRIDGE_MAX_QUEUED_REQUESTS,
+            )
+        try:
+            thread = threading.Thread(
+                target=self._serve,
+                name="daem0nmcp-edit-bridge-ipc",
                 daemon=True,
             )
-            self._workers.append(worker)
-            worker.start()
+            thread.start()
+            self._thread = thread
+            for index in range(BRIDGE_MAX_ACTIVE_REQUESTS):
+                worker = threading.Thread(
+                    target=self._work,
+                    name=f"daem0nmcp-edit-bridge-ipc-{index}",
+                    daemon=True,
+                )
+                worker.start()
+                self._workers.append(worker)
+        except BaseException:
+            self._stop.set()
+            if self._thread is not None:
+                self.close()
+            elif self._listener is not None:
+                try:
+                    self._listener.close()
+                finally:
+                    self._listener = None
+            raise
 
     def _serve(self) -> None:
         assert self._listener is not None
@@ -744,7 +984,9 @@ class LocalBridgeServer:
             self._thread.join(timeout=5)
             if self._thread.is_alive():
                 raise RuntimeError("local bridge did not stop")
-        if self._listener is not None:
+        if self._listener is not None and not isinstance(
+            self._listener, _UnixBridgeListener
+        ):
             self._listener.close()
         with self._active_lock:
             active = tuple(self._active)
@@ -764,9 +1006,12 @@ class LocalBridgeServer:
             worker.join(timeout=BRIDGE_IO_TIMEOUT_SECONDS + 1)
             if worker.is_alive():
                 raise RuntimeError("local bridge worker did not stop")
-        if sys.platform != "win32":
-            with suppress(FileNotFoundError):
-                Path(self.address).unlink()
+        if isinstance(self._listener, _UnixBridgeListener):
+            try:
+                self._listener.close()
+            finally:
+                self._listener = None
+                self._workers.clear()
 
 
 class LocalBridgeClient:

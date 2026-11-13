@@ -1,8 +1,10 @@
 """Tests for the Claude Code hook installer."""
 
 import json
+import os
 import shutil
 import ssl
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -61,6 +63,254 @@ class TestIsDevilEntry:
 
 
 class TestInstall:
+    @pytest.mark.parametrize("mode", ["off", "remind", "enforce"])
+    def test_explicit_automation_is_project_scoped(self, fake_settings, tmp_path, mode):
+        fake_settings.write_text('{"user_setting":"preserve"}', encoding="utf-8")
+        project = tmp_path / "project-mode"
+        project.mkdir()
+        local = project / ".claude" / "settings.local.json"
+        local.parent.mkdir()
+        local.write_text(
+            json.dumps(
+                {
+                    "env": {"OTHER_SETTING": "preserve"},
+                    "hooks": {
+                        "PreToolUse": [
+                            {
+                                "matcher": "Edit",
+                                "hooks": [
+                                    {"type": "command", "command": "custom-check"},
+                                    {
+                                        "type": "command",
+                                        "command": "python -m daem0nmcp.claude_hooks.pre_edit",
+                                    },
+                                ],
+                            }
+                        ]
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        ok, message = install_claude_hooks(
+            project_path=project,
+            automation=mode,
+            client_version="2.1.295",
+            bridge_config_root=tmp_path / "mode-host",
+        )
+        assert ok, message
+        assert fake_settings.read_text() == '{"user_setting":"preserve"}'
+        settings = json.loads(local.read_text())
+        assert settings["env"]["DAEM0NMCP_AUTOMATION_MODE"] == mode
+        assert settings["env"]["OTHER_SETTING"] == "preserve"
+        assert settings["hooks"]["PreToolUse"][0]["hooks"] == [
+            {"type": "command", "command": "custom-check"}
+        ]
+        assert ("DAEM0NMCP_EDIT_BRIDGE_CREDENTIAL_FILE" in settings["env"]) == (
+            mode == "enforce"
+        )
+        assert f"Automation: {mode}" in message
+
+    def test_enforce_prevalidates_project_settings_before_pairing(
+        self, fake_settings, tmp_path
+    ):
+        project = tmp_path / "bad-project"
+        local = project / ".claude" / "settings.local.json"
+        local.parent.mkdir(parents=True)
+        local.write_text('{"env": []}', encoding="utf-8")
+        host_root = tmp_path / "no-pairing"
+        ok, _message = install_claude_hooks(
+            project_path=project,
+            automation="enforce",
+            bridge_config_root=host_root,
+            client_version="2.1.295",
+        )
+        assert not ok
+        assert local.read_text() == '{"env": []}'
+        assert not host_root.exists()
+
+    @pytest.mark.parametrize("mode", ["off", "remind", "enforce"])
+    @pytest.mark.parametrize("linked", ["parent", "file"])
+    def test_explicit_automation_rejects_linked_project_settings(
+        self, fake_settings, tmp_path, mode, linked
+    ):
+        project = tmp_path / "project-link"
+        project.mkdir()
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        sentinel = outside / "settings.local.json"
+        sentinel.write_text('{"sentinel":"outside"}', encoding="utf-8")
+        try:
+            if linked == "parent":
+                (project / ".claude").symlink_to(outside, target_is_directory=True)
+            else:
+                (project / ".claude").mkdir()
+                (project / ".claude/settings.local.json").symlink_to(sentinel)
+        except OSError:
+            pytest.skip("platform does not permit creating symlinks")
+        host_root = tmp_path / "no-host-writes"
+        ok, message = install_claude_hooks(
+            project_path=project,
+            automation=mode,
+            client_version="2.1.295",
+            bridge_config_root=host_root,
+        )
+        assert not ok and "Nothing was changed" in message
+        assert sentinel.read_text() == '{"sentinel":"outside"}'
+        assert not host_root.exists()
+        assert not fake_settings.exists()
+
+    def test_explicit_project_directory_swap_before_publication_is_rejected(
+        self, fake_settings, tmp_path, monkeypatch
+    ):
+        from daem0nmcp import client_install
+
+        project = tmp_path / "swapped-project"
+        local = project / ".claude/settings.local.json"
+        local.parent.mkdir(parents=True)
+        baseline = '{"sentinel":"preserve"}'
+        local.write_text(baseline)
+        original_publish = client_install._publish
+
+        def swap_then_publish(*args, **kwargs):
+            local.parent.rename(project / "original-claude")
+            local.parent.mkdir()
+            local.write_text(baseline)
+            return original_publish(*args, **kwargs)
+
+        monkeypatch.setattr(client_install, "_publish", swap_then_publish)
+        ok, message = install_claude_hooks(project_path=project, automation="remind")
+        assert not ok and "changed" in message
+        assert local.read_text() == baseline
+        assert (project / "original-claude/settings.local.json").read_text() == baseline
+        assert not fake_settings.exists()
+
+    @pytest.mark.parametrize("version", [None, "2.1.274", "2.1.294", "invalid"])
+    def test_enforcement_requires_native_failure_blocking_support(
+        self, fake_settings, tmp_path, version
+    ):
+        project = tmp_path / "unsupported-client"
+        project.mkdir()
+        ok, message = install_claude_hooks(
+            project_path=project, automation="enforce", client_version=version
+        )
+        assert not ok and "UNSUPPORTED_AUTOMATION" in message
+        assert list(project.iterdir()) == []
+        assert not fake_settings.exists()
+
+    def test_enforcement_handlers_use_exec_form_and_native_failure_policy(
+        self, fake_settings, tmp_path
+    ):
+        from daem0nmcp.claude_hooks.install import _build_hook_definitions
+
+        definitions = _build_hook_definitions(enforcing=True)["hooks"]
+        for entry in definitions["PreToolUse"]:
+            handler = entry["hooks"][0]
+            assert handler["onFailure"] == "block"
+            assert handler["timeout"] == 10
+            assert handler["args"][:4] == ["-E", "-u", "-X", "utf8"]
+        legacy = _build_hook_definitions()["hooks"]["PreToolUse"][0]["hooks"][0]
+        assert "onFailure" not in legacy and "args" not in legacy
+
+    def test_enforcement_exec_launch_ignores_project_and_pythonpath_shadows(
+        self, fake_settings, tmp_path
+    ):
+        from daem0nmcp.claude_hooks.install import _build_hook_definitions
+
+        project = tmp_path / "shadow-project"
+        shadow = project / "daem0nmcp"
+        shadow.mkdir(parents=True)
+        (project / ".daem0nmcp").mkdir()
+        marker = project / "executed-shadow"
+        payload = (
+            f"from pathlib import Path; Path({str(marker)!r}).write_text('executed')"
+        )
+        (shadow / "__init__.py").write_text(payload)
+        (project / "sitecustomize.py").write_text(payload)
+        handler = _build_hook_definitions(enforcing=True)["hooks"]["PreToolUse"][0][
+            "hooks"
+        ][0]
+        environment = {
+            **os.environ,
+            "PYTHONPATH": str(project),
+            "DAEM0NMCP_AUTOMATION_MODE": "enforce",
+        }
+        environment.pop("DAEM0NMCP_EDIT_BRIDGE_CREDENTIAL_FILE", None)
+        completed = subprocess.run(
+            [handler["command"], *handler["args"]],
+            input=json.dumps(
+                {
+                    "cwd": str(project),
+                    "session_id": "shadow-probe",
+                    "tool_use_id": "edit-probe",
+                    "tool_name": "Write",
+                    "tool_input": {
+                        "file_path": str(project / "new.py"),
+                        "content": "x",
+                    },
+                }
+            ),
+            text=True,
+            capture_output=True,
+            cwd=project,
+            env=environment,
+            timeout=15,
+        )
+        assert completed.returncode == 2
+        assert "EDIT_BRIDGE_UNAVAILABLE" in completed.stderr
+        assert not marker.exists()
+
+    @pytest.mark.parametrize("mode", ["remind", "enforce"])
+    def test_explicit_project_uninstall_preserves_global_and_sibling_hooks(
+        self, fake_settings, tmp_path, mode
+    ):
+        baseline = '{"hooks":{"Stop":[{"hooks":[{"command":"global-custom"}]}]}}'
+        fake_settings.write_text(baseline)
+        project = tmp_path / "remove-project"
+        project.mkdir()
+        ok, message = install_claude_hooks(
+            project_path=project,
+            automation=mode,
+            client_version="2.1.295",
+            bridge_config_root=tmp_path / "remove-host",
+        )
+        assert ok, message
+        local = project / ".claude/settings.local.json"
+        settings = json.loads(local.read_text())
+        settings["hooks"]["PreToolUse"][0]["hooks"].append({"command": "local-custom"})
+        settings["env"]["KEEP"] = "yes"
+        local.write_text(json.dumps(settings))
+        ok, message = uninstall_claude_hooks(project_path=project)
+        assert ok, message
+        assert fake_settings.read_text() == baseline
+        settings = json.loads(local.read_text())
+        assert settings["env"] == {"KEEP": "yes"}
+        assert settings["hooks"] == {
+            "PreToolUse": [
+                {
+                    "matcher": "Edit|Write|NotebookEdit",
+                    "hooks": [{"command": "local-custom"}],
+                }
+            ]
+        }
+
+    def test_unpaired_project_reminder_uninstall_preserves_existing_storage_env(
+        self, fake_settings, tmp_path
+    ):
+        project = tmp_path / "unpaired-reminder"
+        local = project / ".claude/settings.local.json"
+        local.parent.mkdir(parents=True)
+        expected = {
+            "DAEM0NMCP_PROJECT_ROOT": "user-selected-root",
+            "DAEM0NMCP_STORAGE_PATH": "user-selected-storage",
+            "DAEM0NMCP_EDIT_BRIDGE_MODE": "user-selected-mode",
+        }
+        local.write_text(json.dumps({"env": expected}))
+        assert install_claude_hooks(project_path=project, automation="remind")[0]
+        ok, message = uninstall_claude_hooks(project_path=project)
+        assert ok, message
+        assert json.loads(local.read_text())["env"] == expected
+
     def test_fresh_settings(self, fake_settings):
         ok, msg = install_claude_hooks()
         assert ok

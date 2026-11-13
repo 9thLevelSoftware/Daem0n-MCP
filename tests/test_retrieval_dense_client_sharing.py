@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import gc
 import hashlib
 import importlib.util
 import math
@@ -946,6 +947,15 @@ class EmbeddedQdrantTests(_DenseRuntimeCase):
         foreign.close()
         self.assertEqual(("succeeded", None), (await self._drain())["dense"])
         self.assertEqual(("ready", None, 2), await self._dense(service))
+
+        service.close()
+        # Qdrant loads collection SQLite connections before taking its folder
+        # lock. Failed constructors can survive in exception traceback cycles;
+        # collect those after closing the clients we own, before removing the
+        # fixture. This does not assert immediate dependency cleanup on failure.
+        gc.collect()
+        shutil.rmtree(self.folder)
+        self.assertFalse(self.folder.exists())
 
     def test_shared_handle_deletion_closes_collection_persistence_first(self):
         from qdrant_client import models

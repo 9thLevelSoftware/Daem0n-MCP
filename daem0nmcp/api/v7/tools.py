@@ -1062,6 +1062,9 @@ class ToolDescriptor(WireModel):
     open_world: bool
     listed: bool
     input_schema: JsonObject
+    gateway_tool: Literal["daem0n_tool_call"] = "daem0n_tool_call"
+    gateway_workspace_id_location: Literal["top_level"] = "top_level"
+    gateway_arguments_schema: JsonObject | None = None
 
 
 class ToolsSearchInput(WireModel):
@@ -1076,7 +1079,14 @@ class ToolsSearchData(WireModel):
 class ToolCallInput(WireModel):
     workspace_id: WorkspaceId
     tool: ToolName
-    arguments: UserJsonObject = Field(default_factory=dict)
+    arguments: UserJsonObject = Field(
+        default_factory=dict,
+        description=(
+            "Follow the discovered gateway_arguments_schema. Preserve JSON types: "
+            "integers are numbers, not quoted strings or null. Do not put "
+            "workspace_id here; it belongs at the top level."
+        ),
+    )
 
 
 class ToolCallData(WireModel):
@@ -1426,9 +1436,18 @@ class SandboxExecutePythonInput(WireModel):
 
 class CodeIndexInput(WireModel):
     workspace_id: WorkspaceId
-    relative_root: RelativePath = "."
+    relative_root: RelativePath = Field(
+        default=".",
+        description="Directory relative to the workspace; patterns are matched inside this root.",
+    )
     patterns: list[RelativePath] = Field(
-        default_factory=lambda: ["**/*"], min_length=1, max_length=32
+        default_factory=lambda: ["**/*"],
+        min_length=1,
+        max_length=32,
+        description=(
+            "Globs relative to relative_root. For relative_root='src', use "
+            "'**/*.py', not 'src/**/*.py'."
+        ),
     )
     force: bool = False
 
@@ -1439,8 +1458,18 @@ class CodeSearchInput(WireModel):
         UserText,
         StringConstraints(strict=True, min_length=1, max_length=2000),
     ]
-    cursor: Cursor | None = None
-    limit: Annotated[int, Field(ge=1, le=100)] = 20
+    cursor: Cursor | None = Field(
+        default=None,
+        description="Omit on the first page; use only a next_cursor returned by this search.",
+    )
+    limit: Annotated[
+        int,
+        Field(
+            ge=1,
+            le=100,
+            description="JSON integer from 1 through 100; omit for 20. Do not quote numbers or pass null.",
+        ),
+    ] = 20
     entity_kinds: CodeEntityKindSet | None = None
 
 
@@ -1448,7 +1477,14 @@ class CodeImpactAnalyzeInput(WireModel):
     workspace_id: WorkspaceId
     code_entity_id: CodeEntityId | None = None
     qualified_name: UserNameText | None = None
-    max_depth: Annotated[int, Field(ge=1, le=10)] = 3
+    max_depth: Annotated[
+        int,
+        Field(
+            ge=1,
+            le=10,
+            description="JSON integer from 1 through 10; omit for 3. Do not quote numbers or pass null.",
+        ),
+    ] = 3
 
     @model_validator(mode="after")
     def validate_selector(self) -> CodeImpactAnalyzeInput:
@@ -2282,10 +2318,11 @@ _TOOL_TEXT: Mapping[str, tuple[str, str]] = MappingProxyType(
     {
         "session_brief": (
             "Session Briefing",
-            "Start or refresh the session: returns workspace statistics, recent "
-            "decisions, warnings, failed approaches, applicable rules, active "
-            "context and git changes, and marks the session briefed. Read-only; "
-            "untrusted scanned or ingested text is withheld.",
+            "Read full workspace context: warnings, failures, decisions and rules; "
+            "marks session briefed. Optional in guided mode; memory_recall briefs "
+            "automatically. Use when requested or required by strict mode. Respect "
+            "task order. Requires workspace_id; never {}. Read-only; untrusted "
+            "ingested text withheld.",
         ),
         "session_updates_get": (
             "Get Session Updates",
@@ -2432,24 +2469,25 @@ _TOOL_TEXT: Mapping[str, tuple[str, str]] = MappingProxyType(
         ),
         "system_health": (
             "System Health",
-            "Check that the server is healthy: package, API and storage "
-            "versions, supported transports, task support, authentication mode, "
-            "the state of each optional capability and dreaming. Read-only and "
-            "never gated.",
+            "Optional diagnostics to check whether the server is healthy: "
+            "versions, transports, tasks, authentication, capabilities and "
+            "dreaming. Use within the task's allowed operations when requested "
+            "or investigating a failure; not a prerequisite for memory or code tools. "
+            "Read-only and never gated.",
         ),
         "daem0n_tools_search": (
             "Search Tools",
             "Find tools by what they do. Returns up to 10 matches with each "
-            "tool's description, gate level, safety hints, input schema and "
-            "whether it is listed directly. Call an unlisted match through "
-            "daem0n_tool_call.",
+            "tool's description, safety hints, direct input_schema and separate "
+            "gateway_arguments_schema. Call an unlisted match using gateway_tool, "
+            "with workspace_id outside arguments. Preserve JSON value types.",
         ),
         "daem0n_tool_call": (
             "Call a Tool by Name",
-            "Call any registered tool found with daem0n_tools_search, passing "
-            "its name and arguments, and relay its result or guidance. It does "
-            "whatever the target does, so it can be destructive or reach the "
-            "network.",
+            "Call a discovered tool. Put workspace_id at the top level and use "
+            "the match's gateway_arguments_schema for arguments; never repeat "
+            "workspace_id inside arguments. Relays results or guidance and can "
+            "be destructive or access the network.",
         ),
         "active_context_list": (
             "List Active Context",
@@ -2510,15 +2548,16 @@ _TOOL_TEXT: Mapping[str, tuple[str, str]] = MappingProxyType(
         "code_search": (
             "Search Code Entities",
             "Find indexed code entities such as classes, functions and methods "
-            "whose name or file path contains the query, in pages. Needs a "
-            "code_index run first. Read-only.",
+            "whose name or file path contains the query. Reads the persisted "
+            "index across sessions; index only if absent or source changed. "
+            "Omit cursor on the first page. Read-only.",
         ),
         "code_impact_analyze": (
             "Analyze Code Impact",
             "Show what breaks if you change a function, class, method or other "
             "code entity: lists everything that depends on it, such as what "
             "calls, imports or inherits it, directly or through others up to "
-            "max_depth, with the paths. Needs a code_index run first.",
+            "max_depth, with the paths. Reads the persisted code index.",
         ),
         "code_todos_scan": (
             "Scan for TODO Comments",

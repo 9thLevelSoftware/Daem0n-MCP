@@ -40,6 +40,7 @@ _BRIDGE_ENV_KEYS = (
     "DAEM0NMCP_EDIT_BRIDGE_RUNTIME_DIR",
     "DAEM0NMCP_EDIT_BRIDGE_MODE",
     "DAEM0NMCP_EDIT_HOST_WORKSPACE_BINDING_FILE",
+    "DAEM0NMCP_AUTOMATION_MODE",
 )
 # General Daem0n keys that pairing also sets; removed only from paired projects.
 _SHARED_ENV_KEYS = ("DAEM0NMCP_PROJECT_ROOT", "DAEM0NMCP_STORAGE_PATH")
@@ -60,12 +61,18 @@ def _read_json_object(path: Path) -> dict[str, Any]:
     return value
 
 
-def _read_settings() -> dict[str, Any]:
+def _read_settings(path: Path | None = None) -> dict[str, Any]:
     """Read ``~/.claude/settings.json``; raise ValueError rather than lose it."""
-    path = _settings_path()
+    path = _settings_path() if path is None else path
     if not path.exists():
         return {}
     settings = _read_json_object(path)
+    return _validated_settings(settings, path)
+
+
+def _validated_settings(settings: Any, path: Path) -> dict[str, Any]:
+    if not isinstance(settings, dict):
+        raise ValueError(f"{path} must contain a JSON object")
     hooks = settings.get("hooks", {})
     if not isinstance(hooks, dict) or not all(
         isinstance(entries, list) for entries in hooks.values()
@@ -74,8 +81,8 @@ def _read_settings() -> dict[str, Any]:
     return settings
 
 
-def _write_settings(data: dict[str, Any]) -> None:
-    path = _settings_path()
+def _write_settings(data: dict[str, Any], path: Path | None = None) -> None:
+    path = _settings_path() if path is None else path
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
 
@@ -85,6 +92,12 @@ def _is_daem0n_entry(entry: dict) -> bool:
     hooks = entry.get("hooks") if isinstance(entry, dict) else None
     for hook in hooks if isinstance(hooks, list) else []:
         cmd = hook.get("command") if isinstance(hook, dict) else None
+        args = hook.get("args") if isinstance(hook, dict) else None
+        if isinstance(args, list) and any(
+            isinstance(arg, str) and "run_module('daem0nmcp.claude_hooks." in arg
+            for arg in args
+        ):
+            return True
         if not isinstance(cmd, str):
             continue
         if "daem0nmcp.claude_hooks" in cmd:
@@ -98,6 +111,21 @@ def _is_daem0n_entry(entry: dict) -> bool:
         ):
             return True
     return False
+
+
+def _preserved_entries(entries: list[Any]) -> list[Any]:
+    """Remove owned commands without dropping unrelated commands in an entry."""
+    preserved = []
+    for entry in entries:
+        if not _is_daem0n_entry(entry):
+            preserved.append(entry)
+            continue
+        hooks = [
+            hook for hook in entry["hooks"] if not _is_daem0n_entry({"hooks": [hook]})
+        ]
+        if hooks:
+            preserved.append({**entry, "hooks": hooks})
+    return preserved
 
 
 def module_launch_args(module: str) -> list[str]:
@@ -118,7 +146,7 @@ def _module_switch_commands(entry: object) -> int:
     )
 
 
-def _build_hook_definitions() -> dict[str, Any]:
+def _build_hook_definitions(*, enforcing: bool = False) -> dict[str, Any]:
     """Build the hook definitions using the current Python interpreter."""
     python = sys.executable
     # Quote the path for safety (spaces in Windows paths)
@@ -130,7 +158,7 @@ def _build_hook_definitions() -> dict[str, Any]:
         # plain double quotes are enough for sh, bash and cmd.exe alike.
         return f'{q} {flag} "{code}"'
 
-    return {
+    definitions = {
         "hooks": {
             "PreToolUse": [
                 {
@@ -207,6 +235,25 @@ def _build_hook_definitions() -> dict[str, Any]:
             ],
         }
     }
+    if enforcing:
+        for event_name, entries in definitions["hooks"].items():
+            for entry in entries:
+                for handler in entry["hooks"]:
+                    matched = re.search(r"run_module\('([^']+)'", handler["command"])
+                    if matched is None:
+                        raise ValueError("managed hook launch module is unavailable")
+                    handler["command"] = python
+                    handler["args"] = [
+                        "-E",
+                        "-u",
+                        "-X",
+                        "utf8",
+                        *module_launch_args(matched.group(1)),
+                    ]
+                    handler["timeout"] = 10
+                    if event_name == "PreToolUse":
+                        handler["onFailure"] = "block"
+    return definitions
 
 
 def _configure_project_bridge(
@@ -229,6 +276,8 @@ def install_claude_hooks(
     *,
     project_path: str | Path | None = None,
     enable_edit_bridge: bool | None = None,
+    automation: str | None = None,
+    client_version: str | None = None,
     bridge_config_root: Path | None = None,
     remote_workspace_id: str | None = None,
     remote_credential_path: str | Path | None = None,
@@ -244,14 +293,66 @@ def install_claude_hooks(
 
     Returns (success, message).
     """
+    if automation not in {None, "off", "remind", "enforce"}:
+        return False, "Choose automation off, remind, or enforce. Nothing was changed."
+    if automation is not None and project_path is None:
+        return (
+            False,
+            "Explicit automation requires a project path. Nothing was changed.",
+        )
+    if automation == "enforce":
+        version = re.fullmatch(r"(\d+)\.(\d+)\.(\d+)", client_version or "")
+        if version is None or tuple(map(int, version.groups())) < (2, 1, 295):
+            return (
+                False,
+                "UNSUPPORTED_AUTOMATION: Claude edit enforcement requires an observed "
+                "--client-version 2.1.295 or later with onFailure=block support. "
+                "Use --automation remind on older clients. Nothing was changed.",
+            )
+    project_snapshot = None
     try:
-        settings = _read_settings()
-    except ValueError as exc:
+        if automation is not None:
+            # Preserve the unresolved path until links/reparse ancestry have
+            # been rejected. Resolving first would hide a linked project root.
+            reject_linked_ancestry(Path(project_path))
+        project_root = (
+            None if project_path is None else Path(project_path).resolve(strict=True)
+        )
+        target_settings = (
+            project_root / ".claude" / "settings.local.json"
+            if automation is not None and project_root is not None
+            else _settings_path()
+        )
+        if automation is None:
+            settings = _read_settings(target_settings)
+        else:
+            # Reuse the multi-client installer's bounded no-follow snapshot and
+            # anchored publisher, including checks for changes before commit.
+            from ..client_install import _read
+
+            project_snapshot = _read(target_settings)
+            value = (
+                {}
+                if project_snapshot.data is None
+                else json.loads(project_snapshot.data.decode("utf-8-sig"))
+            )
+            settings = _validated_settings(value, target_settings)
+    except (OSError, ValueError) as exc:
         return False, f"{exc}; fix or move it and retry. Nothing was changed."
-    new_defs = _build_hook_definitions()
-    project_root = (
-        None if project_path is None else Path(project_path).resolve(strict=True)
+    new_defs = (
+        {"hooks": {}}
+        if automation == "off"
+        else _build_hook_definitions(enforcing=automation == "enforce")
     )
+    if automation == "enforce":
+        new_defs["hooks"]["PostToolUseFailure"] = [
+            {
+                **entry,
+                "hooks": [dict(hook) for hook in entry["hooks"]],
+            }
+            for entry in new_defs["hooks"]["PostToolUse"]
+            if entry["matcher"] == "Edit|Write|NotebookEdit"
+        ]
     should_pair_bridge = (
         enable_edit_bridge
         if enable_edit_bridge is not None
@@ -267,6 +368,15 @@ def install_claude_hooks(
             )
         )
     )
+    if automation == "enforce":
+        should_pair_bridge = True
+    elif automation in {"off", "remind"}:
+        should_pair_bridge = False
+    if automation is not None:
+        environment = settings.setdefault("env", {})
+        if not isinstance(environment, dict):
+            return False, "Project env settings must be an object. Nothing was changed."
+        environment["DAEM0NMCP_AUTOMATION_MODE"] = automation
     installation = None
     if project_root is not None and should_pair_bridge and not dry_run:
         try:
@@ -279,9 +389,13 @@ def install_claude_hooks(
                 remote_ca_file=remote_ca_file,
                 remote_origin=remote_origin,
             )
-            project_settings = _configure_project_bridge(
-                project_root, installation.environment()
-            )
+            if automation is None:
+                project_settings = _configure_project_bridge(
+                    project_root, installation.environment()
+                )
+            else:
+                settings["env"].update(installation.environment())
+                project_settings = target_settings
         except (OSError, ValueError, json.JSONDecodeError) as exc:
             return False, f"Edit bridge pairing failed: {exc}"
 
@@ -295,7 +409,7 @@ def install_claude_hooks(
     # First remove all Daem0n / legacy entries from every event. This cleans up
     # deprecated events (e.g. older SessionStart installs) on upgrade.
     for event in list(hooks_section.keys()):
-        filtered = [e for e in hooks_section[event] if not _is_daem0n_entry(e)]
+        filtered = _preserved_entries(hooks_section[event])
         if filtered:
             hooks_section[event] = filtered
         else:
@@ -315,18 +429,41 @@ def install_claude_hooks(
     )
     if dry_run:
         formatted = json.dumps(settings, indent=2)
-        message = f"[dry-run] Would write to {_settings_path()}:\n{formatted}"
+        message = f"[dry-run] Would write to {target_settings}:\n{formatted}"
         if replaced:
             message += f"\nWould replace{replaced_note}"
         return True, message
 
     try:
-        _write_settings(settings)
-    except OSError as exc:
-        return False, f"Failed to write settings: {exc}"
+        if project_snapshot is None:
+            _write_settings(settings, target_settings)
+        else:
+            from ..client_install import _Plan, _publish
+
+            _publish(
+                project_root,
+                [
+                    _Plan(
+                        project_snapshot,
+                        (json.dumps(settings, indent=2) + "\n").encode("utf-8"),
+                    )
+                ],
+                [project_snapshot],
+            )
+    except (OSError, ValueError) as exc:
+        message = f"Failed to write settings: {exc}"
+        if installation is not None:
+            message += f"\nPrepared bridge credential: {installation.credential_path}"
+        return False, message
 
     events = ", ".join(sorted(new_defs["hooks"]))
-    message = f"Installed Daem0n hooks for: {events}\nSettings: {_settings_path()}"
+    message = (
+        f"Installed Daem0n hooks for: {events or 'none'}\nSettings: {target_settings}"
+    )
+    if automation is not None:
+        message += f"\nAutomation: {automation}; covered native tools: " + (
+            "none" if automation == "off" else "Edit, Write, NotebookEdit"
+        )
     if replaced:
         message += f"\nReplaced{replaced_note}"
     if installation is not None:
@@ -353,6 +490,78 @@ def _strip_pairing_env(path: Path) -> dict[str, Any] | None:
     return value
 
 
+def _uninstall_project_automation(
+    project_path: str | Path,
+    *,
+    dry_run: bool,
+    remove_credentials: bool,
+    bridge_config_root: Path | None,
+) -> tuple[bool, str] | None:
+    """Remove an explicit project install using the same protected publication."""
+    from ..client_install import _Plan, _publish, _read
+
+    try:
+        reject_linked_ancestry(project_path)
+        root = Path(project_path).resolve(strict=False)
+        if not root.is_dir():
+            return None
+        path = root / ".claude" / "settings.local.json"
+        snapshot = _read(path)
+        if snapshot.data is None:
+            return None
+        settings = _validated_settings(
+            json.loads(snapshot.data.decode("utf-8-sig")), path
+        )
+        environment = settings.get("env", {})
+        if not isinstance(environment, dict):
+            raise ValueError("project-local Claude env settings must be an object")
+        hooks = settings.get("hooks", {})
+        explicit = "DAEM0NMCP_AUTOMATION_MODE" in environment or any(
+            _is_daem0n_entry(entry) for entries in hooks.values() for entry in entries
+        )
+        if not explicit:
+            return None
+        for event, entries in list(hooks.items()):
+            kept = _preserved_entries(entries)
+            if kept:
+                hooks[event] = kept
+            else:
+                hooks.pop(event)
+        paired = _PAIRING_MARKER in environment
+        environment.pop("DAEM0NMCP_AUTOMATION_MODE", None)
+        if paired:
+            for key in _BRIDGE_ENV_KEYS + _SHARED_ENV_KEYS:
+                environment.pop(key, None)
+        if not environment:
+            settings.pop("env", None)
+        if not hooks:
+            settings.pop("hooks", None)
+        directories = []
+        if remove_credentials:
+            _, _, *layout = local_bridge_layout(root, bridge_config_root)
+            directories = [directory for directory in layout if directory.is_dir()]
+        if not dry_run:
+            _publish(
+                root,
+                [_Plan(snapshot, (json.dumps(settings, indent=2) + "\n").encode())],
+                [snapshot],
+            )
+        prefix = "[dry-run] Would remove" if dry_run else "Removed"
+        message = f"{prefix} project Daem0n automation from {path}"
+        for directory in directories:
+            reject_linked_ancestry(directory)
+            if not dry_run:
+                shutil.rmtree(directory)
+            message += f"\n{prefix} {directory}"
+        return True, message
+    except json.JSONDecodeError:
+        # Preserve the legacy uninstaller's reported partial cleanup for an
+        # unreadable project document; the safe snapshot already rejected links.
+        return None
+    except (OSError, ValueError) as exc:
+        return False, f"Project automation removal failed: {exc}"
+
+
 def uninstall_claude_hooks(
     dry_run: bool = False,
     *,
@@ -371,6 +580,15 @@ def uninstall_claude_hooks(
     Returns (success, message); the message lists everything that was done,
     including after a partial failure.
     """
+    if project_path is not None:
+        project_result = _uninstall_project_automation(
+            project_path,
+            dry_run=dry_run,
+            remove_credentials=remove_credentials,
+            bridge_config_root=bridge_config_root,
+        )
+        if project_result is not None:
+            return project_result
     try:
         settings = _read_settings()
     except ValueError as exc:
@@ -409,7 +627,7 @@ def uninstall_claude_hooks(
     removed_events: list[str] = []
     for event in list(hooks_section.keys()):
         entries = hooks_section[event]
-        filtered = [e for e in entries if not _is_daem0n_entry(e)]
+        filtered = _preserved_entries(entries)
         if len(filtered) < len(entries):
             removed_events.append(event)
         if filtered:
@@ -462,6 +680,8 @@ if __name__ == "__main__":
     parser.add_argument("--uninstall", action="store_true", help="Remove hooks")
     parser.add_argument("--dry-run", action="store_true", help="Show what would change")
     parser.add_argument("--project-path", default=".", help="Project root")
+    parser.add_argument("--automation", choices=("off", "remind", "enforce"))
+    parser.add_argument("--client-version", help="Observed Claude Code version")
     parser.add_argument(
         "--enable-edit-bridge",
         action="store_true",
@@ -486,6 +706,8 @@ if __name__ == "__main__":
             dry_run=args.dry_run,
             project_path=args.project_path,
             enable_edit_bridge=True if args.enable_edit_bridge else None,
+            automation=args.automation,
+            client_version=args.client_version,
             remote_workspace_id=args.remote_workspace_id,
             remote_credential_path=args.remote_credential_file,
             remote_base_url=args.remote_url,
