@@ -213,6 +213,33 @@ def test_simultaneous_startup_has_exactly_one_live_owner(socket_tmp_path):
         winner.close()
 
 
+@pytest.mark.parametrize("existing_lock", [False, True])
+def test_lock_creation_avoids_nonexclusive_create_race(
+    socket_tmp_path, monkeypatch, existing_lock
+):
+    address = socket_tmp_path / "create-race.sock"
+    lock = address.with_name(address.name + ".lock")
+    if existing_lock:
+        lock.write_bytes(b"")
+        lock.chmod(0o600)
+    original_open = os.open
+
+    def darwin_open(path, flags, *args, **kwargs):
+        if path == lock.name and flags & os.O_CREAT and not flags & os.O_EXCL:
+            # Darwin can report ENOENT when two nonexclusive creates race.
+            raise FileNotFoundError(errno.ENOENT, "concurrent lock creation", path)
+        return original_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(os, "open", darwin_open)
+    server = _server(address)
+    server.start()
+    try:
+        assert _call(address).status == 200
+        assert stat.S_IMODE(lock.stat().st_mode) == 0o600
+    finally:
+        server.close()
+
+
 @pytest.mark.parametrize("kind", ["symlink", "directory", "open-mode", "hard-link"])
 def test_unsafe_lock_does_not_remove_existing_endpoint(socket_tmp_path, kind):
     address = socket_tmp_path / "lock-unsafe.sock"

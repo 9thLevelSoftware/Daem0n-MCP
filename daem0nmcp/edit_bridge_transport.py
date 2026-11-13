@@ -631,11 +631,22 @@ class _UnixEndpointLease:
         self._lock_fd: int | None = None
         try:
             self._directory_fd = self._guard.duplicate_target_descriptor()
-            flags = os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK
+            flags = os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK
             flags |= getattr(os, "O_CLOEXEC", 0)
-            self._lock_fd = os.open(
-                self._lock_name, flags, 0o600, dir_fd=self._directory_fd
-            )
+            try:
+                # Darwin can return ENOENT when nonexclusive O_CREAT calls
+                # race. Create atomically, then open an existing lock without
+                # O_CREAT; all ownership and inode checks still follow below.
+                self._lock_fd = os.open(
+                    self._lock_name,
+                    flags | os.O_CREAT | os.O_EXCL,
+                    0o600,
+                    dir_fd=self._directory_fd,
+                )
+            except FileExistsError:
+                self._lock_fd = os.open(
+                    self._lock_name, flags, dir_fd=self._directory_fd
+                )
             opened = os.fstat(self._lock_fd)
             named = os.stat(
                 self._lock_name, dir_fd=self._directory_fd, follow_symlinks=False
