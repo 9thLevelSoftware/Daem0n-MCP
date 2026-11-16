@@ -23,7 +23,7 @@ classifiers = [
 ]
 
 dependencies = [
-    "fastmcp==3.4.7",
+    "fastmcp==4.1.8",
     "sqlalchemy>=2.0.0",
     "aiosqlite>=0.19.0",
     "greenlet>=3.0.0",  # Required for SQLAlchemy async
@@ -34,7 +34,7 @@ dependencies = [
 
 [project.optional-dependencies]
 tasks = [
-    "fastmcp[tasks]==3.4.7",
+    "fastmcp[tasks]==4.1.8",
 ]
 local = [
     "qdrant-client>=1.7.0",
