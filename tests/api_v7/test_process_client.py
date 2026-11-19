@@ -153,7 +153,7 @@ async def test_production_ritual_and_restart(initialized_workspace, transport):
         )
         await _recall_until_visible(session, recall_arguments, record_id)
         templates = await session.list_resource_templates()
-        assert len(templates.resourceTemplates) >= 4
+        assert len(templates.resource_templates) >= 4
         resource = await session.read_resource(
             f"memory://workspaces/{workspace.workspace_id}/warnings"
         )

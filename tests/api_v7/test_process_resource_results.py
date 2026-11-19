@@ -41,11 +41,11 @@ async def test_resource_reads_return_the_declared_json_mime_type(
     workspace = initialized_workspace
     scope = {"workspace_id": workspace.workspace_id}
     async with process_client(workspace.root, transport) as session:
-        templates = (await session.list_resource_templates()).resourceTemplates
+        templates = (await session.list_resource_templates()).resource_templates
         declared = {
-            template.uriTemplate: template.mimeType
+            template.uri_template: template.mime_type
             for template in templates
-            if template.uriTemplate.startswith("memory://")
+            if template.uri_template.startswith("memory://")
         }
         assert set(declared.values()) == {"application/json"}
         assert len(declared) == len(RESOURCE_KINDS)
@@ -55,7 +55,7 @@ async def test_resource_reads_return_the_declared_json_mime_type(
             uri = f"memory://workspaces/{workspace.workspace_id}/{kind}"
             result = await session.read_resource(uri)
             [content] = result.contents
-            assert content.mimeType == "application/json", kind
+            assert content.mime_type == "application/json", kind
             assert str(content.uri) == uri
             document = json.loads(content.text)
             assert document["workspace_id"] == workspace.workspace_id

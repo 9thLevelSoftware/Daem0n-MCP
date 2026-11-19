@@ -671,6 +671,7 @@ def _install_task_protocol(
     if list_entry is None:
         raise FastMCPCompatibilityError("the MCP list_tools handler is unavailable")
     original_list_tools = list_entry.handler
+
     def resolve_task_scope(task_id: str, principal: str, session: str) -> Any:
         try:
             return dispatcher.task_scope(task_id, principal, session)
@@ -878,7 +879,9 @@ def _install_task_protocol(
                 tool.execution = mcp.types.ToolExecution(task_support="optional")
         return result
 
-    low_level.add_request_handler("tools/list", list_entry.params_type, handle_list_tools)
+    low_level.add_request_handler(
+        "tools/list", list_entry.params_type, handle_list_tools
+    )
     low_level.add_request_handler("tools/call", call_entry.params_type, handle_call)
     low_level.add_request_handler(
         "tasks/get", mcp.types.GetTaskRequestParams, handle_get

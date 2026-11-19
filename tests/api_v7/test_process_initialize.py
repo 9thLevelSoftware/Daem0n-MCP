@@ -45,7 +45,8 @@ async def test_no_list_changed_notifications_are_advertised(
     # The registry is fixed for the life of the process, so the server never
     # sends a list-changed notification and must not promise one.
     async with process_client(initialized_workspace.root, transport) as session:
-        capabilities = session.get_server_capabilities()
+        capabilities = session.server_capabilities
+        assert capabilities is not None
         assert capabilities.tools is not None
         assert capabilities.resources is not None
         for name in ("tools", "resources", "prompts"):

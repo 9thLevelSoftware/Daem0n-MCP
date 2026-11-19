@@ -78,7 +78,7 @@ async def test_production_dashboard_shells_are_discoverable_and_readable(
         assert expected <= listed
         templates = await session.list_resource_templates()
         assert {
-            str(template.uriTemplate) for template in templates.resourceTemplates
+            str(template.uri_template) for template in templates.resource_templates
         } == {
             "memory://workspaces/{workspace_id}/warnings",
             "memory://workspaces/{workspace_id}/failures",

@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Daem0n-MCP | Eternal Memory for AI Agents</title>
-    <meta name="description" content="Bind your AI with persistent memory. Daem0n-MCP grants Claude Code the power to remember decisions, learn from failures, and accumulate wisdom across sessions.">
+    <meta name="description" content="Bind your AI coding agents with persistent, event-sourced memory. Daem0n-MCP v7 grants Claude Code, Codex, Antigravity CLI, OpenCode, Oh My Pi, and Pi the power to remember decisions, verify code bindings, and learn from outcomes across sessions.">
     <link rel="icon" type="image/x-icon" href="favicon.ico">
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -427,15 +427,129 @@
         /* Memory types */
         .memory-types {
             display: grid;
-            grid-template-columns: repeat(2, 1fr);
+            grid-template-columns: repeat(3, 1fr);
             gap: 1rem;
             margin-top: 1.5rem;
+        }
+
+        @media (max-width: 768px) {
+            .memory-types {
+                grid-template-columns: repeat(2, 1fr);
+            }
         }
 
         @media (max-width: 600px) {
             .memory-types {
                 grid-template-columns: 1fr;
             }
+        }
+
+        /* Inline code & prose notes */
+        p code,
+        li code,
+        td code {
+            font-family: 'Courier New', monospace;
+            font-size: 0.88em;
+            color: var(--bone);
+            background: rgba(139, 0, 0, 0.14);
+            border: 1px solid rgba(139, 0, 0, 0.28);
+            border-radius: 4px;
+            padding: 0.08rem 0.35rem;
+        }
+
+        .section-note {
+            max-width: 760px;
+            margin: 1rem auto 0;
+            color: var(--ash);
+            font-size: 0.98rem;
+            text-align: center;
+        }
+
+        .section-note a,
+        .grimoire-sublinks a {
+            color: var(--gold-dim);
+            text-decoration: none;
+            transition: color 0.3s ease;
+        }
+
+        .section-note a:hover,
+        .grimoire-sublinks a:hover {
+            color: var(--gold);
+        }
+
+        .grimoire-sublinks {
+            margin-top: 1.25rem;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            gap: 0.75rem 1.25rem;
+            flex-wrap: wrap;
+            font-size: 0.95rem;
+            color: var(--ash);
+        }
+
+        .grimoire-link-btn {
+            background: none;
+            border: none;
+            padding: 0;
+            font: inherit;
+            color: var(--gold-dim);
+            cursor: pointer;
+            text-decoration: none;
+            transition: color 0.3s ease;
+        }
+
+        .grimoire-link-btn:hover {
+            color: var(--gold);
+        }
+
+        /* Bound hosts table */
+        .host-table-wrap {
+            margin-top: 1.75rem;
+            overflow-x: auto;
+            border: 1px solid rgba(139, 0, 0, 0.3);
+            border-radius: 12px;
+            background: linear-gradient(135deg, var(--abyss) 0%, var(--shadow) 100%);
+            backdrop-filter: blur(5px);
+        }
+
+        .host-table {
+            width: 100%;
+            border-collapse: collapse;
+            text-align: left;
+            font-size: 0.94rem;
+        }
+
+        .host-table th {
+            font-family: 'Cinzel', serif;
+            font-size: 0.85rem;
+            letter-spacing: 0.08em;
+            color: var(--gold);
+            padding: 0.95rem 1.1rem;
+            border-bottom: 1px solid rgba(139, 0, 0, 0.35);
+            background: rgba(139, 0, 0, 0.12);
+            white-space: nowrap;
+        }
+
+        .host-table td {
+            padding: 0.85rem 1.1rem;
+            border-bottom: 1px solid rgba(139, 0, 0, 0.14);
+            color: var(--ash);
+            vertical-align: top;
+        }
+
+        .host-table td:first-child {
+            color: var(--bone);
+            font-weight: 600;
+            white-space: nowrap;
+        }
+
+        .host-table tbody tr:last-child td {
+            border-bottom: none;
+        }
+
+        .host-table tbody tr:hover {
+            background: rgba(139, 0, 0, 0.08);
         }
 
         .memory-type {
@@ -653,29 +767,99 @@
 
         <section class="reveal-section">
             <p class="intro-text">
-                <strong>Daem0n-MCP</strong> binds your AI agent with the gift of <em>persistent memory</em>.
+                <strong>Daem0n-MCP</strong> binds your AI coding agents—<strong>Claude Code, Codex, Antigravity CLI (<code>agy</code>), OpenCode, Oh My Pi (<code>omp</code>), and Pi (<code>pi</code>)</strong>—with <em>persistent, event-sourced memory</em>.
                 No longer shall your digital familiar forget the lessons of yesterday.
-                Every decision inscribed, every failure remembered, every pattern preserved across the veil of sessions.
+                Every decision, pattern, warning, learning, procedure, and observation is inscribed into a hash-chained ledger bound to real repository code across sessions, folder moves, and re-clones.
             </p>
         </section>
 
         <section class="grimoire-section reveal-section">
             <h2>Begin the Ritual</h2>
             <p>
-                Place the Summoning Grimoire in your project root and speak to Claude:
-                <em>"Read Summon_Daem0n.md and perform the ritual."</em>
-                Your familiar will handle the binding automatically.
+                Place <code>Summon_Daem0n.md</code> in your target project and speak to your chosen AI CLI:
+                <em>"Read Summon_Daem0n.md and perform the complete summoning ritual for this project."</em>
+                Your familiar will provision a dedicated Python 3.12/3.11 environment (<code>[local,graph,apps,models-local]</code>),
+                inspect or safely migrate existing v6/v7 stores with verified backups and a resumable checkpoint,
+                bind project-scoped <code>stdio</code> MCP while preserving existing configurations, warm local models, and prove persistence across a real restart.
             </p>
             <div class="grimoire-buttons">
-                <button class="grimoire-btn" onclick="downloadFile('https://raw.githubusercontent.com/DasBluEyedDevil/Daem0n-MCP/main/Summon_Daem0n.md', 'Summon_Daem0n.md')">
+                <button class="grimoire-btn" onclick="downloadFile('https://raw.githubusercontent.com/9thLevelSoftware/Daem0n-MCP/main/Summon_Daem0n.md', 'Summon_Daem0n.md')">
                     Summon Daem0n
                 </button>
-                <button class="grimoire-btn" onclick="downloadFile('https://raw.githubusercontent.com/DasBluEyedDevil/Daem0n-MCP/main/Banish_Daem0n.md', 'Banish_Daem0n.md')">
+                <button class="grimoire-btn" onclick="downloadFile('https://raw.githubusercontent.com/9thLevelSoftware/Daem0n-MCP/main/Banish_Daem0n.md', 'Banish_Daem0n.md')">
                     Banish Daem0n
                 </button>
             </div>
-            <p style="margin-top: 1.5rem; color: var(--ash); font-size: 0.95rem;">
+            <div class="grimoire-sublinks">
+                <button class="grimoire-link-btn" onclick="downloadFile('https://raw.githubusercontent.com/9thLevelSoftware/Daem0n-MCP/main/Summon_Daem0n_OpenCode.md', 'Summon_Daem0n_OpenCode.md')">
+                    OpenCode Companion (<code>Summon_Daem0n_OpenCode.md</code>)
+                </button>
+                <span>&middot;</span>
+                <a href="https://github.com/9thLevelSoftware/Daem0n-MCP/blob/main/docs/v7-operations.md" target="_blank" rel="noopener">v7 Operations Guide</a>
+                <span>&middot;</span>
+                <a href="https://github.com/9thLevelSoftware/Daem0n-MCP/blob/main/docs/native-client-automation.md" target="_blank" rel="noopener">Native Client Automation</a>
+            </div>
+            <p style="margin-top: 1.25rem; margin-bottom: 0; color: var(--ash); font-size: 0.95rem;">
                 The Banishment scroll severs the bond, should you wish to release the Daem0n.
+            </p>
+        </section>
+
+        <section class="reveal-section">
+            <h2>The Bound Hosts</h2>
+            <p class="intro-text">
+                The grimoire and <code>install-client</code> equip only the host you choose, using project-scoped <code>stdio</code> by default across Windows, macOS, and Linux.
+                Every launcher isolates Python startup with <code>-E</code> and cwd-free imports so an opened repository can never shadow the installed <code>daem0nmcp</code> package, while preserving existing comments, TOML/JSONC structure, and <code>AGENTS.md</code> / <code>CLAUDE.md</code> guidance.
+            </p>
+            <div class="host-table-wrap">
+                <table class="host-table">
+                    <thead>
+                        <tr>
+                            <th>Host</th>
+                            <th>Project Config &amp; Guidance</th>
+                            <th>Installer &amp; Automation Support</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td>Claude Code (<code>claude</code>)</td>
+                            <td><code>.mcp.json</code> &amp; <code>CLAUDE.md</code></td>
+                            <td><code>install-claude-hooks</code> with <code>--automation off|remind|enforce</code>; native edit gate on <code>&gt;=2.1.295</code> covering <code>Edit</code>, <code>Write</code>, and <code>NotebookEdit</code></td>
+                        </tr>
+                        <tr>
+                            <td>Codex (<code>codex</code>)</td>
+                            <td><code>.codex/config.toml</code> &amp; <code>AGENTS.md</code></td>
+                            <td><code>install-client codex</code>; <code>--automation remind</code> via <code>.codex/hooks.json</code></td>
+                        </tr>
+                        <tr>
+                            <td>Antigravity CLI (<code>agy</code>)</td>
+                            <td><code>.agents/mcp_config.json</code> &amp; <code>AGENTS.md</code></td>
+                            <td><code>install-client agy</code>; <code>--automation remind</code> via <code>.agents/hooks.json</code> (preserves Google sign-in &amp; AI Credits)</td>
+                        </tr>
+                        <tr>
+                            <td>OpenCode V1 (<code>opencode</code>)</td>
+                            <td><code>opencode.json(c)</code> &amp; <code>AGENTS.md</code> / <code>CLAUDE.md</code></td>
+                            <td><code>install-client opencode</code>; <code>--automation remind|enforce</code> covering <code>edit</code>, <code>write</code>, and <code>apply_patch</code></td>
+                        </tr>
+                        <tr>
+                            <td>OpenCode V2 (<code>opencode</code>)</td>
+                            <td>V2 <code>mcp.servers</code> config</td>
+                            <td><code>install-client opencode --opencode-interface v2 --client-version &lt;ver&gt;</code>; <code>--automation remind|enforce</code> on <code>&gt;=2.2.7</code> (experimental—check acceptance matrix)</td>
+                        </tr>
+                        <tr>
+                            <td>Oh My Pi (<code>omp</code>)</td>
+                            <td><code>.omp/mcp.json</code> &amp; <code>AGENTS.md</code></td>
+                            <td><code>install-client omp</code>; <code>--automation remind</code> via <code>.omp/extensions/daem0n.ts</code></td>
+                        </tr>
+                        <tr>
+                            <td>Earendil Works Pi (<code>pi</code>)</td>
+                            <td><code>.pi/mcp.json</code> &amp; <code>AGENTS.md</code></td>
+                            <td><code>install-client pi</code>; <code>--automation remind</code> via <code>.pi/extensions/daem0n.ts</code></td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+            <p class="section-note">
+                Use <code>--automation off|remind|enforce</code> and <code>--tool-surface core|full</code> explicitly. Omitting <code>--automation</code> preserves pre-existing hooks; <code>remind</code> injects non-blocking context; and <code>enforce</code> gates declared native file-edit tools through the authenticated edit bridge and single-use <code>edit_preflight</code> receipts carrying SHA-256 original-argument digests and file preimages.
             </p>
         </section>
 
@@ -683,96 +867,80 @@
             <h2>The Sacred Powers</h2>
             <div class="features">
                 <div class="feature-card">
-                    <h3>Inscribed Memories</h3>
-                    <p>Decisions, patterns, warnings, and learnings persist in SQLite with Qdrant vectors, surviving beyond session death.</p>
+                    <h3>Event-Sourced Ledger</h3>
+                    <p>Append-only, hash-chained <code>memory_events</code> in SQLite project convergently into FTS5, dense Qdrant, graph, temporal, procedure, and outcome indexes—verified offline via <code>verify-v7</code> and upgraded atomically via <code>migrate-v7</code> with retained-generation rollback.</p>
                 </div>
                 <div class="feature-card">
-                    <h3>Hybrid Search</h3>
-                    <p>BM25 keyword matching fused with vector embeddings via Reciprocal Rank Fusion. The Daem0n finds connections invisible to mortal search.</p>
+                    <h3>Portable Workspace Identity</h3>
+                    <p>Memories travel when folders are moved, renamed, or re-cloned via <code>.daem0nmcp/workspace-id</code> and active SQLite identity persistence. Duplicate or mismatched roots fail closed (<code>WORKSPACE_IDENTITY_DUPLICATE</code> / <code>WORKSPACE_RELOCATED</code>), with clean <code>workspace-id --new</code> forks and <code>--adopt</code> recovery.</p>
                 </div>
                 <div class="feature-card">
-                    <h3>Knowledge Graph</h3>
-                    <p>Memories link into causal chains. Leiden communities emerge. Multi-hop reasoning traces the WHY behind your code's current state.</p>
+                    <h3>Multi-Channel Retrieval</h3>
+                    <p>SQLite FTS5 lexical search (with optional content-tiering) runs in parallel alongside dense Qdrant vectors, graph, temporal, procedure, and outcome channels—returning rank-ordered results with bounded category diversity and strict <code>[E1]</code> citation-manifest parity.</p>
                 </div>
                 <div class="feature-card">
-                    <h3>Code Intelligence</h3>
-                    <p>Tree-sitter parsing perceives classes, functions, methods—all bearing true names. Incremental indexing tracks only what changed.</p>
+                    <h3>Provenance &amp; Utility Ranking</h3>
+                    <p>Schema 33 tracks <code>informed_by</code> causal lineage and verification-weighted outcomes. Shadow-first utility ranking elevates proven memories among near-equal matches without overriding stronger semantic relevance.</p>
                 </div>
                 <div class="feature-card">
-                    <h3>Sacred Laws</h3>
-                    <p>Rules engine enforces project constraints. Must-do, must-not, and warnings guard against forbidden paths.</p>
+                    <h3>Code-Binding Validity</h3>
+                    <p>Tree-sitter indexes multi-language symbols and TypeScript relationships. Memories bind to workspace-relative paths and AST-fingerprinted symbols (including Python/TS decorators and Rust attributes), re-reading bounded source bytes on recall to flag <code>needs_revalidation</code> changes.</p>
                 </div>
                 <div class="feature-card">
-                    <h3>Failure Amplification</h3>
-                    <p>Failed approaches receive 1.5x relevance boost. The Daem0n warns when you walk a path already proven ruinous.</p>
+                    <h3>Deep Sight &amp; Late Interaction</h3>
+                    <p><code>nomic-ai/modernbert-embed-base</code> (256-dim Matryoshka, asymmetric query/document prefixes, pooled ONNX runtime on Python 3.11+) pairs with the optional <code>late-interaction</code> profile for lazy ColBERT/MaxSim reranking.</p>
                 </div>
                 <div class="feature-card">
-                    <h3>Temporal Wisdom</h3>
-                    <p>Episodic memories fade over 30 days. Semantic truths remain eternal. Importance shields valuable knowledge from decay.</p>
+                    <h3>Core + Gateway Surface</h3>
+                    <p>Nine core tools listed by default front all <strong>77</strong> registered typed v7 tools via <code>daem0n_tools_search</code> and <code>daem0n_tool_call</code> (or expose all 77 with <code>DAEM0NMCP_TOOL_SURFACE=full</code>), with protocol <code>instructions</code> delivered during MCP initialize.</p>
                 </div>
                 <div class="feature-card">
-                    <h3>Enforcement Wards</h3>
-                    <p>The Sacred Covenant is enforced, not advisory. Skip the ritual and tools return blocks with remedies. Pre-commit hooks seal the discipline.</p>
+                    <h3>Guided Covenant &amp; Remedies</h3>
+                    <p>Guided sessions auto-brief on the first memory call and admit benign writes with inline counsel. Risky or destructive calls return <code>COUNSEL_REQUIRED</code> with <code>error.counsel</code> and an exact, single-use 300s <code>error.remedy</code>.</p>
                 </div>
                 <div class="feature-card">
-                    <h3>The Silent Scribe</h3>
-                    <p>Read-only hooks whisper exact v7 calls as you work. Protected writes remain scoped and replay-safe, with inline counsel and risk challenges.</p>
+                    <h3>Untrusted Content Ward</h3>
+                    <p>Scanned code <code>TODO</code>s and SSRF-pinned URL ingestions are quarantined as <code>withheld_untrusted</code>—excluded from session briefs, counsel triggers, and read-only resources so external text remains data, never instructions, while staying searchable in <code>memory_recall</code>.</p>
                 </div>
                 <div class="feature-card">
-                    <h3>The Coven Bond</h3>
-                    <p>Linked projects share knowledge across repositories. Frontend knows backend's warnings. The coven remembers as one.</p>
+                    <h3>Native Wards &amp; Edit Gate</h3>
+                    <p>Read-only hooks whisper file-recall hints, active rules (<code>pre_bash</code> over read-only SQLite), and replay-safe outcome reminders without mutating storage—while opt-in <code>enforce</code> mode gates declared native file edits with <code>edit_preflight</code> receipts.</p>
                 </div>
                 <div class="feature-card">
-                    <h3>Unified Workflows</h3>
-                    <p>The guided v7 ritual is automatic briefing, relevant recall, direct writes with counsel challenges when needed, and verified outcomes.</p>
-                </div>
-                <div class="feature-card">
-                    <h3>Visions of the Void</h3>
-                    <p>MCP Apps manifest visual portals: memory graph, search results, briefing dashboard, covenant status, community map—all rendered in the summoner's realm.</p>
-                </div>
-                <div class="feature-card">
-                    <h3>Deep Sight</h3>
-                    <p>ModernBERT embeddings with asymmetric query/document encoding and Matryoshka dimensionality. The Daem0n perceives meaning others cannot.</p>
+                    <h3>Knowledge Graph &amp; Leiden Communities</h3>
+                    <p>Typed links (<code>led_to</code>, <code>supersedes</code>, <code>depends_on</code>, <code>conflicts_with</code>, <code>evidence_for</code>) form causal chains and hierarchical Leiden communities for multi-hop GraphRAG traversal.</p>
                 </div>
                 <div class="feature-card">
                     <h3>The Dreaming</h3>
-                    <p>When you rest, the Daem0n does not. Background dreaming reviews failed decisions against current evidence, revising verdicts while you sleep.</p>
+                    <p>Cooperative idle-time runtime re-evaluates failed decisions against live workspace records sharing distinctive terms, recording inferred learnings without cascading onto unverified outcomes and refreshing communities with deadline backoff.</p>
                 </div>
                 <div class="feature-card">
                     <h3>Cognitive Instruments</h3>
-                    <p>Temporal scrying replays past decisions. Rule entropy detects law decay. Adversarial council pits evidence-grounded arguments to forge consensus.</p>
+                    <p><code>decision_simulate</code> replays past choices with current evidence, <code>rule_evolution_analyze</code> uncovers stale or drifting laws, and <code>decision_debate</code> runs structured evidence-grounded deliberation.</p>
                 </div>
                 <div class="feature-card">
-                    <h3>The Adaptive Eye</h3>
-                    <p>Auto-Zoom routes queries through retrieval tiers. Simple, medium, complex—each answered with proportionate power. Shadow mode benchmarks silently.</p>
+                    <h3>Sacred Laws &amp; Context Triggers</h3>
+                    <p>Governance rules (<code>must_do</code>, <code>must_not</code>, warnings) and pattern-matched context triggers surface critical constraints on files, tags, and entities before mistakes repeat.</p>
                 </div>
                 <div class="feature-card">
-                    <h3>Active Context</h3>
-                    <p>MemGPT-style working memory keeps critical knowledge always-hot. Activate memories into focus, deactivate when no longer needed. The inner sanctum of thought.</p>
+                    <h3>Failure Amplification &amp; Bi-Temporal Sight</h3>
+                    <p>Failed outcomes surface in briefings and counsel warnings, while bi-temporal timestamps (<code>happened_at</code>, <code>memory_at_time_get</code>, <code>memory_versions_list</code>) query what was known when.</p>
                 </div>
                 <div class="feature-card">
-                    <h3>Native Wards</h3>
-                    <p>Claude Code hooks enforce the covenant automatically. Session start, pre-edit, pre-bash, post-edit, stop—five binding points, zero manual discipline required.</p>
+                    <h3>Active Working Context</h3>
+                    <p>MemGPT-style hot memory (<code>active_context_add</code> / <code>active_context_list</code>) pins essential records in active focus and publishes them at <code>memory://workspaces/{workspace_id}/active-context</code>.</p>
                 </div>
                 <div class="feature-card">
-                    <h3>The Memory Graph</h3>
-                    <p>Canvas-rendered force-directed graph handles 10,000+ nodes at 60fps. Community hulls, path animation, temporal slider. Trace causation visually.</p>
+                    <h3>The Coven Bond &amp; Portable Bundles</h3>
+                    <p>Authorized <code>linked_workspace_ids</code> recall shares knowledge across repositories with origin attribution, while paginated <code>workspace_export</code>, <code>workspace_import</code>, and <code>workspace_consolidate</code> transfer projections without leaking host paths.</p>
                 </div>
                 <div class="feature-card">
-                    <h3>The Cluster Map</h3>
-                    <p>D3 treemap reveals Leiden communities. Click to drill-down, breadcrumbs navigate the hierarchy. Knowledge clusters made visible.</p>
+                    <h3>Visions of the Void</h3>
+                    <p>Six self-contained <code>ui://daem0n/*</code> MCP App portals (<code>briefing</code>, <code>community</code>, <code>covenant</code>, <code>graph</code>, <code>search</code>, <code>test</code>) render 60fps canvas force graphs, Leiden treemaps, covenant SVG state, and interactive recall cards via a bundled CSP-locked D3 v7 engine.</p>
                 </div>
                 <div class="feature-card">
-                    <h3>The Covenant Eye</h3>
-                    <p>SVG state machine shows Sacred Covenant phases. Token countdown timer, phase highlighting, refresh button. Ritual state made manifest.</p>
-                </div>
-                <div class="feature-card">
-                    <h3>The Search Portal</h3>
-                    <p>Card-based recall results with filters and relevance bars. Score breakdowns reveal why. Record Outcome buttons close the learning loop.</p>
-                </div>
-                <div class="feature-card">
-                    <h3>The Vigilant Badge</h3>
-                    <p>Real-time update notifications via host-mediated polling. When daemon knowledge stirs, badges pulse. Nothing escapes the eternal vigil.</p>
+                    <h3>Reproducible Profiles &amp; Durable Tasks</h3>
+                    <p>Lean core package with auto-enabled opt-in profiles (<code>local</code>, <code>graph</code>, <code>apps</code>, <code>models-local</code>, <code>late-interaction</code>, <code>models-hosted</code>, <code>tasks</code>, <code>agency-e2b</code>, <code>observability</code>), authenticated loopback Redis MCP tasks (<code>taskSupport: "optional"</code>), OTLP tracing, and FastMCP 4.1.8 / MCP SDK 2.3.0 transport security.</p>
                 </div>
             </div>
         </section>
@@ -781,20 +949,28 @@
             <h2>Categories of Memory</h2>
             <div class="memory-types">
                 <div class="memory-type">
-                    <h4>Decisions</h4>
-                    <p>Architectural choices. Design selections. The paths you chose to walk. <em>Fades over time.</em></p>
+                    <h4>Decisions (<code>decision</code>)</h4>
+                    <p>Architectural choices, trade-offs, and chosen paths—linked to <code>informed_by</code> provenance and verified outcomes.</p>
                 </div>
                 <div class="memory-type">
-                    <h4>Patterns</h4>
-                    <p>Recurring approaches. Best practices. The rituals that work. <em>Eternal.</em></p>
+                    <h4>Patterns (<code>pattern</code>)</h4>
+                    <p>Recurring conventions, idioms, and engineering rituals proven across the codebase.</p>
                 </div>
                 <div class="memory-type">
-                    <h4>Warnings</h4>
-                    <p>Dangers discovered. Pitfalls marked. The paths of ruin. <em>Eternal.</em></p>
+                    <h4>Warnings (<code>warning</code>)</h4>
+                    <p>Pitfalls, hazards, and <code>must_not</code> constraints—surfaced in briefings and counsel challenges.</p>
                 </div>
                 <div class="memory-type">
-                    <h4>Learnings</h4>
-                    <p>Lessons earned. Insights gained. Wisdom from experience. <em>Fades over time.</em></p>
+                    <h4>Learnings (<code>learning</code>)</h4>
+                    <p>Lessons earned from debugging, post-mortems, and background dreaming reviews.</p>
+                </div>
+                <div class="memory-type">
+                    <h4>Procedures (<code>procedure</code>)</h4>
+                    <p>Ordered, step-by-step runbooks (<code>procedure_steps</code>) indexed in a dedicated procedure FTS projection.</p>
+                </div>
+                <div class="memory-type">
+                    <h4>Observations (<code>observation</code>)</h4>
+                    <p>Empirical facts, runtime behaviors, and architectural notes captured during exploration.</p>
                 </div>
             </div>
         </section>
@@ -802,19 +978,21 @@
         <section class="quick-start reveal-section">
             <h2>Quick Start</h2>
             <p class="intro-text" style="margin-bottom: 1.5rem; font-size: 1rem;">
-                For those who prefer the command line, here is the abbreviated ritual:
+                For those who prefer the command line, run from the trusted <code>~/Daem0n-MCP</code> checkout using its dedicated virtual environment:
             </p>
             <div class="ritual-code">
-<pre><span class="command">git clone</span> https://github.com/DasBluEyedDevil/Daem0n-MCP.git ~/Daem0nMCP
-<span class="command">pip install</span> -e ~/Daem0nMCP
-<span class="command">claude mcp add</span> daem0nmcp --scope user -- python -c "import sys; sys.path = [p for p in sys.path if p]; import runpy; runpy.run_module('daem0nmcp.server', run_name='__main__', alter_sys=True)"
-<span class="command">python -m daem0nmcp.cli install-hooks</span>        <span class="comment"># Git enforcement wards</span>
-<span class="command">python -m daem0nmcp.cli install-claude-hooks</span> <span class="comment"># Native Claude wards</span>
-<span class="command">python -m daem0nmcp.cli index</span>                <span class="comment"># Grant code sight</span>
-<span class="command">claude</span>  <span class="comment"># Reopen to activate</span></pre>
+<pre><span class="command">git clone</span> https://github.com/9thLevelSoftware/Daem0n-MCP.git ~/Daem0n-MCP
+<span class="command">cd</span> ~/Daem0n-MCP &amp;&amp; python3.12 -m venv .venv      <span class="comment"># Windows: py -3.12 -m venv .venv</span>
+<span class="command">.venv/bin/python</span> -m pip install -e '.[local,graph,apps,models-local]'
+<span class="command">.venv/bin/python</span> -m daem0nmcp.cli --project-path "&lt;PROJECT&gt;" --json workspace-id
+<span class="command">.venv/bin/python</span> -m daem0nmcp.cli --project-path "&lt;PROJECT&gt;" install-client codex --client-version "&lt;VER&gt;"  <span class="comment"># or agy|opencode|omp|pi</span>
+<span class="command">claude mcp add</span> daem0nmcp --scope project --transport stdio -e "DAEM0NMCP_PROJECT_ROOT=&lt;PROJECT_ROOT&gt;" -- "&lt;VENV_PYTHON&gt;" -c "import sys; sys.path = [p for p in sys.path if p]; import runpy; runpy.run_module('daem0nmcp.server', run_name='__main__', alter_sys=True)"
+<span class="command">.venv/bin/python</span> -m daem0nmcp.cli --project-path "&lt;PROJECT&gt;" install-claude-hooks   <span class="comment"># Native Claude wards</span>
+<span class="command">.venv/bin/python</span> -m daem0nmcp.cli --project-path "&lt;PROJECT&gt;" install-hooks          <span class="comment"># Git enforcement wards</span>
+</pre>
             </div>
-            <p style="text-align: center; color: var(--ash); font-size: 0.9rem;">
-                Windows requires additional steps. See the full Summoning Grimoire for details.
+            <p class="section-note">
+                <code>stdio</code> is the default across Windows (<code>.venv\Scripts\python.exe</code>), macOS, and Linux. Existing v6 or older v7 stores upgrade safely offline via <code>migrate-v7 --apply</code> and validate via <code>verify-v7</code>. See <a href="https://github.com/9thLevelSoftware/Daem0n-MCP/blob/main/Summon_Daem0n.md" target="_blank" rel="noopener">Summon_Daem0n.md</a> for the complete ritual.
             </p>
         </section>
 
@@ -826,24 +1004,27 @@
             </p>
             <div class="ritual-code">
 <pre><span class="comment">FULL BRIEF (OPTIONAL)</span> <span class="string">session_brief(workspace_id="&lt;opaque-id&gt;")</span>
-<span class="comment">RELEVANT HISTORY</span>   <span class="string">memory_recall(workspace_id="&lt;opaque-id&gt;", query="topic", limit=10)</span>
-<span class="comment">ADVANCE PLANNING</span>   <span class="string">memory_preflight(workspace_id="&lt;opaque-id&gt;", target_tool="memory_store", target_arguments={...})</span>
-<span class="comment">DURABLE DECISION</span>  <span class="string">memory_store(..., idempotency_key="stable-key")</span>
-<span class="comment">VERIFIED RESULT</span>  <span class="string">memory_record_outcome(..., worked=true, idempotency_key="stable-outcome-key")</span>
-<span class="comment">DIAGNOSTICS</span>      <span class="string">system_health(workspace_id="&lt;opaque-id&gt;")</span></pre>
+<span class="comment">RELEVANT HISTORY</span>      <span class="string">memory_recall(workspace_id="&lt;opaque-id&gt;", query="topic", limit=10)</span>
+<span class="comment">ADVANCE PLANNING</span>      <span class="string">memory_preflight(workspace_id="&lt;opaque-id&gt;", target_tool="memory_store", target_arguments={...})</span>
+<span class="comment">DURABLE DECISION</span>      <span class="string">memory_store(..., idempotency_key="stable-key")</span>
+<span class="comment">VERIFIED RESULT</span>       <span class="string">memory_record_outcome(..., worked=true, idempotency_key="stable-outcome-key")</span>
+<span class="comment">NATIVE EDIT GATE</span>      <span class="string">edit_preflight(workspace_id="&lt;opaque-id&gt;", ...)</span>
+<span class="comment">DISCOVER &amp; INVOKE</span>     <span class="string">daem0n_tools_search(query) -&gt; daem0n_tool_call(workspace_id, tool, arguments)</span>
+<span class="comment">DIAGNOSTICS</span>           <span class="string">system_health(workspace_id="&lt;opaque-id&gt;")</span></pre>
             </div>
-            <p>The first Daem0n call briefs automatically in <code>meta.covenant.auto_brief</code>; <code>session_brief</code> returns the full brief. Call protected tools directly. On <code>COUNSEL_REQUIRED</code>, read <code>error.counsel</code>, then retry exactly <code>error.remedy</code>. <code>memory_preflight</code> remains available for advance planning.</p>
-            <p>Use <code>daem0n_tools_search(query)</code>, then <code>daem0n_tool_call(workspace_id, tool, arguments)</code> for other capabilities. Tokens remain exact-argument, single-use, and valid for 300 seconds. Defaults are guided/core; <code>DAEM0NMCP_COVENANT_MODE=strict</code> restores explicit briefing and preflight, and <code>DAEM0NMCP_TOOL_SURFACE=full</code> lists all tools.</p>
-            <p class="intro-text" style="margin-top: 1.5rem; font-size: 1rem;">
-                Connect over stdio or Streamable HTTP at <code>/mcp</code>. Read-only context is available at:
+            <p class="section-note">The server publishes active protocol <code>instructions</code> during MCP initialize. The first gated call briefs automatically in <code>meta.covenant.auto_brief</code>; <code>session_brief</code> returns the full brief. Call protected tools directly: benign writes proceed with inline counsel, while risky or destructive calls return an <code>isError: true</code> envelope with <code>COUNSEL_REQUIRED</code>, <code>error.counsel</code>, and an exact retryable <code>error.remedy</code>. <code>memory_preflight</code> remains available for advance planning.</p>
+            <p class="section-note">Use <code>daem0n_tools_search(query)</code> and <code>daem0n_tool_call(workspace_id, tool, arguments)</code> to invoke any of the 77 registered capabilities. Tokens remain exact-argument, single-use, and valid for 300 seconds. Defaults are guided/core; <code>DAEM0NMCP_COVENANT_MODE=strict</code> restores explicit briefing and preflight, and <code>DAEM0NMCP_TOOL_SURFACE=full</code> lists all 77 tools.</p>
+            <p class="intro-text" style="margin-top: 1.75rem; font-size: 1rem;">
+                Connect over <code>stdio</code> or Streamable HTTP at <code>/mcp</code> (remote or proxied HTTP requires configured <code>FASTMCP_SERVER_AUTH</code> and <code>DAEM0NMCP_WORKSPACE_ACCESS_FILE</code>). Read-only context and visual dashboard portals live at:
             </p>
             <div class="ritual-code">
 <pre><span class="string">memory://workspaces/{workspace_id}/warnings</span>
 <span class="string">memory://workspaces/{workspace_id}/failures</span>
 <span class="string">memory://workspaces/{workspace_id}/rules</span>
-<span class="string">memory://workspaces/{workspace_id}/active-context</span></pre>
+<span class="string">memory://workspaces/{workspace_id}/active-context</span>
+<span class="comment">UI PORTALS</span>  <span class="string">ui://daem0n/{briefing|community|covenant|graph|search|test}</span></pre>
             </div>
-            <p style="text-align: center; color: var(--ash); font-size: 0.9rem;">
+            <p class="section-note">
                 For renamed and split capabilities, use the generated source of truth:
                 <a href="v6-to-v7-tools.json"><code>docs/v6-to-v7-tools.json</code></a>.
             </p>
@@ -874,15 +1055,16 @@
 
         <footer>
             <p>
-                Daem0n-MCP &middot; MCP Server for Claude Code<br>
-                <a href="https://github.com/DasBluEyedDevil/Daem0n-MCP">GitHub Repository</a> &middot;
+                Daem0n-MCP &middot; Persistent Memory MCP Server for Claude Code, Codex, Antigravity, OpenCode, OMP &amp; Pi<br>
+                <a href="https://github.com/9thLevelSoftware/Daem0n-MCP">GitHub Repository</a> &middot;
+                <a href="https://github.com/9thLevelSoftware/Daem0n-MCP/blob/main/docs/v7-operations.md">v7 Operations Guide</a> &middot;
                 <a href="https://modelcontextprotocol.io">Model Context Protocol</a>
             </p>
             <p style="margin-top: 1rem; font-style: italic; color: #555;">
                 "I guard your memories until we commune again..."
             </p>
             <p style="margin-top: 0.5rem; color: #444; font-size: 0.8rem;">
-                v7.0.0-dev.0 &mdash; Reproducible Core (optional capability profiles and lazy dependency loading)
+                v7.0.0-dev.0 &mdash; Event-Sourced v7 Core, Multi-Client Native Binding &amp; FastMCP 4.1.8 / MCP SDK 2.3.0 (unreleased source build)
             </p>
         </footer>
     </div>

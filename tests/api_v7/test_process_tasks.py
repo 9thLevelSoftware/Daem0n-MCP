@@ -72,9 +72,9 @@ async def _completed_payload(session, task_id: str) -> dict:
     assert status.status == "completed"
     payload = await session.send_request(
         mcp_types.GetTaskPayloadRequest(
-            params=mcp_types.GetTaskPayloadRequestParams(taskId=task_id)
+            params=mcp_types.GetTaskPayloadRequestParams(task_id=task_id)
         ),
-        mcp_types.GetTaskPayloadResult,
+        mcp_types.CallToolResult,
     )
     result = payload.model_dump(by_alias=True, exclude_none=True)
     structured = result["structuredContent"]
@@ -84,7 +84,9 @@ async def _completed_payload(session, task_id: str) -> dict:
 
 async def _task_status(session, task_id: str) -> mcp_types.GetTaskResult:
     return await session.send_request(
-        mcp_types.GetTaskRequest(params=mcp_types.GetTaskRequestParams(taskId=task_id)),
+        mcp_types.GetTaskRequest(
+            params=mcp_types.GetTaskRequestParams(task_id=task_id)
+        ),
         mcp_types.GetTaskResult,
     )
 
@@ -104,10 +106,10 @@ async def test_real_process_task_lifecycle_and_restart(task_workspace, transport
     ) as session:
         await succeed(session, "session_brief", scope)
         accepted = await _submit_task(session, task_workspace.workspace_id)
-        assert accepted.taskId.startswith("tsk_")
+        assert accepted.task_id.startswith("tsk_")
         deadline = asyncio.get_running_loop().time() + 10
         while True:
-            status = await _task_status(session, accepted.taskId)
+            status = await _task_status(session, accepted.task_id)
             if status.status in {"completed", "failed", "cancelled"}:
                 break
             assert asyncio.get_running_loop().time() < deadline
@@ -116,9 +118,9 @@ async def test_real_process_task_lifecycle_and_restart(task_workspace, transport
 
         payload = await session.send_request(
             mcp_types.GetTaskPayloadRequest(
-                params=mcp_types.GetTaskPayloadRequestParams(taskId=accepted.taskId)
+                params=mcp_types.GetTaskPayloadRequestParams(task_id=accepted.task_id)
             ),
-            mcp_types.GetTaskPayloadResult,
+            mcp_types.CallToolResult,
         )
         result = payload.model_dump(by_alias=True, exclude_none=True)
         assert result["structuredContent"]["ok"] is True
@@ -128,11 +130,11 @@ async def test_real_process_task_lifecycle_and_restart(task_workspace, transport
             mcp_types.ListTasksRequest(),
             mcp_types.ListTasksResult,
         )
-        assert accepted.taskId in {task.taskId for task in listed.tasks}
+        assert accepted.task_id in {task.task_id for task in listed.tasks}
 
         cancelled = await session.send_request(
             mcp_types.CancelTaskRequest(
-                params=mcp_types.CancelTaskRequestParams(taskId=accepted.taskId)
+                params=mcp_types.CancelTaskRequestParams(task_id=accepted.task_id)
             ),
             mcp_types.CancelTaskResult,
         )
@@ -144,15 +146,15 @@ async def test_real_process_task_lifecycle_and_restart(task_workspace, transport
         environment_overrides=environment,
     ) as restarted:
         with pytest.raises(MCPError, match="briefing"):
-            await _task_status(restarted, accepted.taskId)
+            await _task_status(restarted, accepted.task_id)
         await succeed(restarted, "session_brief", scope)
-        recovered = await _task_status(restarted, accepted.taskId)
+        recovered = await _task_status(restarted, accepted.task_id)
         assert recovered.status == "completed"
         payload = await restarted.send_request(
             mcp_types.GetTaskPayloadRequest(
-                params=mcp_types.GetTaskPayloadRequestParams(taskId=accepted.taskId)
+                params=mcp_types.GetTaskPayloadRequestParams(task_id=accepted.task_id)
             ),
-            mcp_types.GetTaskPayloadResult,
+            mcp_types.CallToolResult,
         )
         recovered_result = payload.model_dump(by_alias=True)["structuredContent"]
         assert recovered_result["ok"] is True
@@ -248,7 +250,7 @@ async def test_five_source_consolidation_runs_as_durable_task(tmp_path, transpor
                 "source_workspace_ids": source_ids,
             },
         )
-        preview = await _completed_payload(session, preview_task.taskId)
+        preview = await _completed_payload(session, preview_task.task_id)
         assert preview["selected"] == 5
         consolidate_arguments = {
             "source_workspace_ids": source_ids,
@@ -295,7 +297,7 @@ async def test_five_source_consolidation_runs_as_durable_task(tmp_path, transpor
     with closing(sqlite3.connect(task_database)) as connection:
         state = connection.execute(
             "SELECT state FROM durable_tasks WHERE task_id=?",
-            (apply_task.taskId,),
+            (apply_task.task_id,),
         ).fetchone()[0]
     assert state in {"queued", "running"}
 
@@ -311,5 +313,5 @@ async def test_five_source_consolidation_runs_as_durable_task(tmp_path, transpor
                 "session_brief",
                 {"workspace_id": workspace.workspace_id},
             )
-        result = await _completed_payload(restarted, apply_task.taskId)
+        result = await _completed_payload(restarted, apply_task.task_id)
         assert result["imported"] == 5
