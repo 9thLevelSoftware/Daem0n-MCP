@@ -4,7 +4,7 @@ import asyncio
 from types import SimpleNamespace
 
 import pytest
-from mcp import McpError
+from mcp import MCPError
 from mcp.types import INVALID_PARAMS
 
 from daem0nmcp.api.v7.middleware import (
@@ -176,7 +176,7 @@ def _resource_context(workspace_id: str):
 
 
 async def _refusal(middleware, workspace_id: str, read) -> tuple[int, str]:
-    with pytest.raises(McpError) as refused:
+    with pytest.raises(MCPError) as refused:
         await middleware.on_read_resource(_resource_context(workspace_id), read)
     return refused.value.error.code, refused.value.error.message
 

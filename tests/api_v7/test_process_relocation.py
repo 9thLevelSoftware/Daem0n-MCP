@@ -292,10 +292,10 @@ async def test_a_copy_registered_beside_the_original_is_blocked(
         routed = await _call(client, "rule_list", {"workspace_id": copy_id})
         assert routed["error"]["code"] == "WORKSPACE_IDENTITY_DUPLICATE", routed
         assert routed["error"]["retryable"] is False
-        from mcp.shared.exceptions import McpError
+        from mcp.shared.exceptions import MCPError
 
         uri = f"memory://workspaces/{copy_id}/warnings"
-        with pytest.raises(McpError):
+        with pytest.raises(MCPError):
             await client.read_resource(uri)
 
     # A recorded fork settles the copy without touching a single stored row.

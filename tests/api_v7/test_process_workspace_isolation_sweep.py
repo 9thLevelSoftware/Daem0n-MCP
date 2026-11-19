@@ -41,7 +41,7 @@ from typing import Any
 
 import pytest
 from fastmcp import Client
-from mcp.shared.exceptions import McpError
+from mcp.shared.exceptions import MCPError
 from pydantic import BaseModel, ValidationError
 
 from daem0nmcp.api.v7.models import ApiResponse, RecordSummary, guarded_strings
@@ -1021,7 +1021,7 @@ async def _jwt_pass(tmp_path, a_root, b_root, a, b, seed) -> None:
                 # A is what shows B's failure is the authorization refusal.
                 await session.read_resource(f"memory://workspaces/{a}/{kind}")
                 uri = f"memory://workspaces/{b}/{kind}"
-                with pytest.raises(McpError, match="^Resource unavailable$"):
+                with pytest.raises(MCPError, match="^Resource unavailable$"):
                     await session.read_resource(uri)
             # B as the source of an A-side federated read or consolidation.
             denied = await call(

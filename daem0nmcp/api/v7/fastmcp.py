@@ -1,4 +1,4 @@
-"""Pinned FastMCP 3.4.7 adapter for the manifest-owned v7 surface."""
+"""Pinned FastMCP 4.1.8 adapter for the manifest-owned v7 surface."""
 
 from __future__ import annotations
 
@@ -46,7 +46,7 @@ from .tasks import (
     validate_sync_timeout_seconds,
 )
 
-PINNED_FASTMCP_VERSION = "3.4.7"
+PINNED_FASTMCP_VERSION = "4.1.8"
 _REDACTED_LOG_VALUE = "<redacted>"
 _FASTMCP_OPERATION_LOGGER = "fastmcp.server.mixins.mcp_operations"
 
@@ -93,7 +93,7 @@ def ensure_fastmcp_compatibility(version: str) -> None:
     """Require the one framework release covered by protocol conformance."""
     if version != PINNED_FASTMCP_VERSION:
         raise FastMCPCompatibilityError(
-            "FastMCP 3.4.7 is required by the MCP v7 wire contract"
+            "FastMCP 4.1.8 is required by the MCP v7 wire contract"
         )
 
 
@@ -103,7 +103,7 @@ def _installed_fastmcp() -> tuple[type[Any], str]:
 
         version = metadata.version("fastmcp")
     except (ImportError, metadata.PackageNotFoundError) as exc:
-        raise FastMCPCompatibilityError("FastMCP 3.4.7 is not installed") from exc
+        raise FastMCPCompatibilityError("FastMCP 4.1.8 is not installed") from exc
     ensure_fastmcp_compatibility(version)
     return FastMCP, version
 
@@ -333,7 +333,7 @@ def _tool_adapter(
     def manifest_callable_schema(_source: Any, _handler: Any) -> Any:
         return callable_schema
 
-    # FastMCP 3.4.7 asks Pydantic for the callable schema at registration.
+    # FastMCP 4.1.8 asks Pydantic for the callable schema at registration.
     # Keep its validation as a real call schema while making the advertised
     # root metadata byte-for-byte equal to the manifest-owned input model.
     invoke.__get_pydantic_core_schema__ = manifest_callable_schema  # type: ignore[attr-defined]
@@ -342,10 +342,10 @@ def _tool_adapter(
 
 def _resource_failure() -> Exception:
     """An unexpected read failure, with a real JSON-RPC code and no detail."""
-    from mcp import McpError
-    from mcp.types import INTERNAL_ERROR, ErrorData
+    from mcp import MCPError
+    from mcp.types import INTERNAL_ERROR
 
-    return McpError(ErrorData(code=INTERNAL_ERROR, message="Resource read failed"))
+    return MCPError(INTERNAL_ERROR, "Resource read failed")
 
 
 def _resource_adapter(spec: Any):
@@ -371,7 +371,7 @@ def _resource_adapter(spec: Any):
             raise ResourceUnavailableError() from None
         except Exception as exc:
             raise _resource_failure() from exc
-        # FastMCP 3.4.7 labels a bare ``str`` from a resource template as
+        # FastMCP 4.1.8 labels a bare ``str`` from a resource template as
         # text/plain whatever the template declares, so state the type here.
         return ResourceResult([ResourceContent(text, mime_type=spec.mime_type)])
 
@@ -435,79 +435,78 @@ def _install_bounded_call_rejections(server: Any, manifest: V7Manifest) -> None:
     from jsonschema.validators import validator_for
 
     low_level = server._mcp_server
-    original = low_level.request_handlers[mcp.types.CallToolRequest]
-    listed_definition = getattr(low_level, "_get_cached_tool_definition", None)
-    if not callable(listed_definition):
-        raise FastMCPCompatibilityError("the MCP tool definition cache is unavailable")
-    registered = frozenset(spec.name for spec in manifest.tools)
+    entry = low_level.get_request_handler("tools/call")
+    if entry is None:
+        raise FastMCPCompatibilityError("the MCP call_tool handler is unavailable")
+    original = entry.handler
+    schemas = {spec.name: spec.input_schema for spec in manifest.tools}
 
     def rejection(text: str) -> Any:
-        return mcp.types.ServerResult(
-            mcp.types.CallToolResult(
-                content=[mcp.types.TextContent(type="text", text=text)],
-                isError=True,
-            )
+        return mcp.types.CallToolResult(
+            content=[mcp.types.TextContent(type="text", text=text)],
+            is_error=True,
         )
 
-    async def handle_call(request: Any) -> Any:
-        if request.params.name not in registered:
+    async def handle_call(ctx: Any, params: Any) -> Any:
+        schema = schemas.get(params.name)
+        if schema is None:
             return rejection("Unknown tool; use daem0n_tools_search.")
-        definition = await listed_definition(request.params.name)
-        if definition is not None:
-            schema = definition.inputSchema
-            problems = _schema_problems(
-                schema, validator_for(schema)(schema), request.params.arguments or {}
-            )
-            if problems:
-                return rejection(argument_rejection_text(problems))
-        return await original(request)
+        problems = _schema_problems(
+            schema, validator_for(schema)(schema), params.arguments or {}
+        )
+        if problems:
+            return rejection(argument_rejection_text(problems))
+        return await original(ctx, params)
 
-    low_level.request_handlers[mcp.types.CallToolRequest] = handle_call
+    low_level.add_request_handler("tools/call", entry.params_type, handle_call)
 
 
 def _install_bounded_prompt_rejections(server: Any) -> None:
     """Answer a prompt that cannot be served without repeating the request.
 
-    The MCP layer underneath reports any failure of this request as code 0
-    with the framework's text, which quotes the requested name whole.
+    The MCP layer underneath reports any failure of this request with text
+    that quotes the requested name whole.
     """
 
     import mcp.types
     from fastmcp.exceptions import NotFoundError
-    from mcp import McpError
+    from mcp import MCPError
 
     low_level = server._mcp_server
-    original = low_level.request_handlers.get(mcp.types.GetPromptRequest)
-    if original is None:
+    entry = low_level.get_request_handler("prompts/get")
+    if entry is None:
         return
+    original = entry.handler
 
-    async def handle_get_prompt(request: Any) -> Any:
+    async def handle_get_prompt(ctx: Any, params: Any) -> Any:
         try:
-            return await original(request)
+            return await original(ctx, params)
         except NotFoundError:
-            error = mcp.types.ErrorData(
-                code=mcp.types.INVALID_PARAMS, message="Unknown prompt"
-            )
+            raise MCPError(mcp.types.INVALID_PARAMS, "Unknown prompt") from None
+        except MCPError as exc:
+            if (
+                isinstance(exc.__cause__, NotFoundError)
+                or exc.code == mcp.types.INVALID_PARAMS
+            ):
+                raise MCPError(mcp.types.INVALID_PARAMS, "Unknown prompt") from None
+            raise MCPError(mcp.types.INTERNAL_ERROR, "Prompt unavailable") from None
         except Exception:
-            error = mcp.types.ErrorData(
-                code=mcp.types.INTERNAL_ERROR, message="Prompt unavailable"
-            )
-        raise McpError(error)
+            raise MCPError(mcp.types.INTERNAL_ERROR, "Prompt unavailable") from None
 
-    low_level.request_handlers[mcp.types.GetPromptRequest] = handle_get_prompt
+    low_level.add_request_handler("prompts/get", entry.params_type, handle_get_prompt)
 
 
 def _mcp_task(view: TaskView) -> Any:
     import mcp.types
 
     return mcp.types.Task(
-        taskId=view.task_id,
+        task_id=view.task_id,
         status=view.status,
-        statusMessage=view.status_message,
-        createdAt=view.created_at,
-        lastUpdatedAt=view.updated_at,
+        status_message=view.status_message,
+        created_at=view.created_at.isoformat(),
+        last_updated_at=view.updated_at.isoformat(),
         ttl=view.ttl_ms,
-        pollInterval=view.poll_interval_ms,
+        poll_interval=view.poll_interval_ms,
     )
 
 
@@ -525,8 +524,8 @@ def _is_covenant_task_refusal(code: str) -> bool:
 def _covenant_task_refusal(envelope: Mapping[str, Any]) -> Exception:
     """Hand a refused task submission the answer a plain call would get."""
 
-    from mcp import McpError
-    from mcp.types import INVALID_PARAMS, ErrorData
+    from mcp import MCPError
+    from mcp.types import INVALID_PARAMS
 
     error = envelope["error"]
     if error.get("remedy"):
@@ -536,16 +535,14 @@ def _covenant_task_refusal(envelope: Mapping[str, Any]) -> Exception:
         )
     else:
         message = f"The covenant refused this task: {error['message']}"
-    return McpError(
-        ErrorData(
-            code=INVALID_PARAMS,
-            message=message,
-            data={
-                "code": error["code"],
-                "error": error,
-                "covenant": envelope["meta"].get("covenant"),
-            },
-        )
+    return MCPError(
+        INVALID_PARAMS,
+        message,
+        data={
+            "code": error["code"],
+            "error": error,
+            "covenant": envelope["meta"].get("covenant"),
+        },
     )
 
 
@@ -623,19 +620,17 @@ def _task_protocol_error(exc: Exception) -> Exception:
     refusal; a refusal without an entry stays generic and carries no data.
     """
 
-    from mcp import McpError
-    from mcp.types import INTERNAL_ERROR, INVALID_PARAMS, METHOD_NOT_FOUND, ErrorData
+    from mcp import MCPError
+    from mcp.types import INTERNAL_ERROR, INVALID_PARAMS, METHOD_NOT_FOUND
 
     raised = getattr(exc, "code", "TASKS_UNAVAILABLE")
     refusal = _TASK_REFUSALS.get(raised)
     if refusal is None and raised.startswith("TOKEN_"):
         refusal = (raised, _TASK_TOKEN_REFUSAL)
     if refusal is None:
-        return McpError(
-            ErrorData(
-                code=INVALID_PARAMS,
-                message="Task request is invalid or unavailable.",
-            )
+        return MCPError(
+            INVALID_PARAMS,
+            "Task request is invalid or unavailable.",
         )
     reported, message = refusal
     data: dict[str, Any] = {"code": reported}
@@ -646,7 +641,7 @@ def _task_protocol_error(exc: Exception) -> Exception:
         data["retryable"] = reported != "TASKS_UNAVAILABLE"
     else:
         code = INVALID_PARAMS
-    return McpError(ErrorData(code=code, message=message, data=data))
+    return MCPError(code, message, data=data)
 
 
 def _install_task_protocol(
@@ -661,19 +656,37 @@ def _install_task_protocol(
 
     import mcp.types
     from fastmcp.server.context import Context
-    from fastmcp.server.middleware.middleware import MiddlewareContext
+    from fastmcp.server.dependencies import get_context
+    from fastmcp.server.middleware.middleware import (
+        MiddlewareContext,
+        _interior_dispatched,
+    )
 
     low_level = server._mcp_server
-    original_call = low_level.request_handlers[mcp.types.CallToolRequest]
-    invocation_middleware.configure_task_scope_resolver(dispatcher.task_scope)
+    call_entry = low_level.get_request_handler("tools/call")
+    if call_entry is None:
+        raise FastMCPCompatibilityError("the MCP call_tool handler is unavailable")
+    original_call = call_entry.handler
+    list_entry = low_level.get_request_handler("tools/list")
+    if list_entry is None:
+        raise FastMCPCompatibilityError("the MCP list_tools handler is unavailable")
+    original_list_tools = list_entry.handler
+    def resolve_task_scope(task_id: str, principal: str, session: str) -> Any:
+        try:
+            return dispatcher.task_scope(task_id, principal, session)
+        except TaskDispatcherError as exc:
+            raise _task_protocol_error(exc) from None
 
-    async def run_middleware(request: Any, callback: Any) -> Any:
-        async with Context(fastmcp=server) as fastmcp_context:
+    invocation_middleware.configure_task_scope_resolver(resolve_task_scope)
+
+    async def run_call_middleware(ctx: Any, params: Any, callback: Any) -> Any:
+        _interior_dispatched.set(True)
+        async with Context(fastmcp=server, session=ctx.session) as fastmcp_context:
             context = MiddlewareContext(
-                message=request.params,
+                message=params,
                 source="client",
                 type="request",
-                method=request.method,
+                method=ctx.method,
                 fastmcp_context=fastmcp_context,
             )
             try:
@@ -681,9 +694,17 @@ def _install_task_protocol(
             except TaskDispatcherError as exc:
                 raise _task_protocol_error(exc) from None
 
-    async def identity(context: Any) -> tuple[str, str]:
+    async def identity(ctx: Any, params: Any) -> tuple[str, str]:
         try:
-            return await invocation_middleware.identity(context)
+            fastmcp_context = get_context()
+            mw_context = MiddlewareContext(
+                message=params,
+                source="client",
+                type="request",
+                method=ctx.method,
+                fastmcp_context=fastmcp_context,
+            )
+            return await invocation_middleware.identity(mw_context)
         except Exception as exc:
             raise TaskDispatcherError("TASK_NOT_FOUND") from exc
 
@@ -728,9 +749,9 @@ def _install_task_protocol(
             return None
         return envelope
 
-    async def handle_call(request: Any) -> Any:
-        if request.params.task is None:
-            return await original_call(request)
+    async def handle_call(ctx: Any, params: Any) -> Any:
+        if params.task is None:
+            return await original_call(ctx, params)
 
         async def submit(context: Any) -> Any:
             async def accept() -> TaskView:
@@ -772,119 +793,105 @@ def _install_task_protocol(
             created = mcp.types.CreateTaskResult(task=_mcp_task(view))
             if notice is not None:
                 created.meta = {"daem0nmcp/covenant": notice}
-            return mcp.types.ServerResult(created)
+            payload = created.model_dump(by_alias=True, mode="json", exclude_none=True)
+            payload["resultType"] = "io.modelcontextprotocol/tasks"
+            return payload
 
-        return await run_middleware(request, submit)
+        return await run_call_middleware(ctx, params, submit)
 
-    async def handle_get(request: Any) -> Any:
-        async def get(context: Any) -> Any:
-            principal, session = await identity(context)
-            try:
-                view = await dispatcher.get_task(
-                    request.params.taskId,
-                    principal_id=principal,
-                    transport_session_id=session,
-                )
-            except TaskDispatcherError as exc:
-                raise _task_protocol_error(exc) from None
-            return mcp.types.ServerResult(
-                mcp.types.GetTaskResult(**_mcp_task(view).model_dump())
+    async def handle_get(ctx: Any, params: Any) -> Any:
+        try:
+            principal, session = await identity(ctx, params)
+            view = await dispatcher.get_task(
+                params.task_id,
+                principal_id=principal,
+                transport_session_id=session,
             )
+        except TaskDispatcherError as exc:
+            raise _task_protocol_error(exc) from None
+        return mcp.types.GetTaskResult(**_mcp_task(view).model_dump())
 
-        return await run_middleware(request, get)
-
-    async def handle_result(request: Any) -> Any:
-        async def result(context: Any) -> Any:
-            principal, session = await identity(context)
-            try:
-                payload = await dispatcher.get_result(
-                    request.params.taskId,
-                    principal_id=principal,
-                    transport_session_id=session,
-                )
-            except TaskDispatcherError as exc:
-                raise _task_protocol_error(exc) from None
-            structured_payload = dict(payload)
-            is_error = structured_payload.get("ok") is False
-            content = [
-                mcp.types.TextContent(
-                    type="text",
-                    text=json.dumps(
-                        structured_payload,
-                        sort_keys=True,
-                        separators=(",", ":"),
-                        ensure_ascii=False,
-                        allow_nan=False,
-                    ),
-                )
-            ]
-            return mcp.types.ServerResult(
-                mcp.types.GetTaskPayloadResult.model_validate(
-                    {
-                        "content": content,
-                        "structuredContent": structured_payload,
-                        "isError": is_error,
-                    }
-                )
+    async def handle_result(ctx: Any, params: Any) -> Any:
+        try:
+            principal, session = await identity(ctx, params)
+            payload = await dispatcher.get_result(
+                params.task_id,
+                principal_id=principal,
+                transport_session_id=session,
             )
-
-        return await run_middleware(request, result)
-
-    async def handle_cancel(request: Any) -> Any:
-        async def cancel(context: Any) -> Any:
-            principal, session = await identity(context)
-            try:
-                view = await dispatcher.cancel(
-                    request.params.taskId,
-                    principal_id=principal,
-                    transport_session_id=session,
-                )
-            except TaskDispatcherError as exc:
-                raise _task_protocol_error(exc) from None
-            return mcp.types.ServerResult(
-                mcp.types.CancelTaskResult(**_mcp_task(view).model_dump())
+        except TaskDispatcherError as exc:
+            raise _task_protocol_error(exc) from None
+        structured_payload = dict(payload)
+        is_error = structured_payload.get("ok") is False
+        content: list[mcp.types.ContentBlock] = [
+            mcp.types.TextContent(
+                type="text",
+                text=json.dumps(
+                    structured_payload,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    ensure_ascii=False,
+                    allow_nan=False,
+                ),
             )
+        ]
+        return mcp.types.CallToolResult(
+            content=content,
+            structured_content=structured_payload,
+            is_error=is_error,
+        )
 
-        return await run_middleware(request, cancel)
-
-    async def handle_list(request: Any) -> Any:
-        async def list_tasks(context: Any) -> Any:
-            principal, session = await identity(context)
-            try:
-                page = await dispatcher.list_tasks(
-                    principal_id=principal,
-                    transport_session_id=session,
-                    cursor=(None if request.params is None else request.params.cursor),
-                )
-            except TaskDispatcherError as exc:
-                raise _task_protocol_error(exc) from None
-            return mcp.types.ServerResult(
-                mcp.types.ListTasksResult(
-                    tasks=[_mcp_task(view) for view in page.tasks],
-                    nextCursor=page.next_cursor,
-                )
+    async def handle_cancel(ctx: Any, params: Any) -> Any:
+        try:
+            principal, session = await identity(ctx, params)
+            view = await dispatcher.cancel(
+                params.task_id,
+                principal_id=principal,
+                transport_session_id=session,
             )
+        except TaskDispatcherError as exc:
+            raise _task_protocol_error(exc) from None
+        return mcp.types.CancelTaskResult(**_mcp_task(view).model_dump())
 
-        return await run_middleware(request, list_tasks)
+    async def handle_list(ctx: Any, params: Any) -> Any:
+        try:
+            principal, session = await identity(ctx, params)
+            page = await dispatcher.list_tasks(
+                principal_id=principal,
+                transport_session_id=session,
+                cursor=(None if params is None else params.cursor),
+            )
+        except TaskDispatcherError as exc:
+            raise _task_protocol_error(exc) from None
+        return mcp.types.ListTasksResult(
+            tasks=[_mcp_task(view) for view in page.tasks],
+            next_cursor=page.next_cursor,
+        )
 
-    original_list_tools = low_level.request_handlers[mcp.types.ListToolsRequest]
-
-    async def handle_list_tools(request: Any) -> Any:
+    async def handle_list_tools(ctx: Any, params: Any) -> Any:
         # Every tool keeps FastMCP's forbidden TaskConfig, so its Docket
         # submission path stays inert and the framework advertises nothing.
         # The standard task mode is added to the listing itself.
-        result = await original_list_tools(request)
-        for tool in result.root.tools:
+        result = await original_list_tools(ctx, params)
+        for tool in result.tools:
             if tool.name in admission_specs:
-                tool.execution = mcp.types.ToolExecution(taskSupport="optional")
+                tool.execution = mcp.types.ToolExecution(task_support="optional")
         return result
 
-    low_level.request_handlers[mcp.types.ListToolsRequest] = handle_list_tools
-    low_level.request_handlers[mcp.types.CallToolRequest] = handle_call
-    low_level.request_handlers[mcp.types.GetTaskRequest] = handle_get
-    low_level.request_handlers[mcp.types.GetTaskPayloadRequest] = handle_result
-    low_level.request_handlers[mcp.types.CancelTaskRequest] = handle_cancel
-    low_level.request_handlers[mcp.types.ListTasksRequest] = handle_list
+    low_level.add_request_handler("tools/list", list_entry.params_type, handle_list_tools)
+    low_level.add_request_handler("tools/call", call_entry.params_type, handle_call)
+    low_level.add_request_handler(
+        "tasks/get", mcp.types.GetTaskRequestParams, handle_get
+    )
+    low_level.add_request_handler(
+        "tasks/result", mcp.types.GetTaskPayloadRequestParams, handle_result
+    )
+    low_level.add_request_handler(
+        "tasks/cancel", mcp.types.CancelTaskRequestParams, handle_cancel
+    )
+    low_level.add_request_handler(
+        "tasks/list", mcp.types.PaginatedRequestParams, handle_list
+    )
     _set_owned_capabilities(low_level, tasks_enabled=True)
 
 
@@ -896,7 +903,7 @@ def _without_list_changed(capabilities: Any) -> Any:
     """
 
     updates = {
-        name: capability.model_copy(update={"listChanged": False})
+        name: capability.model_copy(update={"list_changed": False})
         for name in ("prompts", "resources", "tools")
         if (capability := getattr(capabilities, name, None)) is not None
     }
@@ -910,17 +917,8 @@ def _set_owned_capabilities(low_level: Any, *, tasks_enabled: bool) -> None:
 
     original = low_level.get_capabilities
 
-    def get_capabilities(
-        _self: Any,
-        notification_options: Any,
-        experimental_capabilities: Any,
-    ) -> Any:
-        capabilities = _without_list_changed(
-            original(
-                notification_options,
-                experimental_capabilities,
-            )
-        )
+    def get_capabilities(_self: Any, *args: Any, **kwargs: Any) -> Any:
+        capabilities = _without_list_changed(original(*args, **kwargs))
         if not tasks_enabled:
             return capabilities.model_copy(update={"tasks": None})
         task_capabilities = mcp.types.ServerTasksCapability(
@@ -940,30 +938,27 @@ def _set_owned_capabilities(low_level: Any, *, tasks_enabled: bool) -> None:
 def _disable_upstream_task_protocol(server: Any) -> None:
     """Remove FastMCP's Docket endpoints when no owned dispatcher is active."""
 
-    import mcp.types
-
     low_level = server._mcp_server
-    for request_type in (
-        mcp.types.GetTaskRequest,
-        mcp.types.GetTaskPayloadRequest,
-        mcp.types.CancelTaskRequest,
-        mcp.types.ListTasksRequest,
-    ):
-        low_level.request_handlers.pop(request_type, None)
+    handlers = getattr(low_level, "_request_handlers", None)
+    if isinstance(handlers, dict):
+        for method in ("tasks/get", "tasks/result", "tasks/cancel", "tasks/list"):
+            handlers.pop(method, None)
     _set_owned_capabilities(low_level, tasks_enabled=False)
 
-    original_call = low_level.request_handlers[mcp.types.CallToolRequest]
+    call_entry = low_level.get_request_handler("tools/call")
+    if call_entry is None:
+        return
+    original_call = call_entry.handler
 
-    async def handle_call(request: Any) -> Any:
+    async def handle_call(ctx: Any, params: Any) -> Any:
         # No task capability is declared, and the task specification has such
         # a receiver "process requests of that type normally, ignoring any
-        # task-augmentation metadata if present".  The framework reads that
-        # metadata from the request context and would refuse the call.
-        if request.params.task is not None:
-            low_level.request_context.experimental.task_metadata = None
-        return await original_call(request)
+        # task-augmentation metadata if present".
+        if getattr(params, "task", None) is not None:
+            params = params.model_copy(update={"task": None})
+        return await original_call(ctx, params)
 
-    low_level.request_handlers[mcp.types.CallToolRequest] = handle_call
+    low_level.add_request_handler("tools/call", call_entry.params_type, handle_call)
 
 
 _COVENANT_INSTRUCTIONS = {
@@ -1177,7 +1172,6 @@ def build_fastmcp_server(
             mime_type=resource_spec.mime_type,
             version=resource_spec.version,
             meta={"daem0nmcp/apiVersion": "7"},
-            task=False,
         )(_resource_adapter(resource_spec))
 
     if hasattr(server, "_mcp_server"):

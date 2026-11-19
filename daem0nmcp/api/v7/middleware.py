@@ -36,18 +36,16 @@ if TYPE_CHECKING:
     from fastmcp.exceptions import ToolError as _BaseToolError
     from fastmcp.exceptions import ValidationError as _BaseValidationError
     from fastmcp.server.middleware import Middleware as _MiddlewareBase
-    from mcp import McpError as _McpError
+    from mcp import MCPError as _McpError
     from mcp.types import INVALID_PARAMS as _INVALID_PARAMS
-    from mcp.types import ErrorData as _ErrorData
 else:
     try:  # Keep the model-free boundary importable without FastMCP.
         from fastmcp.exceptions import ResourceError as _BaseResourceError
         from fastmcp.exceptions import ToolError as _BaseToolError
         from fastmcp.exceptions import ValidationError as _BaseValidationError
         from fastmcp.server.middleware import Middleware as _MiddlewareBase
-        from mcp import McpError as _McpError
+        from mcp import MCPError as _McpError
         from mcp.types import INVALID_PARAMS as _INVALID_PARAMS
-        from mcp.types import ErrorData as _ErrorData
 
         FASTMCP_MIDDLEWARE_AVAILABLE = True
     except ImportError:
@@ -67,14 +65,17 @@ else:
             pass
 
         class _ErrorData:
-            def __init__(self, *, code: int, message: str) -> None:
+            def __init__(
+                self, *, code: int, message: str, data: Any = None
+            ) -> None:
                 self.code = code
                 self.message = message
+                self.data = data
 
         class _McpError(RuntimeError):
-            def __init__(self, error: _ErrorData) -> None:
-                super().__init__(error.message)
-                self.error = error
+            def __init__(self, code: int, message: str, data: Any = None) -> None:
+                super().__init__(message)
+                self.error = _ErrorData(code=code, message=message, data=data)
 
 
 TransportMode = Literal["stdio", "streamable-http"]
@@ -109,9 +110,7 @@ class ResourceUnavailableError(_McpError):
     """
 
     def __init__(self) -> None:
-        super().__init__(
-            _ErrorData(code=RESOURCE_NOT_FOUND, message="Resource unavailable")
-        )
+        super().__init__(RESOURCE_NOT_FOUND, "Resource unavailable")
 
 
 class ResourceInvocationContextError(ResourceUnavailableError):
@@ -124,12 +123,8 @@ class ResourceAdmissionLimitError(_McpError):
     def __init__(self) -> None:
         # The same code the task endpoints use for this refusal.
         super().__init__(
-            _ErrorData(
-                code=_INVALID_PARAMS,
-                message=(
-                    "ADMISSION_LIMIT_REACHED: retry after an active request completes"
-                ),
-            )
+            _INVALID_PARAMS,
+            "ADMISSION_LIMIT_REACHED: retry after an active request completes",
         )
 
 
@@ -342,15 +337,13 @@ class V7InvocationMiddleware(_MiddlewareBase):
             "tasks/list",
         }:
             return await _resolve_awaitable(call_next(context))
-        from mcp import McpError
-        from mcp.types import INVALID_PARAMS, ErrorData
+        from mcp import MCPError
+        from mcp.types import INVALID_PARAMS
 
         try:
             principal, session = await self.identity(context)
         except Exception:
-            raise McpError(
-                ErrorData(code=INVALID_PARAMS, message="Task not found.")
-            ) from None
+            raise MCPError(INVALID_PARAMS, "Task not found.") from None
 
         async def scoped_call(current: Any) -> Any:
             # Global/principal slots are already held, including during an
@@ -359,12 +352,19 @@ class V7InvocationMiddleware(_MiddlewareBase):
             if context.method == "tasks/list":
                 return await _resolve_awaitable(call_next(current))
             if self._task_scope_resolver is None:
-                raise McpError(
-                    ErrorData(code=INVALID_PARAMS, message="Task not found.")
-                )
-            scope = self._task_scope_resolver(
-                context.message.taskId, principal, session
-            )
+                raise MCPError(INVALID_PARAMS, "Task not found.")
+            message = context.message
+            if isinstance(message, Mapping):
+                task_id = message.get("taskId")
+                if task_id is None:
+                    task_id = message.get("task_id")
+            else:
+                task_id = getattr(message, "task_id", None)
+                if task_id is None:
+                    task_id = getattr(message, "taskId", None)
+            if not isinstance(task_id, str):
+                raise MCPError(INVALID_PARAMS, "Task not found.")
+            scope = self._task_scope_resolver(task_id, principal, session)
             workspace = scope.canonical_workspace
             count = self._workspace_inflight.get(workspace, 0)
             if count >= self._max_inflight_per_workspace:
@@ -384,27 +384,37 @@ class V7InvocationMiddleware(_MiddlewareBase):
                 context, scoped_call, None, principal_id=principal
             )
         except _BaseToolError:
-            raise McpError(
-                ErrorData(
-                    code=INVALID_PARAMS,
-                    message="ADMISSION_LIMIT_REACHED: retry after an active request completes",
-                )
+            raise MCPError(
+                INVALID_PARAMS,
+                "ADMISSION_LIMIT_REACHED: retry after an active request completes",
             ) from None
 
     @property
     def stdio_session_id(self) -> str | None:
         return self._stdio_session_id
 
-    async def on_initialize(self, context: Any, call_next: Callable[[Any], Any]) -> Any:
-        """Issue a server-owned stdio session only after initialization succeeds."""
-
-        result = call_next(context)
-        result = await _resolve_awaitable(result)
+    def _issue_stdio_session_id(self) -> None:
         if self._transport_mode == "stdio":
             session_id = self._session_id_factory()
             if not isinstance(session_id, str) or not session_id.strip():
                 raise ToolInvocationContextError()
             self._stdio_session_id = session_id.strip()
+
+    async def on_initialize(self, context: Any, call_next: Callable[[Any], Any]) -> Any:
+        """Issue a server-owned stdio session only after initialization succeeds."""
+
+        result = call_next(context)
+        result = await _resolve_awaitable(result)
+        self._issue_stdio_session_id()
+        return result
+
+    async def on_discover(self, context: Any, call_next: Callable[[Any], Any]) -> Any:
+        """Issue a server-owned stdio session after MCP 2026-07-28 discovery succeeds."""
+
+        result = call_next(context)
+        result = await _resolve_awaitable(result)
+        if self._stdio_session_id is None:
+            self._issue_stdio_session_id()
         return result
 
     def _default_access_token(self) -> object:

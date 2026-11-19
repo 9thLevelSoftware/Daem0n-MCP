@@ -163,6 +163,16 @@ class CovenantMiddleware(Middleware if _FASTMCP_MIDDLEWARE_AVAILABLE else object
             self._stdio_session_id = secrets.token_urlsafe(24)
         return result
 
+    async def on_discover(
+        self,
+        context: MiddlewareContext[Any],
+        call_next: CallNext[Any, Any],
+    ) -> Any:
+        result = await call_next(context)
+        if self._transport_mode == "stdio" and self._stdio_session_id is None:
+            self._stdio_session_id = secrets.token_urlsafe(24)
+        return result
+
     def _resolve_workspace(self, selector: str | None) -> str:
         return _as_workspace_root(self._workspace_resolver(selector))
 

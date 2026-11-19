@@ -166,7 +166,7 @@ class FastMCPAdapterTests(unittest.TestCase):
             ensure_fastmcp_compatibility,
         )
 
-        ensure_fastmcp_compatibility("3.4.7")
+        ensure_fastmcp_compatibility("4.1.8")
         for version in ("3.4.6", "3.4.8", "3.0.0b2", "2.13.0"):
             with (
                 self.subTest(version=version),
@@ -178,10 +178,10 @@ class FastMCPAdapterTests(unittest.TestCase):
         project = tomllib.loads(pathlib.Path("pyproject.toml").read_text("utf-8"))[
             "project"
         ]
-        self.assertIn("fastmcp==3.4.7", project["dependencies"])
+        self.assertIn("fastmcp==4.1.8", project["dependencies"])
         self.assertEqual(
             project["optional-dependencies"]["tasks"],
-            ["fastmcp[tasks]==3.4.7"],
+            ["fastmcp[tasks]==4.1.8"],
         )
 
     def test_builds_fresh_strict_stateful_server_from_manifest(self) -> None:
@@ -190,7 +190,7 @@ class FastMCPAdapterTests(unittest.TestCase):
         server = build_fastmcp_server(
             self._manifest(),
             fastmcp_cls=_FakeFastMCP,
-            distribution_version="3.4.7",
+            distribution_version="4.1.8",
             tasks_enabled=False,
             auth="auth-provider",
         )
@@ -221,7 +221,7 @@ class FastMCPAdapterTests(unittest.TestCase):
         result = asyncio.run(handler(workspace_id="ws_test", limit=3))
         self.assertEqual(result, {"value": "ws_test:3"})
         self.assertEqual(len(server.resources), 1)
-        self.assertIs(server.resources[0][1]["task"], False)
+        self.assertNotIn("task", server.resources[0][1])
 
     def _resource_reader(self, handler, *, requires_workspace: bool = True):
         from daem0nmcp.api.v7.fastmcp import _resource_adapter
@@ -259,7 +259,7 @@ class FastMCPAdapterTests(unittest.TestCase):
         self.assertEqual(wire.contents[0].mimeType, "application/json")
 
     def test_resource_refusal_and_failure_use_real_protocol_codes(self) -> None:
-        from mcp import McpError
+        from mcp import MCPError
         from mcp.types import INTERNAL_ERROR
 
         from daem0nmcp.api.v7.middleware import (
@@ -283,7 +283,7 @@ class FastMCPAdapterTests(unittest.TestCase):
         async def oversized_static() -> str:
             return "x" * 2_000_001
 
-        with self.assertRaises(McpError) as caught:
+        with self.assertRaises(MCPError) as caught:
             asyncio.run(self._resource_reader(refused)(workspace_id="ws_test"))
         refusal = caught.exception.error
         self.assertEqual(
@@ -300,7 +300,7 @@ class FastMCPAdapterTests(unittest.TestCase):
             (self._resource_reader(oversized_static, requires_workspace=False), {}),
         ):
             with self.subTest(reader=reader.__name__, arguments=arguments):
-                with self.assertRaises(McpError) as caught:
+                with self.assertRaises(MCPError) as caught:
                     asyncio.run(reader(**arguments))
                 failure = caught.exception.error
                 self.assertEqual(
@@ -314,7 +314,7 @@ class FastMCPAdapterTests(unittest.TestCase):
         server = build_fastmcp_server(
             self._manifest(with_resource=False),
             fastmcp_cls=_FakeFastMCP,
-            distribution_version="3.4.7",
+            distribution_version="4.1.8",
             tasks_enabled=False,
         )
         _, handler = server.tools[0]
@@ -493,7 +493,7 @@ class FastMCPAdapterTests(unittest.TestCase):
         build_fastmcp_server(
             self._manifest(with_resource=False),
             fastmcp_cls=_FakeFastMCP,
-            distribution_version="3.4.7",
+            distribution_version="4.1.8",
             tasks_enabled=False,
         )
         logger = logging.getLogger("fastmcp.server.mixins.mcp_operations")
@@ -541,7 +541,7 @@ class FastMCPAdapterTests(unittest.TestCase):
         server = build_fastmcp_server(
             self._manifest(with_resource=False),
             fastmcp_cls=_FakeFastMCP,
-            distribution_version="3.4.7",
+            distribution_version="4.1.8",
             tasks_enabled=False,
             lifespan=lifespan,
         )
@@ -568,7 +568,7 @@ class FastMCPAdapterTests(unittest.TestCase):
             build_fastmcp_server(
                 self._manifest(task_mode="optional", with_resource=False),
                 fastmcp_cls=_FakeFastMCP,
-                distribution_version="3.4.7",
+                distribution_version="4.1.8",
                 task_config_cls=_FakeTaskConfig,
                 tasks_enabled=True,
                 foreground_policies=self._foreground_policies(),
@@ -590,7 +590,7 @@ class FastMCPAdapterTests(unittest.TestCase):
             server = build_fastmcp_server(
                 self._manifest(task_mode="optional", with_resource=False),
                 fastmcp_cls=_FakeFastMCP,
-                distribution_version="3.4.7",
+                distribution_version="4.1.8",
                 tasks_enabled=False,
                 sync_timeout_seconds=7,
                 foreground_policies=self._foreground_policies(),
@@ -614,7 +614,7 @@ class FastMCPAdapterTests(unittest.TestCase):
                     read_only=False,
                 ),
                 fastmcp_cls=_FakeFastMCP,
-                distribution_version="3.4.7",
+                distribution_version="4.1.8",
                 tasks_enabled=False,
                 sync_timeout_seconds=7,
                 foreground_policies=self._foreground_policies(),
@@ -628,7 +628,7 @@ class FastMCPAdapterTests(unittest.TestCase):
                 build_fastmcp_server(
                     self._manifest(task_mode="optional", with_resource=False),
                     fastmcp_cls=_FakeFastMCP,
-                    distribution_version="3.4.7",
+                    distribution_version="4.1.8",
                     tasks_enabled=False,
                     sync_timeout_seconds=timeout,
                     foreground_policies=self._foreground_policies(),
@@ -650,7 +650,7 @@ class FastMCPAdapterTests(unittest.TestCase):
             server = build_fastmcp_server(
                 self._manifest(with_resource=False),
                 fastmcp_cls=_FakeFastMCP,
-                distribution_version="3.4.7",
+                distribution_version="4.1.8",
                 sync_timeout_seconds=9,
             )
             _, handler = server.tools[0]
@@ -679,7 +679,7 @@ class FastMCPAdapterTests(unittest.TestCase):
                     handler=unreviewed,
                 ),
                 fastmcp_cls=_FakeFastMCP,
-                distribution_version="3.4.7",
+                distribution_version="4.1.8",
                 foreground_policies=self._foreground_policies(),
             )
 
@@ -721,7 +721,7 @@ class FastMCPAdapterTests(unittest.TestCase):
                 handler=admission_aware,
             ),
             fastmcp_cls=_FakeFastMCP,
-            distribution_version="3.4.7",
+            distribution_version="4.1.8",
             tasks_enabled=False,
             foreground_policies=self._foreground_policies(
                 max_numeric_values={"limit": 1}
@@ -766,7 +766,7 @@ class FastMCPAdapterTests(unittest.TestCase):
                 handler=slow_admission,
             ),
             fastmcp_cls=_FakeFastMCP,
-            distribution_version="3.4.7",
+            distribution_version="4.1.8",
             sync_timeout_seconds=1,
             foreground_policies=self._foreground_policies(
                 max_numeric_values={"limit": 1}
@@ -810,7 +810,7 @@ class FastMCPAdapterTests(unittest.TestCase):
                 handler=bounded_rejection,
             ),
             fastmcp_cls=_FakeFastMCP,
-            distribution_version="3.4.7",
+            distribution_version="4.1.8",
             foreground_policies=self._foreground_policies(),
         )
         _, handler = server.tools[0]
@@ -828,7 +828,7 @@ class FastMCPAdapterTests(unittest.TestCase):
             build_fastmcp_server(
                 self._manifest(with_resource=False),
                 fastmcp_cls=_ExplodingFastMCP,
-                distribution_version="3.4.7",
+                distribution_version="4.1.8",
                 tasks_enabled=False,
             )
 

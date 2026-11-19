@@ -968,9 +968,9 @@ async def test_an_un_migrated_v6_workspace_says_migration_is_required(tmp_path):
         # (`RESOURCE_UNAVAILABLE`) for every failure, so a caller cannot
         # enumerate workspaces by reading its errors; `session_brief` is
         # where the reason is named.
-        from mcp.shared.exceptions import McpError
+        from mcp.shared.exceptions import MCPError
 
-        with pytest.raises(McpError):
+        with pytest.raises(MCPError):
             await client.read_resource(f"memory://workspaces/{workspace_id}/rules")
 
     # The transfer boundary raises it too.  It sits behind the covenant, so

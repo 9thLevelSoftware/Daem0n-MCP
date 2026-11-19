@@ -78,10 +78,10 @@ class PackagingContractTests(unittest.TestCase):
 
     def test_v7_manifest_pins_supported_fastmcp_profiles(self) -> None:
         self.assertEqual(self.project["version"], "7.0.0.dev0")
-        self.assertIn("fastmcp==3.4.7", self.project["dependencies"])
+        self.assertIn("fastmcp==4.1.8", self.project["dependencies"])
         self.assertEqual(
             self.project["optional-dependencies"]["tasks"],
-            ["fastmcp[tasks]==3.4.7"],
+            ["fastmcp[tasks]==4.1.8"],
         )
 
     def test_lock_editable_root_matches_project_metadata(self) -> None:

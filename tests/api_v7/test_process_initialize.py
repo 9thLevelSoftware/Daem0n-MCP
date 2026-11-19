@@ -51,7 +51,7 @@ async def test_no_list_changed_notifications_are_advertised(
         for name in ("tools", "resources", "prompts"):
             capability = getattr(capabilities, name)
             if capability is not None:
-                assert capability.listChanged is False, name
+                assert capability.list_changed is False, name
         assert capabilities.resources.subscribe is False
 
 
@@ -72,7 +72,7 @@ async def test_initialize_carries_instructions_for_the_active_settings(
         )
         server = create_v7_server("stdio", settings=settings, environ={})
         async with Client(server) as client:
-            instructions = client.initialize_result.instructions
+            instructions = client.session.instructions
 
     assert instructions == server_instructions(
         covenant_mode=covenant_mode,

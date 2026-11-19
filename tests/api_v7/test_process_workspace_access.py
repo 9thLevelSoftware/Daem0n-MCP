@@ -6,7 +6,7 @@ import time
 
 import httpx
 import pytest
-from mcp.shared.exceptions import McpError
+from mcp.shared.exceptions import MCPError
 
 from tests.api_v7.process_client import (
     call,
@@ -122,7 +122,7 @@ async def test_real_jwt_workspace_access_and_revocation(tmp_path, issuer):
             {"workspace_id": alpha.workspace_id, "query": "revoked"},
         )
         assert denied["error"]["code"] == "UNAUTHORIZED_WORKSPACE"
-        with pytest.raises(McpError, match="^Resource unavailable$"):
+        with pytest.raises(MCPError, match="^Resource unavailable$"):
             await session.read_resource(
                 f"memory://workspaces/{alpha.workspace_id}/warnings"
             )

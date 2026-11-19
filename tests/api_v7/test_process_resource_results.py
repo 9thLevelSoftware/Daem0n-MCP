@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 
 import pytest
-from mcp import McpError
+from mcp import MCPError
 
 from daem0nmcp.database import DatabaseManager
 from daem0nmcp.workspace import WorkspaceRegistry
@@ -28,7 +28,7 @@ async def initialized_workspace(tmp_path):
 
 
 async def _refusal(session, uri: str) -> tuple[int, str, object]:
-    with pytest.raises(McpError) as caught:
+    with pytest.raises(MCPError) as caught:
         await session.read_resource(uri)
     error = caught.value.error
     return error.code, error.message, error.data

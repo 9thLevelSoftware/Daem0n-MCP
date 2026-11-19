@@ -955,7 +955,7 @@ async def test_actual_mcp_graph_profile_enabled_and_disabled(tmp_path, transport
         assert replayed["manifest"]["generation"] == backfill["manifest"]["generation"]
         assert not conflict["ok"]
         assert conflict["error"]["code"] == "IDEMPOTENCY_CONFLICT"
-        assert invalid.isError
+        assert invalid.is_error
         assert backfill["scanned"] == 1
         assert backfill["extracted"] >= 1
         community_arguments = {

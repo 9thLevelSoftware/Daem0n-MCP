@@ -9,7 +9,7 @@ from contextlib import closing
 
 import mcp.types as mcp_types
 import pytest
-from mcp.shared.exceptions import McpError
+from mcp.shared.exceptions import MCPError
 from pydantic import RootModel
 
 from daem0nmcp.api.v7.runtime_services import WorkspaceStorageResolver
@@ -143,7 +143,7 @@ async def test_real_process_task_lifecycle_and_restart(task_workspace, transport
         transport,
         environment_overrides=environment,
     ) as restarted:
-        with pytest.raises(McpError, match="briefing"):
+        with pytest.raises(MCPError, match="briefing"):
             await _task_status(restarted, accepted.taskId)
         await succeed(restarted, "session_brief", scope)
         recovered = await _task_status(restarted, accepted.taskId)

@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 
 import pytest
-from mcp import McpError
+from mcp import MCPError
 from mcp.types import INVALID_PARAMS
 
 from daem0nmcp.database import DatabaseManager
@@ -33,10 +33,10 @@ async def initialized_workspace(tmp_path):
 def _envelope(result) -> dict:
     """Return the envelope, proving both renderings of it are intact."""
 
-    assert isinstance(result.structuredContent, dict)
+    assert isinstance(result.structured_content, dict)
     assert len(result.content) == 1
-    assert json.loads(result.content[0].text) == result.structuredContent
-    return result.structuredContent
+    assert json.loads(result.content[0].text) == result.structured_content
+    return result.structured_content
 
 
 @pytest.mark.parametrize("transport", ["stdio", "streamable-http"])
@@ -57,7 +57,7 @@ async def test_failed_envelopes_set_is_error_and_keep_the_envelope(
         )
         envelope = _envelope(stored)
         assert envelope["ok"] is True, envelope
-        assert stored.isError is False
+        assert stored.is_error is False
         record_id = envelope["data"]["record"]["record_id"]
 
         # Gateway path: a failure the gateway produces itself.
@@ -68,7 +68,7 @@ async def test_failed_envelopes_set_is_error_and_keep_the_envelope(
         envelope = _envelope(unknown)
         assert envelope["ok"] is False
         assert envelope["error"]["field_errors"][0]["code"] == "UNKNOWN_TOOL"
-        assert unknown.isError is True
+        assert unknown.is_error is True
 
         # Direct path: a replayed key with different content.
         conflict = await session.call_tool(
@@ -83,7 +83,7 @@ async def test_failed_envelopes_set_is_error_and_keep_the_envelope(
         envelope = _envelope(conflict)
         assert envelope["ok"] is False
         assert envelope["error"]["code"] == "IDEMPOTENCY_CONFLICT"
-        assert conflict.isError is True
+        assert conflict.is_error is True
 
         # Guided counsel: the client must still be able to read the counsel
         # and replay the exact remedy, directly and through the gateway.
@@ -99,7 +99,7 @@ async def test_failed_envelopes_set_is_error_and_keep_the_envelope(
             envelope = _envelope(challenged)
             assert envelope["ok"] is False
             assert envelope["error"]["code"] == "COUNSEL_REQUIRED"
-            assert challenged.isError is True
+            assert challenged.is_error is True
             counsel = envelope["error"]["counsel"]
             assert counsel["reasons"] == ["DESTRUCTIVE_OPERATION"]
             assert counsel["preflight_token"]
@@ -109,15 +109,15 @@ async def test_failed_envelopes_set_is_error_and_keep_the_envelope(
         retried = await session.call_tool(remedy["tool"], remedy["arguments"])
         envelope = _envelope(retried)
         assert envelope["ok"] is True, envelope
-        assert retried.isError is False
+        assert retried.is_error is False
 
 
 MARKER = "zq9-caller-supplied-marker"
 
 
 def _rejection_text(result) -> str:
-    assert result.isError is True
-    assert result.structuredContent is None
+    assert result.is_error is True
+    assert result.structured_content is None
     [content] = result.content
     return content.text
 
@@ -198,7 +198,7 @@ async def test_rejected_arguments_are_described_without_echoing_them(
             {**scope, "tool": "memory_recall", "arguments": {"query": [MARKER]}},
         )
         envelope = _envelope(relayed)
-        assert relayed.isError is True
+        assert relayed.is_error is True
         assert envelope["error"]["code"] == "INVALID_ARGUMENT"
         assert envelope["error"]["field_errors"] == [
             {
@@ -216,7 +216,7 @@ async def test_rejected_arguments_are_described_without_echoing_them(
                 "arguments": {"query": "x", MARKER: 1},
             },
         )
-        assert relayed.isError is True
+        assert relayed.is_error is True
         assert _envelope(relayed)["error"]["field_errors"] == [
             {
                 "field": "arguments",
@@ -240,7 +240,7 @@ async def test_unknown_prompt_is_refused_without_echoing_its_name(
     async with process_client(workspace.root, "stdio") as session:
         assert (await session.list_prompts()).prompts == []
         for name in ("no_such_prompt", MARKER + "y" * 1_100_000):
-            with pytest.raises(McpError) as refused:
+            with pytest.raises(MCPError) as refused:
                 await session.get_prompt(name, {MARKER: MARKER})
             assert refused.value.error.code == INVALID_PARAMS
             assert refused.value.error.message == "Unknown prompt"

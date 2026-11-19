@@ -1,5 +1,5 @@
 # tests/test_fastmcp3_compat.py
-"""Test FastMCP 3.4.7 compatibility."""
+"""Test FastMCP 4.1.8 compatibility."""
 
 
 def test_fastmcp_import():
@@ -14,7 +14,7 @@ def test_fastmcp_version():
     import fastmcp
 
     version = getattr(fastmcp, "__version__", "0.0.0")
-    assert version == "3.4.7", f"Expected FastMCP 3.4.7, got {version}"
+    assert version == "4.1.8", f"Expected FastMCP 4.1.8, got {version}"
 
 
 def test_server_import():

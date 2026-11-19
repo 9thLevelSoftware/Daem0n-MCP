@@ -14,7 +14,7 @@ from unittest.mock import patch
 import mcp.types as mcp_types
 import pytest
 from fastmcp import Client
-from mcp.shared.exceptions import McpError
+from mcp.shared.exceptions import MCPError
 from pydantic import RootModel
 
 from daem0nmcp.api.v7 import production, rule_trigger_operations
@@ -30,7 +30,9 @@ _UNREACHABLE_QUEUE = "redis://:secret@127.0.0.1:1/0"
 
 
 @asynccontextmanager
-async def _client(root: Path, *, tasks: bool, **settings: Any):
+async def _client(
+    root: Path, *, tasks: bool, mode: str = "auto", **settings: Any
+):
     (workspace,) = await initialize_workspaces((root,))
     loaded = Settings(
         project_root=str(root),
@@ -48,7 +50,7 @@ async def _client(root: Path, *, tasks: bool, **settings: Any):
             server = production.create_v7_server("stdio", settings=loaded, environ={})
     else:
         server = production.create_v7_server("stdio", settings=loaded, environ={})
-    async with Client(server) as client:
+    async with Client(server, mode=mode) as client:
         yield client, workspace.workspace_id
 
 
@@ -56,13 +58,11 @@ async def _call(
     client: Client, name: str, arguments: dict[str, Any], *, task: bool = True
 ) -> mcp_types.CreateTaskResult | mcp_types.CallToolResult:
     response = await client.session.send_request(
-        mcp_types.ClientRequest(
-            mcp_types.CallToolRequest(
-                params=mcp_types.CallToolRequestParams(
-                    name=name,
-                    arguments=arguments,
-                    task=mcp_types.TaskMetadata(ttl=60_000) if task else None,
-                )
+        mcp_types.CallToolRequest(
+            params=mcp_types.CallToolRequestParams(
+                name=name,
+                arguments=arguments,
+                task=mcp_types.TaskMetadata(ttl=60_000) if task else None,
             )
         ),
         _TaskCallResult,
@@ -71,7 +71,7 @@ async def _call(
 
 
 async def _refusal(client: Client, name: str, arguments: dict[str, Any]) -> Any:
-    with pytest.raises(McpError) as refused:
+    with pytest.raises(MCPError) as refused:
         await _call(client, name, arguments)
     return refused.value.error
 
@@ -103,7 +103,7 @@ async def test_guided_task_refusal_carries_the_counsel_and_its_remedy(tmp_path):
 
         # Nothing was accepted without the capability ...
         listed = await client.session.send_request(
-            mcp_types.ClientRequest(mcp_types.ListTasksRequest()),
+            mcp_types.ListTasksRequest(),
             mcp_types.ListTasksResult,
         )
         assert listed.tasks == []
@@ -113,7 +113,7 @@ async def test_guided_task_refusal_carries_the_counsel_and_its_remedy(tmp_path):
             client, "memory_store_batch", answer["remedy"]["arguments"]
         )
         assert isinstance(accepted, mcp_types.CreateTaskResult)
-        assert accepted.task.taskId.startswith("tsk_")
+        assert accepted.task.task_id.startswith("tsk_")
 
 
 async def test_guided_task_on_an_unbriefed_session_is_briefed_and_accepted(tmp_path):
@@ -125,7 +125,7 @@ async def test_guided_task_on_an_unbriefed_session_is_briefed_and_accepted(tmp_p
         )
 
         assert isinstance(accepted, mcp_types.CreateTaskResult)
-        assert accepted.task.taskId.startswith("tsk_")
+        assert accepted.task.task_id.startswith("tsk_")
         assert accepted.meta is not None
         assert accepted.meta["daem0nmcp/covenant"]["auto_brief"] is not None
 
@@ -157,7 +157,8 @@ async def test_strict_task_refusals_name_the_explicit_ceremony(tmp_path):
 
 async def test_task_metadata_is_ignored_when_tasks_are_not_offered(tmp_path):
     async with _client(tmp_path, tasks=False) as (client, workspace_id):
-        assert client.initialize_result.capabilities.tasks is None
+        assert client.server_capabilities is not None
+        assert client.server_capabilities.tasks is None
         arguments = {"workspace_id": workspace_id, "query": "plain recall"}
 
         augmented = await _call(client, "memory_recall", arguments)
@@ -165,12 +166,12 @@ async def test_task_metadata_is_ignored_when_tasks_are_not_offered(tmp_path):
 
     # A receiver without the task capability processes the request normally.
     assert isinstance(augmented, mcp_types.CallToolResult)
-    assert augmented.isError is False
-    assert augmented.structuredContent["ok"] is True
-    assert plain.structuredContent["ok"] is True
+    assert augmented.is_error is False
+    assert augmented.structured_content["ok"] is True
+    assert plain.structured_content["ok"] is True
     assert (
-        augmented.structuredContent["data"]["items"]
-        == plain.structuredContent["data"]["items"]
+        augmented.structured_content["data"]["items"]
+        == plain.structured_content["data"]["items"]
     )
 
 
@@ -178,7 +179,10 @@ async def test_task_metadata_is_ignored_when_tasks_are_not_offered(tmp_path):
 async def test_tools_list_marks_task_support_only_when_tasks_are_offered(
     tmp_path, tasks
 ):
-    async with _client(tmp_path, tasks=tasks, tool_surface="full") as (client, _):
+    async with _client(tmp_path, tasks=tasks, mode="legacy", tool_surface="full") as (
+        client,
+        _,
+    ):
         tools = await client.list_tools()
 
     declared = {
@@ -187,9 +191,9 @@ async def test_tools_list_marks_task_support_only_when_tasks_are_offered(
         if (tool.meta or {}).get("daem0nmcp/taskMode") == "optional"
     }
     advertised = {
-        tool.name: tool.execution.taskSupport
+        tool.name: tool.execution.task_support
         for tool in tools
-        if tool.execution is not None and tool.execution.taskSupport is not None
+        if tool.execution is not None and tool.execution.task_support is not None
     }
     # A task is admitted only when it is replay-safe: the tool is read-only
     # or its input carries an idempotency key.  The rest are not advertised.
@@ -198,8 +202,8 @@ async def test_tools_list_marks_task_support_only_when_tasks_are_offered(
         for tool in tools
         if tool.name in declared
         and (
-            (tool.annotations is not None and tool.annotations.readOnlyHint)
-            or "idempotency_key" in tool.inputSchema["properties"]
+            (tool.annotations is not None and tool.annotations.read_only_hint)
+            or "idempotency_key" in tool.input_schema["properties"]
         )
     }
     assert "memory_recall" in admissible and "memory_store" not in declared
@@ -266,34 +270,28 @@ async def test_task_refusals_are_told_apart_by_code_and_data(tmp_path):
             },
         )
         malformed = await _refusal(client, "memory_recall", scope)
-        with pytest.raises(McpError) as bad_metadata:
+        with pytest.raises(MCPError) as bad_metadata:
             await client.session.send_request(
-                mcp_types.ClientRequest(
-                    mcp_types.CallToolRequest(
-                        params=mcp_types.CallToolRequestParams(
-                            name="memory_recall",
-                            arguments=scope | {"query": "queued recall"},
-                            task=mcp_types.TaskMetadata(ttl=-1),
-                        )
+                mcp_types.CallToolRequest(
+                    params=mcp_types.CallToolRequestParams(
+                        name="memory_recall",
+                        arguments=scope | {"query": "queued recall"},
+                        task=mcp_types.TaskMetadata(ttl=-1),
                     )
                 ),
                 _TaskCallResult,
             )
-        with pytest.raises(McpError) as missing:
+        with pytest.raises(MCPError) as missing:
             await client.session.send_request(
-                mcp_types.ClientRequest(
-                    mcp_types.GetTaskRequest(
-                        params=mcp_types.GetTaskRequestParams(taskId="tsk_" + "0" * 64)
-                    )
+                mcp_types.GetTaskRequest(
+                    params=mcp_types.GetTaskRequestParams(task_id="tsk_" + "0" * 64)
                 ),
                 mcp_types.GetTaskResult,
             )
-        with pytest.raises(McpError) as bad_cursor:
+        with pytest.raises(MCPError) as bad_cursor:
             await client.session.send_request(
-                mcp_types.ClientRequest(
-                    mcp_types.ListTasksRequest(
-                        params=mcp_types.PaginatedRequestParams(cursor="not-a-cursor")
-                    )
+                mcp_types.ListTasksRequest(
+                    params=mcp_types.PaginatedRequestParams(cursor="not-a-cursor")
                 ),
                 mcp_types.ListTasksResult,
             )

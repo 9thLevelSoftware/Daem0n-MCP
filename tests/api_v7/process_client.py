@@ -16,7 +16,7 @@ from datetime import timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-import httpx
+import httpx2
 from joserfc import jwt
 from joserfc.jwk import RSAKey
 from mcp import ClientSession, StdioServerParameters
@@ -272,13 +272,12 @@ async def process_client(
                 if http_probe is not None:
                     await http_probe(f"http://127.0.0.1:{port}/mcp")
                 async with (
-                    httpx.AsyncClient(headers=http_headers, timeout=30) as http_client,
+                    httpx2.AsyncClient(headers=http_headers, timeout=30) as http_client,
                     streamable_http_client(
                         f"http://127.0.0.1:{port}/mcp", http_client=http_client
                     ) as (
                         read,
                         write,
-                        _,
                     ),
                     ClientSession(
                         read, write, read_timeout_seconds=timedelta(seconds=30)
@@ -305,15 +304,15 @@ async def process_client(
 
 async def call(session: ClientSession, tool: str, arguments: dict) -> dict:
     result = await session.call_tool(tool, arguments)
-    assert isinstance(result.structuredContent, dict), (
+    assert isinstance(result.structured_content, dict), (
         f"{tool}: MCP protocol error or missing structured response"
     )
     # A failed envelope is flagged as a tool execution error and still carries
     # the whole envelope; a protocol error has no structured content at all.
-    assert result.isError is (result.structuredContent.get("ok") is False), (
+    assert result.is_error is (result.structured_content.get("ok") is False), (
         f"{tool}: isError does not mirror the envelope"
     )
-    return result.structuredContent
+    return result.structured_content
 
 
 async def succeed(session: ClientSession, tool: str, arguments: dict) -> dict:

@@ -155,11 +155,11 @@ class V7CompositionTests(unittest.TestCase):
         )
         first = surface.build_server(
             fastmcp_cls=_FakeFastMCP,
-            distribution_version="3.4.7",
+            distribution_version="4.1.8",
         )
         second = surface.build_server(
             fastmcp_cls=_FakeFastMCP,
-            distribution_version="3.4.7",
+            distribution_version="4.1.8",
         )
         self.assertIsNot(first, second)
         # The surface's invocation middleware, then the adapter's own layer

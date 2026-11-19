@@ -86,7 +86,7 @@ async def test_production_code_index_search_and_impact(code_workspace, transport
                 "qualified_name": "core.target",
             },
         )
-        assert malformed.isError
+        assert malformed.is_error
 
         foreign_id = derive_public_object_id(
             "ws_0123456789abcdef01234567",
@@ -106,7 +106,7 @@ async def test_production_code_index_search_and_impact(code_workspace, transport
             "code_index",
             {**scope, "relative_root": "../other", "patterns": ["**/*.py"]},
         )
-        assert escaped.isError
+        assert escaped.is_error
 
 
 async def test_production_code_index_disabled_profile_has_remedy(code_workspace):
