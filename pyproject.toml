@@ -71,7 +71,7 @@ models-hosted = [
     "tiktoken>=0.5.0",
 ]
 agency-e2b = [
-    "e2b-code-interpreter==2.10.0",
+    "e2b-code-interpreter==2.10.5",
 ]
 observability = [
     "opentelemetry-api>=1.20.0",
@@ -81,8 +81,8 @@ observability = [
 dev = [
     "pytest>=7.0.0",
     "pytest-asyncio>=0.23.0",
-    "ruff==0.16.8",  # keep in sync with ci.yml and .pre-commit-config.yaml
-    "mypy==2.3.1",  # keep in sync with ci.yml and .pre-commit-config.yaml
+    "ruff==0.17.5",  # keep in sync with ci.yml and .pre-commit-config.yaml
+    "mypy==2.4.1",  # keep in sync with ci.yml and .pre-commit-config.yaml
     "pre-commit>=3.0.0",
 ]
 
