@@ -653,11 +653,15 @@ class ResourceInvocationMiddlewareTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertFalse(called)
         self.assertEqual(
-            {(type(error), error.args, str(error)) for error in errors},
+            {
+                (type(error), error.error.code, error.error.message, str(error))
+                for error in errors
+            },
             {
                 (
                     ResourceInvocationContextError,
-                    ("Resource unavailable",),
+                    -32002,
+                    "Resource unavailable",
                     "Resource unavailable",
                 )
             },

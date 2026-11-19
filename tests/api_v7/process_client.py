@@ -12,7 +12,6 @@ import threading
 import time
 from collections.abc import Awaitable, Callable, Iterator
 from contextlib import asynccontextmanager, contextmanager
-from datetime import timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -203,9 +202,7 @@ async def process_client(
             with (workspace / log_name).open("w", encoding="utf-8") as log:
                 async with (
                     stdio_client(parameters, errlog=log) as (read, write),
-                    ClientSession(
-                        read, write, read_timeout_seconds=timedelta(seconds=30)
-                    ) as session,
+                    ClientSession(read, write, read_timeout_seconds=30.0) as session,
                 ):
                     await session.initialize()
                     try:
@@ -274,14 +271,14 @@ async def process_client(
                 async with (
                     httpx2.AsyncClient(headers=http_headers, timeout=30) as http_client,
                     streamable_http_client(
-                        f"http://127.0.0.1:{port}/mcp", http_client=http_client
+                        f"http://127.0.0.1:{port}/mcp",
+                        http_client=http_client,
+                        max_sse_event_size=None,
                     ) as (
                         read,
                         write,
                     ),
-                    ClientSession(
-                        read, write, read_timeout_seconds=timedelta(seconds=30)
-                    ) as session,
+                    ClientSession(read, write, read_timeout_seconds=30.0) as session,
                 ):
                     await session.initialize()
                     yield session

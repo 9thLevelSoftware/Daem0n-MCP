@@ -65,9 +65,7 @@ else:
             pass
 
         class _ErrorData:
-            def __init__(
-                self, *, code: int, message: str, data: Any = None
-            ) -> None:
+            def __init__(self, *, code: int, message: str, data: Any = None) -> None:
                 self.code = code
                 self.message = message
                 self.data = data

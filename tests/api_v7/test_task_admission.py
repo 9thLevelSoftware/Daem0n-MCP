@@ -30,9 +30,7 @@ _UNREACHABLE_QUEUE = "redis://:secret@127.0.0.1:1/0"
 
 
 @asynccontextmanager
-async def _client(
-    root: Path, *, tasks: bool, mode: str = "auto", **settings: Any
-):
+async def _client(root: Path, *, tasks: bool, mode: str = "auto", **settings: Any):
     (workspace,) = await initialize_workspaces((root,))
     loaded = Settings(
         project_root=str(root),

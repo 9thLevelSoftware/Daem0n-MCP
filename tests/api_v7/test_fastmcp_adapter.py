@@ -256,7 +256,7 @@ class FastMCPAdapterTests(unittest.TestCase):
         self.assertEqual(content.mime_type, "application/json")
         self.assertEqual(content.content, '{"value":"ws_test"}')
         wire = result.to_mcp_result("memory://workspaces/ws_test/warnings")
-        self.assertEqual(wire.contents[0].mimeType, "application/json")
+        self.assertEqual(wire.contents[0].mime_type, "application/json")
 
     def test_resource_refusal_and_failure_use_real_protocol_codes(self) -> None:
         from mcp import MCPError
